@@ -230,6 +230,26 @@ const provided = resolveHybridKeywords("温度梯度如何影响定向凝固？"
 assert.equal(provided.source, "provided");
 assert.deepEqual(provided.keywords, ["温度梯度", "temperature gradient"]);
 
+// An array that empties out during normalization is NOT an error, it degrades
+// to the same fallback as passing nothing. That silent equivalence is why the
+// MCP layer reports keywordFallbackReason: a caller told "you did not supply
+// keywords" right after it did supply some would have no idea what to change,
+// and could reissue the identical call.
+assert.deepEqual(normalizeKeywords([]), []);
+assert.deepEqual(normalizeKeywords(["", "   ", "\t"]), []);
+for (const emptyish of [[], ["", "   "]]) {
+  const degraded = resolveHybridKeywords("温度梯度如何影响定向凝固？", emptyish);
+  assert.equal(
+    degraded.source,
+    "fallback",
+    "a keywords array that normalizes to nothing must degrade to fallback",
+  );
+  assert.ok(
+    degraded.keywords.length > 0,
+    "the fallback must still produce probes so the search stays executable",
+  );
+}
+
 // A Han sentence has no spaces, so plain tokenisation yields one unusable run.
 // The fallback must break it into term-sized probes instead.
 const chineseFallback = resolveHybridKeywords(

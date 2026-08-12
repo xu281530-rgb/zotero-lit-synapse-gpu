@@ -426,7 +426,7 @@ export class StreamableMCPServer {
         resources: {},
       },
       serverInfo: this.serverInfo,
-      instructions: `Use hybrid_search as the default first step for literature discovery. It fuses metadata keyword and semantic retrieval without scanning full documents. This server never calls an LLM of its own, so YOU are the query-understanding stage: before every hybrid_search call, (1) identify the discipline and the specific sub-field the question belongs to, (2) adopt that field's expert perspective for the rest of the call, (3) work out the real research intent behind the wording - the mechanism, quantity or phenomenon actually being asked about - and only then (4) write the query and keywords. Reason from domain knowledge, not from the surface words of the question: a materials-science question needs the underlying mechanism, the standard technical terms, the field's abbreviations, the governing variables and the accepted synonyms, not a paraphrase of what the user typed. The library holds both Chinese and English literature, so every call must carry a complete natural-language query for the semantic branch plus keywords covering BOTH Chinese and English terms, translations, synonyms and abbreviations, regardless of the language the user asked in; never narrow the search to one language. Keep every keyword defensible as a term a specialist would search: around 5-12 is the recommended amount, any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted, and padding the list with generic words that are only loosely related to the research intent makes the ranking worse, not better. If you omit keywords the server falls back to mechanical tokenization of the query and says so in the response; treat that warning as a signal to redo the call with proper domain keywords. If the user only asks which literature is relevant, return the matched titles and metadata directly. Only when the user requests passages, evidence, or full-text details, call search_fulltext with selected itemKeys from hybrid_search. Never perform unscoped whole-library full-text search.`,
+      instructions: `Use hybrid_search as the default first step for literature discovery. It fuses metadata keyword and semantic retrieval without scanning full documents. This server never calls an LLM of its own, so YOU are the query-understanding stage: before every hybrid_search call, (1) identify the discipline and the specific sub-field the question belongs to, (2) adopt that field's expert perspective for the rest of the call, (3) work out the real research intent behind the wording - the mechanism, quantity or phenomenon actually being asked about - and only then (4) write the query and keywords. Reason from domain knowledge, not from the surface words of the question: a materials-science question needs the underlying mechanism, the standard technical terms, the field's abbreviations, the governing variables and the accepted synonyms, not a paraphrase of what the user typed. The library holds both Chinese and English literature, so every call must carry a complete natural-language query for the semantic branch plus keywords covering BOTH Chinese and English terms, translations, synonyms and abbreviations, regardless of the language the user asked in; never narrow the search to one language. Keep every keyword defensible as a term a specialist would search: around 5-12 is the recommended amount, any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted, and padding the list with generic words that are only loosely related to the research intent makes the ranking worse, not better. If you omit keywords, or pass an array that is empty once blank entries are trimmed, the server falls back to mechanical tokenization of the query and says so in the response; redo that call ONCE with proper domain keywords, and if you have already retried it, use the results you have instead of calling again - the fallback still returns a real ranking, so it is never a reason to loop. If the user only asks which literature is relevant, return the matched titles and metadata directly. Only when the user requests passages, evidence, or full-text details, call search_fulltext with selected itemKeys from hybrid_search. Never perform unscoped whole-library full-text search.`,
     });
   }
 
@@ -489,7 +489,7 @@ export class StreamableMCPServer {
           '  keywords: ["温度梯度", "定向凝固", "柱状晶", "等轴晶", "柱状晶-等轴晶转变", "凝固速率", "temperature gradient", "directional solidification", "columnar grain", "equiaxed grain", "columnar-to-equiaxed transition", "CET", "growth rate"]',
           '  Note what came from domain knowledge rather than from the question: the CET abbreviation, growth rate / 凝固速率 as the co-governing variable, and the columnar/equiaxed grain pair. Note also what was left out: "材料", "实验", "influence factors" — true of the question but too generic to discriminate between papers.',
           '',
-          'If you do not pass keywords, the server falls back to mechanically tokenizing the query, returns keywordSource "fallback" and a warning stating the keywords were NOT produced by domain-expert analysis. That path exists only so the call still runs; when you see it, redo the search with proper keywords.',
+          'If you do not pass keywords - or pass an array that is empty after blank entries are trimmed - the server falls back to mechanically tokenizing the query, returns keywordSource "fallback", a keywordFallbackReason naming which of the two happened, and a warning stating the keywords were NOT produced by domain-expert analysis. That path exists only so the call still runs, and it does return a real ranking. Redo the search ONCE with proper keywords; if you have already retried, keep the results rather than calling a third time.',
           '',
           'Leave language at its "all" default so retrieval stays genuinely cross-lingual; the other language values only narrow recall. Return these literature matches directly when the user only asks which documents are relevant; call search_fulltext with the matched itemKeys only when the user asks for passages, evidence, or full-text details.',
         ].join('\n'),
@@ -1851,9 +1851,27 @@ export class StreamableMCPServer {
     // reach the caller, not just the log, or a degraded search looks normal.
     const keywordOrigin: 'ai' | 'fallback' =
       keywordSource === 'fallback' ? 'fallback' : 'ai';
+    // An array that normalizes away (empty, blank strings, or []) reaches this
+    // point looking exactly like "no keywords at all". Telling a caller that
+    // already passed the argument it "did not do the analysis" is the one way
+    // this warning could send it round the same call again, so name the real
+    // problem instead.
+    const keywordsArgumentPresent =
+      args.keywords !== undefined && args.keywords !== null;
+    const fallbackReason =
+      keywordOrigin !== 'fallback'
+        ? null
+        : keywordsArgumentPresent
+          ? 'The keywords argument was present but empty after trimming blank entries and duplicates, so it could not be used.'
+          : 'No keywords argument was supplied.';
+    // One retry is enough to fix this: the caller either produces domain
+    // keywords on the second attempt or it never will. Cap it explicitly so
+    // the instruction cannot be read as "keep retrying until it is clean".
+    const retryBudgetNote =
+      'Retry at most once: if you have already retried this search, use these results as they are rather than calling hybrid_search again.';
     const fallbackWarning =
       keywordOrigin === 'fallback'
-        ? `warning: Keywords were generated by mechanical fallback tokenization, not by AI/domain-expert analysis; retrieval quality may be lower. The lexical branch only covers the language the query was written in. Redo this search with a domain-expert keyword set: identify the sub-field, adopt its expert perspective, and pass bilingual Chinese and English terms of art, translations, synonyms and abbreviations. Around 5-12 keywords is the recommended amount, and any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted.`
+        ? `warning: Keywords were generated by mechanical fallback tokenization, not by AI/domain-expert analysis; retrieval quality may be lower. ${fallbackReason} The lexical branch only covers the language the query was written in. Redo this search once with a domain-expert keyword set: identify the sub-field, adopt its expert perspective, and pass bilingual Chinese and English terms of art, translations, synonyms and abbreviations as a non-empty array of trimmed strings. Around 5-12 keywords is the recommended amount, and any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted. ${retryBudgetNote} These results are usable in the meantime: the ranking below is real, only the lexical probes were mechanical.`
         : null;
 
     const hybridWarnings = [...searchResult.warnings];
@@ -1888,6 +1906,7 @@ export class StreamableMCPServer {
         searchMode: 'hybrid',
         fusion: 'weighted_rrf',
         keywordSource: keywordOrigin,
+        keywordFallbackReason: fallbackReason ?? undefined,
         keywordCount: lexicalKeywords.length,
         keywordWeights: lexicalKeywordEntries.map((entry) => ({
           keyword: entry.text,
@@ -1928,7 +1947,7 @@ export class StreamableMCPServer {
         fulltextScanned: false,
         nextStep:
           keywordOrigin === 'fallback'
-            ? 'These keywords came from mechanical tokenization. Redo hybrid_search with domain-expert bilingual keywords before relying on this ranking; only then call search_fulltext with selected itemKeys if the user wants passages or evidence.'
+            ? `These keywords came from mechanical tokenization. Redo hybrid_search once with domain-expert bilingual keywords, then work from that ranking. ${retryBudgetNote} Call search_fulltext with selected itemKeys only if the user wants passages or evidence.`
             : 'Return these matches directly unless the user requests passages, evidence, or full-text details; then call search_fulltext with selected itemKeys.',
       },
     };
