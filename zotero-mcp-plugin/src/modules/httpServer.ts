@@ -1,6 +1,16 @@
 import { StreamableMCPServer } from "./streamableMCPServer";
 import { serverPreferences } from "./serverPreferences";
 import { testMCPIntegration } from "./mcpTest";
+import {
+  MCP_PROTOCOL_VERSION,
+  SUPPORTED_MCP_PROTOCOL_VERSIONS,
+  checkProtocolVersionHeader,
+  getMCPMethodResponse,
+} from "./mcpTransport";
+import { checkRequestAccess, parseRequestHeaders } from "./httpAccessControl";
+import { MAX_HYBRID_KEYWORDS } from "./hybridSearch";
+import { sanitizeForPrivacy } from "../utils/privacy";
+import { config } from "../../package.json";
 
 declare let ztoolkit: ZToolkit;
 
@@ -100,9 +110,23 @@ export class HttpServer {
   private sessionCleanupInterval: ReturnType<typeof setInterval> | null = null;
   // Track active transports to close them on shutdown
   private activeTransports: Set<any> = new Set();
+  // 记录当前实际绑定的监听参数，供设置变更时判断是否需要重新绑定。
+  // 只看 isRunning 无法区分 "已在跑" 和 "在跑但绑错了地址/端口"。
+  private boundPort: number | null = null;
+  private boundLoopbackOnly: boolean | null = null;
 
   public isServerRunning(): boolean {
     return this.isRunning;
+  }
+
+  /** 当前实际监听的端口；未运行时为 null。 */
+  public getBoundPort(): number | null {
+    return this.isRunning ? this.boundPort : null;
+  }
+
+  /** 当前是否仅绑定回环地址；未运行时为 null。 */
+  public isBoundLoopbackOnly(): boolean | null {
+    return this.isRunning ? this.boundLoopbackOnly : null;
   }
 
   public start(port: number) {
@@ -141,6 +165,17 @@ export class HttpServer {
       this.serverSocket.init(port, loopbackOnly, -1);
       this.serverSocket.asyncListen(this.listener);
       this.isRunning = true;
+      this.boundPort = port;
+      this.boundLoopbackOnly = loopbackOnly;
+
+      if (!loopbackOnly) {
+        // 监听 0.0.0.0 时令牌是唯一屏障，确保它存在。
+        try {
+          serverPreferences.ensureAuthToken();
+        } catch (tokenError) {
+          ztoolkit.log(`[HttpServer] Failed to ensure MCP access token: ${tokenError}`, 'error');
+        }
+      }
 
       Zotero.debug(
         `[HttpServer] Successfully started HTTP server on port ${port}`,
@@ -203,6 +238,9 @@ export class HttpServer {
       ztoolkit.log(`[HttpServer] Error closing server socket: ${e}`, 'error');
       this.isRunning = false;
     }
+
+    this.boundPort = null;
+    this.boundLoopbackOnly = null;
 
     // Clear active sessions
     this.activeSessions.clear();
@@ -292,6 +330,17 @@ export class HttpServer {
       `Content-Type: ${result.headers?.["Content-Type"] || "application/json; charset=utf-8"}\r\n`;
     
     let headers = baseHeaders;
+
+    for (const [name, value] of Object.entries(result.headers || {})) {
+      if (
+        name.toLowerCase() === "content-type" ||
+        name.toLowerCase() === "content-length" ||
+        name.toLowerCase() === "connection"
+      ) {
+        continue;
+      }
+      headers += `${name}: ${String(value)}\r\n`;
+    }
     
     // Add session ID for MCP requests
     if (sessionId) {
@@ -307,6 +356,32 @@ export class HttpServer {
     }
     
     return headers;
+  }
+
+  /**
+   * 把一个 {status, headers, body} 结果完整写回输出流。
+   * 统一在这里计算 UTF-8 Content-Length，避免各分支各写一遍。
+   */
+  private writeResult(
+    output: any,
+    result: { status: number; statusText: string; headers?: Record<string, string>; body: string },
+    keepAlive: boolean,
+    sessionId?: string,
+  ): void {
+    const body = result.body || "";
+    const byteLength = getByteLength(body);
+    const headers = this.buildHttpHeaders(result, keepAlive, sessionId) +
+      `Content-Length: ${byteLength}\r\n` +
+      "\r\n";
+    output.write(headers, headers.length);
+    if (byteLength > 0) {
+      writeStringToStream(output, body);
+    }
+    try {
+      output.flush();
+    } catch (flushError) {
+      // Some streams don't support flush, ignore
+    }
   }
 
   private listener = {
@@ -527,7 +602,20 @@ export class HttpServer {
           const url = new URL(urlPath, "http://127.0.0.1");
           const query = new URLSearchParams(url.search);
           const path = url.pathname;
-          
+          const headers = parseRequestHeaders(requestText);
+
+          // 访问控制先于任何业务处理：Origin/Host 防跨源与 DNS rebinding，
+          // Bearer Token 在开启远程访问（或用户显式要求鉴权）时强制生效。
+          const accessFailure = checkRequestAccess(path, headers);
+          if (accessFailure) {
+            ztoolkit.log(
+              `[HttpServer] Request rejected by access control: ${method} ${path} -> ${accessFailure.status}`,
+              "warn",
+            );
+            this.writeResult(output, accessFailure, false);
+            return;
+          }
+
           // 提取POST请求的body
           let requestBody = "";
           if (method === "POST") {
@@ -558,16 +646,11 @@ export class HttpServer {
           
           if (path === "/mcp" || (path.startsWith("/mcp/") && !path.includes(".well-known"))) {
             if (mcpSessionHeader && mcpSessionHeader[1]) {
-              sessionId = mcpSessionHeader[1].trim();
-              this.updateSessionActivity(sessionId);
-              ztoolkit.log(`[HttpServer] Using existing MCP session: ${sessionId}`);
-            } else {
-              sessionId = this.generateSessionId();
-              this.activeSessions.set(sessionId, {
-                createdAt: new Date(),
-                lastActivity: new Date()
-              });
-              ztoolkit.log(`[HttpServer] Created new MCP session: ${sessionId}`);
+              const incomingSessionId = mcpSessionHeader[1].trim();
+              this.updateSessionActivity(incomingSessionId);
+              ztoolkit.log(
+                `[HttpServer] Received client MCP session header: ${incomingSessionId}`,
+              );
             }
           }
 
@@ -578,51 +661,22 @@ export class HttpServer {
           let result;
 
           if (path === "/mcp") {
-            if (method === "POST") {
-              // Handle MCP requests via streamable HTTP
-              if (this.mcpServer) {
-                result = await this.mcpServer.handleMCPRequest(requestBody);
-              } else {
-                result = {
-                  status: 503,
-                  statusText: "Service Unavailable",
-                  headers: { "Content-Type": "application/json; charset=utf-8" },
-                  body: JSON.stringify({ error: "MCP server not enabled" }),
-                };
-              }
-            } else if (method === "GET") {
-              // Handle GET request to MCP endpoint - show endpoint info
-              result = {
-                status: 200,
-                statusText: "OK",
-                headers: { "Content-Type": "application/json; charset=utf-8" },
-                body: JSON.stringify({
-                  endpoint: "/mcp",
-                  protocol: "MCP (Model Context Protocol)",
-                  transport: "Streamable HTTP",
-                  version: "2024-11-05",
-                  description: "This endpoint accepts MCP protocol requests via POST method",
-                  usage: {
-                    method: "POST",
-                    contentType: "application/json",
-                    body: "MCP JSON-RPC 2.0 formatted requests"
-                  },
-                  status: this.mcpServer ? "available" : "disabled",
-                  documentation: "Send POST requests with MCP protocol messages to interact with Zotero data"
-                }),
-              };
+            // MCP 2025-06-18: 初始化之后的请求需要带 MCP-Protocol-Version，
+            // 缺失按 2025-03-26 处理，出现无法识别的版本直接 400。
+            const versionFailure = checkProtocolVersionHeader(
+              headers.get("mcp-protocol-version"),
+            );
+            const methodResponse = getMCPMethodResponse(
+              method,
+              Boolean(this.mcpServer),
+            );
+            if (versionFailure) {
+              result = versionFailure;
+            } else if (methodResponse) {
+              result = methodResponse;
             } else {
-              result = {
-                status: 405,
-                statusText: "Method Not Allowed",
-                headers: { 
-                  "Content-Type": "application/json; charset=utf-8",
-                  "Allow": "GET, POST"
-                },
-                body: JSON.stringify({ 
-                  error: `Method ${method} not allowed. Use GET for info or POST for MCP requests.` 
-                }),
-              };
+              // Handle MCP requests via streamable HTTP
+              result = await this.mcpServer!.handleMCPRequest(requestBody);
             }
           } else if (path === "/mcp/status") {
             // MCP server status endpoint
@@ -631,7 +685,7 @@ export class HttpServer {
                 status: 200,
                 statusText: "OK",
                 headers: { "Content-Type": "application/json; charset=utf-8" },
-                body: JSON.stringify(this.mcpServer.getStatus()),
+                body: JSON.stringify(sanitizeForPrivacy(this.mcpServer.getStatus())),
               };
             } else {
               result = {
@@ -647,7 +701,9 @@ export class HttpServer {
               status: 200,
               statusText: "OK",
               headers: { "Content-Type": "application/json; charset=utf-8" },
-              body: JSON.stringify(this.getCapabilities()),
+              // 该文档端点目前只含静态描述，但统一走 sanitizer，
+              // 以免日后往里加动态字段时又开出一个绕过口子。
+              body: JSON.stringify(sanitizeForPrivacy(this.getCapabilities())),
             };
           } else if (path === "/test/mcp") {
             const testResult = await testMCPIntegration();
@@ -655,7 +711,7 @@ export class HttpServer {
               status: 200,
               statusText: "OK",
               headers: { "Content-Type": "application/json; charset=utf-8" },
-              body: JSON.stringify(testResult),
+              body: JSON.stringify(sanitizeForPrivacy(testResult)),
             };
           } else if (path.startsWith("/ping")) {
             const pingResult = {
@@ -717,7 +773,9 @@ export class HttpServer {
             `[HttpServer] Error in request handling: ${error.message}`,
             "error",
           );
-          const errorBody = JSON.stringify({ error: error.message });
+          // 异常信息常带本机路径（文件读取失败、导入失败等），
+          // 这是绕过 MCP 层 sanitizer 的另一个出口，必须单独脱敏。
+          const errorBody = JSON.stringify(sanitizeForPrivacy({ error: error.message }));
           // Use getByteLength for accurate Content-Length with non-ASCII characters
           const errorByteLength = getByteLength(errorBody);
           const errorResult = {
@@ -802,21 +860,23 @@ private getCapabilities() {
   return {
     serverInfo: {
       name: "Zotero MCP Plugin",
-      version: "1.1.0",
+      // 版本号统一取自 package.json 的 config.addonVersion，
+      // 与 manifest.json、设置页脚、MCP serverInfo 保持同一来源。
+      version: config.addonVersion,
       description: "Model Context Protocol integration for Zotero research management",
-      author: "Zotero MCP Team",
-      repository: "https://github.com/zotero/zotero-mcp",
-      documentation: "https://github.com/zotero/zotero-mcp/blob/main/README.md"
+      author: config.addonName,
+      repository: "https://github.com/cookjohn/zotero-mcp",
+      documentation: "https://github.com/cookjohn/zotero-mcp/blob/main/README.md"
     },
     protocols: {
       mcp: {
-        version: "2024-11-05",
+        version: MCP_PROTOCOL_VERSION,
         transport: "streamable-http",
         endpoint: "/mcp",
         description: "Full MCP protocol support for AI clients"
       },
       rest: {
-        version: "1.1.0",
+        version: config.addonVersion,
         description: "REST API for direct HTTP access",
         baseUrl: `http://127.0.0.1:${this.port}`
       }
@@ -845,21 +905,30 @@ private getCapabilities() {
     tools: [
       {
         name: "hybrid_search",
-        description: "Default first step for literature discovery. Searches Zotero metadata fields and the semantic index in parallel, then fuses rankings with weighted RRF. Does not scan full document text.",
+        description: "Default first step for literature discovery. Searches Zotero metadata fields and the semantic index in parallel, then fuses rankings with weighted RRF. Does not scan full document text. Always covers Chinese and English literature together: pass a complete natural-language query for the semantic branch plus bilingual keywords for the lexical branch, whichever language the user asked in. About 5-12 keywords is the recommended amount for best results, not a required range; any number from 1 to " + MAX_HYBRID_KEYWORDS + " is accepted.",
         category: "search",
         parameters: {
-          query: { type: "string", description: "Natural-language literature query", required: true },
+          query: { type: "string", description: "Complete natural-language sentence describing the information need, embedded as-is for cross-lingual semantic search. Include an English and a Chinese phrasing separated by ' / '.", required: true },
+          keywords: { type: "array", items: { type: "string" }, description: "Precise Chinese AND English domain terms, translations, synonyms and abbreviations. For best results, it is recommended to provide 5-12 relevant Chinese and/or English keywords; fewer or more are still allowed, from 1 up to " + MAX_HYBRID_KEYWORDS + " entries. Each is searched separately over title, abstract, creator, publicationTitle and tags, then aggregated, deduplicated and scored with a coverage bonus. Omitting this falls back to splitting the query, which only probes the language the user typed in.", required: false },
           topK: { type: "number", description: "Number of fused results (default: 10)", required: false },
           candidateK: { type: "number", description: "Candidates per retrieval branch before fusion", required: false },
           minScore: { type: "number", description: "Minimum semantic similarity score", required: false },
-          language: { type: "string", enum: ["zh", "en", "all"], description: "Semantic language filter", required: false },
+          language: { type: "string", enum: ["zh", "en", "all", "auto"], description: "Semantic branch language filter. Keep the 'all' default for cross-lingual recall; zh/en/auto drop literature written in the other language", required: false },
           rrfK: { type: "number", description: "RRF rank constant (default: 60)", required: false },
           keywordWeight: { type: "number", description: "Keyword branch weight (default: 1)", required: false },
           semanticWeight: { type: "number", description: "Semantic branch weight (default: 1)", required: false },
-          libraryID: { type: "number", description: "Optional library for metadata retrieval", required: false }
+          libraryID: { type: "number", description: "Library used by keyword and semantic retrieval", required: false },
+          semanticTimeoutMs: { type: "number", description: "Semantic branch deadline in milliseconds (default: 8000)", required: false },
+          totalTimeoutMs: { type: "number", description: "Overall hybrid deadline in milliseconds (default: 10000)", required: false }
         },
         examples: [
-          { query: { query: "dynamic recrystallization of nickel superalloys" }, description: "Locate literature without scanning full text" }
+          {
+            query: {
+              query: "Effects of temperature gradient on columnar-to-equiaxed transition during directional solidification / 温度梯度对定向凝固柱状晶-等轴晶转变的影响",
+              keywords: ["温度梯度", "定向凝固", "柱状晶", "等轴晶", "柱状晶-等轴晶转变", "temperature gradient", "directional solidification", "columnar grain", "equiaxed grain", "columnar-to-equiaxed transition", "CET"]
+            },
+            description: "Chinese question, bilingual retrieval: the full sentence drives cross-lingual semantic search while the keywords drive lexical search in both languages"
+          }
         ]
       },
       {
@@ -1075,7 +1144,7 @@ private getCapabilities() {
           method: "POST",
           description: "MCP protocol endpoint for AI clients",
           contentType: "application/json",
-          protocol: "MCP 2024-11-05"
+          protocol: `MCP ${MCP_PROTOCOL_VERSION}`
         }
       },
       rest: {
@@ -1126,7 +1195,12 @@ private getCapabilities() {
           ]
         }
       },
-      authentication: "None required for local connections",
+      authentication: serverPreferences.isAuthRequired()
+        ? "Required: send the plugin access token as an Authorization: Bearer <token> header"
+        : "Not required for loopback connections; enabling remote access makes the bearer token mandatory",
+      originPolicy:
+        "Requests carrying a non-loopback Origin header are rejected (DNS rebinding protection)",
+      protocolVersions: SUPPORTED_MCP_PROTOCOL_VERSIONS,
       rateLimit: "No rate limiting currently implemented",
       cors: "CORS headers not currently set"
     },

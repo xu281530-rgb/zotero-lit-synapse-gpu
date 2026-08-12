@@ -338,7 +338,12 @@ function calculateRelevanceScore(
 
   // 检查各字段匹配情况
   if (params.q) {
-    const query = params.q.toLowerCase();
+    const tokens =
+      params.q
+        .toLowerCase()
+        .match(/[\p{L}\p{N}]+/gu)
+        ?.filter((token) => token.length > 1 || /[\p{Script=Han}]/u.test(token))
+        .slice(0, 12) || [];
     Object.entries(fieldWeights).forEach(([field, weight]) => {
       let fieldValue: string = "";
 
@@ -360,8 +365,12 @@ function calculateRelevanceScore(
         }
       }
 
-      if (fieldValue.toLowerCase().includes(query)) {
-        score += weight;
+      const normalizedField = fieldValue.toLowerCase();
+      const matchedTokenCount = tokens.filter((token) =>
+        normalizedField.includes(token),
+      ).length;
+      if (matchedTokenCount > 0) {
+        score += weight * matchedTokenCount;
         matchedFields.push(field);
       }
     });

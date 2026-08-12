@@ -10,11 +10,22 @@ const MCP_SERVER_ALLOW_REMOTE = `${PREFS_PREFIX}.mcp.server.allowRemote`;
 const MCP_SERVER_AUTH_TOKEN = `${PREFS_PREFIX}.mcp.server.authToken`;
 const MCP_SERVER_REQUIRE_AUTH = `${PREFS_PREFIX}.mcp.server.requireAuth`;
 
+/**
+ * 会影响 MCP 监听地址/端口/鉴权的偏好全名。
+ * 导出给 hooks 使用，避免在多处硬编码同一串字符串而写错。
+ */
+export const SERVER_LISTENER_PREFS = {
+  enabled: MCP_SERVER_ENABLED,
+  port: MCP_SERVER_PORT,
+  allowRemote: MCP_SERVER_ALLOW_REMOTE,
+  requireAuth: MCP_SERVER_REQUIRE_AUTH,
+} as const;
+
 type PreferenceObserver = (name: string) => void;
 
 class ServerPreferences {
   private observers: PreferenceObserver[] = [];
-  private observerID: symbol | null = null;
+  private observerIDs: symbol[] = [];
   private monitorInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
@@ -170,29 +181,65 @@ class ServerPreferences {
   }
 
   private register(): void {
-    try {
-      // Register observer for the enabled preference only
-      if (typeof ztoolkit !== 'undefined') {
-        ztoolkit.log(`[ServerPreferences] Registering observer for: ${MCP_SERVER_ENABLED}`);
+    // 影响监听地址/端口的偏好，任何一个变化都要让服务器重新对齐配置。
+    // 之前只注册了 enabled，改端口和开关远程访问都不会触发任何动作。
+    const watched = [
+      MCP_SERVER_ENABLED,
+      MCP_SERVER_PORT,
+      MCP_SERVER_ALLOW_REMOTE,
+      MCP_SERVER_REQUIRE_AUTH,
+    ];
+
+    for (const prefName of watched) {
+      try {
+        if (typeof ztoolkit !== 'undefined') {
+          ztoolkit.log(`[ServerPreferences] Registering observer for: ${prefName}`);
+        }
+
+        // 两处必须显式处理，否则 observer 形同虚设：
+        // 1. 第三个参数 global 必须为 true。为 false 时 Zotero 会把名字挂到
+        //    extensions.zotero. 分支下，我们传的已经是全名，会变成
+        //    extensions.zotero.extensions.zotero...，永远不会被触发。
+        // 2. 回调收到的第一个参数是偏好的“新值”，不是偏好名。原实现把它当
+        //    名字与全名做字符串比较，即使触发也永远匹配不上。这里改为闭包捕获
+        //    已知的 prefName 传给下游，回调参数只用于日志。
+        const observerID = Zotero.Prefs.registerObserver(
+          prefName,
+          (newValue: unknown) => {
+            if (typeof ztoolkit !== 'undefined') {
+              ztoolkit.log(
+                `[ServerPreferences] Observer triggered for ${prefName} (new value type: ${typeof newValue})`,
+              );
+            }
+            this.observers.forEach((observer) => {
+              try {
+                observer(prefName);
+              } catch (callbackError) {
+                if (typeof ztoolkit !== 'undefined') {
+                  ztoolkit.log(
+                    `[ServerPreferences] Observer callback failed for ${prefName}: ${callbackError}`,
+                    'error',
+                  );
+                }
+              }
+            });
+          },
+          true,
+        );
+
+        this.observerIDs.push(observerID);
+      } catch (error) {
+        if (typeof ztoolkit !== 'undefined') {
+          ztoolkit.log(
+            `[ServerPreferences] Error registering observer for ${prefName}: ${error}`,
+            'error',
+          );
+        }
       }
-      
-      this.observerID = Zotero.Prefs.registerObserver(
-        MCP_SERVER_ENABLED,
-        (name: string) => {
-          if (typeof ztoolkit !== 'undefined') {
-            ztoolkit.log(`[ServerPreferences] Observer triggered for: ${name}`);
-          }
-          this.observers.forEach((observer) => observer(name));
-        },
-      );
-      
-      if (typeof ztoolkit !== 'undefined') {
-        ztoolkit.log(`[ServerPreferences] Observer registered with ID: ${this.observerID?.toString()}`);
-      }
-    } catch (error) {
-      if (typeof ztoolkit !== 'undefined') {
-        ztoolkit.log(`[ServerPreferences] Error registering observer: ${error}`, 'error');
-      }
+    }
+
+    if (typeof ztoolkit !== 'undefined') {
+      ztoolkit.log(`[ServerPreferences] Registered ${this.observerIDs.length} preference observers`);
     }
   }
 
@@ -204,10 +251,14 @@ class ServerPreferences {
       ztoolkit.log(`[ServerPreferences] Monitor interval cleared`);
     }
 
-    if (this.observerID) {
-      Zotero.Prefs.unregisterObserver(this.observerID);
-      this.observerID = null;
+    for (const observerID of this.observerIDs) {
+      try {
+        Zotero.Prefs.unregisterObserver(observerID);
+      } catch (error) {
+        ztoolkit.log(`[ServerPreferences] Error unregistering observer: ${error}`, 'error');
+      }
     }
+    this.observerIDs = [];
     this.observers = [];
     ztoolkit.log(`[ServerPreferences] Unregistered`);
   }

@@ -3,6 +3,7 @@
  * 
  * Tests the integrated MCP server functionality
  */
+import { MCP_PROTOCOL_VERSION } from './mcpTransport';
 
 export interface MCPTestResult {
   testName: string;
@@ -36,7 +37,7 @@ export async function testMCPIntegration(): Promise<{
       id: 'test-1',
       method: 'initialize',
       params: {
-        protocolVersion: '2024-11-05',
+        protocolVersion: '2025-06-18',
         capabilities: {},
         clientInfo: {
           name: 'test-client',
@@ -54,7 +55,7 @@ export async function testMCPIntegration(): Promise<{
     
     if (
       response.result &&
-      response.result.protocolVersion === '2024-11-05' &&
+      response.result.protocolVersion === MCP_PROTOCOL_VERSION &&
       response.result.instructions?.includes(
         'Use hybrid_search as the default first step',
       )

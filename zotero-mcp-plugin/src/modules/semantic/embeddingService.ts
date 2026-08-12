@@ -776,7 +776,12 @@ export class EmbeddingService {
    * @param isQuery - Not used for API-based embedding, kept for interface compatibility
    * @throws {EmbeddingAPIError} When API call fails
    */
-  async embed(text: string, language?: 'zh' | 'en' | 'auto', _isQuery: boolean = false): Promise<EmbeddingResult> {
+  async embed(
+    text: string,
+    language?: 'zh' | 'en' | 'auto',
+    _isQuery: boolean = false,
+    options?: { signal?: AbortSignal },
+  ): Promise<EmbeddingResult> {
     const startTime = Date.now();
     await this.initialize();
 
@@ -801,7 +806,7 @@ export class EmbeddingService {
     }
 
     try {
-      const embeddings = await this.callEmbeddingAPI([text]);
+      const embeddings = await this.callEmbeddingAPI([text], options?.signal);
       const embedding = embeddings[0];
 
       const elapsed = Date.now() - startTime;
@@ -1069,7 +1074,10 @@ export class EmbeddingService {
    * Call the embedding API using Zotero.HTTP
    * @throws {EmbeddingAPIError} When API call fails after all retries
    */
-  private async callEmbeddingAPI(texts: string[]): Promise<number[][]> {
+  private async callEmbeddingAPI(
+    texts: string[],
+    signal?: AbortSignal,
+  ): Promise<number[][]> {
     // Validate and clean input texts
     const cleanTexts = texts.map(t => t.trim()).filter(t => t.length > 0);
     if (cleanTexts.length === 0) {
@@ -1142,6 +1150,14 @@ export class EmbeddingService {
 
     let lastError: EmbeddingAPIError | null = null;
 
+    const abortError = () =>
+      new EmbeddingAPIError(
+        'Embedding request cancelled',
+        'network',
+        { retryable: false },
+      );
+    if (signal?.aborted) throw abortError();
+
     // Calculate request body size for logging
     const requestBodyStr = JSON.stringify(requestBody);
     const requestBodySize = requestBodyStr.length;
@@ -1162,13 +1178,39 @@ export class EmbeddingService {
 
         ztoolkit.log(`[EmbeddingService] Sending request attempt ${attempt + 1}/${this.config.maxRetries} to ${url}`);
 
+        if (signal?.aborted) throw abortError();
+
+        // Zotero.HTTP hands back a canceller so an abandoned request is really
+        // torn down. Without it a timed-out hybrid query leaves its embedding
+        // POST running, and repeated queries stack up background traffic.
+        let cancelRequest: (() => void) | null = null;
+        const onAbort = () => {
+          try {
+            cancelRequest?.();
+          } catch {
+            // The request may already have completed.
+          }
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+
         // Use Zotero.HTTP.request which is available in Zotero environment
-        const response = await Zotero.HTTP.request('POST', url, {
-          headers,
-          body: requestBodyStr,
-          timeout: this.config.timeout,
-          responseType: 'json'
-        });
+        let response: XMLHttpRequest;
+        try {
+          response = await Zotero.HTTP.request('POST', url, {
+            headers,
+            body: requestBodyStr,
+            timeout: this.config.timeout,
+            responseType: 'json',
+            cancellerReceiver: (canceller: () => void) => {
+              cancelRequest = canceller;
+              if (signal?.aborted) onAbort();
+            },
+          });
+        } finally {
+          signal?.removeEventListener('abort', onAbort);
+        }
+
+        if (signal?.aborted) throw abortError();
 
         ztoolkit.log(`[EmbeddingService] Response received: status=${response.status}`);
 
@@ -1321,6 +1363,9 @@ export class EmbeddingService {
             }
           );
         }
+
+        // A cancelled request must not be retried - the caller stopped caring.
+        if (signal?.aborted) throw abortError();
 
         ztoolkit.log(`[EmbeddingService] API attempt ${attempt + 1}/${this.config.maxRetries} failed: ${lastError.type} (status=${lastError.statusCode}) - ${lastError.message}`, 'warn');
 

@@ -8,6 +8,11 @@
 export {
   SemanticSearchService,
   getSemanticSearchService,
+  // onShutdown 通过这个 barrel require 该函数来释放单例。之前它只在
+  // semanticSearchService.ts 里 export、没有在这里转出，require destructure
+  // 得到的是 undefined，关闭时抛 TypeError，单例因此从未被置空——
+  // 禁用/重新启用插件会继续用上一份已 destroy 的实例。
+  resetSemanticSearchService,
   type SemanticSearchOptions,
   type SemanticSearchResult,
   type IndexProgress,

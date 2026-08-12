@@ -42,7 +42,7 @@ export async function registerSemanticIndexColumn(): Promise<void> {
 
       // Data provider - returns the status text for each item
       dataProvider: (item: Zotero.Item, dataKey: string) => {
-        return getItemIndexStatus(item.key);
+        return getItemIndexStatus(item.key, item.libraryID);
       },
 
       // Custom cell renderer for styling
@@ -92,7 +92,7 @@ export function unregisterSemanticIndexColumn(): void {
  * Get the index status for a specific item
  * Uses cached data to avoid repeated database queries
  */
-function getItemIndexStatus(itemKey: string): string {
+function getItemIndexStatus(itemKey: string, libraryID?: number): string {
   // Check if cache is valid
   const now = Date.now();
   if (!indexedItemsCache || (now - cacheTimestamp) > CACHE_TTL_MS) {
@@ -102,8 +102,18 @@ function getItemIndexStatus(itemKey: string): string {
     return '-';
   }
 
+  // The cache holds raw storage keys, which are namespaced by library for
+  // everything outside My Library. Looking up a bare key would show every
+  // indexed group item as unindexed - and could show a group item as indexed
+  // because an unrelated My Library item happens to share its key.
+  const effectiveLibraryID = libraryID ?? Zotero.Libraries.userLibraryID;
+  const storageKey =
+    effectiveLibraryID === Zotero.Libraries.userLibraryID
+      ? itemKey
+      : `${effectiveLibraryID}:${itemKey}`;
+
   // Return status from cache
-  return indexedItemsCache.has(itemKey) ? '\u2713' : '-';
+  return indexedItemsCache.has(storageKey) ? '\u2713' : '-';
 }
 
 /**

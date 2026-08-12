@@ -261,6 +261,13 @@ Translate the above text enclosed with <translate_input> into {{target_language}
       clearStatus(status);
     };
 
+    const savedBaseURL = normalizeURL(
+      Zotero.Prefs.get(`${this.prefPrefix}mineru.baseURL`, true),
+    );
+    if (savedBaseURL) {
+      setControlValue(baseURL, savedBaseURL);
+    }
+
     addControlChange(mode, syncBaseURL);
     addButtonCommand(validateButton, async () => {
       await this.validateMinerU(root, validateButton, status);

@@ -1,12 +1,17 @@
 import { BasicExampleFactory } from "./modules/examples";
 import { httpServer } from "./modules/httpServer"; // 使用单例导出
-import { serverPreferences } from "./modules/serverPreferences";
+import { serverPreferences, SERVER_LISTENER_PREFS } from "./modules/serverPreferences";
 import { getString, initLocale } from "./utils/locale";
 import { registerPrefsScripts } from "./modules/preferenceScript";
 import { createZToolkit } from "./utils/ztoolkit";
 import { MCPSettingsService } from "./modules/mcpSettingsService";
 import { registerSemanticIndexColumn, unregisterSemanticIndexColumn, refreshSemanticColumn } from "./modules/semanticIndexColumn";
 import { getMinerUService } from "./modules/mineru";
+import {
+  groupItemKeysByLibrary,
+  groupQueueKeysByLibrary,
+  toLibraryQueueKey,
+} from "./modules/libraryScope";
 
 // Preference keys for semantic search settings
 const PREF_SEMANTIC_ENABLED = 'extensions.zotero.zotero-mcp-plugin.semantic.enabled';
@@ -19,8 +24,32 @@ let itemNotifierID: string | null = null;
 let autoUpdateDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 const AUTO_UPDATE_DEBOUNCE_MS = 5000; // Wait 5 seconds after last change before updating
 
-// Queue of item keys to update
-const pendingAutoUpdateKeys = new Set<string>();
+// Queue of items to update, keyed by `<libraryID>:<itemKey>` so group-library
+// items are never re-indexed against My Library's ID.
+//
+// The value records whether that key needs a *forced* re-extraction:
+//   true  - an add / attachment landing: re-read the item from disk even if the
+//           timestamps look unchanged (a freshly attached PDF is the point).
+//   false - a plain `modify`: let needsReindexByTimestamp decide. Forcing here
+//           would re-extract PDF text on every tag edit or sync-driven
+//           dateModified bump, which is exactly the pointless churn we want to
+//           avoid.
+// Merging is OR-ed: once a key needs forcing in a batch, it keeps forcing.
+const pendingAutoUpdateKeys = new Map<string, boolean>();
+
+// Retry bookkeeping for auto-update batches that could not be processed yet
+// (service not ready, another build in flight, transient failure).
+let autoUpdateRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let autoUpdateRetryCount = 0;
+const AUTO_UPDATE_RETRY_BASE_MS = 30 * 1000;
+const AUTO_UPDATE_RETRY_MAX_MS = 10 * 60 * 1000;
+/**
+ * Cap on consecutive retry rounds. Hitting it stops the timer but deliberately
+ * KEEPS the queued keys, so the next item event (or the periodic auto-index
+ * check) picks them up instead of losing them. This is what bounds the retry
+ * loop without ever discarding work.
+ */
+const AUTO_UPDATE_MAX_RETRIES = 8;
 
 // Flag to prevent recursive auto-update during indexing
 let isAutoIndexing = false;
@@ -62,7 +91,53 @@ function clearAllPendingTimeouts(): void {
 }
 
 /**
+ * Requeue a batch that could not be processed, and arrange another attempt.
+ *
+ * Keys are put back (OR-ing the force flag with anything queued meanwhile, so a
+ * newer forced request is never downgraded) and a backoff timer is armed. The
+ * batch is only ever dropped from the queue after it has actually been indexed.
+ */
+function requeueAutoUpdates(batch: Map<string, boolean>, reason: string): void {
+  if (isShuttingDown) return;
+
+  for (const [key, force] of batch) {
+    pendingAutoUpdateKeys.set(key, (pendingAutoUpdateKeys.get(key) ?? false) || force);
+  }
+
+  if (autoUpdateRetryCount >= AUTO_UPDATE_MAX_RETRIES) {
+    ztoolkit.log(
+      `[MCP Plugin] Auto-update still blocked after ${autoUpdateRetryCount} retries (${reason}); ${pendingAutoUpdateKeys.size} keys stay queued for the next item event or periodic check`,
+      'warn',
+    );
+    return;
+  }
+
+  autoUpdateRetryCount += 1;
+  const delay = Math.min(
+    AUTO_UPDATE_RETRY_BASE_MS * Math.pow(2, autoUpdateRetryCount - 1),
+    AUTO_UPDATE_RETRY_MAX_MS,
+  );
+
+  // A single timer for the whole queue: re-arming replaces it, so repeated
+  // failures cannot pile up overlapping retries.
+  if (autoUpdateRetryTimer) clearTimeout(autoUpdateRetryTimer);
+  autoUpdateRetryTimer = trackedSetTimeout(() => {
+    autoUpdateRetryTimer = null;
+    processPendingAutoUpdates();
+  }, delay);
+
+  ztoolkit.log(
+    `[MCP Plugin] Auto-update deferred (${reason}); retry ${autoUpdateRetryCount}/${AUTO_UPDATE_MAX_RETRIES} in ${Math.round(delay / 1000)}s, ${pendingAutoUpdateKeys.size} keys still queued`,
+  );
+}
+
+/**
  * Process pending auto-update items
+ *
+ * Keys are removed from the queue only after the corresponding build actually
+ * ran. Previously the whole queue was cleared up front, so a service that was
+ * not ready yet, a concurrent build ('busy'), or any thrown error silently
+ * discarded every queued item and nothing ever re-indexed them.
  */
 async function processPendingAutoUpdates() {
   if (isShuttingDown) return;
@@ -72,10 +147,27 @@ async function processPendingAutoUpdates() {
   const semanticEnabled = Zotero.Prefs.get(PREF_SEMANTIC_ENABLED, true);
   if (semanticEnabled === false) return;
 
-  const keysToUpdate = Array.from(pendingAutoUpdateKeys);
+  // Another build (periodic auto-index, or a user-triggered one) holds the
+  // service. Keep the queue and come back rather than racing it into 'busy'.
+  if (isAutoIndexing) {
+    const deferred = new Map(pendingAutoUpdateKeys);
+    pendingAutoUpdateKeys.clear();
+    requeueAutoUpdates(deferred, 'another index build is in progress');
+    return;
+  }
+
+  // Take the batch, but hold on to it: it goes back into the queue unless the
+  // build for every library actually completes.
+  const batch = new Map(pendingAutoUpdateKeys);
   pendingAutoUpdateKeys.clear();
 
-  ztoolkit.log(`[MCP Plugin] Auto-updating semantic index for ${keysToUpdate.length} items`);
+  const forcedKeys: string[] = [];
+  const incrementalKeys: string[] = [];
+  for (const [key, force] of batch) {
+    (force ? forcedKeys : incrementalKeys).push(key);
+  }
+
+  ztoolkit.log(`[MCP Plugin] Auto-updating semantic index for ${batch.size} items (forced=${forcedKeys.length}, incremental=${incrementalKeys.length})`);
 
   // Set flag to prevent recursive calls during indexing
   isAutoIndexing = true;
@@ -87,27 +179,70 @@ async function processPendingAutoUpdates() {
     // Check if service is ready
     const isReady = await semanticService.isReady();
     if (!isReady) {
-      ztoolkit.log("[MCP Plugin] Semantic service not ready, skipping auto-update");
+      ztoolkit.log("[MCP Plugin] Semantic service not ready, deferring auto-update");
+      requeueAutoUpdates(batch, 'semantic service not ready');
       return;
     }
 
-    // These keys were explicitly touched (added, or had an attachment land on
-    // them), so force past the already-indexed filter. The content-hash check
-    // inside indexItem still prevents pointless re-embedding.
-    await semanticService.buildIndex({
-      itemKeys: keysToUpdate,
-      rebuild: false,  // Only add new indexes, don't clear existing data
-      force: true,
-      onProgress: (progress) => {
-        ztoolkit.log(`[MCP Plugin] Auto-update progress: ${progress.processed}/${progress.total}`);
+    // One build per library and per force mode: buildIndex resolves keys with
+    // getByLibraryAndKeyAsync, so a group item indexed under the user library
+    // ID would simply not be found.
+    //
+    // forced=true keys were explicitly touched (added, or had an attachment
+    // land on them), so they must bypass the extraction cache. forced=false
+    // keys come from `modify`; buildIndex no longer drops targeted keys at the
+    // index_status filter, so needsReindexByTimestamp decides whether anything
+    // is actually re-embedded.
+    const groups: Array<{ keys: string[]; force: boolean }> = [
+      { keys: forcedKeys, force: true },
+      { keys: incrementalKeys, force: false },
+    ];
+
+    for (const group of groups) {
+      if (group.keys.length === 0) continue;
+      const byLibrary = groupQueueKeysByLibrary(
+        group.keys,
+        Zotero.Libraries.userLibraryID,
+      );
+      for (const [libraryID, keysToUpdate] of byLibrary) {
+        const result = await semanticService.buildIndex({
+          itemKeys: keysToUpdate,
+          libraryID,
+          rebuild: false,  // Only add new indexes, don't clear existing data
+          force: group.force,
+          onProgress: (progress) => {
+            ztoolkit.log(`[MCP Plugin] Auto-update progress (libraryID=${libraryID}, force=${group.force}): ${progress.processed}/${progress.total}`);
+          }
+        });
+
+        if (result.status === 'busy') {
+          // Someone else grabbed the service between our check and this call.
+          requeueAutoUpdates(batch, 'buildIndex reported busy');
+          return;
+        }
+        if (result.status === 'error' && result.errorRetryable !== false) {
+          requeueAutoUpdates(batch, `buildIndex error: ${result.error || 'unknown'}`);
+          return;
+        }
+        if (result.status === 'error') {
+          // Non-retryable (e.g. embedding dimension mismatch): retrying cannot
+          // help, so drop the batch instead of spinning on it forever.
+          ztoolkit.log(`[MCP Plugin] Auto-update aborted, non-retryable error: ${result.error}`, 'error');
+          autoUpdateRetryCount = 0;
+          return;
+        }
       }
-    });
+    }
+
+    // Everything ran: the batch is done and the backoff resets.
+    autoUpdateRetryCount = 0;
 
     // Refresh semantic column to show updated status
     refreshSemanticColumn();
-    ztoolkit.log(`[MCP Plugin] Auto-update completed for ${keysToUpdate.length} items`);
+    ztoolkit.log(`[MCP Plugin] Auto-update completed for ${batch.size} items`);
   } catch (error) {
     ztoolkit.log(`[MCP Plugin] Auto-update failed: ${error}`, 'error');
+    requeueAutoUpdates(batch, `exception: ${error}`);
   } finally {
     // Always reset the flag
     isAutoIndexing = false;
@@ -116,9 +251,20 @@ async function processPendingAutoUpdates() {
 
 /**
  * Schedule auto-update with debouncing
+ *
+ * @param force Re-extract even when timestamps look unchanged. True for adds
+ *   and for attachments landing on an already-indexed parent; false for plain
+ *   modifications, which must stay cheap.
  */
-function scheduleAutoUpdate(itemKey: string) {
-  pendingAutoUpdateKeys.add(itemKey);
+function scheduleAutoUpdate(itemKey: string, libraryID: number, force: boolean) {
+  const queueKey = toLibraryQueueKey(itemKey, libraryID);
+  pendingAutoUpdateKeys.set(
+    queueKey,
+    (pendingAutoUpdateKeys.get(queueKey) ?? false) || force,
+  );
+
+  // New activity: give the queue a fresh set of retries.
+  autoUpdateRetryCount = 0;
 
   // Clear existing timer
   if (autoUpdateDebounceTimer) {
@@ -133,6 +279,55 @@ function scheduleAutoUpdate(itemKey: string) {
 }
 
 /**
+ * Queue items touched by a `modify` event.
+ *
+ * Resolves whatever Zotero reports (regular item, attachment, note, annotation)
+ * back to the regular item that owns the index entry, then queues it
+ * non-forced. Nothing is re-embedded unless needsReindexByTimestamp sees a
+ * changed item_modified / attachment_modified stamp, so a tag edit or a sync
+ * touch that changes nothing indexable costs a single timestamp comparison.
+ */
+function queueModifiedItems(numericIds: number[]): void {
+  let items: any[] = [];
+  try {
+    items = Zotero.Items.get(numericIds) as any[];
+  } catch (error) {
+    ztoolkit.log(`[MCP Plugin] Could not resolve modified items: ${error}`, 'warn');
+    return;
+  }
+
+  for (const item of items) {
+    try {
+      if (!item) continue;
+      if (item.deleted) continue;
+
+      if (item.isRegularItem?.()) {
+        scheduleAutoUpdate(item.key, item.libraryID, false);
+        continue;
+      }
+
+      // Same loop guard as the add path: the Markdown attachments the indexer
+      // writes itself must never re-queue their own parent.
+      if (item.attachmentContentType === "text/markdown") continue;
+
+      // Attachments, notes and annotations contribute to the parent's indexed
+      // content, so a change to them is a change to the parent.
+      const parentKey =
+        item.parentItem?.key ||
+        (item.parentItemKey as string | undefined) ||
+        // An annotation hangs off an attachment, which hangs off the item.
+        item.parentItem?.parentItem?.key ||
+        null;
+      if (parentKey) {
+        scheduleAutoUpdate(parentKey, item.libraryID, false);
+      }
+    } catch (error) {
+      ztoolkit.log(`[MCP Plugin] Skipped modified item: ${error}`, 'warn');
+    }
+  }
+}
+
+/**
  * Handle deleted items - remove their indexes
  */
 async function handleItemsDeleted(itemIds: number[], extraData: any) {
@@ -141,27 +336,30 @@ async function handleItemsDeleted(itemIds: number[], extraData: any) {
     const vectorStore = getVectorStore();
 
     // Try to get item keys from extraData (Zotero passes old data for deleted items)
-    const itemKeys: string[] = [];
+    const itemIdentities: Array<{ itemKey: string; libraryID?: number }> = [];
     if (extraData) {
       for (const id of itemIds) {
         const oldData = extraData[id];
         if (oldData?.key) {
-          itemKeys.push(oldData.key);
+          itemIdentities.push({
+            itemKey: oldData.key,
+            libraryID: oldData.libraryID,
+          });
         }
       }
     }
 
-    if (itemKeys.length === 0) {
+    if (itemIdentities.length === 0) {
       ztoolkit.log(`[MCP Plugin] No item keys found for deleted items, skipping index cleanup`);
       return;
     }
 
-    ztoolkit.log(`[MCP Plugin] Cleaning up indexes for ${itemKeys.length} deleted items`);
+    ztoolkit.log(`[MCP Plugin] Cleaning up indexes for ${itemIdentities.length} deleted items`);
 
-    for (const itemKey of itemKeys) {
+    for (const { itemKey, libraryID } of itemIdentities) {
       try {
         // Delete vectors and content cache (item is permanently deleted)
-        await vectorStore.deleteItemVectors(itemKey, true);
+        await vectorStore.deleteItemVectors(itemKey, true, libraryID);
         ztoolkit.log(`[MCP Plugin] Deleted index and cache for item: ${itemKey}`);
       } catch (e) {
         // Ignore errors for items that weren't indexed
@@ -200,8 +398,13 @@ function registerItemNotifier() {
       const enabled = Zotero.Prefs.get(PREF_SEMANTIC_AUTO_UPDATE, true);
       if (!enabled) return;
 
-      // Only process add and delete events (not modify - to avoid loops)
-      if (event !== 'add' && event !== 'delete') return;
+      // add / modify / delete. `modify` used to be dropped outright, which is
+      // why editing a title, abstract, tags, or annotations never reached the
+      // index. It is safe to handle now: the queue is debounced, the
+      // isAutoIndexing guard above still blocks events raised by our own
+      // indexing, and modify-driven work is queued non-forced so an unchanged
+      // item costs one timestamp comparison and nothing else.
+      if (event !== 'add' && event !== 'modify' && event !== 'delete') return;
 
       ztoolkit.log(`[MCP Plugin] Item notifier: event=${event}, type=${type}, ids=${ids.length}`);
 
@@ -212,7 +415,7 @@ function registerItemNotifier() {
         const items = Zotero.Items.get(numericIds);
         for (const item of items) {
           if (item.isRegularItem?.()) {
-            scheduleAutoUpdate(item.key);
+            scheduleAutoUpdate(item.key, item.libraryID, true);
             continue;
           }
           // The Markdown attachments the indexer itself writes must not
@@ -231,10 +434,13 @@ function registerItemNotifier() {
             (item.parentItemKey as string | undefined) ||
             null;
           if (parentKey) {
-            ztoolkit.log(`[MCP Plugin] Attachment added, re-queueing parent item: ${parentKey}`);
-            scheduleAutoUpdate(parentKey);
+            ztoolkit.log(`[MCP Plugin] Attachment added, re-queueing parent item: ${parentKey} (libraryID=${item.libraryID})`);
+            // The attachment always lives in the same library as its parent.
+            scheduleAutoUpdate(parentKey, item.libraryID, true);
           }
         }
+      } else if (event === 'modify') {
+        queueModifiedItems(numericIds);
       } else if (event === 'delete') {
         // For delete events, remove index for deleted items
         // Extract item keys from extraData (items are already deleted)
@@ -321,6 +527,16 @@ async function triggerAutoIndexBuild() {
 
     ztoolkit.log("[MCP Plugin] Periodic auto-index check...");
 
+    // Drain anything the debounced path could not finish (service was not
+    // ready, another build held the lock, retries were exhausted). Without
+    // this those keys would sit in the queue until the next item event.
+    if (pendingAutoUpdateKeys.size > 0 && !isAutoIndexing) {
+      ztoolkit.log(`[MCP Plugin] Draining ${pendingAutoUpdateKeys.size} queued auto-update keys before the periodic check`);
+      autoUpdateRetryCount = 0;
+      await processPendingAutoUpdates();
+      if (isShuttingDown) return;
+    }
+
     const { getSemanticSearchService } = await import("./modules/semantic");
     const semanticService = getSemanticSearchService();
 
@@ -347,9 +563,13 @@ async function triggerAutoIndexBuild() {
     // Set flag to prevent recursive calls during indexing
     isAutoIndexing = true;
 
-    // Start building index for unindexed items (rebuild=false means only index new items)
-    ztoolkit.log("[MCP Plugin] Starting auto index build for unindexed items...");
+    // Start building index for unindexed items (rebuild=false means only index
+    // new items). Scoped to My Library on purpose: group libraries are indexed
+    // when the user touches them (notifier / menu commands), so a background
+    // timer never silently spends embedding quota on someone else's library.
+    ztoolkit.log("[MCP Plugin] Starting auto index build for unindexed items in My Library...");
     semanticService.buildIndex({
+      libraryID: Zotero.Libraries.userLibraryID,
       rebuild: false,  // Only index items that haven't been indexed
       onProgress: (progress) => {
         if (progress.processed % 10 === 0) {
@@ -394,7 +614,87 @@ function unregisterItemNotifier() {
     clearTimeout(autoUpdateDebounceTimer);
     autoUpdateDebounceTimer = null;
   }
+  if (autoUpdateRetryTimer) {
+    clearTimeout(autoUpdateRetryTimer);
+    autoUpdateRetryTimer = null;
+  }
+  autoUpdateRetryCount = 0;
   pendingAutoUpdateKeys.clear();
+}
+
+/** 触发服务器重新对齐的偏好全名集合。 */
+const WATCHED_SERVER_PREFS = new Set<string>(
+  Object.values(SERVER_LISTENER_PREFS),
+);
+
+/** 去抖句柄：连续修改端口/开关时只做一次重启。 */
+let serverStateSyncTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * 把 HTTP 服务器的实际监听状态对齐到偏好设置。
+ *
+ * 幂等：已经按目标端口和目标绑定范围在跑就什么都不做，所以设置页里
+ * 直接控制服务器的处理器与偏好 observer 同时触发也不会互相踩。
+ */
+function applyServerState(reason: string): void {
+  if (isShuttingDown) return;
+
+  try {
+    const enabled = serverPreferences.isServerEnabled();
+
+    if (!enabled) {
+      if (httpServer.isServerRunning()) {
+        httpServer.stop();
+        ztoolkit.log(`[MCP Plugin] HTTP server stopped (${reason})`);
+      }
+      return;
+    }
+
+    const port = serverPreferences.getPort();
+    if (!port || isNaN(port)) {
+      ztoolkit.log(`[MCP Plugin] Skipping server sync, invalid port: ${port}`, "warn");
+      return;
+    }
+
+    // allowRemote 决定 nsIServerSocket.init 的 loopbackOnly 参数，
+    // 只有重新 init 才能换绑定地址，所以它和端口一样属于需要重启的变更。
+    const loopbackOnly = !serverPreferences.isRemoteAccessAllowed();
+
+    if (
+      httpServer.isServerRunning() &&
+      httpServer.getBoundPort() === port &&
+      httpServer.isBoundLoopbackOnly() === loopbackOnly
+    ) {
+      ztoolkit.log(`[MCP Plugin] HTTP server already matches preferences (${reason})`);
+      return;
+    }
+
+    if (httpServer.isServerRunning()) {
+      httpServer.stop();
+      ztoolkit.log(`[MCP Plugin] HTTP server stopped for rebind (${reason})`);
+    }
+
+    httpServer.start(port);
+    ztoolkit.log(
+      `[MCP Plugin] HTTP server listening on ${loopbackOnly ? "127.0.0.1" : "0.0.0.0"}:${port} (${reason})`,
+    );
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    ztoolkit.log(`[MCP Plugin] Error applying server state (${reason}): ${err.message}`, "error");
+  }
+}
+
+/**
+ * 去抖调度状态对齐。设置页改端口时每敲一个字符都会写偏好，
+ * 立即重启会反复占用/释放端口。
+ */
+function scheduleServerStateSync(reason: string): void {
+  if (isShuttingDown) return;
+  if (serverStateSyncTimer) clearTimeout(serverStateSyncTimer);
+  serverStateSyncTimer = trackedSetTimeout(() => {
+    serverStateSyncTimer = null;
+    applyServerState(reason);
+  }, 300);
 }
 
 async function onStartup() {
@@ -453,30 +753,14 @@ async function onStartup() {
     ztoolkit.log(`[MCP Plugin] [STARTUP] Failed to start HTTP server: ${err.message}`, "error");
   }
 
-  // 监听偏好设置变化
-  serverPreferences.addObserver(async (name) => {
+  // 监听偏好设置变化。回调只负责触发一次去抖的状态对齐，
+  // 具体“该不该重启”交给 applyServerState 判断，避免与设置页里
+  // 直接调用 start/stop 的逻辑互相打架。
+  serverPreferences.addObserver((name) => {
     if (isShuttingDown) return; // 关闭时不处理偏好变化
     ztoolkit.log(`[MCP Plugin] Preference changed: ${name}`);
-
-    if (name === "extensions.zotero.zotero-mcp-plugin.mcp.server.port" || name === "extensions.zotero.zotero-mcp-plugin.mcp.server.enabled") {
-      try {
-        if (httpServer.isServerRunning()) {
-          httpServer.stop();
-          ztoolkit.log("[MCP Plugin] HTTP server stopped for restart");
-        }
-
-        if (serverPreferences.isServerEnabled()) {
-          const port = serverPreferences.getPort();
-          httpServer.start(port);
-          ztoolkit.log(`[MCP Plugin] HTTP server restarted on port ${port}`);
-        } else {
-          ztoolkit.log("[MCP Plugin] HTTP server disabled by user");
-        }
-      } catch (error) {
-        const err = error instanceof Error ? error : new Error(String(error));
-        ztoolkit.log(`[MCP Plugin] Error handling preference change: ${err.message}`, "error");
-      }
-    }
+    if (!WATCHED_SERVER_PREFS.has(name)) return;
+    scheduleServerStateSync(name);
   });
 
   BasicExampleFactory.registerPrefs();
@@ -568,10 +852,10 @@ function onShutdown(): void {
   // 停止语义搜索服务
   try {
     ztoolkit.log("[MCP Plugin] [SHUTDOWN 5/7] Stopping semantic search service...");
-    const { getSemanticSearchService, resetSemanticSearchService } = require("./modules/semantic");
-    const semanticService = getSemanticSearchService();
-    semanticService.abortIndex();
-    semanticService.destroy();
+    // resetSemanticSearchService() 内部已经做了 abortIndex() + destroy() 并置空
+    // 单例，且实例不存在时是 no-op——不必先 getSemanticSearchService()，
+    // 否则关闭时反而会为了销毁而新建一个从未使用过的实例。
+    const { resetSemanticSearchService } = require("./modules/semantic");
     resetSemanticSearchService();
     ztoolkit.log("[MCP Plugin] [SHUTDOWN 5/7] Done");
   } catch (error) {
@@ -1024,6 +1308,7 @@ async function handleIndexCollection(win: _ZoteroTypes.MainWindow, rebuild: bool
     // "rebuild" already clears everything first, so force would be redundant)
     semanticService.buildIndex({
       itemKeys,
+      libraryID: collection.libraryID,
       rebuild,
       force: !rebuild,
       onProgress: (progress) => {
@@ -1098,9 +1383,10 @@ async function handleClearCollectionIndex(win: _ZoteroTypes.MainWindow) {
 
     // Convert IDs to item objects and get keys
     const items = Zotero.Items.get(itemIDs);
-    const itemKeys = items
-      .filter((item: any) => item.isRegularItem?.())
-      .map((item: any) => item.key);
+    const regularItems = items.filter((item: any) =>
+      item.isRegularItem?.(),
+    );
+    const itemKeys = regularItems.map((item: any) => item.key);
 
     if (itemKeys.length === 0) {
       ztoolkit.log("[MCP Plugin] No regular items in collection");
@@ -1115,7 +1401,11 @@ async function handleClearCollectionIndex(win: _ZoteroTypes.MainWindow) {
     let clearedCount = 0;
     for (const itemKey of itemKeys) {
       try {
-        await vectorStore.deleteItemVectors(itemKey);
+        await vectorStore.deleteItemVectors(
+          itemKey,
+          false,
+          collection.libraryID,
+        );
         clearedCount++;
       } catch (e) {
         // Ignore errors for items that weren't indexed
@@ -1160,18 +1450,22 @@ async function handleClearSelectedIndex(win: _ZoteroTypes.MainWindow) {
 
     // Selecting the PDF row instead of its parent is the natural thing to do
     // when you want that PDF re-read, so resolve attachments to their parent
-    // item rather than silently dropping them.
-    const seen = new Set<string>();
-    const itemKeys: string[] = [];
+    // item rather than silently dropping them. Identities carry the library so
+    // a group-library selection is never indexed against My Library's ID.
+    const selectedIdentities: Array<{ key: string; libraryID: number }> = [];
     for (const item of selectedItems as any[]) {
       const key = item.isRegularItem?.()
         ? item.key
         : item.parentItem?.key || (item.parentItemKey as string | undefined);
-      if (key && !seen.has(key)) {
-        seen.add(key);
-        itemKeys.push(key);
+      if (key) {
+        selectedIdentities.push({
+          key,
+          libraryID: item.libraryID ?? Zotero.Libraries.userLibraryID,
+        });
       }
     }
+    const keysByLibrary = groupItemKeysByLibrary(selectedIdentities);
+    const itemKeys = Array.from(keysByLibrary.values()).flat();
 
     if (itemKeys.length === 0) {
       ztoolkit.log("[MCP Plugin] No indexable items in selection");
@@ -1195,18 +1489,21 @@ async function handleClearSelectedIndex(win: _ZoteroTypes.MainWindow) {
 
     ztoolkit.log(`[MCP Plugin] Clearing index for ${itemKeys.length} selected items...`);
 
-    // Delete vectors for these items
+    // Delete vectors for these items, per library: storage keys are namespaced
+    // by libraryID, so clearing without one silently misses group items.
     const { getVectorStore } = await import("./modules/semantic/vectorStore");
     const vectorStore = getVectorStore();
     await vectorStore.initialize();
 
     let clearedCount = 0;
-    for (const itemKey of itemKeys) {
-      try {
-        await vectorStore.deleteItemVectors(itemKey);
-        clearedCount++;
-      } catch (e) {
-        // Ignore errors for items that weren't indexed
+    for (const [libraryID, keys] of keysByLibrary) {
+      for (const itemKey of keys) {
+        try {
+          await vectorStore.deleteItemVectors(itemKey, false, libraryID);
+          clearedCount++;
+        } catch (e) {
+          // Ignore errors for items that weren't indexed
+        }
       }
     }
 
@@ -1223,6 +1520,58 @@ async function handleClearSelectedIndex(win: _ZoteroTypes.MainWindow) {
     ztoolkit.log(`[MCP Plugin] Error clearing selected items index: ${error}`, "error");
     showNotification(win, getString("menu-semantic-index-error" as any) || "Failed to clear index");
   }
+}
+
+/**
+ * Run one buildIndex per library and merge the per-library results into the
+ * single summary the notice UI expects.
+ *
+ * A `busy` result short-circuits: another build already holds the lock, so the
+ * remaining libraries would just be rejected too.
+ */
+async function runBuildsPerLibrary(
+  semanticService: any,
+  keysByLibrary: Map<number, string[]>,
+  onProgress: (progress: any) => void,
+): Promise<any> {
+  const merged: any = {
+    total: 0,
+    processed: 0,
+    indexed: 0,
+    unchanged: 0,
+    skipped: 0,
+    failedCount: 0,
+    minerUFailures: 0,
+    minerUAttachments: 0,
+    status: "completed",
+  };
+
+  for (const [libraryID, itemKeys] of keysByLibrary) {
+    ztoolkit.log(`[MCP Plugin] Indexing ${itemKeys.length} items in libraryID=${libraryID}`);
+    const result = await semanticService.buildIndex({
+      itemKeys,
+      libraryID,
+      rebuild: false,
+      force: true,
+      onProgress,
+    });
+    if (result?.status === "busy") return result;
+    merged.total += result?.total ?? 0;
+    merged.processed += result?.processed ?? 0;
+    merged.indexed += result?.indexed ?? 0;
+    merged.unchanged += result?.unchanged ?? 0;
+    merged.skipped += result?.skipped ?? 0;
+    merged.failedCount += result?.failedCount ?? 0;
+    merged.minerUFailures += result?.minerUFailures ?? 0;
+    merged.minerUAttachments += result?.minerUAttachments ?? 0;
+    if (result?.status && result.status !== "completed") {
+      merged.status = result.status;
+      merged.error = result.error;
+      merged.errorType = result.errorType;
+    }
+  }
+
+  return merged;
 }
 
 /**
@@ -1248,18 +1597,22 @@ async function handleIndexSelected(win: _ZoteroTypes.MainWindow) {
 
     // Selecting the PDF row instead of its parent is the natural thing to do
     // when you want that PDF re-read, so resolve attachments to their parent
-    // item rather than silently dropping them.
-    const seen = new Set<string>();
-    const itemKeys: string[] = [];
+    // item rather than silently dropping them. Identities carry the library so
+    // a group-library selection is never indexed against My Library's ID.
+    const selectedIdentities: Array<{ key: string; libraryID: number }> = [];
     for (const item of selectedItems as any[]) {
       const key = item.isRegularItem?.()
         ? item.key
         : item.parentItem?.key || (item.parentItemKey as string | undefined);
-      if (key && !seen.has(key)) {
-        seen.add(key);
-        itemKeys.push(key);
+      if (key) {
+        selectedIdentities.push({
+          key,
+          libraryID: item.libraryID ?? Zotero.Libraries.userLibraryID,
+        });
       }
     }
+    const keysByLibrary = groupItemKeysByLibrary(selectedIdentities);
+    const itemKeys = Array.from(keysByLibrary.values()).flat();
 
     if (itemKeys.length === 0) {
       ztoolkit.log("[MCP Plugin] No indexable items in selection");
@@ -1289,14 +1642,11 @@ async function handleIndexSelected(win: _ZoteroTypes.MainWindow) {
 
     // Build index for selected items. force: the user explicitly asked for
     // these items, so "already in index_status" must not silently skip them.
-    semanticService.buildIndex({
-      itemKeys,
-      rebuild: false,
-      force: true,
-      onProgress: (progress) => {
-        live.onProgress(progress);
-        ztoolkit.log(`[MCP Plugin] Index progress: ${progress.processed}/${progress.total}`);
-      }
+    // Selections can span libraries, and buildIndex resolves keys with
+    // getByLibraryAndKeyAsync, so each library gets its own build.
+    runBuildsPerLibrary(semanticService, keysByLibrary, (progress) => {
+      live.onProgress(progress);
+      ztoolkit.log(`[MCP Plugin] Index progress: ${progress.processed}/${progress.total}`);
     }).then((result) => {
       live.finish();
       if (result.status === 'busy') {
@@ -1335,7 +1685,13 @@ async function handleIndexSelected(win: _ZoteroTypes.MainWindow) {
  */
 async function handleIndexAll(win: _ZoteroTypes.MainWindow) {
   try {
-    ztoolkit.log("[MCP Plugin] Indexing all items...");
+    // "All items" means the library currently open in the pane. Falling back
+    // to userLibraryID would index My Library while the user is looking at a
+    // group library and watching a progress popup that never touches it.
+    const selectedLibraryID =
+      (win.ZoteroPane as any)?.getSelectedLibraryID?.() ??
+      Zotero.Libraries.userLibraryID;
+    ztoolkit.log(`[MCP Plugin] Indexing all items in libraryID=${selectedLibraryID}...`);
 
     // Import and use semantic search service
     const { getSemanticSearchService } = await import("./modules/semantic");
@@ -1348,8 +1704,9 @@ async function handleIndexAll(win: _ZoteroTypes.MainWindow) {
       getString("menu-semantic-index-started" as any) || "Semantic indexing started",
     );
 
-    // Build index for all items
+    // Build index for all items in the selected library
     semanticService.buildIndex({
+      libraryID: selectedLibraryID,
       rebuild: false,
       onProgress: (progress) => {
         live.onProgress(progress);

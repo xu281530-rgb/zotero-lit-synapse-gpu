@@ -12,6 +12,7 @@ declare let IOUtils: any;
 
 export interface VectorRecord {
   itemKey: string;
+  libraryID?: number;
   chunkId: number;
   vector: Float32Array;
   language: 'zh' | 'en';
@@ -28,6 +29,7 @@ export interface QuantizedVector {
 
 export interface SearchResult {
   itemKey: string;
+  libraryID: number;
   chunkId: number;
   score: number;
   chunkText: string;
@@ -82,6 +84,27 @@ export class VectorStore {
   constructor() {
     this.instanceId = ++vectorStoreInstanceCounter;
     ztoolkit.log(`[VectorStore] Constructor called, instanceId=${this.instanceId}, total instances=${vectorStoreInstanceCounter}`);
+  }
+
+  private toStorageKey(itemKey: string, libraryID?: number): string {
+    const effectiveLibraryID =
+      libraryID ?? Zotero.Libraries.userLibraryID;
+    return effectiveLibraryID === Zotero.Libraries.userLibraryID
+      ? itemKey
+      : `${effectiveLibraryID}:${itemKey}`;
+  }
+
+  private fromStorageKey(storageKey: string): {
+    itemKey: string;
+    libraryID: number;
+  } {
+    const match = storageKey.match(/^(\d+):(.+)$/);
+    return match
+      ? { libraryID: Number(match[1]), itemKey: match[2] }
+      : {
+          libraryID: Zotero.Libraries.userLibraryID,
+          itemKey: storageKey,
+        };
   }
 
   async initialize(): Promise<void> {
@@ -418,7 +441,8 @@ export class VectorStore {
   async insertVector(record: VectorRecord): Promise<void> {
     await this.ensureInitialized();
 
-    ztoolkit.log(`[VectorStore] insertVector: ${record.itemKey}_${record.chunkId}, dims=${record.vector.length}, lang=${record.language}`);
+    const storageKey = this.toStorageKey(record.itemKey, record.libraryID);
+    ztoolkit.log(`[VectorStore] insertVector: ${storageKey}_${record.chunkId}, dims=${record.vector.length}, lang=${record.language}`);
 
     const vectorBlob = this.float32ArrayToBuffer(record.vector);
 
@@ -429,7 +453,7 @@ export class VectorStore {
 
     // Write int8 + metadata to embeddings (vector column = empty blob placeholder)
     await this.db.queryAsync(`INSERT OR REPLACE INTO embeddings (item_key, chunk_id, vector, language, chunk_text, dimensions, vector_int8, vector_scale, vector_norm) VALUES (?, ?, x'', ?, ?, ?, ?, ?, ?)`, [
-      record.itemKey,
+      storageKey,
       record.chunkId,
       record.language,
       record.chunkText || '',
@@ -441,13 +465,13 @@ export class VectorStore {
 
     // Write float32 vector to separate table
     await this.db.queryAsync(`INSERT OR REPLACE INTO vectors_f32 (item_key, chunk_id, vector) VALUES (?, ?, ?)`, [
-      record.itemKey,
+      storageKey,
       record.chunkId,
       vectorBlob
     ]);
 
     // Update cache
-    const cacheKey = `${record.itemKey}_${record.chunkId}`;
+    const cacheKey = `${storageKey}_${record.chunkId}`;
     this.updateCache(cacheKey, record.vector);
   }
 
@@ -462,6 +486,7 @@ export class VectorStore {
 
     await this.db.executeTransaction(async () => {
       for (const record of records) {
+        const storageKey = this.toStorageKey(record.itemKey, record.libraryID);
         const vectorBlob = this.float32ArrayToBuffer(record.vector);
 
         // Pre-compute Int8 quantized vector and norm for optimized search
@@ -471,7 +496,7 @@ export class VectorStore {
 
         // Write int8 + metadata to embeddings (vector column = empty blob placeholder)
         await this.db.queryAsync(`INSERT OR REPLACE INTO embeddings (item_key, chunk_id, vector, language, chunk_text, dimensions, vector_int8, vector_scale, vector_norm) VALUES (?, ?, x'', ?, ?, ?, ?, ?, ?)`, [
-          record.itemKey,
+          storageKey,
           record.chunkId,
           record.language,
           record.chunkText || '',
@@ -483,7 +508,7 @@ export class VectorStore {
 
         // Write float32 vector to separate table
         await this.db.queryAsync(`INSERT OR REPLACE INTO vectors_f32 (item_key, chunk_id, vector) VALUES (?, ?, ?)`, [
-          record.itemKey,
+          storageKey,
           record.chunkId,
           vectorBlob
         ]);
@@ -512,11 +537,20 @@ export class VectorStore {
       language?: 'zh' | 'en' | 'all';
       itemKeys?: string[];
       minScore?: number;
+      libraryID?: number;
+      deadlineAt?: number;
     } = {}
   ): Promise<SearchResult[]> {
     await this.ensureInitialized();
 
-    const { topK = 10, language = 'all', itemKeys, minScore = 0 } = options;
+    const {
+      topK = 10,
+      language = 'all',
+      itemKeys,
+      minScore = 0,
+      libraryID = Zotero.Libraries.userLibraryID,
+      deadlineAt,
+    } = options;
     const startTime = Date.now();
 
     ztoolkit.log(`[VectorStore] search() start: instanceId=${this.instanceId}, topK=${topK}, lang=${language}, minScore=${minScore}, queryDims=${queryVector.length}`);
@@ -531,9 +565,17 @@ export class VectorStore {
     }
 
     if (itemKeys && itemKeys.length > 0) {
-      const placeholders = itemKeys.map(() => '?').join(',');
+      const storageKeys = itemKeys.map((key) =>
+        this.toStorageKey(key, libraryID),
+      );
+      const placeholders = storageKeys.map(() => '?').join(',');
       conditions.push(`item_key IN (${placeholders})`);
-      params.push(...itemKeys);
+      params.push(...storageKeys);
+    } else if (libraryID === Zotero.Libraries.userLibraryID) {
+      conditions.push("item_key NOT GLOB '[0-9]*:*'");
+    } else {
+      conditions.push('item_key GLOB ?');
+      params.push(`${libraryID}:*`);
     }
 
     // Optimized batch size: 50,000 vectors per chunk
@@ -606,6 +648,9 @@ export class VectorStore {
 
     // Process in large batches (chunked streaming)
     while (offset < totalCount) {
+      if (deadlineAt && Date.now() >= deadlineAt) {
+        throw new Error('Vector scan timed out');
+      }
       batchCount++;
       const batchStartTime = Date.now();
       const batchParams = [...params, BATCH_SIZE, offset];
@@ -627,7 +672,15 @@ export class VectorStore {
       const computeStartTime = Date.now();
 
       // Process this batch
-      for (const row of rows) {
+      for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+        if (
+          deadlineAt &&
+          rowIndex % 256 === 0 &&
+          Date.now() >= deadlineAt
+        ) {
+          throw new Error('Vector scan timed out');
+        }
+        const row = rows[rowIndex];
         try {
           let score: number;
 
@@ -716,8 +769,10 @@ export class VectorStore {
           }
 
           if (score >= minScore) {
+            const identity = this.fromStorageKey(row.item_key);
             const result: SearchResult = {
-              itemKey: row.item_key,
+              itemKey: identity.itemKey,
+              libraryID: identity.libraryID,
               chunkId: row.chunk_id,
               score,
               chunkText: row.chunk_text,
@@ -779,7 +834,9 @@ export class VectorStore {
    * been attached yet — so it must stay eligible for a retry. 'failed:%'
    * markers are still skipped on purpose.
    */
-  async getItemsToSkip(): Promise<Set<string>> {
+  async getItemsToSkip(
+    libraryID: number = Zotero.Libraries.userLibraryID,
+  ): Promise<Set<string>> {
     await this.ensureInitialized();
 
     // IMPORTANT: Single-line query to avoid Zotero queryAsync bug with multi-line SQL
@@ -789,7 +846,12 @@ export class VectorStore {
       return new Set();
     }
 
-    return new Set(rows.map((r: any) => r.item_key));
+    return new Set(
+      rows
+        .map((r: any) => this.fromStorageKey(r.item_key))
+        .filter((identity: any) => identity.libraryID === libraryID)
+        .map((identity: any) => identity.itemKey),
+    );
   }
 
   async getIndexedItems(): Promise<Set<string>> {
@@ -854,18 +916,19 @@ export class VectorStore {
   /**
    * Get index status for an item
    */
-  async getIndexStatus(itemKey: string): Promise<IndexStatus | null> {
+  async getIndexStatus(itemKey: string, libraryID?: number): Promise<IndexStatus | null> {
     await this.ensureInitialized();
 
     // IMPORTANT: Single-line query to avoid Zotero queryAsync bug with multi-line SQL
-    const rows = await this.db.queryAsync(`SELECT item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified FROM index_status WHERE item_key = ?`, [itemKey]);
+    const storageKey = this.toStorageKey(itemKey, libraryID);
+    const rows = await this.db.queryAsync(`SELECT item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified FROM index_status WHERE item_key = ?`, [storageKey]);
 
     // Zotero's queryAsync returns undefined when no rows found
     if (!rows || rows.length === 0) return null;
 
     const row = rows[0];
     return {
-      itemKey: row.item_key,
+      itemKey,
       indexedAt: row.indexed_at,
       chunkCount: row.chunk_count,
       contentHash: row.content_hash,
@@ -883,7 +946,8 @@ export class VectorStore {
     chunkCount: number,
     contentHash: string,
     itemModified?: string,
-    attachmentModified?: string
+    attachmentModified?: string,
+    libraryID?: number,
   ): Promise<void> {
     await this.ensureInitialized();
 
@@ -891,7 +955,7 @@ export class VectorStore {
       INSERT OR REPLACE INTO index_status
       (item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified)
       VALUES (?, strftime('%s', 'now'), 2, ?, ?, ?, ?)
-    `, [itemKey, chunkCount, contentHash, itemModified || null, attachmentModified || null]);
+    `, [this.toStorageKey(itemKey, libraryID), chunkCount, contentHash, itemModified || null, attachmentModified || null]);
   }
 
   /**
@@ -901,9 +965,10 @@ export class VectorStore {
   async needsReindexByTimestamp(
     itemKey: string,
     itemModified: string,
-    attachmentModified: string
+    attachmentModified: string,
+    libraryID?: number,
   ): Promise<boolean> {
-    const status = await this.getIndexStatus(itemKey);
+    const status = await this.getIndexStatus(itemKey, libraryID);
 
     // No existing index, needs indexing
     if (!status) return true;
@@ -925,8 +990,8 @@ export class VectorStore {
   /**
    * Check if item needs re-indexing by content hash
    */
-  async needsReindex(itemKey: string, contentHash: string): Promise<boolean> {
-    const status = await this.getIndexStatus(itemKey);
+  async needsReindex(itemKey: string, contentHash: string, libraryID?: number): Promise<boolean> {
+    const status = await this.getIndexStatus(itemKey, libraryID);
     if (!status) return true;
     return status.contentHash !== contentHash;
   }
@@ -937,11 +1002,11 @@ export class VectorStore {
    * Get cached content for an item
    * Returns null if not cached or hash doesn't match
    */
-  async getCachedContent(itemKey: string): Promise<{ content: string; hash: string } | null> {
+  async getCachedContent(itemKey: string, libraryID?: number): Promise<{ content: string; hash: string } | null> {
     await this.ensureInitialized();
 
     // IMPORTANT: Single-line query to avoid Zotero queryAsync bug with multi-line SQL
-    const rows = await this.db.queryAsync(`SELECT full_content, content_hash FROM content_cache WHERE item_key = ?`, [itemKey]);
+    const rows = await this.db.queryAsync(`SELECT full_content, content_hash FROM content_cache WHERE item_key = ?`, [this.toStorageKey(itemKey, libraryID)]);
 
     if (!rows || rows.length === 0) return null;
 
@@ -954,13 +1019,13 @@ export class VectorStore {
   /**
    * Set cached content for an item
    */
-  async setCachedContent(itemKey: string, content: string, contentHash: string): Promise<void> {
+  async setCachedContent(itemKey: string, content: string, contentHash: string, libraryID?: number): Promise<void> {
     await this.ensureInitialized();
 
     await this.db.queryAsync(`
       INSERT OR REPLACE INTO content_cache (item_key, full_content, content_hash, cached_at)
       VALUES (?, ?, ?, strftime('%s', 'now'))
-    `, [itemKey, content, contentHash]);
+    `, [this.toStorageKey(itemKey, libraryID), content, contentHash]);
   }
 
   /**
@@ -1109,33 +1174,34 @@ export class VectorStore {
    * @param itemKey The item key to delete
    * @param deleteContentCache If true, also delete content cache (use when item is permanently deleted)
    */
-  async deleteItemVectors(itemKey: string, deleteContentCache: boolean = false): Promise<void> {
+  async deleteItemVectors(itemKey: string, deleteContentCache: boolean = false, libraryID?: number): Promise<void> {
     await this.ensureInitialized();
 
+    const storageKey = this.toStorageKey(itemKey, libraryID);
     await this.db.executeTransaction(async () => {
       await this.db.queryAsync(
         `DELETE FROM embeddings WHERE item_key = ?`,
-        [itemKey]
+        [storageKey]
       );
       await this.db.queryAsync(
         `DELETE FROM vectors_f32 WHERE item_key = ?`,
-        [itemKey]
+        [storageKey]
       );
       await this.db.queryAsync(
         `DELETE FROM index_status WHERE item_key = ?`,
-        [itemKey]
+        [storageKey]
       );
       if (deleteContentCache) {
         await this.db.queryAsync(
           `DELETE FROM content_cache WHERE item_key = ?`,
-          [itemKey]
+          [storageKey]
         );
       }
     });
 
     // Clear cache entries
     for (const key of this.vectorCache.keys()) {
-      if (key.startsWith(`${itemKey}_`)) {
+      if (key.startsWith(`${storageKey}_`)) {
         this.vectorCache.delete(key);
       }
     }
@@ -1145,40 +1211,65 @@ export class VectorStore {
   }
 
   /**
-   * Clear all vectors and index status (preserves content cache)
-   * Use this for re-indexing while keeping extracted content
+   * SQL fragment + params selecting only the rows of one library.
+   *
+   * Storage keys are bare item keys for My Library and `<libraryID>:<key>`
+   * for every other library, which is the same shape search() filters on.
    */
-  async clear(): Promise<void> {
+  private libraryScopeClause(libraryID: number): {
+    clause: string;
+    params: any[];
+  } {
+    return libraryID === Zotero.Libraries.userLibraryID
+      ? { clause: "item_key NOT GLOB '[0-9]*:*'", params: [] }
+      : { clause: 'item_key GLOB ?', params: [`${libraryID}:*`] };
+  }
+
+  /**
+   * Clear vectors and index status (preserves content cache)
+   * Use this for re-indexing while keeping extracted content
+   *
+   * @param libraryID Restrict the wipe to one library. A rebuild of a group
+   *   library must not delete My Library's index, and vice versa, so every
+   *   rebuild path passes the library it is actually rebuilding.
+   */
+  async clear(libraryID?: number): Promise<void> {
     await this.ensureInitialized();
 
     // Log which database we're clearing
-    ztoolkit.log(`[VectorStore] clear() called on instanceId=${this.instanceId}, dbPath=${this.dbPath}`);
+    ztoolkit.log(`[VectorStore] clear() called on instanceId=${this.instanceId}, dbPath=${this.dbPath}, libraryID=${libraryID ?? 'all'}`);
+
+    const scope =
+      libraryID === undefined ? null : this.libraryScopeClause(libraryID);
+    const where = scope ? ` WHERE ${scope.clause}` : '';
+    const params = scope ? scope.params : [];
 
     // Get counts before deletion for logging
-    const beforeEmbeddings = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM embeddings`);
-    const beforeIndex = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM index_status`);
+    const beforeEmbeddings = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM embeddings${where}`, params);
+    const beforeIndex = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM index_status${where}`, params);
     ztoolkit.log(`[VectorStore] clear() starting: embeddings=${beforeEmbeddings}, index_status=${beforeIndex}`);
 
     // Execute DELETE statements directly (not in transaction to ensure immediate effect)
-    await this.db.queryAsync(`DELETE FROM embeddings`);
-    await this.db.queryAsync(`DELETE FROM vectors_f32`);
-    await this.db.queryAsync(`DELETE FROM index_status`);
+    await this.db.queryAsync(`DELETE FROM embeddings${where}`, params);
+    await this.db.queryAsync(`DELETE FROM vectors_f32${where}`, params);
+    await this.db.queryAsync(`DELETE FROM index_status${where}`, params);
 
     // Verify deletion
-    const afterEmbeddings = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM embeddings`);
-    const afterF32 = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM vectors_f32`);
-    const afterIndex = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM index_status`);
+    const afterEmbeddings = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM embeddings${where}`, params);
+    const afterF32 = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM vectors_f32${where}`, params);
+    const afterIndex = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM index_status${where}`, params);
     ztoolkit.log(`[VectorStore] clear() completed: embeddings=${afterEmbeddings}, vectors_f32=${afterF32}, index_status=${afterIndex}`);
 
     if (afterEmbeddings > 0 || afterF32 > 0 || afterIndex > 0) {
       ztoolkit.log(`[VectorStore] WARNING: clear() did not fully delete data! Retrying...`, 'warn');
       // Retry with explicit SQL
-      await this.db.queryAsync(`DELETE FROM embeddings WHERE 1=1`);
-      await this.db.queryAsync(`DELETE FROM vectors_f32 WHERE 1=1`);
-      await this.db.queryAsync(`DELETE FROM index_status WHERE 1=1`);
+      const retryWhere = scope ? ` WHERE ${scope.clause}` : ' WHERE 1=1';
+      await this.db.queryAsync(`DELETE FROM embeddings${retryWhere}`, params);
+      await this.db.queryAsync(`DELETE FROM vectors_f32${retryWhere}`, params);
+      await this.db.queryAsync(`DELETE FROM index_status${retryWhere}`, params);
 
-      const finalEmbeddings = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM embeddings`);
-      const finalIndex = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM index_status`);
+      const finalEmbeddings = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM embeddings${where}`, params);
+      const finalIndex = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM index_status${where}`, params);
       ztoolkit.log(`[VectorStore] clear() retry result: embeddings=${finalEmbeddings}, index_status=${finalIndex}`);
     }
 
@@ -1328,7 +1419,7 @@ export class VectorStore {
    * Get vectors for a specific item (for find_similar).
    * Reads float32 vectors from vectors_f32 table.
    */
-  async getItemVectors(itemKey: string): Promise<Array<{
+  async getItemVectors(itemKey: string, libraryID?: number): Promise<Array<{
     chunkId: number;
     vector: Float32Array;
     language: string;
@@ -1336,14 +1427,15 @@ export class VectorStore {
     await this.ensureInitialized();
 
     // Get dimensions and language from embeddings table
-    const metaRows = await this.db.queryAsync(`SELECT chunk_id, language, dimensions FROM embeddings WHERE item_key = ? ORDER BY chunk_id`, [itemKey]);
+    const storageKey = this.toStorageKey(itemKey, libraryID);
+    const metaRows = await this.db.queryAsync(`SELECT chunk_id, language, dimensions FROM embeddings WHERE item_key = ? ORDER BY chunk_id`, [storageKey]);
 
     if (!metaRows || metaRows.length === 0) {
       return [];
     }
 
     // Get float32 vectors from vectors_f32 table
-    const vecRows = await this.db.queryAsync(`SELECT chunk_id, vector FROM vectors_f32 WHERE item_key = ? ORDER BY chunk_id`, [itemKey]);
+    const vecRows = await this.db.queryAsync(`SELECT chunk_id, vector FROM vectors_f32 WHERE item_key = ? ORDER BY chunk_id`, [storageKey]);
 
     // Build a map of chunk_id -> vector blob for fast lookup
     const vecMap = new Map<number, any>();

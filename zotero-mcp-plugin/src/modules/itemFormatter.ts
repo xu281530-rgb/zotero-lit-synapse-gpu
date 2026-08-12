@@ -8,6 +8,7 @@ declare let ztoolkit: ZToolkit;
 export function formatItemBrief(item: Zotero.Item): Record<string, any> {
   return {
     key: item.key,
+    libraryID: item.libraryID,
     title: item.getField("title") || "No Title",
     creators: item
       .getCreators()
@@ -51,6 +52,7 @@ export async function formatItem(
   }
   const formattedItem: Record<string, any> = {
     key: item.key,
+    libraryID: item.libraryID,
     itemType: item.itemType,
     zoteroUrl: `zotero://select/library/items/${item.key}`,
   };

@@ -411,6 +411,10 @@ function bindMinerUSettings(doc: Document) {
     }
   };
 
+  // Restore the persisted URL before applyMode inspects the input. Zotero's
+  // preference binding may not have populated HTML controls at panel load time.
+  bindHtmlInput(doc, `#zotero-prefpane-${ref}-mineru-base-url`, `${P}baseURL`);
+
   if (modeSelect) {
     const savedMode = (Zotero.Prefs.get(`${P}mode`, true) as string) || 'cloud';
     modeSelect.value = savedMode;
@@ -421,7 +425,6 @@ function bindMinerUSettings(doc: Document) {
     });
   }
 
-  bindHtmlInput(doc, `#zotero-prefpane-${ref}-mineru-base-url`, `${P}baseURL`);
   bindHtmlInput(doc, `#zotero-prefpane-${ref}-mineru-api-token`, `${P}apiToken`);
   bindHtmlSelect(doc, `#zotero-prefpane-${ref}-mineru-model-version`, `${P}modelVersion`);
   modelSelect?.addEventListener('change', applyModelCapabilities);

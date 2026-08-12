@@ -5,6 +5,7 @@
 
 declare let ztoolkit: ZToolkit;
 import { getString } from "../utils/locale";
+import { serverPreferences } from "./serverPreferences";
 
 export interface ClientConfig {
   name: string;
@@ -264,7 +265,7 @@ url = "http://127.0.0.1:${port}/mcp"
         "   qwen mcp list",
         "",
         "4. Available MCP tools in Qwen Code:",
-        "   - hybrid_search: DEFAULT first step; fuse metadata keyword and semantic retrieval with RRF without scanning full text",
+        "   - hybrid_search: DEFAULT first step; fuse metadata keyword and semantic retrieval with RRF without scanning full text. Pass a complete natural-language query plus bilingual Chinese/English keywords so both languages are recalled (about 5-12 keywords is recommended for best results, not a required range)",
         "   - search_library: Search your Zotero library by exact/field relevance",
         "   - semantic_search: Search by embedding similarity only",
         "   - get_annotations: Get annotations and notes",
@@ -273,10 +274,10 @@ url = "http://127.0.0.1:${port}/mcp"
         "   - search_fulltext: Second-stage search requiring itemKeys returned by hybrid_search",
         "   - And more research tools!",
         "",
-        "5. Start with hybrid_search. Return matched titles directly unless passages or evidence are requested; only then call search_fulltext with selected itemKeys.",
+        "5. Start with hybrid_search. Always send both a full natural-language query and bilingual keywords, whatever language the question used. Return matched titles directly unless passages or evidence are requested; only then call search_fulltext with selected itemKeys.",
         "",
         "6. Start using the tools with @ syntax:",
-        "   Example: /analyze @zotero:hybrid_search query:\"machine learning\"",
+        "   Example: /analyze @zotero:hybrid_search query:\"machine learning for alloy design / 面向合金设计的机器学习\" keywords:[\"machine learning\",\"alloy design\",\"机器学习\",\"合金设计\"]",
         "",
         "7. Use /mcp command to verify MCP server is active",
         "",
@@ -339,6 +340,46 @@ url = "http://127.0.0.1:${port}/mcp"
     return client?.getInstructions?.(port) || [];
   }
 
+  /**
+   * 开启鉴权时补一段令牌说明。
+   *
+   * 服务端在 allowRemote / requireAuth 打开后会拒绝不带 Bearer 令牌的请求，
+   * 而这些客户端模板本身不含 Authorization 头；不把令牌告诉用户，等于开了
+   * 鉴权就再也连不上。这里只在需要时追加一段文本，不改任何模板结构。
+   */
+  private static buildAuthNotice(): string {
+    try {
+      if (!serverPreferences.isAuthRequired()) return "";
+      const token = serverPreferences.getAuthToken();
+      if (!token) {
+        return [
+          "",
+          "## Access token required",
+          "",
+          "Remote access is enabled but no access token has been generated yet.",
+          "Open the plugin preferences and regenerate the MCP access token first.",
+          "",
+        ].join("\n");
+      }
+      return [
+        "",
+        "## Access token required",
+        "",
+        "This server rejects requests without a bearer token. Add this header to the",
+        "configuration below (the `headers` block, or `--header` for CLI clients):",
+        "",
+        "```",
+        `Authorization: Bearer ${token}`,
+        "```",
+        "",
+        "Keep the token private; anyone holding it can read and modify your library.",
+        "",
+      ].join("\n");
+    } catch {
+      return "";
+    }
+  }
+
   static generateFullGuide(clientName: string, port: number, serverName?: string): string {
     const client = this.CLIENT_CONFIGS.find(c => c.name === clientName);
     if (!client) {
@@ -346,6 +387,7 @@ url = "http://127.0.0.1:${port}/mcp"
     }
 
     const config = this.generateConfig(clientName, port, serverName);
+    const authNotice = this.buildAuthNotice();
     const instructions = this.getInstructions(clientName, port);
     const actualServerName = serverName || "zotero-mcp";
     const codeLanguage = client.configLanguage || "json";
@@ -356,7 +398,7 @@ ${getString("config-guide-server-info")}
 ${getString("config-guide-server-name", { args: { serverName: actualServerName } })}
 ${getString("config-guide-server-port", { args: { port: port.toString() } })}
 ${getString("config-guide-server-endpoint", { args: { port: port.toString() } })}
-
+${authNotice}
 ${getString("config-guide-json-header")}
 \`\`\`${codeLanguage}
 ${config}

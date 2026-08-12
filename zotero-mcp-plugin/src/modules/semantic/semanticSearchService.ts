@@ -29,12 +29,21 @@ const PREF_INDEX_PROGRESS = 'extensions.zotero.zotero-mcp-plugin.semantic.indexP
 export interface SemanticSearchOptions {
   topK?: number;              // Number of results
   minScore?: number;          // Minimum similarity threshold
-  language?: 'zh' | 'en' | 'all';  // Language filter
+  language?: 'zh' | 'en' | 'all' | 'auto';  // Language filter
   itemKeys?: string[];        // Limit to specific items
+  libraryID?: number;
+  timeoutMs?: number;
+  /**
+   * Caller-owned cancellation. A timeout alone only stops the caller waiting;
+   * the signal is what actually aborts the in-flight embedding request so
+   * repeated queries cannot pile up background HTTP work.
+   */
+  signal?: AbortSignal;
 }
 
 export interface SemanticSearchResult {
   itemKey: string;
+  libraryID: number;
   parentKey?: string;
   title: string;
   creators?: string;
@@ -223,89 +232,152 @@ export class SemanticSearchService {
     query: string,
     options: SemanticSearchOptions = {}
   ): Promise<SemanticSearchResult[]> {
-    await this.initialize();
-
+    const startTime = Date.now();
     const {
       topK = 10,
-      minScore = 0.1,  // Lowered from 0.3 to allow more results through
+      minScore = 0.3,
       language = 'all',
-      itemKeys
+      itemKeys,
+      libraryID = Zotero.Libraries.userLibraryID,
+      timeoutMs,
+      signal,
     } = options;
-
-    const startTime = Date.now();
-    ztoolkit.log(`[SemanticSearch] Searching: "${query.substring(0, 50)}..."`);
-
+    const deadlineAt = timeoutMs ? startTime + timeoutMs : undefined;
+    // Own an internal controller even when the caller passed none, so the
+    // deadline can abort the embedding request instead of orphaning it.
+    const abortController =
+      typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const abortSearch = () => {
+      try {
+        abortController?.abort();
+      } catch {
+        // Aborting twice is harmless.
+      }
+    };
+    if (signal) {
+      if (signal.aborted) abortSearch();
+      else signal.addEventListener('abort', abortSearch, { once: true });
+    }
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    if (timeoutMs) {
+      deadlineTimer = setTimeout(abortSearch, timeoutMs);
+    }
     try {
-      // 1. Generate query embedding (isQuery=true for BGE instruction prefix)
-      ztoolkit.log(`[SemanticSearch] Step 1: Generating query embedding...`);
-      const queryEmbedding = await this.embeddingService.embed(query, 'auto', true);
-      ztoolkit.log(`[SemanticSearch] Query embedding: lang=${queryEmbedding.language}, dims=${queryEmbedding.dimensions}`);
+      await this.initialize();
+      if (deadlineAt && Date.now() >= deadlineAt) {
+        throw new Error(`Semantic search timed out after ${timeoutMs}ms`);
+      }
+      ztoolkit.log(`[SemanticSearch] Searching: "${query.substring(0, 50)}..."`);
 
-      // 2. Vector search - use detected language when language option is 'all' for better performance
-      // This significantly reduces search space (up to 50% reduction)
-      const searchLanguage = language === 'all' ? queryEmbedding.language : language;
-      ztoolkit.log(`[SemanticSearch] Step 2: Vector search (topK=${topK * 3}, minScore=${minScore}, lang=${searchLanguage})...`);
-      const vectorResults = await this.vectorStore.search(queryEmbedding.embedding, {
-        topK: topK * 3,  // Get more for deduplication
-        language: searchLanguage,
-        itemKeys,
-        minScore
-      });
-      ztoolkit.log(`[SemanticSearch] Vector search returned ${vectorResults.length} results`);
+      try {
+        // 1. Generate query embedding (isQuery=true for BGE instruction prefix)
+        ztoolkit.log(`[SemanticSearch] Step 1: Generating query embedding...`);
+        const embeddingStartedAt = Date.now();
+        const queryEmbedding = await this.embeddingService.embed(
+          query,
+          'auto',
+          true,
+          { signal: abortController?.signal },
+        );
+        const embeddingMs = Date.now() - embeddingStartedAt;
+        ztoolkit.log(
+          `[SemanticSearch][Timing] embedding=${embeddingMs}ms libraryID=${libraryID}`,
+        );
+        if (deadlineAt && Date.now() >= deadlineAt) {
+          throw new Error(`Semantic search timed out after ${timeoutMs}ms`);
+        }
+        ztoolkit.log(`[SemanticSearch] Query embedding: lang=${queryEmbedding.language}, dims=${queryEmbedding.dimensions}`);
 
-      // 3. Aggregate by item
-      const itemResultsMap = new Map<string, {
-        itemKey: string;
-        chunks: Array<{ chunkId: number; text: string; score: number }>;
-        maxScore: number;
-      }>();
-
-      for (const result of vectorResults) {
-        const existing = itemResultsMap.get(result.itemKey);
-        if (existing) {
-          existing.chunks.push({
-            chunkId: result.chunkId,
-            text: result.chunkText,
-            score: result.score
+        // 2. Vector search. "all" remains unfiltered; "auto" uses query language.
+        const searchLanguage =
+          language === 'auto' ? queryEmbedding.language : language;
+        ztoolkit.log(`[SemanticSearch] Step 2: Vector search (topK=${topK * 3}, minScore=${minScore}, lang=${searchLanguage})...`);
+        const vectorStartedAt = Date.now();
+        let vectorScanMs = 0;
+        let vectorResults;
+        try {
+          vectorResults = await this.vectorStore.search(queryEmbedding.embedding, {
+            topK: topK * 3,  // Get more for deduplication
+            language: searchLanguage,
+            itemKeys,
+            minScore,
+            libraryID,
+            deadlineAt,
           });
-          existing.maxScore = Math.max(existing.maxScore, result.score);
-        } else {
-          itemResultsMap.set(result.itemKey, {
-            itemKey: result.itemKey,
-            chunks: [{
+        } finally {
+          vectorScanMs = Date.now() - vectorStartedAt;
+          ztoolkit.log(
+            `[SemanticSearch][Timing] vectorScan=${vectorScanMs}ms libraryID=${libraryID}`,
+          );
+        }
+        ztoolkit.log(`[SemanticSearch] Vector search returned ${vectorResults.length} results`);
+
+        // 3. Aggregate by item
+        const itemResultsMap = new Map<string, {
+          itemKey: string;
+          libraryID: number;
+          chunks: Array<{ chunkId: number; text: string; score: number }>;
+          maxScore: number;
+        }>();
+
+        for (const result of vectorResults) {
+          const identity = `${result.libraryID}:${result.itemKey}`;
+          const existing = itemResultsMap.get(identity);
+          if (existing) {
+            existing.chunks.push({
               chunkId: result.chunkId,
               text: result.chunkText,
               score: result.score
-            }],
-            maxScore: result.score
-          });
+            });
+            existing.maxScore = Math.max(existing.maxScore, result.score);
+          } else {
+            itemResultsMap.set(identity, {
+              itemKey: result.itemKey,
+              libraryID: result.libraryID,
+              chunks: [{
+                chunkId: result.chunkId,
+                text: result.chunkText,
+                score: result.score
+              }],
+              maxScore: result.score
+            });
+          }
         }
+
+        // 4. Pure semantic search (no hybrid)
+        ztoolkit.log(`[SemanticSearch] Step 3: Aggregated into ${itemResultsMap.size} unique items`);
+
+        const finalResults: SemanticSearchResult[] = Array.from(itemResultsMap.values())
+          .sort((a, b) => b.maxScore - a.maxScore)
+          .slice(0, topK)
+          .map(r => ({
+            itemKey: r.itemKey,
+            libraryID: r.libraryID,
+            title: '',
+            score: r.maxScore,
+            matchedChunks: r.chunks.sort((a, b) => b.score - a.score).slice(0, 3)
+          }));
+
+        // 5. Fill in item metadata
+        await this.fillItemMetadata(finalResults);
+
+        const searchTime = Date.now() - startTime;
+        ztoolkit.log(`[SemanticSearch] Found ${finalResults.length} results in ${searchTime}ms`);
+        ztoolkit.log(
+          `[SemanticSearch][Timing] embedding=${embeddingMs}ms vectorScan=${vectorScanMs}ms total=${searchTime}ms libraryID=${libraryID}`,
+        );
+
+        return finalResults.slice(0, topK);
+
+      } catch (error) {
+        ztoolkit.log(`[SemanticSearch] Search error: ${error}`, 'error');
+        throw error;
       }
-
-      // 4. Pure semantic search (no hybrid)
-      ztoolkit.log(`[SemanticSearch] Step 3: Aggregated into ${itemResultsMap.size} unique items`);
-
-      const finalResults: SemanticSearchResult[] = Array.from(itemResultsMap.values())
-        .sort((a, b) => b.maxScore - a.maxScore)
-        .slice(0, topK)
-        .map(r => ({
-          itemKey: r.itemKey,
-          title: '',
-          score: r.maxScore,
-          matchedChunks: r.chunks.sort((a, b) => b.score - a.score).slice(0, 3)
-        }));
-
-      // 5. Fill in item metadata
-      await this.fillItemMetadata(finalResults);
-
-      const searchTime = Date.now() - startTime;
-      ztoolkit.log(`[SemanticSearch] Found ${finalResults.length} results in ${searchTime}ms`);
-
-      return finalResults.slice(0, topK);
-
-    } catch (error) {
-      ztoolkit.log(`[SemanticSearch] Search error: ${error}`, 'error');
-      throw error;
+    } finally {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      signal?.removeEventListener('abort', abortSearch);
+      // Nothing is waiting on this search any more; stop whatever still runs.
+      abortSearch();
     }
   }
 
@@ -314,15 +386,32 @@ export class SemanticSearchService {
    */
   async findSimilar(
     itemKey: string,
-    options: { topK?: number; minScore?: number } = {}
+    options: {
+      topK?: number;
+      minScore?: number;
+      libraryID?: number;
+      timeoutMs?: number;
+    } = {}
   ): Promise<SemanticSearchResult[]> {
+    const startTime = Date.now();
+    const deadlineAt = options.timeoutMs
+      ? startTime + options.timeoutMs
+      : undefined;
     await this.initialize();
 
-    const { topK = 5, minScore = 0.3 } = options;  // Lowered from 0.5
+    const {
+      topK = 5,
+      minScore = 0.3,
+      libraryID = Zotero.Libraries.userLibraryID,
+      timeoutMs,
+    } = options;
+    if (deadlineAt && Date.now() >= deadlineAt) {
+      throw new Error(`Similarity search timed out after ${timeoutMs}ms`);
+    }
 
     try {
       // Get item's vectors
-      const itemVectors = await this.vectorStore.getItemVectors(itemKey);
+      const itemVectors = await this.vectorStore.getItemVectors(itemKey, libraryID);
 
       if (itemVectors.length === 0) {
         ztoolkit.log(`[SemanticSearch] Item ${itemKey} not indexed`);
@@ -335,7 +424,9 @@ export class SemanticSearchService {
       // Search for similar
       const results = await this.vectorStore.search(queryVector, {
         topK: topK + 1,
-        minScore
+        minScore,
+        libraryID,
+        deadlineAt,
       });
 
       // Filter out the source item and map results
@@ -344,6 +435,7 @@ export class SemanticSearchService {
         .slice(0, topK)
         .map(r => ({
           itemKey: r.itemKey,
+          libraryID: r.libraryID,
           title: '',
           score: r.score,
           matchedChunks: [{
@@ -371,6 +463,7 @@ export class SemanticSearchService {
    */
   async buildIndex(options: {
     itemKeys?: string[];
+    libraryID?: number;
     rebuild?: boolean;
     /**
      * Index the given itemKeys even if they are already in index_status,
@@ -382,7 +475,13 @@ export class SemanticSearchService {
   } = {}): Promise<IndexProgress> {
     await this.initialize();
 
-    const { itemKeys, rebuild = false, force = false, onProgress } = options;
+    const {
+      itemKeys,
+      libraryID = Zotero.Libraries.userLibraryID,
+      rebuild = false,
+      force = false,
+      onProgress,
+    } = options;
 
     if (this._buildActive) {
       ztoolkit.log('[SemanticSearch] buildIndex already running, ignoring duplicate call', 'warn');
@@ -429,9 +528,9 @@ export class SemanticSearchService {
       // Get items to index
       let items: any[];
       if (itemKeys && itemKeys.length > 0) {
-        items = await this.getItemsByKeys(itemKeys);
+        items = await this.getItemsByKeys(itemKeys, libraryID);
       } else {
-        items = await this.getItemsWithContent();
+        items = await this.getItemsWithContent(libraryID);
       }
 
       const totalLibraryItems = items.length;
@@ -439,23 +538,38 @@ export class SemanticSearchService {
 
       // Filter already indexed items (unless rebuild or an explicit force)
       if (!rebuild && !force) {
-        const skipSet = await this.vectorStore.getItemsToSkip();
-        const indexedCount = skipSet.size;
-        items = items.filter(item => !skipSet.has(item.key));
-        this.indexProgress.skipped = totalLibraryItems - items.length;
-        ztoolkit.log(`[SemanticSearch] Items: library=${totalLibraryItems}, indexed=${indexedCount}, toIndex=${items.length}, skipped=${this.indexProgress.skipped}`);
+        if (itemKeys && itemKeys.length > 0) {
+          // The caller named these items, so "already in index_status" is not a
+          // reason to skip them — that filter is what made
+          // needsReindexByTimestamp dead code for every indexed item: the item
+          // was dropped here and indexItemWithProcessor never saw it, so an
+          // edited title/abstract/attachment could never be picked up.
+          // Let them through and rely on the per-item timestamp + content-hash
+          // checks, which re-index only what actually changed. Nothing is
+          // re-embedded when the timestamps match.
+          this.indexProgress.skipped = 0;
+          ztoolkit.log(`[SemanticSearch] Targeted incremental: ${items.length} requested items pass the index_status filter; per-item timestamp/hash checks decide what is re-indexed`);
+        } else {
+          const skipSet = await this.vectorStore.getItemsToSkip(libraryID);
+          const indexedCount = skipSet.size;
+          items = items.filter(item => !skipSet.has(item.key));
+          this.indexProgress.skipped = totalLibraryItems - items.length;
+          ztoolkit.log(`[SemanticSearch] Items: library=${totalLibraryItems}, indexed=${indexedCount}, toIndex=${items.length}, skipped=${this.indexProgress.skipped}`);
+        }
       } else if (force) {
         this.indexProgress.skipped = 0;
         ztoolkit.log(`[SemanticSearch] Force mode: re-indexing all ${items.length} requested items, ignoring index_status`);
       } else {
-        // For rebuild: clear all existing index data first
-        ztoolkit.log(`[SemanticSearch] Rebuild mode: clearing existing index data...`);
+        // For rebuild: clear this library's existing index data first.
+        // Scoped on purpose: rebuilding a group library must not wipe My
+        // Library's index (or any other group's) as a side effect.
+        ztoolkit.log(`[SemanticSearch] Rebuild mode: clearing existing index data for libraryID=${libraryID}...`);
 
         // Get stats before clear for verification
         const statsBefore = await this.vectorStore.getStats();
         ztoolkit.log(`[SemanticSearch] Before clear: ${statsBefore.totalVectors} vectors, ${statsBefore.totalItems} items`);
 
-        await this.vectorStore.clear();
+        await this.vectorStore.clear(libraryID);
 
         // Verify clear worked
         const statsAfter = await this.vectorStore.getStats();
@@ -714,7 +828,7 @@ export class SemanticSearchService {
 
     // Fast check: if timestamps haven't changed, skip entirely (no content extraction needed)
     const needsCheckByTimestamp = await this.vectorStore.needsReindexByTimestamp(
-      item.key, itemModified, attachmentModified
+      item.key, itemModified, attachmentModified, item.libraryID
     );
     if (!needsCheckByTimestamp && !force) {
       this.indexProgress.unchanged = (this.indexProgress.unchanged || 0) + 1;
@@ -728,16 +842,26 @@ export class SemanticSearchService {
     // Timestamps changed - try to use cached content first (avoid PDF re-extraction)
     // A forced run must not answer from the extraction cache either: the whole
     // point is to run extraction again with the current MinerU settings.
-    const cached = force ? null : await this.vectorStore.getCachedContent(item.key);
+    const cached = force
+      ? null
+      : await this.vectorStore.getCachedContent(item.key, item.libraryID);
     if (cached) {
       // Check if cached content hash matches stored index hash
-      const needsIndex = await this.vectorStore.needsReindex(item.key, cached.hash);
+      const needsIndex = await this.vectorStore.needsReindex(
+        item.key,
+        cached.hash,
+        item.libraryID,
+      );
       if (!needsIndex) {
         // Content unchanged, just update timestamps
-        const status = await this.vectorStore.getIndexStatus(item.key);
+        const status = await this.vectorStore.getIndexStatus(
+          item.key,
+          item.libraryID,
+        );
         if (status) {
           await this.vectorStore.updateIndexStatus(
-            item.key, status.chunkCount, cached.hash, itemModified, attachmentModified
+            item.key, status.chunkCount, cached.hash, itemModified, attachmentModified,
+            item.libraryID,
           );
         }
         this.indexProgress.unchanged = (this.indexProgress.unchanged || 0) + 1;
@@ -758,7 +882,9 @@ export class SemanticSearchService {
     const content = await this.extractItemContent(item, sharedProcessor);
     if (!content.trim()) {
       // Mark item in index_status even with no content, to prevent repeated rebuild attempts
-      await this.vectorStore.updateIndexStatus(item.key, 0, 'empty', itemModified, attachmentModified);
+      await this.vectorStore.updateIndexStatus(
+        item.key, 0, 'empty', itemModified, attachmentModified, item.libraryID,
+      );
       ztoolkit.log(`[SemanticSearch] indexItem() skip: no content for ${item.key}, marked in index_status to avoid retry loop`);
       return;
     }
@@ -767,7 +893,9 @@ export class SemanticSearchService {
     // Check for pause after content extraction (before embedding)
     if (this._paused || this._aborted) {
       // Save cached content but don't continue
-      await this.vectorStore.setCachedContent(item.key, content, this.hashContent(content));
+      await this.vectorStore.setCachedContent(
+        item.key, content, this.hashContent(content), item.libraryID,
+      );
       ztoolkit.log(`[SemanticSearch] indexItem() paused/aborted after content extraction: ${item.key}`);
       return;
     }
@@ -776,17 +904,27 @@ export class SemanticSearchService {
     const contentHash = this.hashContent(content);
 
     // Cache the extracted content for future use
-    await this.vectorStore.setCachedContent(item.key, content, contentHash);
+    await this.vectorStore.setCachedContent(
+      item.key, content, contentHash, item.libraryID,
+    );
     ztoolkit.log(`[SemanticSearch] indexItem() cached content: ${content.length} chars`);
 
     // Check if content actually changed (compare with stored hash)
-    const needsIndex = await this.vectorStore.needsReindex(item.key, contentHash);
+    const needsIndex = await this.vectorStore.needsReindex(
+      item.key,
+      contentHash,
+      item.libraryID,
+    );
     if (!needsIndex) {
       // Content hash unchanged, just update timestamps
-      const status = await this.vectorStore.getIndexStatus(item.key);
+      const status = await this.vectorStore.getIndexStatus(
+        item.key,
+        item.libraryID,
+      );
       if (status) {
         await this.vectorStore.updateIndexStatus(
-          item.key, status.chunkCount, contentHash, itemModified, attachmentModified
+          item.key, status.chunkCount, contentHash, itemModified, attachmentModified,
+          item.libraryID,
         );
       }
       this.indexProgress.unchanged = (this.indexProgress.unchanged || 0) + 1;
@@ -795,7 +933,7 @@ export class SemanticSearchService {
     }
 
     // Delete existing vectors
-    await this.vectorStore.deleteItemVectors(item.key);
+    await this.vectorStore.deleteItemVectors(item.key, false, item.libraryID);
 
     // Chunk the content
     const chunks = this.textChunker.chunk(content);
@@ -823,6 +961,7 @@ export class SemanticSearchService {
 
       return {
         itemKey: item.key,
+        libraryID: item.libraryID,
         chunkId: idx,
         vector: embedding.embedding,
         language: embedding.language,
@@ -833,7 +972,10 @@ export class SemanticSearchService {
     await this.vectorStore.insertVectorsBatch(records);
     // Record the count of chunks actually embedded (embedBatch may have
     // skipped oversized chunks), not the total chunk count
-    await this.vectorStore.updateIndexStatus(item.key, records.length, contentHash, itemModified, attachmentModified);
+    await this.vectorStore.updateIndexStatus(
+      item.key, records.length, contentHash, itemModified, attachmentModified,
+      item.libraryID,
+    );
 
     this.indexProgress.indexed = (this.indexProgress.indexed || 0) + 1;
 
@@ -847,19 +989,19 @@ export class SemanticSearchService {
   /**
    * Delete index for an item
    */
-  async deleteItemIndex(itemKey: string): Promise<void> {
+  async deleteItemIndex(itemKey: string, libraryID?: number): Promise<void> {
     await this.initialize();
-    await this.vectorStore.deleteItemVectors(itemKey);
-    ztoolkit.log(`[SemanticSearch] Deleted index for item: ${itemKey}`);
+    await this.vectorStore.deleteItemVectors(itemKey, false, libraryID);
+    ztoolkit.log(`[SemanticSearch] Deleted index for item: ${itemKey} (libraryID=${libraryID ?? 'user'})`);
   }
 
   /**
-   * Clear all indexes
+   * Clear indexes. Pass a libraryID to clear only that library.
    */
-  async clearIndex(): Promise<void> {
+  async clearIndex(libraryID?: number): Promise<void> {
     await this.initialize();
-    await this.vectorStore.clear();
-    ztoolkit.log('[SemanticSearch] Index cleared');
+    await this.vectorStore.clear(libraryID);
+    ztoolkit.log(`[SemanticSearch] Index cleared (libraryID=${libraryID ?? 'all'})`);
   }
 
   // ============ Status Methods ============
@@ -1330,7 +1472,7 @@ export class SemanticSearchService {
     for (const result of results) {
       try {
         const item = await Zotero.Items.getByLibraryAndKeyAsync(
-          Zotero.Libraries.userLibraryID,
+          result.libraryID,
           result.itemKey
         );
 
@@ -1366,12 +1508,15 @@ export class SemanticSearchService {
   /**
    * Get items by keys
    */
-  private async getItemsByKeys(keys: string[]): Promise<any[]> {
+  private async getItemsByKeys(
+    keys: string[],
+    libraryID: number = Zotero.Libraries.userLibraryID,
+  ): Promise<any[]> {
     const items: any[] = [];
     for (const key of keys) {
       try {
         const item = await Zotero.Items.getByLibraryAndKeyAsync(
-          Zotero.Libraries.userLibraryID,
+          libraryID,
           key
         );
         if (item) items.push(item);
@@ -1385,11 +1530,13 @@ export class SemanticSearchService {
   /**
    * Get all items with content (regular items with attachments)
    */
-  private async getItemsWithContent(): Promise<any[]> {
+  private async getItemsWithContent(
+    libraryID: number = Zotero.Libraries.userLibraryID,
+  ): Promise<any[]> {
     try {
       // Get all regular items
       const search = new Zotero.Search();
-      search.libraryID = Zotero.Libraries.userLibraryID;
+      search.libraryID = libraryID;
       search.addCondition('itemType', 'isNot', 'attachment');
       search.addCondition('itemType', 'isNot', 'note');
       search.addCondition('itemType', 'isNot', 'annotation');

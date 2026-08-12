@@ -21,11 +21,27 @@ import { SmartAnnotationExtractor } from './smartAnnotationExtractor';
 import { MCPSettingsService } from './mcpSettingsService';
 import { getSemanticSearchService, SemanticSearchService } from './semantic';
 import {
+  DEFAULT_HYBRID_TIMEOUT_MS,
+  DEFAULT_SEMANTIC_TIMEOUT_MS,
+  HYBRID_KEYWORD_COVERAGE_BONUS,
+  LEXICAL_FIELD_WEIGHTS,
+  MAX_HYBRID_KEYWORDS,
+  MAX_SUPPLIED_KEYWORDS,
+  resolveHybridKeywords,
   runHybridSearch,
+  runWithTimeout,
   type HybridSearchOptions,
   type KeywordSearchItem,
   type SemanticSearchItem,
 } from './hybridSearch';
+import { runLexicalSearch } from './lexicalSearch';
+import {
+  MCP_PROTOCOL_VERSION,
+  SUPPORTED_MCP_PROTOCOL_VERSIONS,
+  negotiateProtocolVersion,
+} from './mcpTransport';
+import { sanitizeForPrivacy, scrubPathFields } from '../utils/privacy';
+import { config } from '../../package.json';
 
 export interface MCPRequest {
   jsonrpc: '2.0';
@@ -54,6 +70,129 @@ export interface MCPNotification {
   params?: any;
 }
 
+const PREF_WRITE_ENABLED = 'extensions.zotero.zotero-mcp-plugin.write.enabled';
+const PREF_WRITE_CONFIRM = 'extensions.zotero.zotero-mcp-plugin.write.confirmBeforeMutation';
+const PREF_ALLOW_FILE_IMPORT = 'extensions.zotero.zotero-mcp-plugin.write.allowFileImport';
+
+/**
+ * 所有会改动 Zotero 数据的工具。
+ *
+ * 之前 tools/list 只隐藏了 write_* 四个工具，collection 的增删改和成员
+ * 增删照样对外可见，客户端会以为可以调用；调用层虽然拦得住，但工具清单
+ * 与实际权限不一致本身就是缺陷。
+ */
+export const MUTATING_TOOL_NAMES = new Set<string>([
+  'write_note',
+  'write_tag',
+  'write_metadata',
+  'write_item',
+  'create_collection',
+  'update_collection',
+  'delete_collection',
+  'add_items_to_collection',
+  'remove_items_from_collection',
+]);
+
+const WRITE_DISABLED_MESSAGE =
+  'Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.';
+
+export function isWriteEnabled(): boolean {
+  try {
+    return Zotero.Prefs.get(PREF_WRITE_ENABLED, true) === true;
+  } catch {
+    return false;
+  }
+}
+
+function assertWriteEnabled(toolName: string): void {
+  if (!isWriteEnabled()) {
+    ztoolkit.log(`[StreamableMCP] Blocked ${toolName}: write operations disabled`, 'warn');
+    throw new Error(WRITE_DISABLED_MESSAGE);
+  }
+}
+
+/** `write.allowFileImport` 是否允许从任意本机路径导入文件。默认不允许。 */
+export function isFileImportAllowed(): boolean {
+  try {
+    return Zotero.Prefs.get(PREF_ALLOW_FILE_IMPORT, true) === true;
+  } catch {
+    return false;
+  }
+}
+
+function isMutationConfirmationRequired(): boolean {
+  try {
+    // 偏好缺失时按开启处理，与 addon/prefs.js 的默认值 true 一致：
+    // 确认框宁可多弹，也不能因为读不到偏好而静默放行写操作。
+    return Zotero.Prefs.get(PREF_WRITE_CONFIRM, true) !== false;
+  } catch {
+    return true;
+  }
+}
+
+/** 为确认框生成一句人类可读的操作摘要，尽量不泄漏大段内容。 */
+function describeMutation(toolName: string, args: any): string {
+  const parts: string[] = [];
+  if (args?.action) parts.push(`action: ${String(args.action)}`);
+  if (args?.itemKey) parts.push(`item: ${String(args.itemKey)}`);
+  if (args?.noteKey) parts.push(`note: ${String(args.noteKey)}`);
+  if (args?.parentKey) parts.push(`parent: ${String(args.parentKey)}`);
+  if (args?.collectionKey) parts.push(`collection: ${String(args.collectionKey)}`);
+  if (args?.name) parts.push(`name: ${String(args.name)}`);
+  if (Array.isArray(args?.itemKeys)) parts.push(`items: ${args.itemKeys.length}`);
+  if (Array.isArray(args?.tags)) parts.push(`tags: ${args.tags.length}`);
+  return parts.length > 0 ? parts.join(', ') : 'no additional parameters';
+}
+
+/**
+ * `write.confirmBeforeMutation` 的实际执行点。
+ *
+ * 之前这个偏好只存在于设置页，勾不勾都不影响任何写操作。这里在真正落库前
+ * 弹一个模态确认框；用户拒绝或没有可用主窗口时抛错，让工具调用失败而不是
+ * 无声地改库。
+ */
+async function assertMutationConfirmed(toolName: string, args: any): Promise<void> {
+  if (!isMutationConfirmationRequired()) return;
+
+  let win: any = null;
+  try {
+    win = Zotero.getMainWindow();
+  } catch {
+    win = null;
+  }
+
+  if (!win) {
+    // 没有窗口就没法征求同意，此时放行等于绕过该设置。
+    throw new Error(
+      `Confirmation is required before write operations (write.confirmBeforeMutation), but no Zotero window is available to ask. Bring Zotero to the foreground and retry, or turn the setting off.`,
+    );
+  }
+
+  let approved = false;
+  try {
+    approved = Services.prompt.confirm(
+      win,
+      'Zotero MCP Plugin',
+      `An MCP client is requesting to modify your Zotero library.
+
+Tool: ${toolName}
+${describeMutation(toolName, args)}
+
+Allow this change?`,
+    );
+  } catch (error) {
+    ztoolkit.log(`[StreamableMCP] Mutation confirmation dialog failed: ${error}`, 'error');
+    throw new Error(
+      `Could not display the write confirmation dialog required by write.confirmBeforeMutation: ${error}`,
+    );
+  }
+
+  if (!approved) {
+    ztoolkit.log(`[StreamableMCP] User declined mutation: ${toolName}`, 'warn');
+    throw new Error(`The user declined the requested ${toolName} operation.`);
+  }
+}
+
 /**
  * Streamable HTTP-based MCP Server integrated into Zotero Plugin
  *
@@ -67,7 +206,8 @@ export class StreamableMCPServer {
   private isInitialized: boolean = false;
   private serverInfo = {
     name: 'zotero-integrated-mcp',
-    version: '1.1.0',
+    // 与 manifest.json / 设置页脚同源，避免三处版本号各说各话。
+    version: config.addonVersion,
   };
   private clientSessions: Map<string, { initTime: Date; lastActivity: Date; clientInfo?: any }> = new Map();
 
@@ -99,7 +239,7 @@ export class StreamableMCPServer {
         status: 400,
         statusText: "Bad Request",
         headers: { "Content-Type": "application/json; charset=utf-8" },
-        body: JSON.stringify(errorResponse)
+        body: this.serializeResponse(errorResponse)
       };
     }
 
@@ -110,7 +250,7 @@ export class StreamableMCPServer {
           status: 400,
           statusText: "Bad Request",
           headers: { "Content-Type": "application/json; charset=utf-8" },
-          body: JSON.stringify(batchError)
+          body: this.serializeResponse(batchError)
         };
       }
 
@@ -120,7 +260,7 @@ export class StreamableMCPServer {
           status: 400,
           statusText: "Bad Request",
           headers: { "Content-Type": "application/json; charset=utf-8" },
-          body: JSON.stringify(invalidRequest)
+          body: this.serializeResponse(invalidRequest)
         };
       }
 
@@ -131,7 +271,7 @@ export class StreamableMCPServer {
           status: 400,
           statusText: "Bad Request",
           headers: { "Content-Type": "application/json; charset=utf-8" },
-          body: JSON.stringify(invalidRequest)
+          body: this.serializeResponse(invalidRequest)
         };
       }
 
@@ -153,7 +293,7 @@ export class StreamableMCPServer {
         status,
         statusText: status === 400 ? "Bad Request" : "OK",
         headers: { "Content-Type": "application/json; charset=utf-8" },
-        body: JSON.stringify(response)
+        body: this.serializeResponse(response)
       };
       
     } catch (error) {
@@ -172,7 +312,7 @@ export class StreamableMCPServer {
         status: 400,
         statusText: "Bad Request",
         headers: { "Content-Type": "application/json; charset=utf-8" },
-        body: JSON.stringify(errorResponse)
+        body: this.serializeResponse(errorResponse)
       };
     }
   }
@@ -235,6 +375,30 @@ export class StreamableMCPServer {
   }
 
   private handleInitialize(request: MCPRequest): MCPResponse {
+    // 协议版本协商，遵循 MCP lifecycle：
+    // - 请求的版本受支持 -> 回同一版本；
+    // - 不受支持 -> 回服务器最新支持版本，由客户端决定继续还是断开。
+    //   这是协商而非错误，所以 initialize 不会因版本不匹配而失败。
+    // - 缺失 -> 按服务器最新支持版本处理。
+    // 只有 protocolVersion 类型非法（不是字符串）才算 invalid params。
+    const requestedVersion = request.params?.protocolVersion;
+    if (requestedVersion !== undefined && typeof requestedVersion !== 'string') {
+      return this.createError(
+        request.id ?? null,
+        -32602,
+        'Invalid params: protocolVersion must be a string',
+        { supported: SUPPORTED_MCP_PROTOCOL_VERSIONS },
+      );
+    }
+
+    const negotiatedVersion = negotiateProtocolVersion(requestedVersion);
+    if (requestedVersion !== undefined && negotiatedVersion !== requestedVersion) {
+      ztoolkit.log(
+        `[StreamableMCP] Client requested unsupported protocol version ${requestedVersion}; offering ${negotiatedVersion} instead`,
+        'warn',
+      );
+    }
+
     // Extract client info from initialize request
     const clientInfo = request.params?.clientInfo || {};
     const sessionId = this.generateSessionId();
@@ -246,21 +410,23 @@ export class StreamableMCPServer {
       clientInfo
     });
     
-    ztoolkit.log(`[StreamableMCP] Client initialized with session: ${sessionId}, client: ${clientInfo.name || 'unknown'}`);
+    ztoolkit.log(`[StreamableMCP] Client initialized with session: ${sessionId}, client: ${clientInfo.name || 'unknown'}, protocol: ${negotiatedVersion}`);
     
     // Create standard MCP initialize response (no custom fields)
     return this.createResponse(request.id ?? null, {
-      protocolVersion: '2024-11-05',
+      protocolVersion: negotiatedVersion,
       capabilities: {
         tools: {
-          listChanged: true,
+          // 本实现从不发送 notifications/tools/list_changed，
+          // 声明 true 会让客户端一直等一个永远不会到来的通知。
+          listChanged: false,
         },
         logging: {},
         prompts: {},
         resources: {},
       },
       serverInfo: this.serverInfo,
-      instructions: 'Use hybrid_search as the default first step for literature discovery. It fuses metadata keyword and semantic retrieval without scanning full documents. If the user only asks which literature is relevant, return the matched titles and metadata directly. Only when the user requests passages, evidence, or full-text details, call search_fulltext with selected itemKeys from hybrid_search. Never perform unscoped whole-library full-text search.',
+      instructions: `Use hybrid_search as the default first step for literature discovery. It fuses metadata keyword and semantic retrieval without scanning full documents. The library holds both Chinese and English literature, so every hybrid_search call must carry a complete natural-language query for the semantic branch plus keywords covering BOTH Chinese and English terms, translations, synonyms and abbreviations, regardless of the language the user asked in; never narrow the search to one language. Around 5-12 keywords is the recommended amount for best results, not a required range: any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted. If the user only asks which literature is relevant, return the matched titles and metadata directly. Only when the user requests passages, evidence, or full-text details, call search_fulltext with selected itemKeys from hybrid_search. Never perform unscoped whole-library full-text search.`,
     });
   }
 
@@ -301,13 +467,34 @@ export class StreamableMCPServer {
     const tools = [
       {
         name: 'hybrid_search',
-        description: 'DEFAULT FIRST STEP for locating literature. Runs Zotero metadata/field keyword retrieval and semantic vector retrieval in parallel, then fuses their rankings with weighted Reciprocal Rank Fusion (RRF). It does not scan full document text. Return these literature matches directly when the user only asks which documents are relevant; call search_fulltext with the matched itemKeys only when the user asks for passages, evidence, or full-text details.',
+        description: [
+          'DEFAULT FIRST STEP for locating literature. Runs Zotero metadata/field keyword retrieval and semantic vector retrieval in parallel, then fuses their rankings with weighted Reciprocal Rank Fusion (RRF). It does not scan full document text.',
+          '',
+          'The library is bilingual, so every call must retrieve Chinese AND English literature, no matter which language the user asked in. Do NOT translate the question into a single language and do NOT restrict the search to the language of the question. You (the calling AI) are responsible for the query rewrite: this tool never calls an LLM of its own.',
+          '',
+          'Build the arguments like this:',
+          '1. query — one complete natural-language sentence expressing the real information need of the user, used verbatim as the embedding input for cross-lingual semantic search. Do not reduce it to loose tokens. Writing it as an English phrasing followed by " / " and the Chinese phrasing is recommended, so the embedding sees both surface forms.',
+          `2. keywords — precise domain terms covering BOTH Chinese and English: the core concepts, their standard technical translations, common synonyms, and field abbreviations. For best results, providing about 5-12 relevant Chinese and/or English keywords is recommended; this is guidance, not a constraint — any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted. All of them are matched in a single pass over the candidate records (title, abstract, creator, publication title, tags), then scored by term specificity, field weight and how many distinct keywords each record matched, so short exact terms work far better than long sentences and extra keywords cost almost nothing.`,
+          '',
+          'Worked example — user asks "温度梯度如何影响定向凝固中的柱状晶转变？":',
+          '  query: "Effects of temperature gradient on columnar-to-equiaxed transition during directional solidification / 温度梯度对定向凝固柱状晶-等轴晶转变的影响"',
+          '  keywords: ["温度梯度", "定向凝固", "柱状晶", "等轴晶", "柱状晶-等轴晶转变", "temperature gradient", "directional solidification", "columnar grain", "equiaxed grain", "columnar-to-equiaxed transition", "CET"]',
+          '',
+          'Leave language at its "all" default so retrieval stays genuinely cross-lingual; the other language values only narrow recall. Return these literature matches directly when the user only asks which documents are relevant; call search_fulltext with the matched itemKeys only when the user asks for passages, evidence, or full-text details.',
+        ].join('\n'),
         inputSchema: {
           type: 'object',
           properties: {
             query: {
               type: 'string',
-              description: 'Natural-language literature query'
+              description: 'Complete natural-language sentence describing the information need, embedded as-is for cross-lingual semantic search. Not a token list. Include both an English and a Chinese phrasing (separated by " / ") so the embedding covers both.'
+            },
+            keywords: {
+              type: 'array',
+              items: { type: 'string' },
+              minItems: 1,
+              maxItems: MAX_SUPPLIED_KEYWORDS,
+              description: `Optional lexical probes for the keyword branch: precise Chinese AND English domain terms, technical translations, synonyms and abbreviations. For best results, it is recommended to provide 5-12 relevant Chinese and/or English keywords. Fewer or more keywords are still allowed within the implemented input limit of 1 to ${MAX_HYBRID_KEYWORDS} entries. Always supply both scripts regardless of the language the user asked in. All keywords are matched together in one pass over title, abstract, creator, publicationTitle and tags, and ranked by term specificity, field weight and keyword coverage, so a broad word cannot outrank a discriminative phrase. Omitting this falls back to splitting the query, which can only probe the language the user typed in and is scored at a lower weight.`
             },
             topK: {
               type: 'number',
@@ -323,8 +510,8 @@ export class StreamableMCPServer {
             },
             language: {
               type: 'string',
-              enum: ['zh', 'en', 'all'],
-              description: 'Semantic result language filter (default: all)'
+              enum: ['zh', 'en', 'all', 'auto'],
+              description: 'Semantic branch language filter. Keep the "all" default for genuinely cross-lingual recall; "zh"/"en" restrict the index to that language and "auto" restricts it to the detected query language, both of which drop literature written in the other language. Only set this when the user explicitly asks for one language.'
             },
             rrfK: {
               type: 'number',
@@ -340,7 +527,17 @@ export class StreamableMCPServer {
             },
             libraryID: {
               type: 'number',
-              description: 'Optional Zotero library ID for metadata keyword retrieval'
+              description: 'Zotero library ID used by both keyword and semantic retrieval'
+            },
+            semanticTimeoutMs: {
+              type: 'number',
+              minimum: 1,
+              description: 'Semantic branch deadline in milliseconds (default: 8000)'
+            },
+            totalTimeoutMs: {
+              type: 'number',
+              minimum: 1,
+              description: 'Overall hybrid retrieval deadline in milliseconds (default: 10000)'
             }
           },
           required: ['query']
@@ -867,8 +1064,17 @@ export class StreamableMCPServer {
             },
             language: {
               type: 'string',
-              enum: ['zh', 'en', 'all'],
-              description: 'Filter by language (default: all)'
+              enum: ['zh', 'en', 'all', 'auto'],
+              description: 'Filter by language; all searches every language, auto uses query language (default: all)'
+            },
+            libraryID: {
+              type: 'number',
+              description: 'Zotero library ID (default: user library)'
+            },
+            timeoutMs: {
+              type: 'number',
+              minimum: 1,
+              description: 'Total semantic search deadline in milliseconds (default: 8000)'
             }
           },
           required: ['query']
@@ -890,7 +1096,16 @@ export class StreamableMCPServer {
             },
             minScore: {
               type: 'number',
-              description: 'Minimum similarity score 0-1 (default: 0.5)'
+              description: 'Minimum similarity score 0-1 (default: 0.3)'
+            },
+            libraryID: {
+              type: 'number',
+              description: 'Zotero library ID (default: user library)'
+            },
+            timeoutMs: {
+              type: 'number',
+              minimum: 1,
+              description: 'Total similarity search deadline in milliseconds (default: 8000)'
             }
           },
           required: ['itemKey']
@@ -1056,7 +1271,7 @@ export class StreamableMCPServer {
             action: {
               type: 'string',
               enum: ['create', 'reparent', 'import'],
-              description: 'create: create a new item with metadata. reparent: move an attachment under a different parent item. import: import a local file (e.g., Markdown, PDF) as an attachment to an existing item.'
+              description: 'create: create a new item with metadata. reparent: move an attachment under a different parent item. import: import a local file (e.g., Markdown, PDF) as an attachment to an existing item; this action additionally requires the "Allow File Import" preference to be enabled and fails otherwise.'
             },
             itemType: {
               type: 'string',
@@ -1121,21 +1336,25 @@ export class StreamableMCPServer {
       : tools;
 
     // Filter out write tools if write operations are disabled (default: disabled)
-    const writeEnabled = Zotero.Prefs.get('extensions.zotero.zotero-mcp-plugin.write.enabled', true);
-    const writeToolNames = new Set([
-      'write_note', 'write_tag', 'write_metadata', 'write_item',
-    ]);
-    const finalTools = writeEnabled === true
+    const writeEnabled = isWriteEnabled();
+    const finalTools = writeEnabled
       ? filteredTools
-      : filteredTools.filter((t: any) => !writeToolNames.has(t.name));
+      : filteredTools.filter((t: any) => !MUTATING_TOOL_NAMES.has(t.name));
 
     return this.createResponse(request.id ?? null, { tools: finalTools });
   }
 
   private async handleToolCall(request: MCPRequest): Promise<MCPResponse> {
     const { name, arguments: args } = request.params;
-    
+
     try {
+      // 统一的写入闸门：任何会改动 Zotero 数据的工具都先过这里。
+      // 每个 case 内原有的 write.enabled 检查保留，作为二次校验。
+      if (MUTATING_TOOL_NAMES.has(name)) {
+        assertWriteEnabled(name);
+        await assertMutationConfirmed(name, args);
+      }
+
       let result;
       
       switch (name) {
@@ -1158,7 +1377,7 @@ export class StreamableMCPServer {
           break;
 
         case 'hybrid_search':
-          if (!args?.query) {
+          if (typeof args?.query !== 'string' || !args.query.trim()) {
             throw new Error('query is required');
           }
           result = await this.callHybridSearch(args);
@@ -1322,7 +1541,9 @@ export class StreamableMCPServer {
             throw new Error('Semantic search is disabled. Enable it in Zotero MCP Plugin preferences.');
           }
           if (name === 'semantic_search') {
-            if (!args?.query) throw new Error('query is required');
+            if (typeof args?.query !== 'string' || !args.query.trim()) {
+              throw new Error('query is required');
+            }
             result = await this.callSemanticSearch(args);
           } else if (name === 'find_similar') {
             if (!args?.itemKey) throw new Error('itemKey is required');
@@ -1402,6 +1623,11 @@ export class StreamableMCPServer {
         default:
           throw new Error(`Unknown tool: ${name}`);
       }
+
+      // 结构化路径字段必须在序列化成 content[0].text 之前清掉——
+      // 一旦变成字符串，按字段名清空就无从下手。字符串里的绝对路径
+      // 由 handleMCPRequest 的出口统一脱敏，不在这里重复扫描大文本。
+      result = scrubPathFields(result);
 
       // Wrap result in MCP content format with proper text type.
       // Keep large results compact: the HTTP layer writes the body in a
@@ -1501,58 +1727,158 @@ export class StreamableMCPServer {
 
   private async callHybridSearch(args: any): Promise<any> {
     const topK = args.topK ?? 10;
-    const options: HybridSearchOptions = {
+    const candidateK = args.candidateK ?? Math.max(topK * 3, 20);
+    const minScore = args.minScore ?? 0.3;
+    const language = args.language ?? 'all';
+    const libraryID =
+      args.libraryID ?? Zotero.Libraries.userLibraryID;
+    this.validateSearchParameters({
+      query: args.query,
       topK,
-      candidateK: args.candidateK ?? Math.max(topK * 3, 20),
+      candidateK,
+      minScore,
+      language,
+      libraryID,
+    });
+    // The caller supplies bilingual keywords; when it does not we derive probes
+    // from the query, which can only cover the language the user typed in.
+    const {
+      keywords: lexicalKeywords,
+      entries: lexicalKeywordEntries,
+      source: keywordSource,
+    } = resolveHybridKeywords(args.query, args.keywords);
+    const options: HybridSearchOptions = {
+      keywords: lexicalKeywords,
+      topK,
+      candidateK,
       rrfK: args.rrfK ?? 60,
       keywordWeight: args.keywordWeight ?? 1,
       semanticWeight: args.semanticWeight ?? 1,
+      semanticTimeoutMs: args.semanticTimeoutMs,
+      totalTimeoutMs: args.totalTimeoutMs,
     };
+    const totalTimeoutMs = args.totalTimeoutMs ?? DEFAULT_HYBRID_TIMEOUT_MS;
+    const semanticTimeoutMs = Math.min(
+      args.semanticTimeoutMs ?? DEFAULT_SEMANTIC_TIMEOUT_MS,
+      totalTimeoutMs,
+    );
+    const hybridStartedAt = Date.now();
     const semanticEnabled = Zotero.Prefs.get(
       'extensions.zotero.zotero-mcp-plugin.semantic.enabled',
       true,
     ) !== false;
 
+    // Both branches must be able to stop, not just be stopped waiting for:
+    // an abandoned embedding request or library scan would otherwise keep
+    // burning time (and API quota) after the hybrid deadline has passed.
+    const semanticAbort =
+      typeof AbortController !== 'undefined' ? new AbortController() : null;
+    let lexicalCancelled = false;
+    let lexicalDiagnostics: Awaited<
+      ReturnType<typeof runLexicalSearch>
+    >['diagnostics'] | null = null;
+
     const searchResult = await runHybridSearch(
       { ...options, query: args.query },
       {
         keywordSearch: async (): Promise<KeywordSearchItem[]> => {
-          const keywordResponse = await this.callSearchLibrary({
-            q: args.query,
-            libraryID: args.libraryID,
-            relevanceScoring: true,
-            sort: 'relevance',
-            limit: options.candidateK,
-            offset: 0,
-            mode: 'complete',
+          // One pass: candidates are selected once and every keyword is
+          // matched during that same traversal, instead of running K separate
+          // Zotero searches that used to overrun the hybrid deadline.
+          const outcome = await runLexicalSearch({
+            keywords: lexicalKeywordEntries,
+            libraryID,
+            candidateK: options.candidateK,
+            // Stop a little before the hybrid deadline so a partial, ranked
+            // candidate set still reaches fusion instead of the branch being
+            // killed outright and hybrid silently degrading to semantic-only.
+            deadlineAt:
+              hybridStartedAt + Math.max(1000, Math.floor(totalTimeoutMs * 0.85)),
+            isCancelled: () => lexicalCancelled,
           });
-          return Array.isArray(keywordResponse?.results)
-            ? keywordResponse.results
-            : [];
+          lexicalDiagnostics = outcome.diagnostics;
+          ztoolkit.log(
+            `[StreamableMCP][Lexical] strategy=${outcome.diagnostics.strategy} candidates=${outcome.diagnostics.candidateIDs} scanned=${outcome.diagnostics.scannedItems} truncated=${outcome.diagnostics.truncated} prioritized=${outcome.diagnostics.prioritized} search=${outcome.diagnostics.searchMs}ms scan=${outcome.diagnostics.scanMs}ms rank=${outcome.diagnostics.rankMs}ms total=${outcome.diagnostics.totalMs}ms keywords=${lexicalKeywordEntries.length}`,
+          );
+          return outcome.items;
+        },
+        cancelKeywordSearch: () => {
+          lexicalCancelled = true;
         },
         semanticSearch: async (): Promise<SemanticSearchItem[]> => {
           if (!semanticEnabled) {
             throw new Error('semantic search is disabled in plugin preferences');
           }
           const semanticService = getSemanticSearchService();
-          await semanticService.initialize();
           return semanticService.search(args.query, {
             topK: options.candidateK,
-            minScore: args.minScore ?? 0.3,
-            language: args.language ?? 'all',
+            minScore,
+            language,
+            libraryID,
+            timeoutMs: semanticTimeoutMs,
+            signal: semanticAbort?.signal,
           });
+        },
+        cancelSemanticSearch: () => {
+          semanticAbort?.abort();
         },
       },
     );
+    // Nothing else is waiting on these branches once fusion is done.
+    lexicalCancelled = true;
+    semanticAbort?.abort();
+
+    const diagnostics = lexicalDiagnostics as
+      | Awaited<ReturnType<typeof runLexicalSearch>>['diagnostics']
+      | null;
+    ztoolkit.log(
+      `[StreamableMCP][HybridTiming] lexical=${searchResult.timings.keywordMs}ms semantic=${searchResult.timings.semanticMs}ms rrf=${searchResult.timings.rrfMs}ms total=${searchResult.timings.totalMs}ms keywords=${lexicalKeywords.length}(${keywordSource}) lexicalCandidates=${diagnostics?.candidateIDs ?? 0} lexicalScanned=${diagnostics?.scannedItems ?? 0} libraryID=${libraryID}`,
+    );
+
+    const hybridWarnings = [...searchResult.warnings];
+    if (keywordSource === 'fallback') {
+      hybridWarnings.push(
+        `keywords were not supplied, so the lexical branch was derived from the query and only covers the language it was written in. Pass bilingual Chinese and English keywords to recall literature in both languages; around 5-12 keywords is the recommended amount for best results, and any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted.`,
+      );
+    }
+    if (diagnostics?.failedKeywords.length) {
+      hybridWarnings.push(
+        `Keyword probes failed and were skipped: ${diagnostics.failedKeywords.join(', ')}`,
+      );
+    }
+    if (diagnostics?.truncated) {
+      hybridWarnings.push(
+        diagnostics.prioritized
+          ? 'The lexical candidate set exceeded the candidate cap and was reduced to the items matching the most keywords. Pass fewer, more specific keywords for complete lexical coverage.'
+          : 'The lexical candidate set was truncated because it hit the candidate cap or the hybrid deadline. Pass fewer, more specific keywords for complete lexical coverage.',
+      );
+    }
 
     return {
       mode: 'hybrid',
       query: args.query,
+      keywords: lexicalKeywords,
       data: searchResult.results,
       metadata: {
         extractedAt: new Date().toISOString(),
         searchMode: 'hybrid',
         fusion: 'weighted_rrf',
+        keywordSource,
+        keywordCount: lexicalKeywords.length,
+        keywordWeights: lexicalKeywordEntries.map((entry) => ({
+          keyword: entry.text,
+          weight: entry.weight,
+          origin: entry.origin,
+        })),
+        lexicalStrategy: diagnostics?.strategy,
+        lexicalCandidateCount: diagnostics?.candidateIDs ?? 0,
+        lexicalScannedCount: diagnostics?.scannedItems ?? 0,
+        lexicalTruncated: diagnostics?.truncated ?? false,
+        lexicalPrioritized: diagnostics?.prioritized ?? false,
+        failedKeywords: diagnostics?.failedKeywords ?? [],
+        keywordCoverageBonus: HYBRID_KEYWORD_COVERAGE_BONUS,
+        lexicalFieldWeights: LEXICAL_FIELD_WEIGHTS,
+        language,
         rrfK: options.rrfK,
         keywordWeight: options.keywordWeight,
         semanticWeight: options.semanticWeight,
@@ -1561,11 +1887,86 @@ export class StreamableMCPServer {
         keywordResultCount: searchResult.keywordResultCount,
         semanticResultCount: searchResult.semanticResultCount,
         degraded: searchResult.degraded,
-        warnings: searchResult.warnings,
+        warnings: hybridWarnings,
+        timings: {
+          lexicalMs: searchResult.timings.keywordMs,
+          semanticMs: searchResult.timings.semanticMs,
+          rrfMs: searchResult.timings.rrfMs,
+          totalMs: searchResult.timings.totalMs,
+          lexicalBreakdown: diagnostics
+            ? {
+                searchMs: diagnostics.searchMs,
+                scanMs: diagnostics.scanMs,
+                rankMs: diagnostics.rankMs,
+              }
+            : undefined,
+        },
         fulltextScanned: false,
         nextStep: 'Return these matches directly unless the user requests passages, evidence, or full-text details; then call search_fulltext with selected itemKeys.',
       },
     };
+  }
+
+  private validateSearchParameters(params: {
+    query?: unknown;
+    topK: unknown;
+    candidateK?: unknown;
+    minScore: unknown;
+    language?: unknown;
+    libraryID: unknown;
+    timeoutMs?: unknown;
+  }): void {
+    if (
+      params.query !== undefined &&
+      (typeof params.query !== 'string' || !params.query.trim())
+    ) {
+      throw new Error('query must not be blank');
+    }
+    if (
+      !Number.isInteger(params.topK) ||
+      Number(params.topK) < 1 ||
+      Number(params.topK) > 100
+    ) {
+      throw new Error('topK must be an integer between 1 and 100');
+    }
+    if (
+      params.candidateK !== undefined &&
+      (!Number.isInteger(params.candidateK) ||
+        Number(params.candidateK) < Number(params.topK) ||
+        Number(params.candidateK) > 500)
+    ) {
+      throw new Error(
+        'candidateK must be an integer between topK and 500',
+      );
+    }
+    if (
+      typeof params.minScore !== 'number' ||
+      !Number.isFinite(params.minScore) ||
+      params.minScore < 0 ||
+      params.minScore > 1
+    ) {
+      throw new Error('minScore must be a finite number between 0 and 1');
+    }
+    if (
+      params.language !== undefined &&
+      !['zh', 'en', 'all', 'auto'].includes(String(params.language))
+    ) {
+      throw new Error('language must be one of zh, en, all, or auto');
+    }
+    if (
+      !Number.isInteger(params.libraryID) ||
+      Number(params.libraryID) <= 0
+    ) {
+      throw new Error('libraryID must be a positive integer');
+    }
+    if (
+      params.timeoutMs !== undefined &&
+      (typeof params.timeoutMs !== 'number' ||
+        !Number.isFinite(params.timeoutMs) ||
+        params.timeoutMs < 1)
+    ) {
+      throw new Error('timeoutMs must be a positive finite number');
+    }
   }
 
   private async callSearchAnnotations(args: any): Promise<any> {
@@ -1854,14 +2255,34 @@ export class StreamableMCPServer {
 
   private async callSemanticSearch(args: any): Promise<any> {
     try {
-      const semanticService = getSemanticSearchService();
-      await semanticService.initialize();
-
-      const results = await semanticService.search(args.query, {
-        topK: args.topK,
-        minScore: args.minScore,
-        language: args.language
+      const topK = args.topK ?? 10;
+      const minScore = args.minScore ?? 0.3;
+      const language = args.language ?? 'all';
+      const libraryID =
+        args.libraryID ?? Zotero.Libraries.userLibraryID;
+      const timeoutMs = args.timeoutMs ?? DEFAULT_SEMANTIC_TIMEOUT_MS;
+      this.validateSearchParameters({
+        query: args.query,
+        topK,
+        minScore,
+        language,
+        libraryID,
+        timeoutMs,
       });
+      const semanticService = getSemanticSearchService();
+
+      const results = await runWithTimeout(
+        () =>
+          semanticService.search(args.query, {
+            topK,
+            minScore,
+            language,
+            libraryID,
+            timeoutMs,
+          }),
+        timeoutMs,
+        'Semantic search',
+      );
 
       const response = {
         mode: 'semantic',
@@ -1886,13 +2307,30 @@ export class StreamableMCPServer {
 
   private async callFindSimilar(args: any): Promise<any> {
     try {
-      const semanticService = getSemanticSearchService();
-      await semanticService.initialize();
-
-      const results = await semanticService.findSimilar(args.itemKey, {
-        topK: args.topK,
-        minScore: args.minScore
+      const topK = args.topK ?? 5;
+      const minScore = args.minScore ?? 0.3;
+      const libraryID =
+        args.libraryID ?? Zotero.Libraries.userLibraryID;
+      const timeoutMs = args.timeoutMs ?? DEFAULT_SEMANTIC_TIMEOUT_MS;
+      this.validateSearchParameters({
+        topK,
+        minScore,
+        libraryID,
+        timeoutMs,
       });
+      const semanticService = getSemanticSearchService();
+
+      const results = await runWithTimeout(
+        () =>
+          semanticService.findSimilar(args.itemKey, {
+            topK,
+            minScore,
+            libraryID,
+            timeoutMs,
+          }),
+        timeoutMs,
+        'Similarity search',
+      );
 
       const response = {
         mode: 'similar',
@@ -2636,6 +3074,13 @@ export class StreamableMCPServer {
         }
 
         case 'import': {
+          // write.allowFileImport 之前只是个设置页开关，这里才真正生效：
+          // 关闭时不允许任何 MCP 调用把本机任意路径的文件拉进库里。
+          if (!isFileImportAllowed()) {
+            throw new Error(
+              'File import from local paths is disabled. Enable "Allow File Import" in the Zotero MCP Plugin preferences to use write_item action "import".',
+            );
+          }
           if (!filePath || typeof filePath !== 'string') {
             throw new Error('filePath is required for import action (absolute path to the file)');
           }
@@ -2846,6 +3291,17 @@ export class StreamableMCPServer {
     return parts.join('\n');
   }
 
+  /**
+   * MCP 响应的唯一序列化出口。
+   *
+   * 所有分支（result、error.message、error.data、通知的空体）都必须经过这里，
+   * 否则 privacy sanitizer 会被绕过。tools/call 抛出的异常信息里常带用户传入的
+   * 文件路径（例如 write_item 的 "File not found: ..."），只清 result 是不够的。
+   */
+  private serializeResponse(response: MCPResponse): string {
+    return JSON.stringify(sanitizeForPrivacy(response));
+  }
+
   private createResponse(id: string | number | null, result: any): MCPResponse {
     return {
       jsonrpc: '2.0',
@@ -2873,7 +3329,9 @@ export class StreamableMCPServer {
     return {
       isInitialized: this.isInitialized,
       serverInfo: this.serverInfo,
-      protocolVersion: '2024-11-05',
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      // 与 initialize 协商和 HTTP MCP-Protocol-Version 校验用的是同一份列表。
+      supportedProtocolVersions: SUPPORTED_MCP_PROTOCOL_VERSIONS,
       supportedMethods: [
         'initialize',
         'initialized', 
