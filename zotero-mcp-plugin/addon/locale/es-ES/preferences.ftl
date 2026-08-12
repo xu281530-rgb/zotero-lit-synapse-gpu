@@ -213,3 +213,57 @@ pref-contact-title = Información de contacto
 pref-contact-email = Correo electrónico: fransjone@mail.com
 pref-contact-github = GitHub: https://github.com/cookjohn/zotero-mcp
 pref-contact-wechat = WeChat: 未来论文实验室
+# ============ MinerU high-precision PDF parsing ============
+pref-mineru-title = High-precision PDF parsing (MinerU)
+pref-mineru-desc = Run PDFs through MinerU for layout reconstruction before they reach the vector index and the MCP full-text tools, yielding Markdown with heading structure, formulas and tables instead of Zotero's raw text extraction.
+pref-mineru-enable-text = Enable MinerU parsing
+pref-mineru-enable-sub = When off, everything falls back to Zotero's built-in PDF text extraction
+pref-mineru-mode-label = Deployment
+pref-mineru-mode-cloud = Cloud API (mineru.net)
+pref-mineru-mode-local = Local mineru-api
+pref-mineru-mode-hint = Cloud requires an API token and consumes your MinerU quota; local requires a self-hosted mineru-api (Python 3.10-3.13).
+pref-mineru-base-url-label = Service URL
+pref-mineru-token-label = API token
+pref-mineru-token-hint = Issued from your mineru.net account; cloud mode only.
+pref-mineru-model-label = Parsing model
+pref-mineru-model-vlm = VLM (higher accuracy)
+pref-mineru-model-pipeline = Pipeline (faster, cheaper)
+pref-mineru-model-hybrid = Híbrido (MinerU 3.4+, local)
+pref-mineru-language-label = Document language
+pref-mineru-language-hint = Solo afecta a páginas escaneadas que requieren OCR. El valor por defecto ch ya cubre chino, inglés y japonés; auto no se acepta.
+pref-mineru-vlm-hint = VLM analiza la página completa de forma visual, por lo que «Forzar OCR» e «Idioma del documento» no le afectan. Cambia a Pipeline o Híbrido para que surtan efecto.
+pref-mineru-ocr-text = Force OCR
+pref-mineru-ocr-sub = Only needed for scanned PDFs without a text layer; significantly slower
+pref-mineru-formula-text = Parse formulas
+pref-mineru-formula-sub = Reconstruct formulas as LaTeX
+pref-mineru-table-text = Parse tables
+pref-mineru-table-sub = Reconstruct tables as Markdown tables
+pref-mineru-test-button-text = Test connection
+pref-mineru-testing = Testing…
+pref-mineru-reindex-hint = Note: this only applies to PDFs parsed from now on. Already-indexed items need a full index rebuild before they use MinerU output.
+pref-mineru-attach-text = Adjuntar el Markdown al elemento
+pref-mineru-attach-sub = Tras un análisis correcto, añade el Markdown como adjunto del elemento padre del PDF para poder abrirlo directamente. Volver a analizar lo reemplaza en lugar de acumular duplicados.
+pref-mineru-advanced-title = Advanced options and parse cache
+pref-mineru-concurrency-label = Concurrency
+pref-mineru-timeout-label = Timeout (s)
+pref-mineru-max-size-label = Max file size (MB)
+pref-mineru-blocking-text = Allow on-demand parsing for MCP tools
+pref-mineru-blocking-sub = Off by default. When on, MCP full-text tools wait for MinerU on a cache miss, which can time out the AI client.
+pref-mineru-cache-refresh-button-text = Refresh cache stats
+pref-mineru-cache-clear-button-text = Clear parse cache
+pref-mineru-cache-clear-confirm = This deletes every cached MinerU result; the next index run will re-parse them. Continue?
+pref-mineru-cache-cleared = Parse cache cleared
+
+
+
+
+# Hardened build security settings
+pref-server-token-label = MCP access token
+pref-server-token-regenerate = Regenerate
+pref-server-token-hint = Required for remote access. Treat it as a password and send Authorization: Bearer <token> from the client.
+pref-write-confirm-text = Confirm every write in Zotero
+pref-write-confirm-sub = Recommended. MCP clients cannot bypass the local confirmation dialog.
+pref-file-import-text = Allow MCP to import local files
+pref-file-import-sub = High-risk capability; disabled by default. Enable only when explicitly needed.
+pref-expose-paths-text = Expose local file paths in MCP results
+pref-expose-paths-sub = Absolute paths are hidden by default to reduce local information disclosure.

@@ -1087,6 +1087,19 @@ export class EmbeddingService {
     const provider = this.getEffectiveProvider();
     const url = this.getEmbeddingEndpoint();
 
+    // 非回环地址必须走 HTTPS，除非用户显式允许明文 HTTP
+    try {
+      const parsedURL = new URL(url);
+      const loopback = ['localhost', '127.0.0.1', '::1'].includes(parsedURL.hostname.toLowerCase());
+      const allowInsecure = Zotero.Prefs.get('extensions.zotero.zotero-mcp-plugin.embedding.allowInsecureHTTP', true) === true;
+      if (parsedURL.protocol !== 'https:' && !loopback && !allowInsecure) {
+        throw new Error('Embedding API must use HTTPS unless it is on loopback or insecure HTTP is explicitly enabled');
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('Embedding API must use HTTPS')) throw error;
+      throw new Error('Embedding API URL is invalid');
+    }
+
     ztoolkit.log(`[EmbeddingService] API call: provider=${provider}, url=${url}`);
 
     // Estimate tokens for rate limit check
@@ -1266,7 +1279,7 @@ export class EmbeddingService {
         ztoolkit.log(`[EmbeddingService]   - status: ${statusCode}`, 'error');
         ztoolkit.log(`[EmbeddingService]   - name: ${error.name}`, 'error');
         if (responseBody) {
-          ztoolkit.log(`[EmbeddingService]   - responseBody: ${responseBody}`, 'error');
+          ztoolkit.log(`[EmbeddingService]   - response body received (${responseBody.length} chars; content suppressed)`, 'error');
         }
 
         // If already an EmbeddingAPIError, use it directly

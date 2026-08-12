@@ -13,6 +13,10 @@ import { getVectorStore, VectorStore } from './vectorStore';
 import { getTextChunker, TextChunker } from './textChunker';
 import { TextFormatter } from '../textFormatter';
 import { PDFProcessor } from '../pdfProcessor';
+import {
+  getMinerUService,
+  getOriginalPDFAttachmentsForItem,
+} from '../mineru';
 
 declare let Zotero: any;
 declare let ztoolkit: ZToolkit;
@@ -55,6 +59,12 @@ export interface IndexProgress {
   startTime?: number;
   estimatedRemaining?: number;
   failedCount?: number;            // Number of failed items
+  skipped?: number;                // Items filtered out as already indexed
+  indexed?: number;                // Items whose vectors were actually (re)written
+  unchanged?: number;              // Items visited but left as-is (nothing changed)
+  minerUFailures?: number;         // PDFs MinerU could not parse this run
+  minerULastError?: string;        // Last MinerU error, for the notification
+  minerUAttachments?: number;      // Markdown attachments written onto items this run
 }
 
 export interface SemanticServiceStats {
@@ -97,6 +107,8 @@ export class SemanticSearchService {
   private _aborted = false;
   private _pauseResolve: (() => void) | null = null;
   private _buildActive = false;
+  /** Set for the duration of a forced build; read by extractItemContent */
+  private _forceRun = false;
 
   // Error handling
   private _onErrorCallback?: (error: EmbeddingAPIError) => void;
@@ -360,11 +372,17 @@ export class SemanticSearchService {
   async buildIndex(options: {
     itemKeys?: string[];
     rebuild?: boolean;
+    /**
+     * Index the given itemKeys even if they are already in index_status,
+     * without clearing the whole store the way rebuild does. Used by every
+     * path that targets specific items the user or the notifier just touched.
+     */
+    force?: boolean;
     onProgress?: (progress: IndexProgress) => void;
   } = {}): Promise<IndexProgress> {
     await this.initialize();
 
-    const { itemKeys, rebuild = false, onProgress } = options;
+    const { itemKeys, rebuild = false, force = false, onProgress } = options;
 
     if (this._buildActive) {
       ztoolkit.log('[SemanticSearch] buildIndex already running, ignoring duplicate call', 'warn');
@@ -379,10 +397,17 @@ export class SemanticSearchService {
       this._paused = false;
       this._aborted = false;
       this._pauseResolve = null;
+      // Only one build runs at a time (guarded by _buildActive), so a field is
+      // enough to reach extractItemContent without threading force through
+      // every call in between.
+      this._forceRun = force;
+      getMinerUService().resetRunStats();
 
       this.indexProgress = {
         total: 0,
         processed: 0,
+        indexed: 0,
+        unchanged: 0,
         status: 'indexing',
         startTime: Date.now()
       };
@@ -412,12 +437,16 @@ export class SemanticSearchService {
       const totalLibraryItems = items.length;
       ztoolkit.log(`[SemanticSearch] Library items fetched: ${totalLibraryItems}`);
 
-      // Filter already indexed items (unless rebuild)
-      if (!rebuild) {
-        const indexedItems = await this.vectorStore.getIndexedItems();
-        const indexedCount = indexedItems.size;
-        items = items.filter(item => !indexedItems.has(item.key));
-        ztoolkit.log(`[SemanticSearch] Items: library=${totalLibraryItems}, indexed=${indexedCount}, toIndex=${items.length}`);
+      // Filter already indexed items (unless rebuild or an explicit force)
+      if (!rebuild && !force) {
+        const skipSet = await this.vectorStore.getItemsToSkip();
+        const indexedCount = skipSet.size;
+        items = items.filter(item => !skipSet.has(item.key));
+        this.indexProgress.skipped = totalLibraryItems - items.length;
+        ztoolkit.log(`[SemanticSearch] Items: library=${totalLibraryItems}, indexed=${indexedCount}, toIndex=${items.length}, skipped=${this.indexProgress.skipped}`);
+      } else if (force) {
+        this.indexProgress.skipped = 0;
+        ztoolkit.log(`[SemanticSearch] Force mode: re-indexing all ${items.length} requested items, ignoring index_status`);
       } else {
         // For rebuild: clear all existing index data first
         ztoolkit.log(`[SemanticSearch] Rebuild mode: clearing existing index data...`);
@@ -443,6 +472,8 @@ export class SemanticSearchService {
       onProgress?.(this.indexProgress);
 
       if (items.length === 0) {
+        this.indexProgress.minerUFailures = 0;
+        this.indexProgress.minerUAttachments = 0;
         this.indexProgress.status = 'completed';
         return this.indexProgress;
       }
@@ -490,7 +521,7 @@ export class SemanticSearchService {
               this.indexProgress.currentItem = item.key;
               // Each item gets its own processor from the pool
               const processor = processorPool[batchIndex % processorPool.length];
-              await this.indexItemWithProcessor(item, processor);
+              await this.indexItemWithProcessor(item, processor, force);
               return item.key; // Return item key for tracking
             })
           );
@@ -608,6 +639,11 @@ export class SemanticSearchService {
         ztoolkit.log(`[SemanticSearch] Terminated ${processorPool.length} PDFProcessor workers`);
       }
 
+      const minerUStats = getMinerUService().getRunStats();
+      this.indexProgress.minerUFailures = minerUStats.failures;
+      this.indexProgress.minerULastError = minerUStats.lastError;
+      this.indexProgress.minerUAttachments = minerUStats.attachments;
+
       // Only set completed if not aborted
       if (this.indexProgress.status !== 'aborted') {
         this.indexProgress.status = 'completed';
@@ -625,6 +661,7 @@ export class SemanticSearchService {
       throw error;
     } finally {
       this._buildActive = false;
+      this._forceRun = false;
     }
   }
 
@@ -637,8 +674,21 @@ export class SemanticSearchService {
 
   /**
    * Index a single item with optional shared PDFProcessor
+   *
+   * @param force Re-read the item from disk even when nothing looks changed.
+   *   The two fast paths below (timestamp match, cached extraction) exist to
+   *   keep incremental builds cheap, but they answer "has the *item* changed?"
+   *   and not "would extraction produce something different now?" — which is
+   *   exactly what changes when MinerU is switched on, its options are edited,
+   *   or a previous parse failed. A forced run is the user asking us to look
+   *   again, so both fast paths must be off, otherwise the build reports
+   *   "finished N/N" without ever opening a single PDF.
    */
-  async indexItemWithProcessor(item: any, sharedProcessor: PDFProcessor | null): Promise<void> {
+  async indexItemWithProcessor(
+    item: any,
+    sharedProcessor: PDFProcessor | null,
+    force: boolean = this._forceRun,
+  ): Promise<void> {
     const startTime = Date.now();
     const itemTitle = item.getDisplayTitle?.() || item.key;
     ztoolkit.log(`[SemanticSearch] indexItem() start: ${item.key} "${itemTitle.substring(0, 30)}..."`);
@@ -666,16 +716,19 @@ export class SemanticSearchService {
     const needsCheckByTimestamp = await this.vectorStore.needsReindexByTimestamp(
       item.key, itemModified, attachmentModified
     );
-    if (!needsCheckByTimestamp) {
+    if (!needsCheckByTimestamp && !force) {
+      this.indexProgress.unchanged = (this.indexProgress.unchanged || 0) + 1;
       ztoolkit.log(`[SemanticSearch] indexItem() skip: timestamps unchanged for ${item.key}`);
       return;
     }
+    if (!needsCheckByTimestamp && force) {
+      ztoolkit.log(`[SemanticSearch] indexItem() force: timestamps unchanged for ${item.key}, re-extracting anyway`);
+    }
 
     // Timestamps changed - try to use cached content first (avoid PDF re-extraction)
-    let content: string;
-    let contentHash: string;
-
-    const cached = await this.vectorStore.getCachedContent(item.key);
+    // A forced run must not answer from the extraction cache either: the whole
+    // point is to run extraction again with the current MinerU settings.
+    const cached = force ? null : await this.vectorStore.getCachedContent(item.key);
     if (cached) {
       // Check if cached content hash matches stored index hash
       const needsIndex = await this.vectorStore.needsReindex(item.key, cached.hash);
@@ -687,6 +740,7 @@ export class SemanticSearchService {
             item.key, status.chunkCount, cached.hash, itemModified, attachmentModified
           );
         }
+        this.indexProgress.unchanged = (this.indexProgress.unchanged || 0) + 1;
         ztoolkit.log(`[SemanticSearch] indexItem() skip: cached content unchanged, updated timestamps`);
         return;
       }
@@ -701,7 +755,7 @@ export class SemanticSearchService {
     }
 
     // Extract content (PDF extraction happens here)
-    content = await this.extractItemContent(item, sharedProcessor);
+    const content = await this.extractItemContent(item, sharedProcessor);
     if (!content.trim()) {
       // Mark item in index_status even with no content, to prevent repeated rebuild attempts
       await this.vectorStore.updateIndexStatus(item.key, 0, 'empty', itemModified, attachmentModified);
@@ -719,7 +773,7 @@ export class SemanticSearchService {
     }
 
     // Calculate content hash
-    contentHash = this.hashContent(content);
+    const contentHash = this.hashContent(content);
 
     // Cache the extracted content for future use
     await this.vectorStore.setCachedContent(item.key, content, contentHash);
@@ -735,6 +789,7 @@ export class SemanticSearchService {
           item.key, status.chunkCount, contentHash, itemModified, attachmentModified
         );
       }
+      this.indexProgress.unchanged = (this.indexProgress.unchanged || 0) + 1;
       ztoolkit.log(`[SemanticSearch] indexItem() skip: content unchanged, updated timestamps`);
       return;
     }
@@ -779,6 +834,8 @@ export class SemanticSearchService {
     // Record the count of chunks actually embedded (embedBatch may have
     // skipped oversized chunks), not the total chunk count
     await this.vectorStore.updateIndexStatus(item.key, records.length, contentHash, itemModified, attachmentModified);
+
+    this.indexProgress.indexed = (this.indexProgress.indexed || 0) + 1;
 
     const elapsed = Date.now() - startTime;
     if (records.length < chunks.length) {
@@ -1109,7 +1166,15 @@ export class SemanticSearchService {
       // Get content from attachments (full text + annotations)
       if (item.isRegularItem?.()) {
         const attachmentIds = item.getAttachments?.() || [];
-        ztoolkit.log(`[SemanticSearch] extractItemContent() checking ${attachmentIds.length} attachments`);
+        const originalPDFs = await getOriginalPDFAttachmentsForItem(item);
+        const originalPDFIds = new Set(originalPDFs.map((attachment) => attachment.id));
+        ztoolkit.log(
+          "[SemanticSearch] attachment selection: " +
+            attachmentIds.length +
+            " total, " +
+            originalPDFIds.size +
+            " original PDF",
+        );
         let annotationCount = 0;
         let fullTextCount = 0;
 
@@ -1119,33 +1184,62 @@ export class SemanticSearchService {
             if (!attachment) continue;
 
             // Extract full text from PDF attachments using PDFProcessor
-            if (attachment.isPDFAttachment?.()) {
+            if (
+              attachment.isPDFAttachment?.() &&
+              originalPDFIds.has(attachment.id)
+            ) {
               try {
                 const filePath = await attachment.getFilePathAsync?.();
                 if (filePath) {
                   ztoolkit.log(`[SemanticSearch] extractItemContent() extracting PDF: ${filePath}`);
-                  // Use shared processor if provided (much faster for batch processing)
-                  const processor = sharedProcessor || new PDFProcessor(ztoolkit);
-                  const shouldTerminate = !sharedProcessor;  // Only terminate if we created it
-                  try {
-                    const textContent = await processor.extractText(filePath);
-                    if (textContent && textContent.length > 0) {
-                      const maxFullTextLength = 50000;
-                      const finalContent = textContent.length > maxFullTextLength
-                        ? textContent.substring(0, maxFullTextLength)
-                        : textContent;
-                      if (textContent.length > maxFullTextLength) {
-                        ztoolkit.log(`[SemanticSearch] extractItemContent() truncated to ${maxFullTextLength} chars`);
-                      }
-                      parts.push(finalContent);
-                      fullTextCount++;
-                      ztoolkit.log(`[SemanticSearch] extractItemContent() got PDF text: ${finalContent.length} chars`);
-                    } else {
-                      ztoolkit.log(`[SemanticSearch] extractItemContent() PDF extraction returned empty`);
+
+                  // MinerU 高精度解析优先：索引是批处理任务，允许阻塞等待解析。
+                  // 未启用 / 解析失败时返回 null，自动落到下面的内置提取。
+                  const minerUText = await getMinerUService().getIndexTextForAttachment(
+                    attachment,
+                    {
+                      allowParse: true,
+                      // A forced re-index is the user asking us to try again,
+                      // so don't sit on a cached parse failure.
+                      ignoreFailureCache: this._forceRun,
+                    },
+                  );
+                  if (minerUText) {
+                    const maxFullTextLength = 50000;
+                    const finalContent = minerUText.length > maxFullTextLength
+                      ? minerUText.substring(0, maxFullTextLength)
+                      : minerUText;
+                    if (minerUText.length > maxFullTextLength) {
+                      ztoolkit.log(`[SemanticSearch] extractItemContent() MinerU text truncated to ${maxFullTextLength} chars`);
                     }
-                  } finally {
-                    if (shouldTerminate) {
-                      processor.terminate();
+                    parts.push(finalContent);
+                    fullTextCount++;
+                    ztoolkit.log(`[SemanticSearch] extractItemContent() got MinerU text: ${finalContent.length} chars`);
+                  } else {
+                    // 回退：Zotero 内置 pdfWorker 提取
+                    // Use shared processor if provided (much faster for batch processing)
+                    const processor = sharedProcessor || new PDFProcessor(ztoolkit);
+                    const shouldTerminate = !sharedProcessor;  // Only terminate if we created it
+                    try {
+                      const textContent = await processor.extractText(filePath);
+                      if (textContent && textContent.length > 0) {
+                        const maxFullTextLength = 50000;
+                        const finalContent = textContent.length > maxFullTextLength
+                          ? textContent.substring(0, maxFullTextLength)
+                          : textContent;
+                        if (textContent.length > maxFullTextLength) {
+                          ztoolkit.log(`[SemanticSearch] extractItemContent() truncated to ${maxFullTextLength} chars`);
+                        }
+                        parts.push(finalContent);
+                        fullTextCount++;
+                        ztoolkit.log(`[SemanticSearch] extractItemContent() got PDF text: ${finalContent.length} chars`);
+                      } else {
+                        ztoolkit.log(`[SemanticSearch] extractItemContent() PDF extraction returned empty`);
+                      }
+                    } finally {
+                      if (shouldTerminate) {
+                        processor.terminate();
+                      }
                     }
                   }
                 } else {
@@ -1174,7 +1268,10 @@ export class SemanticSearchService {
             }
 
             // Get annotations from PDF attachments
-            if (attachment.isPDFAttachment?.()) {
+            if (
+              attachment.isPDFAttachment?.() &&
+              originalPDFIds.has(attachment.id)
+            ) {
               const annotations = attachment.getAnnotations?.() || [];
               for (const ann of annotations) {
                 const text = ann.annotationText;

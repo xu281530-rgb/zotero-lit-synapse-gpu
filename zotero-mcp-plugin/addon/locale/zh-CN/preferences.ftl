@@ -1,5 +1,4 @@
 pref-help = { $name } Build { $version } { $time }
-
 pref-server-title = MCP 服务器
 pref-section-server-desc = AI 客户端通过此服务连接你的 Zotero 文献库
 pref-server-enable =
@@ -14,7 +13,6 @@ pref-server-remote-text = 允许远程访问
 pref-server-remote-sub = 开启后请确保网络环境安全
 pref-server-allow-remote-warning = 警告：这将使 MCP 服务器暴露到网络中。仅在需要远程访问或遇到 VPN/代理问题时启用。
 pref-server-off-hint = MCP 服务器已关闭，开启后即可配置客户端和搜索功能
-
 pref-mcp-settings-title = 内容设置
 pref-mcp-settings-description = 配置 MCP 服务器如何处理和返回内容给 AI 客户端
 pref-section-content-desc = 控制 MCP 返回给 AI 的内容量和格式
@@ -44,7 +42,6 @@ pref-include-metadata-label =
     .label = 在响应中包含项目元数据
 pref-include-metadata-text = 包含元数据
 pref-include-metadata-sub = 返回标题、作者、DOI 等字段
-
 pref-client-config-title = 客户端配置
 pref-client-config-description = 为主流 AI 客户端生成 MCP 服务器配置文件，方便快速连接到 Zotero MCP 服务器。
 pref-section-client-desc = 选择你的 AI 客户端，一键生成连接配置
@@ -65,13 +62,11 @@ pref-config-guide-title = 使用说明
 pref-config-guide-placeholder = 选择客户端类型并生成配置后，此处将显示详细的配置指南...
 pref-client-codex-cli = Codex CLI
 pref-client-custom-http = 自定义 HTTP 客户端
-
 pref-semantic-enable =
     .label = 启用语义搜索
 pref-semantic-enable-text = 启用语义搜索
 pref-semantic-enable-sub = 关闭后仅使用关键词搜索
 pref-semantic-disabled-hint = 语义搜索已关闭 · 开启后可使用自然语言检索文献
-
 pref-embedding-title = 语义搜索
 pref-embedding-description = 配置用于语义搜索的 Embedding API。支持 OpenAI 兼容的 API。
 pref-section-semantic-desc = 通过向量嵌入实现自然语言文献检索
@@ -104,14 +99,12 @@ pref-embedding-dimensions-auto = 自动（从 API 检测）
 pref-embedding-detected-dims = 检测到的维度
 pref-embedding-dimension-mismatch = 维度不匹配！索引使用的维度与当前配置不同，请重建索引以使用新配置。
 pref-embedding-model-change-warning = 模型已更改，已有索引可能不兼容。请测试连接后重建索引。
-
 pref-rate-limit-title = 速率与费用
 pref-rate-limit-rpm-label = 每分钟请求数：
 pref-rate-limit-tpm-label = 每分钟令牌数：
 pref-rate-limit-cost-label = $/1M 令牌
 pref-rate-limit-zero-hint = 0 = 不限
 pref-section-index-label = 索引
-
 pref-api-usage-title = API 使用统计
 pref-api-usage-total-tokens = 累计令牌消耗：
 pref-api-usage-total-requests = 累计 API 请求：
@@ -129,12 +122,10 @@ pref-api-usage-reset-button =
     .label = 重置统计
 pref-api-usage-reset-button-text = 重置统计
 pref-api-usage-reset-confirm = 确定要重置所有 API 使用统计吗？此操作无法撤销。
-
 pref-api-stat-tokens = 令牌
 pref-api-stat-requests = 请求
 pref-api-stat-cost = 费用
 pref-api-stat-rate-hits = 限速触发
-
 pref-semantic-stats-title = 语义索引状态
 pref-semantic-stats-loading = 正在加载...
 pref-semantic-stats-total-items = 已索引条目：
@@ -158,12 +149,10 @@ pref-semantic-stats-refresh-button =
     .label = 刷新
 pref-semantic-stats-not-initialized = 语义搜索服务未初始化
 pref-semantic-stats-db-corrupted = 索引数据库已损坏，请重启 Zotero 自动修复
-
 pref-stat-items = 文献
 pref-stat-vectors = 向量
 pref-stat-database = 数据库
 pref-stat-status = 状态
-
 pref-semantic-index-control-title = 索引操作
 pref-semantic-auto-update =
     .label = 条目变化时自动更新索引（添加/修改）
@@ -211,20 +200,117 @@ pref-semantic-index-busy = 已有索引任务正在运行，请等待其完成
 pref-semantic-index-confirm-rebuild = 这将重建整个索引，确定吗？
 pref-semantic-index-confirm-clear = 这将清空所有索引数据（保留内容缓存），确定吗？
 pref-semantic-index-cleared = 索引已清空
-
 pref-detail-stats-title = 详细统计与 API 用量
 pref-detail-index-section = 索引详情
 pref-detail-api-section = API 累计
-
 first-install-title = 欢迎使用 Zotero MCP 插件
 first-install-prompt = 感谢安装 Zotero MCP 插件！为了开始使用，您需要为您的 AI 客户端生成配置文件。是否现在打开设置页面来生成配置？
 first-install-open-prefs = 打开设置
 first-install-later = 稍后配置
-
 pref-write-enable-text = 启用写入操作
 pref-write-enable-sub = 允许 AI 客户端创建和修改笔记（默认关闭以确保安全）
-
 pref-contact-title = 联系方式
 pref-contact-email = 邮箱：fransjone@mail.com
 pref-contact-github = GitHub：https://github.com/cookjohn/zotero-mcp
 pref-contact-wechat = 微信公众号：未来论文实验室
+# ============ MinerU 高精度 PDF 解析 ============
+pref-mineru-title = PDF 高精度解析（MinerU）
+pref-mineru-desc = 在把 PDF 交给向量索引和 MCP 全文工具之前，先用 MinerU 做版面还原，得到带标题层级、公式与表格的 Markdown，替代 Zotero 内置的裸文本提取。
+pref-mineru-enable-text = 启用 MinerU 解析
+pref-mineru-enable-sub = 语义索引与 PDF 阅读共用同一份 MinerU Markdown；关闭后含 PDF 的条目不会回退生成第二份文本
+pref-mineru-mode-label = 部署方式
+pref-mineru-mode-cloud = 云端 API（mineru.net）
+pref-mineru-mode-local = 本地 mineru-api
+pref-mineru-mode-hint = 云端需要 API Token 并消耗官方配额；本地需自行部署 mineru-api（Python 3.10-3.13）。
+pref-mineru-base-url-label = 服务地址
+pref-mineru-token-label = API Token
+pref-mineru-token-hint = 在 mineru.net 个人中心申请，仅云端模式需要。
+pref-mineru-model-label = 解析模型
+pref-mineru-model-vlm = VLM（精度更高）
+pref-mineru-model-pipeline = Pipeline（更快更省）
+pref-mineru-model-hybrid = 混合（MinerU 3.4+，本地）
+pref-mineru-language-label = 文档语言
+pref-mineru-language-hint = 仅影响需要 OCR 的扫描件。默认 ch 已覆盖中英日繁，不支持填 auto。
+pref-mineru-vlm-hint = VLM 为整页视觉解析，「强制 OCR」与「文档语言」对它无效；改用 Pipeline 或混合模型后才会生效。
+pref-mineru-ocr-text = 强制 OCR
+pref-mineru-ocr-sub = 扫描件或无文本层的 PDF 才需要开启，会显著变慢
+pref-mineru-formula-text = 解析公式
+pref-mineru-formula-sub = 把公式还原为 LaTeX
+pref-mineru-table-text = 解析表格
+pref-mineru-table-sub = 把表格还原为 Markdown 表格
+pref-mineru-test-button-text = 测试连接
+pref-mineru-testing = 正在测试…
+pref-mineru-reindex-hint = 提示：构建索引会先生成或复用 MinerU Markdown，并自动供 PDF 阅读器使用；已有旧索引请执行「重建索引」。
+pref-mineru-attach-text = 把解析结果挂到条目下
+pref-mineru-attach-sub = 解析成功后，在原 PDF 所属条目下生成一个 Markdown 子附件，可直接打开查看；重新解析会替换旧的，不会重复堆积
+pref-mineru-advanced-title = 高级选项与解析缓存
+pref-mineru-concurrency-label = 并发数
+pref-mineru-timeout-label = 超时（秒）
+pref-mineru-max-size-label = 单文件上限（MB）
+pref-mineru-blocking-text = 允许 MCP 接口即时解析
+pref-mineru-blocking-sub = 默认关闭。开启后 MCP 全文工具在缓存未命中时会等待 MinerU 解析完成，可能导致 AI 客户端请求超时。
+pref-mineru-cache-refresh-button-text = 刷新缓存统计
+pref-mineru-cache-clear-button-text = 清空解析缓存
+pref-mineru-cache-clear-confirm = 这将删除所有已缓存的 MinerU 解析结果，下次索引需要重新解析，确定吗？
+pref-mineru-cache-cleared = 解析缓存已清空
+
+
+
+
+# Hardened build security settings
+pref-server-token-label = MCP 访问令牌
+pref-server-token-regenerate = 重新生成
+pref-server-token-hint = 启用远程访问时必须使用此令牌。请像密码一样保管，并在客户端发送 Authorization: Bearer <令牌>。
+pref-write-confirm-text = 每次写入前在 Zotero 中确认
+pref-write-confirm-sub = 建议保持开启；模型无法绕过本机确认对话框。
+pref-file-import-text = 允许 MCP 导入本地文件
+pref-file-import-sub = 高风险功能，默认关闭。仅在明确需要时开启。
+pref-expose-paths-text = 在 MCP 结果中暴露本地文件路径
+pref-expose-paths-sub = 默认隐藏绝对路径，减少本机信息泄露。
+
+# ============ PDF 阅读与翻译（集成于高精度解析） ============
+pref-translation-title = PDF 阅读与翻译
+pref-translation-desc = 阅读器、全文翻译和语义索引直接复用上方 MinerU 生成的同一份 Markdown；这里仅配置翻译模型与术语策略，不再创建第二个设置条目。
+pref-translation-provider-label = 服务商
+pref-translation-base-url-label = 翻译接口地址
+pref-translation-api-key-label = 翻译 API Key
+pref-translation-model-label = 翻译模型
+pref-translation-language-label = 目标语言
+pref-translation-context-text = 启用 AI 智能上下文
+pref-translation-context-sub = 翻译当前内容块时参考相邻段落与文档结构
+pref-translation-document-glossary-text = 自动生成单篇文档术语
+pref-translation-document-glossary-sub = 为当前 PDF 提取并使用专属术语映射
+pref-translation-global-glossary-text = 使用全局术语表
+pref-translation-global-glossary-sub = 在所有 PDF 翻译中复用下方维护的术语
+pref-translation-expert-label = 领域专家
+pref-translation-expert-auto = 自动识别
+pref-translation-expert-general = 通用
+pref-translation-expert-academic = 学术
+pref-translation-expert-technical = 技术
+pref-translation-expert-legal = 法律
+pref-translation-expert-medical = 医学
+pref-translation-expert-custom = 自定义
+pref-translation-expert-custom-label = 专家指令
+pref-translation-prompt-title = 翻译提示词模板
+pref-translation-prompt-edit = 编辑提示词
+pref-translation-prompt-reset = 恢复默认
+pref-translation-prompt-hint = 可用变量：target_language、text、context、glossary（在模板中使用双花括号）。
+pref-translation-glossary-title = 全局术语表
+pref-translation-glossary-search =
+    .placeholder = 搜索术语
+pref-translation-glossary-add = 添加
+pref-translation-glossary-import = 导入
+pref-translation-glossary-export = 导出
+pref-translation-glossary-save = 保存术语表
+pref-translation-glossary-enabled = 启用
+pref-translation-glossary-source = 原文
+pref-translation-glossary-target = 译文
+pref-translation-glossary-language = 目标语言
+pref-translation-glossary-note = 备注
+pref-translation-performance-title = 翻译性能与可靠性
+pref-translation-batch-label = 每批内容块
+pref-translation-concurrency-label = 并发请求
+pref-translation-retries-label = 失败重试
+
+# Unified PDF Markdown pipeline
+pref-mineru-unified-flow = 统一流程：建立语义索引时会先生成或复用 MinerU Markdown，再由同一份 Markdown 建立索引并驱动 PDF 阅读、段落覆盖与翻译；无需再单独解析一次 PDF。

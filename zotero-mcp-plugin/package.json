@@ -1,14 +1,15 @@
 {
   "name": "zotero-mcp-plugin",
   "type": "module",
-  "version": "1.5.0",
-  "description": "Zotero MCP Plugin",
+  "version": "1.6.5+6",
+  "description": "Zotero MCP Plugin with original-PDF-only indexing with direct Doc2X original-note Markdown reuse, MinerU parse reuse, and PDF-change-aware high-precision indexing for Zotero 9.0.x with MCP 2026-07-28 stateless Streamable HTTP compliance",
   "config": {
     "addonName": "Zotero MCP Plugin",
     "addonID": "zotero-mcp-plugin@autoagent.my",
     "addonRef": "zotero-mcp-plugin",
     "addonInstance": "ZoteroMCP",
-    "prefsPrefix": "extensions.zotero.zotero-mcp-plugin"
+    "prefsPrefix": "extensions.zotero.zotero-mcp-plugin",
+    "addonVersion": "1.6.5.6"
   },
   "repository": {
     "type": "git",
@@ -28,6 +29,7 @@
     "release": "npm version patch --force -m \"Release v%s\" && git push --follow-tags",
     "release:beta": "npm version prepatch --preid beta --force -m \"Release v%s\" && git push --follow-tags",
     "prepare-release": "node scripts/prepare-release.js",
+    "version": "node scripts/sync-addon-version.js && npm run prepare-release && git add package.json package-lock.json update.json update-beta.json",
     "release:init": "node scripts/init-release.js",
     "test": "zotero-plugin test",
     "test:update": "node scripts/test-update.js",

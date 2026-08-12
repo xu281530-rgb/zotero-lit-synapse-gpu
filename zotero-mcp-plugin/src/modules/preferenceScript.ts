@@ -1,6 +1,8 @@
 import { config } from "../../package.json";
 import { getString } from "../utils/locale";
 import { ClientConfigGenerator } from "./clientConfigGenerator";
+import { generateSecureIdentifier } from "../utils/security";
+import { trackedSetTimeout } from "../hooks";
 
 export async function registerPrefsScripts(_window: Window) {
   // This function is called when the prefs window is opened
@@ -159,6 +161,44 @@ function bindPrefEvents() {
 
   // Bind HTML toggle switches (these need manual pref sync since they're not XUL checkboxes)
   bindHtmlCheckbox(doc, `#zotero-prefpane-${config.addonRef}-mcp-server-allow-remote`, "extensions.zotero.zotero-mcp-plugin.mcp.server.allowRemote");
+  bindHtmlInput(doc, `#zotero-prefpane-${config.addonRef}-mcp-server-auth-token`, "extensions.zotero.zotero-mcp-plugin.mcp.server.authToken");
+  bindHtmlCheckbox(doc, `#zotero-prefpane-${config.addonRef}-write-confirm`, "extensions.zotero.zotero-mcp-plugin.write.confirmBeforeMutation");
+  bindHtmlCheckbox(doc, `#zotero-prefpane-${config.addonRef}-file-import-enabled`, "extensions.zotero.zotero-mcp-plugin.write.allowFileImport");
+  bindHtmlCheckbox(doc, `#zotero-prefpane-${config.addonRef}-expose-file-paths`, "extensions.zotero.zotero-mcp-plugin.privacy.exposeFilePaths");
+
+  const remoteToggle = doc?.querySelector(`#zotero-prefpane-${config.addonRef}-mcp-server-allow-remote`) as HTMLInputElement;
+  const tokenInput = doc?.querySelector(`#zotero-prefpane-${config.addonRef}-mcp-server-auth-token`) as HTMLInputElement;
+  const regenerateTokenButton = doc?.querySelector('#regenerate-mcp-token-button') as HTMLButtonElement;
+
+  regenerateTokenButton?.addEventListener('click', () => {
+    const token = generateSecureIdentifier("");
+    Zotero.Prefs.set("extensions.zotero.zotero-mcp-plugin.mcp.server.authToken", token, true);
+    if (tokenInput) tokenInput.value = token;
+  });
+
+  remoteToggle?.addEventListener('change', () => {
+    try {
+      if (remoteToggle.checked) {
+        let token = String(Zotero.Prefs.get("extensions.zotero.zotero-mcp-plugin.mcp.server.authToken", true) || '').trim();
+        if (token.length < 32) {
+          token = generateSecureIdentifier("");
+          Zotero.Prefs.set("extensions.zotero.zotero-mcp-plugin.mcp.server.authToken", token, true);
+          if (tokenInput) tokenInput.value = token;
+        }
+      }
+      const httpServer = addon.data.httpServer;
+      if (httpServer?.isServerRunning()) {
+        const portPref = Zotero.Prefs.get("extensions.zotero.zotero-mcp-plugin.mcp.server.port", true);
+        const port = typeof portPref === 'number' ? portPref : 23120;
+        httpServer.stop();
+        httpServer.start(port);
+        ztoolkit.log(`[PreferenceScript] Server rebound after remote-access change on port ${port}`);
+      }
+    } catch (error) {
+      ztoolkit.log(`[PreferenceScript] Failed to apply remote-access change: ${error}`, "error");
+      addon.data.prefs!.window.alert(`Failed to apply MCP remote-access setting: ${error}`);
+    }
+  });
   bindHtmlCheckbox(doc, `#zotero-prefpane-${config.addonRef}-include-metadata`, "extensions.zotero.zotero-mcp-plugin.ui.includeMetadata");
   bindHtmlCheckbox(doc, `#zotero-prefpane-${config.addonRef}-semantic-auto-update`, "extensions.zotero.zotero-mcp-plugin.semantic.autoUpdate");
   bindHtmlCheckbox(doc, `#zotero-prefpane-${config.addonRef}-custom-include-webpage`, "extensions.zotero.zotero-mcp-plugin.custom.includeWebpage");
@@ -294,8 +334,232 @@ function bindPrefEvents() {
   // ============ Semantic Index Stats ============
   bindSemanticStatsSettings(doc);
 
+  // ============ MinerU PDF Parsing ============
+  bindMinerUSettings(doc);
+
+  // ============ Integrated PDF Translation ============
+  bindTranslationSettings(doc);
+  initIntegratedTranslationPreferences(addon.data.prefs!.window);
+
   // ============ Rate Limit Summary ============
   updateRateLimitSummary(doc);
+}
+
+/**
+ * MinerU 高精度 PDF 解析设置
+ * - 总开关控制下方配置区显隐
+ * - 切换 cloud/local 时自动纠正 base URL 并显隐 Token 输入
+ * - 测试连接 / 查看与清空解析缓存
+ */
+function bindMinerUSettings(doc: Document) {
+  const P = "extensions.zotero.zotero-mcp-plugin.mineru.";
+  const ref = config.addonRef;
+
+  const modeSelect = doc?.querySelector(`#zotero-prefpane-${ref}-mineru-mode`) as HTMLSelectElement;
+  const baseUrlInput = doc?.querySelector(`#zotero-prefpane-${ref}-mineru-base-url`) as HTMLInputElement;
+  const tokenRow = doc?.querySelector('#mineru-token-row') as HTMLElement;
+  const testButton = doc?.querySelector('#test-mineru-button') as HTMLButtonElement;
+  const testResult = doc?.querySelector('#mineru-test-result') as HTMLElement;
+  const modelSelect = doc?.querySelector(`#zotero-prefpane-${ref}-mineru-model-version`) as HTMLSelectElement;
+  const hybridOption = doc?.querySelector('#mineru-model-hybrid-option') as HTMLOptionElement;
+  const ocrRow = doc?.querySelector('#mineru-ocr-row') as HTMLElement;
+  const languageRow = doc?.querySelector('#mineru-language-row') as HTMLElement;
+  const vlmHint = doc?.querySelector('#mineru-vlm-hint') as HTMLElement;
+  const languageInput = doc?.querySelector(`#zotero-prefpane-${ref}-mineru-language`) as HTMLInputElement;
+  const cacheSummary = doc?.querySelector('#mineru-cache-summary') as HTMLElement;
+  const cacheResult = doc?.querySelector('#mineru-cache-result') as HTMLElement;
+  const refreshCacheButton = doc?.querySelector('#refresh-mineru-cache-button') as HTMLButtonElement;
+  const clearCacheButton = doc?.querySelector('#clear-mineru-cache-button') as HTMLButtonElement;
+
+  const CLOUD_URL = "https://mineru.net";
+  const LOCAL_URL = "http://127.0.0.1:8000";
+
+  // VLM 后端整页视觉解析，不吃 parse_method 与 OCR 语言，对应控件置灰
+  const applyModelCapabilities = () => {
+    const isVLM = (modelSelect?.value || 'vlm') === 'vlm';
+    const ocrCheckbox = doc?.querySelector(
+      `#zotero-prefpane-${ref}-mineru-enable-ocr`,
+    ) as HTMLInputElement;
+    if (ocrCheckbox) ocrCheckbox.disabled = isVLM;
+    if (languageInput) languageInput.disabled = isVLM;
+    ocrRow?.classList.toggle('zmp-inert', isVLM);
+    languageRow?.classList.toggle('zmp-inert', isVLM);
+    if (vlmHint) vlmHint.style.display = isVLM ? '' : 'none';
+  };
+
+  // 模式切换：同步纠正 base URL，并显隐 Token 行
+  const applyMode = (mode: string) => {
+    if (tokenRow) tokenRow.style.display = mode === 'local' ? 'none' : '';
+    // 云端 model_version 只有 pipeline / vlm / MinerU-HTML，没有 hybrid
+    if (hybridOption) {
+      hybridOption.hidden = mode !== 'local';
+      hybridOption.disabled = mode !== 'local';
+    }
+    if (mode !== 'local' && modelSelect?.value === 'hybrid') {
+      modelSelect.value = 'vlm';
+      Zotero.Prefs.set(`${P}modelVersion`, 'vlm', true);
+    }
+    applyModelCapabilities();
+    if (baseUrlInput) {
+      const current = (baseUrlInput.value || '').trim().replace(/\/+$/, '');
+      if (!current || current === CLOUD_URL || current === LOCAL_URL) {
+        const next = mode === 'local' ? LOCAL_URL : CLOUD_URL;
+        baseUrlInput.value = next;
+        Zotero.Prefs.set(`${P}baseURL`, next, true);
+      }
+      baseUrlInput.placeholder = mode === 'local' ? LOCAL_URL : CLOUD_URL;
+    }
+  };
+
+  if (modeSelect) {
+    const savedMode = (Zotero.Prefs.get(`${P}mode`, true) as string) || 'cloud';
+    modeSelect.value = savedMode;
+    applyMode(savedMode);
+    modeSelect.addEventListener('change', () => {
+      Zotero.Prefs.set(`${P}mode`, modeSelect.value, true);
+      applyMode(modeSelect.value);
+    });
+  }
+
+  bindHtmlInput(doc, `#zotero-prefpane-${ref}-mineru-base-url`, `${P}baseURL`);
+  bindHtmlInput(doc, `#zotero-prefpane-${ref}-mineru-api-token`, `${P}apiToken`);
+  bindHtmlSelect(doc, `#zotero-prefpane-${ref}-mineru-model-version`, `${P}modelVersion`);
+  modelSelect?.addEventListener('change', applyModelCapabilities);
+  bindHtmlInput(doc, `#zotero-prefpane-${ref}-mineru-language`, `${P}language`);
+  bindHtmlCheckbox(doc, `#zotero-prefpane-${ref}-mineru-enable-ocr`, `${P}enableOCR`);
+  bindHtmlCheckbox(doc, `#zotero-prefpane-${ref}-mineru-enable-formula`, `${P}enableFormula`);
+  bindHtmlCheckbox(doc, `#zotero-prefpane-${ref}-mineru-enable-table`, `${P}enableTable`);
+  bindHtmlInput(doc, `#zotero-prefpane-${ref}-mineru-concurrency`, `${P}concurrency`, true);
+  bindHtmlInput(doc, `#zotero-prefpane-${ref}-mineru-timeout`, `${P}timeoutSeconds`, true);
+  bindHtmlInput(doc, `#zotero-prefpane-${ref}-mineru-max-size`, `${P}maxFileSizeMB`, true);
+  bindHtmlCheckbox(doc, `#zotero-prefpane-${ref}-mineru-blocking-on-demand`, `${P}blockingOnDemand`);
+
+  // bindHtmlCheckbox 对未设置过的布尔项默认勾选，OCR 默认应为关闭
+  const ocrCheckbox = doc?.querySelector(`#zotero-prefpane-${ref}-mineru-enable-ocr`) as HTMLInputElement;
+  if (ocrCheckbox) {
+    ocrCheckbox.checked = Zotero.Prefs.get(`${P}enableOCR`, true) === true;
+  }
+  const blockingCheckbox = doc?.querySelector(`#zotero-prefpane-${ref}-mineru-blocking-on-demand`) as HTMLInputElement;
+  if (blockingCheckbox) {
+    blockingCheckbox.checked = Zotero.Prefs.get(`${P}blockingOnDemand`, true) === true;
+  }
+
+  // bindHtmlSelect 在上面才把偏好值写回 modelSelect，初始化时 applyMode 读到的
+  // 还是 DOM 默认值，所以这里再纠正一次「云端 + hybrid」这种不存在的组合。
+  if (
+    modelSelect?.value === 'hybrid' &&
+    ((modeSelect?.value as string) || 'cloud') !== 'local'
+  ) {
+    modelSelect.value = 'vlm';
+    Zotero.Prefs.set(`${P}modelVersion`, 'vlm', true);
+  }
+  applyModelCapabilities();
+
+  // 测试连接
+  if (testButton && testResult) {
+    testButton.addEventListener('click', async () => {
+      testButton.disabled = true;
+      testResult.textContent = getString('pref-mineru-testing');
+      testResult.style.color = 'var(--text-2)';
+      try {
+        const { getMinerUService } = await import('./mineru');
+        const result = await getMinerUService().testConnection();
+        testResult.textContent = result.message;
+        testResult.style.color = result.ok ? 'var(--green)' : 'var(--red)';
+      } catch (error) {
+        testResult.textContent = String(error);
+        testResult.style.color = 'var(--red)';
+      } finally {
+        testButton.disabled = false;
+      }
+    });
+  }
+
+  // 缓存统计
+  const refreshCacheStats = async () => {
+    try {
+      const { getMinerUService } = await import('./mineru');
+      const stats = await getMinerUService().getCacheStats();
+      const mb = (stats.bytes / 1024 / 1024).toFixed(1);
+      if (cacheSummary) cacheSummary.textContent = `${stats.entries} 篇 · ${mb} MB`;
+      if (cacheResult) {
+        cacheResult.textContent = `${stats.entries} 篇 · ${mb} MB`;
+        cacheResult.style.color = 'var(--text-2)';
+      }
+    } catch (error) {
+      ztoolkit.log(`[PreferenceScript] MinerU cache stats failed: ${error}`, 'warn');
+    }
+  };
+  refreshCacheStats();
+  refreshCacheButton?.addEventListener('click', () => { refreshCacheStats(); });
+
+  clearCacheButton?.addEventListener('click', async () => {
+    const win = addon.data.prefs?.window;
+    if (win && !win.confirm(getString('pref-mineru-cache-clear-confirm'))) {
+      return;
+    }
+    try {
+      const { getMinerUService } = await import('./mineru');
+      await getMinerUService().clearCache();
+      if (cacheResult) {
+        cacheResult.textContent = getString('pref-mineru-cache-cleared');
+        cacheResult.style.color = 'var(--green)';
+      }
+      refreshCacheStats();
+    } catch (error) {
+      if (cacheResult) {
+        cacheResult.textContent = String(error);
+        cacheResult.style.color = 'var(--red)';
+      }
+    }
+  });
+}
+
+/**
+ * 集成版 PDF 翻译设置面板由 mark-reader 子系统提供，
+ * 首选项窗口就绪后把它挂到本插件的设置根节点上。
+ */
+function initIntegratedTranslationPreferences(win: Window) {
+  const tryInit = () => {
+    try {
+      const helper = (win as any)?.Zotero_Preferences?.ZoteroMarkReaderPreferences || (win as any)?.ZoteroMarkReaderPreferences;
+      const rootNode = win?.document?.querySelector('#zotero-mcp-plugin-preferences');
+      if (!helper?.init || !rootNode) return false;
+      helper.init(rootNode);
+      ztoolkit.log("[PreferenceScript] Integrated PDF translation settings initialized");
+      return true;
+    } catch (error) {
+      ztoolkit.log(`[PreferenceScript] Translation settings initialization failed: ${error}`, "error");
+      return false;
+    }
+  };
+
+  if (!tryInit()) {
+    trackedSetTimeout(tryInit, 0);
+    trackedSetTimeout(tryInit, 250);
+  }
+}
+
+/**
+ * LLM / 翻译相关偏好绑定
+ */
+function bindTranslationSettings(doc: Document) {
+  const L = "extensions.zotero.zotero-mcp-plugin.llm.";
+  const T = "extensions.zotero.zotero-mcp-plugin.translation.";
+
+  bindHtmlInput(doc, '#zmr-llm-provider', `${L}provider`);
+  bindHtmlInput(doc, '#zmr-llm-base-url', `${L}baseURL`);
+  bindHtmlInput(doc, '#zmr-llm-api-key', `${L}apiKey`);
+  bindHtmlInput(doc, '#zmr-llm-model', `${L}model`);
+  bindHtmlSelect(doc, '#zmr-llm-language', `${L}targetLanguage`);
+  bindHtmlCheckbox(doc, '#zmr-translation-context-enabled', `${T}contextEnabled`);
+  bindHtmlCheckbox(doc, '#zmr-translation-auto-document-glossary', `${T}autoDocumentGlossary`);
+  bindHtmlCheckbox(doc, '#zmr-translation-use-global-glossary', `${T}useGlobalGlossary`);
+  bindHtmlSelect(doc, '#zmr-translation-expert', `${T}expertMode`);
+  bindHtmlInput(doc, '#zmr-translation-expert-custom', `${T}expertCustom`);
+  bindHtmlInput(doc, '#zmr-translation-batch-size', `${T}batchSize`, true);
+  bindHtmlInput(doc, '#zmr-translation-concurrency', `${T}concurrency`, true);
+  bindHtmlInput(doc, '#zmr-translation-retries', `${T}maxRetries`, true);
 }
 
 /**
@@ -306,11 +570,13 @@ function updateServerDependentUI(doc: Document, enabled: boolean) {
   const serverOffHint = doc?.querySelector('#server-off-hint') as HTMLElement;
   const portRow = doc?.querySelector('#server-port-row') as HTMLElement;
   const remoteRow = doc?.querySelector('#server-remote-row') as HTMLElement;
+  const tokenRow = doc?.querySelector('#server-token-row') as HTMLElement;
 
   if (serverContent) serverContent.style.display = enabled ? '' : 'none';
   if (serverOffHint) serverOffHint.style.display = enabled ? 'none' : 'block';
   if (portRow) portRow.style.display = enabled ? '' : 'none';
   if (remoteRow) remoteRow.style.display = enabled ? '' : 'none';
+  if (tokenRow) tokenRow.style.display = enabled ? '' : 'none';
 }
 
 /**
@@ -321,6 +587,10 @@ function bindCollapsiblePanels(doc: Document) {
     { toggle: '#custom-settings-toggle', panel: '#custom-settings-panel' },
     { toggle: '#rate-limit-toggle', panel: '#rate-limit-panel' },
     { toggle: '#detail-stats-toggle', panel: '#detail-stats-panel' },
+    { toggle: '#mineru-advanced-toggle', panel: '#mineru-advanced-panel' },
+    { toggle: '#translation-prompt-toggle', panel: '#translation-prompt-panel' },
+    { toggle: '#translation-glossary-toggle', panel: '#translation-glossary-panel' },
+    { toggle: '#translation-performance-toggle', panel: '#translation-performance-panel' },
   ];
 
   for (const { toggle, panel } of panels) {

@@ -13,14 +13,16 @@ const updateBetaJsonPath = path.join(rootDir, "update-beta.json");
 
 const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8"));
 const {
-  version,
-  config: { addonID },
+  config: { addonID, addonVersion },
 } = packageJson;
 
 const repoUrl = "https://github.com/cookjohn/zotero-mcp";
 
 function generateUpdateJson(isBeta = false) {
-  const currentVersion = isBeta ? `${version}-beta.0` : version;
+  const currentVersion =
+    isBeta && !addonVersion.includes("-")
+      ? addonVersion + "-beta.0"
+      : addonVersion;
   const updateLink = `${repoUrl}/releases/download/v${currentVersion}/zotero-mcp-plugin-${currentVersion}.xpi`;
 
   return {
@@ -32,8 +34,8 @@ function generateUpdateJson(isBeta = false) {
             update_link: updateLink,
             applications: {
               zotero: {
-                strict_min_version: "6.999",
-                strict_max_version: "9.*",
+                strict_min_version: "9.0",
+                strict_max_version: "9.0.*",
               },
             },
           },
@@ -53,5 +55,5 @@ fs.writeFileSync(
 );
 
 console.log(
-  `Generated update.json and update-beta.json for version ${version}`,
+  `Generated update.json and update-beta.json for version ${addonVersion}`,
 );

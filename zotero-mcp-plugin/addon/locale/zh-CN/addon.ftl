@@ -9,7 +9,6 @@ prefs-table-title = 标题
 prefs-table-detail = 详情
 tabpanel-lib-tab-label = 库标签
 tabpanel-reader-tab-label = 阅读器标签
-
 # 客户端配置说明
 codex-cli-instructions =
     ══════════════════════════════════════════════════════════
@@ -25,29 +24,6 @@ codex-cli-instructions =
        1. 打开 ~/.codex/config.toml
        2. 将生成的 TOML 片段添加到 [mcp_servers] 下
        3. 保留 headers 配置块：
-          [mcp_servers."zotero-mcp".headers]
-          "Content-Type" = "application/json"
-       4. 保存后重启 Codex CLI 会话
-
-    ▶ 方法 3：与 Claude Code / cc-switch 统一配置
-    ──────────────────────────────────────────────────────────
-       1. 统一使用同一 HTTP 端点与 Content-Type header
-       2. 带 headers 的 Claude Code JSON 配置可兼容使用
-       3. 通过一份 zotero-mcp 定义复用到多客户端
-
-    ▶ 验证
-    ──────────────────────────────────────────────────────────
-       1. 使用 `codex mcp list` 确认服务已注册
-       2. 执行一次会调用 tools/list 或 Zotero 工具的请求
-
-    ▶ 前提条件
-    ──────────────────────────────────────────────────────────
-       ✓ Zotero 正在运行
-       ✓ MCP 插件服务已启用
-       ✓ 127.0.0.1 端点可访问
-
-    ══════════════════════════════════════════════════════════
-
 claude-desktop-instructions =
     ══════════════════════════════════════════════════════════
       Claude Desktop MCP 配置指南
@@ -78,7 +54,6 @@ claude-desktop-instructions =
        • 配置未生效: 重启 Claude Desktop
 
     ══════════════════════════════════════════════════════════
-
 cline-vscode-instructions =
     ══════════════════════════════════════════════════════════
       Cline (VS Code) MCP 配置指南
@@ -103,7 +78,6 @@ cline-vscode-instructions =
        ✓ alwaysAllow: ["*"] 可自动授权工具调用
 
     ══════════════════════════════════════════════════════════
-
 continue-dev-instructions =
     ══════════════════════════════════════════════════════════
       Continue.dev MCP 配置指南
@@ -126,7 +100,6 @@ continue-dev-instructions =
        ✓ Zotero 必须正在运行
 
     ══════════════════════════════════════════════════════════
-
 cursor-instructions =
     ══════════════════════════════════════════════════════════
       Cursor MCP 配置指南
@@ -154,7 +127,6 @@ cursor-instructions =
        • 连接超时: 检查 Zotero 是否运行
 
     ══════════════════════════════════════════════════════════
-
 cherry-studio-instructions =
     ══════════════════════════════════════════════════════════
       Cherry Studio MCP 配置指南
@@ -176,7 +148,6 @@ cherry-studio-instructions =
        ✓ Zotero 必须正在运行
 
     ══════════════════════════════════════════════════════════
-
 gemini-cli-instructions =
     ══════════════════════════════════════════════════════════
       Gemini CLI MCP 配置指南
@@ -204,7 +175,6 @@ gemini-cli-instructions =
        ✓ 无需额外依赖
 
     ══════════════════════════════════════════════════════════
-
 workbuddy-instructions =
     ══════════════════════════════════════════════════════════
       WorkBuddy MCP 配置指南
@@ -220,7 +190,6 @@ workbuddy-instructions =
     ──────────────────────────────────────────────────────────
        • 需要安装 Node.js（配置使用 npx mcp-remote 桥接）
        • Zotero 需保持运行且已启用 MCP 服务器
-
 chatbox-instructions =
     ══════════════════════════════════════════════════════════
       Chatbox MCP 配置指南
@@ -241,7 +210,6 @@ chatbox-instructions =
        ✓ Zotero 必须正在运行
 
     ══════════════════════════════════════════════════════════
-
 trae-ai-instructions =
     ══════════════════════════════════════════════════════════
       Trae AI MCP 配置指南
@@ -263,7 +231,6 @@ trae-ai-instructions =
        ✓ Zotero 必须正在运行
 
     ══════════════════════════════════════════════════════════
-
 custom-http-instructions =
     ══════════════════════════════════════════════════════════
       通用 HTTP MCP 客户端配置
@@ -287,18 +254,15 @@ custom-http-instructions =
        ✓ 客户端必须支持 Streamable HTTP 传输
 
     ══════════════════════════════════════════════════════════
-
-config-guide-header = # {$clientName} MCP 配置指南
-
+config-guide-header = # { $clientName } MCP 配置指南
 config-guide-server-info = ## 服务器信息
-config-guide-server-name = - **服务器名称**: {$serverName}
-config-guide-server-port = - **端口**: {$port}
-config-guide-server-endpoint = - **端点**: http://localhost:{$port}/mcp
-
+config-guide-server-name = - **服务器名称**: { $serverName }
+config-guide-server-port = - **端口**: { $port }
+config-guide-server-endpoint = - **端点**: http://localhost:{ $port }/mcp
 config-guide-json-header = ## 配置片段
 config-guide-steps-header = ## 配置步骤
 config-guide-tools-header = ## 可用工具
-config-guide-tools-list = 
+config-guide-tools-list =
     - search_library - 搜索 Zotero 文库
     - get_item_details - 获取文献详细信息
     - get_item_fulltext - 获取文献全文内容
@@ -306,16 +270,13 @@ config-guide-tools-list =
     - get_collections - 获取收藏夹列表
     - search_annotations - 搜索注释和标注
     - 以及更多...
-
 config-guide-troubleshooting-header = ## 故障排除
-config-guide-troubleshooting-list = 
+config-guide-troubleshooting-list =
     1. 确保 Zotero 正在运行
     2. 确保 MCP 服务器已启用并在指定端口运行
     3. 检查防火墙设置
     4. 验证配置文件格式正确
-
-config-guide-generated-time = 生成时间: {$time}
-
+config-guide-generated-time = 生成时间: { $time }
 # 语义索引右键菜单
 menu-semantic-index = 更新语义索引
 menu-semantic-index-selected = 索引选中条目
@@ -330,7 +291,6 @@ menu-semantic-index-busy = 已有索引任务正在运行，请等待其完成
 menu-semantic-index-error = 语义索引失败
 menu-semantic-index-no-collection = 请选择一个分类
 menu-semantic-index-no-items = 没有可索引的条目
-
 # 分类右键菜单
 menu-collection-semantic-index = 语义索引
 menu-collection-build-index = 构建索引
@@ -338,3 +298,21 @@ menu-collection-rebuild-index = 重建索引
 menu-collection-clear-index = 清除索引
 menu-collection-clear-confirm = 确定要清除该分类的语义索引吗？
 menu-collection-index-cleared = 索引已清除
+# 索引结果通知 / index result notifications
+notice-index-done = 索引完成
+notice-index-nothing-new = 没有需要索引的新条目
+notice-index-nothing = 没有可索引的条目
+notice-index-skipped = 已在索引中，跳过
+notice-index-written = 本次重新写入
+notice-index-unchanged = 内容未变化，索引已是最新
+notice-index-attached = 已挂到条目下的 Markdown
+notice-index-preparing = 准备中…
+notice-index-parsing = MinerU 解析中
+notice-index-embedding = 正在写入向量…
+notice-index-failed = 失败条目
+notice-index-zero-hint = 没有写入内容：附件里没能提取到文本
+notice-mineru-failed = MinerU 解析失败
+notice-mineru-fallback = 对应 PDF 未写入索引；请修复 MinerU 配置后重试
+notice-index-no-selection = 没有选中任何条目
+notice-index-no-eligible = 选中的内容里没有可索引的条目
+notice-index-no-eligible-hint = 请选中文献条目，或选中隶属于某个文献条目的附件。

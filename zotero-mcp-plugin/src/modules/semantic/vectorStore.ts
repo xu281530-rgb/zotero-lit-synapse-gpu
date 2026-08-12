@@ -772,6 +772,26 @@ export class VectorStore {
   /**
    * Get all indexed item keys
    */
+  /**
+   * Keys the incremental build may skip: everything already in index_status
+   * except items recorded as 'empty'. An 'empty' row only means the item had
+   * no extractable content at the time — typically because its PDF had not
+   * been attached yet — so it must stay eligible for a retry. 'failed:%'
+   * markers are still skipped on purpose.
+   */
+  async getItemsToSkip(): Promise<Set<string>> {
+    await this.ensureInitialized();
+
+    // IMPORTANT: Single-line query to avoid Zotero queryAsync bug with multi-line SQL
+    const rows = await this.db.queryAsync(`SELECT item_key FROM index_status WHERE content_hash != 'empty' AND version >= 2`);
+
+    if (!rows || rows.length === 0) {
+      return new Set();
+    }
+
+    return new Set(rows.map((r: any) => r.item_key));
+  }
+
   async getIndexedItems(): Promise<Set<string>> {
     await this.ensureInitialized();
 
@@ -870,7 +890,7 @@ export class VectorStore {
     await this.db.queryAsync(`
       INSERT OR REPLACE INTO index_status
       (item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified)
-      VALUES (?, strftime('%s', 'now'), 1, ?, ?, ?, ?)
+      VALUES (?, strftime('%s', 'now'), 2, ?, ?, ?, ?)
     `, [itemKey, chunkCount, contentHash, itemModified || null, attachmentModified || null]);
   }
 
@@ -887,6 +907,9 @@ export class VectorStore {
 
     // No existing index, needs indexing
     if (!status) return true;
+
+    // Index schema older than v2, force re-index
+    if (Number(status.version || 0) < 2) return true;
 
     // No stored timestamps (old data), needs re-check with content hash
     if (!status.itemModified || !status.attachmentModified) return true;

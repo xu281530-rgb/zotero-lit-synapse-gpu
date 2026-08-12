@@ -111,25 +111,39 @@ export class FulltextService {
 
       // Handle different attachment types
       if (this.isPDFAttachment(attachment, attachmentType)) {
-        // Use PDFProcessor directly for PDF files
+        // MinerU 高精度解析优先。同步接口默认只读缓存，未命中立即回退。
         try {
-          const { PDFProcessor } = await import('./pdfProcessor');
-          const { TextFormatter } = await import('./textFormatter');
-          const processor = new PDFProcessor(ztoolkit);
-          
-          const filePath = attachment.getFilePath();
-          if (filePath) {
-            try {
-              const rawText = await processor.extractText(filePath);
-              content = TextFormatter.formatPDFText(rawText);
-              extractionMethod = 'pdf_processor';
-            } catch (fileError) {
-              ztoolkit.log(`[FulltextService] PDF file not accessible at path: ${filePath} - ${fileError}`, "warn");
-            } finally {
-              processor.terminate();
+          const { getMinerUService } = await import('./mineru');
+          const minerUText = await getMinerUService().getIndexTextForAttachment(attachment);
+          if (minerUText) {
+            content = minerUText;
+            extractionMethod = 'mineru';
+          }
+        } catch (minerUError) {
+          ztoolkit.log(`[FulltextService] MinerU lookup failed for ${attachment.key}: ${minerUError}`, "warn");
+        }
+
+        // Use PDFProcessor directly for PDF files (MinerU 未命中时的回退)
+        try {
+          if (!content) {
+            const { PDFProcessor } = await import('./pdfProcessor');
+            const { TextFormatter } = await import('./textFormatter');
+            const processor = new PDFProcessor(ztoolkit);
+
+            const filePath = attachment.getFilePath();
+            if (filePath) {
+              try {
+                const rawText = await processor.extractText(filePath);
+                content = TextFormatter.formatPDFText(rawText);
+                extractionMethod = 'pdf_processor';
+              } catch (fileError) {
+                ztoolkit.log(`[FulltextService] PDF file not accessible at path: ${filePath} - ${fileError}`, "warn");
+              } finally {
+                processor.terminate();
+              }
+            } else {
+              ztoolkit.log(`[FulltextService] No file path available for PDF attachment ${attachment.key}`, "warn");
             }
-          } else {
-            ztoolkit.log(`[FulltextService] No file path available for PDF attachment ${attachment.key}`, "warn");
           }
         } catch (pdfError) {
           ztoolkit.log(`[FulltextService] PDF extraction failed for ${attachment.key}: ${pdfError}`, "warn");

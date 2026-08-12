@@ -9,7 +9,6 @@ prefs-table-title = タイトル
 prefs-table-detail = 詳細
 tabpanel-lib-tab-label = ライブラリタブ
 tabpanel-reader-tab-label = リーダータブ
-
 # Client Configuration Instructions
 codex-cli-instructions =
     ══════════════════════════════════════════════════════════
@@ -25,29 +24,6 @@ codex-cli-instructions =
        1. Open ~/.codex/config.toml
        2. Add the generated TOML snippet under [mcp_servers]
        3. Keep the headers block:
-          [mcp_servers."zotero-mcp".headers]
-          "Content-Type" = "application/json"
-       4. Save and restart Codex CLI session
-
-    ▶ Method 3: Unified config with Claude Code / cc-switch
-    ──────────────────────────────────────────────────────────
-       1. Keep the same HTTP endpoint and Content-Type header
-       2. Claude Code style JSON with headers is also compatible
-       3. Use one shared zotero-mcp server definition across clients
-
-    ▶ Verification
-    ──────────────────────────────────────────────────────────
-       1. Use 'codex mcp list' to confirm the server is registered
-       2. Run a prompt that calls tools/list or a Zotero tool
-
-    ▶ Prerequisites
-    ──────────────────────────────────────────────────────────
-       ✓ Zotero must be running
-       ✓ MCP plugin server must be enabled
-       ✓ Endpoint should be reachable at 127.0.0.1
-
-    ══════════════════════════════════════════════════════════
-
 claude-desktop-instructions =
     ══════════════════════════════════════════════════════════
       Claude Desktop MCP Configuration Guide
@@ -78,7 +54,6 @@ claude-desktop-instructions =
        • Config not applied: Restart Claude Desktop
 
     ══════════════════════════════════════════════════════════
-
 cline-vscode-instructions =
     ══════════════════════════════════════════════════════════
       Cline (VS Code) MCP Configuration Guide
@@ -103,7 +78,6 @@ cline-vscode-instructions =
        ✓ alwaysAllow: ["*"] auto-approves tool calls
 
     ══════════════════════════════════════════════════════════
-
 continue-dev-instructions =
     ══════════════════════════════════════════════════════════
       Continue.dev MCP Configuration Guide
@@ -126,7 +100,6 @@ continue-dev-instructions =
        ✓ Zotero must be running
 
     ══════════════════════════════════════════════════════════
-
 cursor-instructions =
     ══════════════════════════════════════════════════════════
       Cursor MCP Configuration Guide
@@ -154,7 +127,6 @@ cursor-instructions =
        • Connection timeout: Check if Zotero is running
 
     ══════════════════════════════════════════════════════════
-
 cherry-studio-instructions =
     ══════════════════════════════════════════════════════════
       Cherry Studio MCP Configuration Guide
@@ -176,7 +148,6 @@ cherry-studio-instructions =
        ✓ Zotero must be running
 
     ══════════════════════════════════════════════════════════
-
 gemini-cli-instructions =
     ══════════════════════════════════════════════════════════
       Gemini CLI MCP Configuration Guide
@@ -204,7 +175,6 @@ gemini-cli-instructions =
        ✓ No additional dependencies required
 
     ══════════════════════════════════════════════════════════
-
 workbuddy-instructions =
     ══════════════════════════════════════════════════════════
       WorkBuddy MCP 設定ガイド
@@ -220,7 +190,6 @@ workbuddy-instructions =
     ──────────────────────────────────────────────────────────
        • Node.js が必要です（npx mcp-remote を使用）
        • Zotero が起動中で MCP サーバーが有効であること
-
 chatbox-instructions =
     ══════════════════════════════════════════════════════════
       Chatbox MCP Configuration Guide
@@ -241,7 +210,6 @@ chatbox-instructions =
        ✓ Zotero must be running
 
     ══════════════════════════════════════════════════════════
-
 trae-ai-instructions =
     ══════════════════════════════════════════════════════════
       Trae AI MCP Configuration Guide
@@ -263,7 +231,6 @@ trae-ai-instructions =
        ✓ Zotero must be running
 
     ══════════════════════════════════════════════════════════
-
 custom-http-instructions =
     ══════════════════════════════════════════════════════════
       Generic HTTP MCP Client Configuration
@@ -287,14 +254,11 @@ custom-http-instructions =
        ✓ Client must support Streamable HTTP transport
 
     ══════════════════════════════════════════════════════════
-
-config-guide-header = # {$clientName} MCP 設定ガイド
-
+config-guide-header = # { $clientName } MCP 設定ガイド
 config-guide-server-info = ## サーバー情報
-config-guide-server-name = - **サーバー名**: {$serverName}
-config-guide-server-port = - **ポート**: {$port}
-config-guide-server-endpoint = - **エンドポイント**: http://localhost:{$port}/mcp
-
+config-guide-server-name = - **サーバー名**: { $serverName }
+config-guide-server-port = - **ポート**: { $port }
+config-guide-server-endpoint = - **エンドポイント**: http://localhost:{ $port }/mcp
 config-guide-json-header = ## 設定スニペット
 config-guide-steps-header = ## 設定手順
 config-guide-tools-header = ## 利用可能なツール
@@ -306,16 +270,13 @@ config-guide-tools-list =
     - get_collections - コレクション一覧を取得
     - search_annotations - 注釈とハイライトを検索
     - その他...
-
 config-guide-troubleshooting-header = ## トラブルシューティング
 config-guide-troubleshooting-list =
     1. Zoteroが起動していることを確認してください
     2. MCPサーバーが有効で、指定ポートで稼働していることを確認してください
     3. ファイアウォールの設定を確認してください
     4. 設定ファイルの形式が正しいことを確認してください
-
-config-guide-generated-time = 生成日時: {$time}
-
+config-guide-generated-time = 生成日時: { $time }
 # Context menu for semantic indexing
 menu-semantic-index = セマンティックインデックスを更新
 menu-semantic-index-selected = 選択したアイテムをインデックス
@@ -330,7 +291,6 @@ menu-semantic-index-busy = インデックス作成がすでに実行中です�
 menu-semantic-index-error = セマンティックインデックスに失敗しました
 menu-semantic-index-no-collection = コレクションを選択してください
 menu-semantic-index-no-items = インデックス可能なアイテムがありません
-
 # Collection context menu
 menu-collection-semantic-index = セマンティックインデックス
 menu-collection-build-index = インデックスを構築
@@ -338,3 +298,21 @@ menu-collection-rebuild-index = インデックスを再構築
 menu-collection-clear-index = インデックスをクリア
 menu-collection-clear-confirm = このコレクションのセマンティックインデックスをクリアしますか？
 menu-collection-index-cleared = インデックスをクリアしました
+# 索引结果通知 / index result notifications
+notice-index-done = インデックス完了
+notice-index-nothing-new = 新しくインデックスする項目はありません
+notice-index-nothing = インデックス可能な項目がありません
+notice-index-skipped = インデックス済みのためスキップ
+notice-index-written = ベクトルを再作成
+notice-index-unchanged = すでに最新です
+notice-index-attached = アイテムに添付した Markdown
+notice-index-preparing = 準備中…
+notice-index-parsing = MinerU で解析中
+notice-index-embedding = ベクトルを書き込み中…
+notice-index-failed = 失敗した項目
+notice-index-zero-hint = 何も書き込まれませんでした：添付ファイルからテキストを抽出できませんでした。
+notice-mineru-failed = MinerU が解析できませんでした
+notice-mineru-fallback = 対象 PDF は索引化されませんでした。MinerU 設定を修正して再試行してください
+notice-index-no-selection = 項目が選択されていません
+notice-index-no-eligible = 選択範囲にインデックス可能な項目がありません
+notice-index-no-eligible-hint = 文献項目、またはそれに属する添付ファイルを選択してください。

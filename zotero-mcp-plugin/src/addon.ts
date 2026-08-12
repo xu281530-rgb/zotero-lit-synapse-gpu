@@ -2,7 +2,8 @@ import { config } from "../package.json";
 import { ColumnOptions, DialogHelper } from "zotero-plugin-toolkit";
 import { HttpServer, httpServer } from "./modules/httpServer";
 import { serverPreferences } from "./modules/serverPreferences";
-import hooks from "./hooks";
+import hooks, { getMinerUService } from "./hooks";
+import { getOriginalPDFAttachmentsForItem } from "./modules/mineru";
 import { createZToolkit } from "./utils/ztoolkit";
 
 class Addon {
@@ -51,6 +52,71 @@ class Addon {
       stopServer: () => {
         Zotero.debug("===MCP=== Manually stopping server...");
         addon.data.httpServer?.stop();
+      },
+      pdfPrecision: {
+        parseAttachment: async (
+          attachment: Zotero.Item,
+          options: { force?: boolean } = {},
+        ) => {
+          const service = getMinerUService();
+          const result = await service.getRichParseForAttachment(attachment, {
+            allowParse: true,
+            ignoreFailureCache: true,
+            ignoreEnabled: true,
+            force: options.force === true,
+          });
+          if (!result) {
+            throw new Error("No reusable Doc2X/MinerU Markdown or new high-precision PDF result was available");
+          }
+          return result;
+        },
+        getCachedParse: async (attachment: Zotero.Item) => {
+          const service = getMinerUService();
+          return service.getRichParseForAttachment(attachment, {
+            allowParse: false,
+            ignoreEnabled: true,
+          });
+        },
+        updateCachedMarkdown: async (
+          attachment: Zotero.Item,
+          markdown: string,
+        ) => {
+          return getMinerUService().updateCachedMarkdown(attachment, markdown);
+        },
+        syncMarkdownAttachment: async (
+          attachment: Zotero.Item,
+          markdown: string,
+        ) => {
+          return getMinerUService().updateCachedMarkdown(attachment, markdown);
+        },
+        selectOriginalPDFAttachments: async (items: Zotero.Item[]) => {
+          const selected: Zotero.Item[] = [];
+          const seen = new Set<number>();
+          for (const item of items || []) {
+            let parent = item;
+            if (item?.isAttachment?.()) {
+              const parentID = item.parentItemID;
+              if (!parentID) {
+                if (item.isPDFAttachment?.() && !seen.has(item.id)) {
+                  seen.add(item.id);
+                  selected.push(item);
+                }
+                continue;
+              }
+              parent = await Zotero.Items.getAsync(parentID);
+            }
+            if (!parent?.isRegularItem?.()) continue;
+            for (const attachment of await getOriginalPDFAttachmentsForItem(parent)) {
+              if (!seen.has(attachment.id)) {
+                seen.add(attachment.id);
+                selected.push(attachment);
+              }
+            }
+          }
+          return selected;
+        },
+        testConnection: async () => getMinerUService().testConnection(),
+        getConfig: () => getMinerUService().getConfig(),
       },
     };
   }

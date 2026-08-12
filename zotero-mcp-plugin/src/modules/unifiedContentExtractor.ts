@@ -507,6 +507,23 @@ export class UnifiedContentExtractor {
    * Extract text from PDF - first try Zotero cache, then fallback to PDFProcessor
    */
   private async extractPDFText(filePath: string, attachmentId?: number): Promise<string> {
+    // MinerU 高精度解析优先。这是同步接口，默认只读缓存，未命中立即回退。
+    if (attachmentId) {
+      try {
+        const { getMinerUService } = await import('./mineru');
+        const attachment = await Zotero.Items.getAsync(attachmentId);
+        if (attachment) {
+          const minerUText = await getMinerUService().getIndexTextForAttachment(attachment);
+          if (minerUText) {
+            ztoolkit.log(`[UnifiedContentExtractor] Using MinerU markdown (${minerUText.length} chars)`);
+            return minerUText;
+          }
+        }
+      } catch (minerUError) {
+        ztoolkit.log(`[UnifiedContentExtractor] MinerU lookup failed: ${minerUError}`, "warn");
+      }
+    }
+
     // First try Zotero's cached fulltext (much faster)
     if (attachmentId) {
       const cachedText = await this.getZoteroCachedFulltext(attachmentId);

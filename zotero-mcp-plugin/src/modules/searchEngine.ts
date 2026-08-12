@@ -213,6 +213,65 @@ function parseNumberRange(rangeStr: string): {
  * @param queryValue 查询值
  * @returns 是否匹配
  */
+function isSafeSearchRegex(pattern: string): boolean {
+  if (pattern.length > 128) return false;
+
+  let escaped = false;
+  let inCharacterClass = false;
+  const groups: Array<{ hasAlternation: boolean; hasQuantifier: boolean }> = [];
+
+  const isQuantifierStart = (index: number) =>
+    pattern[index] === "+" ||
+    pattern[index] === "*" ||
+    (pattern[index] === "{" && /^[0-9]+(?:,[0-9]*)?}/.test(pattern.slice(index + 1)));
+
+  for (let index = 0; index < pattern.length; index++) {
+    const char = pattern[index];
+
+    if (escaped) {
+      if (char >= "1" && char <= "9") return false;
+      escaped = false;
+      continue;
+    }
+    if (char.charCodeAt(0) === 92) {
+      escaped = true;
+      continue;
+    }
+    if (char === "[") {
+      inCharacterClass = true;
+      continue;
+    }
+    if (char === "]" && inCharacterClass) {
+      inCharacterClass = false;
+      continue;
+    }
+    if (inCharacterClass) continue;
+
+    if (char === "(") {
+      groups.push({ hasAlternation: false, hasQuantifier: false });
+      continue;
+    }
+    if (char === "|") {
+      if (groups.length > 0) groups[groups.length - 1].hasAlternation = true;
+      continue;
+    }
+    if (isQuantifierStart(index)) {
+      if (groups.length > 0) groups[groups.length - 1].hasQuantifier = true;
+      continue;
+    }
+    if (char === ")" && groups.length > 0) {
+      const group = groups.pop();
+      if (
+        isQuantifierStart(index + 1) &&
+        (group?.hasAlternation || group?.hasQuantifier)
+      ) {
+        return false;
+      }
+    }
+  }
+
+  return groups.length === 0 && !inCharacterClass && !escaped;
+}
 function matchesFieldQuery(
   fieldValue: any,
   operator: string,
@@ -235,8 +294,9 @@ function matchesFieldQuery(
       return fieldStr.endsWith(queryStr);
     case "regex":
       try {
+        if (!isSafeSearchRegex(queryValue)) return false;
         const regex = new RegExp(queryValue, "i");
-        return regex.test(fieldStr);
+        return regex.test(fieldStr.slice(0, 10_000));
       } catch {
         return false;
       }

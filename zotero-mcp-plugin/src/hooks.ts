@@ -6,6 +6,7 @@ import { registerPrefsScripts } from "./modules/preferenceScript";
 import { createZToolkit } from "./utils/ztoolkit";
 import { MCPSettingsService } from "./modules/mcpSettingsService";
 import { registerSemanticIndexColumn, unregisterSemanticIndexColumn, refreshSemanticColumn } from "./modules/semanticIndexColumn";
+import { getMinerUService } from "./modules/mineru";
 
 // Preference keys for semantic search settings
 const PREF_SEMANTIC_ENABLED = 'extensions.zotero.zotero-mcp-plugin.semantic.enabled';
@@ -38,7 +39,7 @@ let isShuttingDown = false;
 /**
  * Create a tracked setTimeout that will be cleaned up on shutdown
  */
-function trackedSetTimeout(callback: () => void, delay: number): ReturnType<typeof setTimeout> {
+export function trackedSetTimeout(callback: () => void, delay: number): ReturnType<typeof setTimeout> {
   const timer = setTimeout(() => {
     pendingTimeouts.delete(timer);
     if (!isShuttingDown) {
@@ -90,10 +91,13 @@ async function processPendingAutoUpdates() {
       return;
     }
 
-    // Build index for new items only (rebuild: false to avoid clearing all data)
+    // These keys were explicitly touched (added, or had an attachment land on
+    // them), so force past the already-indexed filter. The content-hash check
+    // inside indexItem still prevents pointless re-embedding.
     await semanticService.buildIndex({
       itemKeys: keysToUpdate,
       rebuild: false,  // Only add new indexes, don't clear existing data
+      force: true,
       onProgress: (progress) => {
         ztoolkit.log(`[MCP Plugin] Auto-update progress: ${progress.processed}/${progress.total}`);
       }
@@ -207,9 +211,28 @@ function registerItemNotifier() {
         // For add events, schedule indexing for new items
         const items = Zotero.Items.get(numericIds);
         for (const item of items) {
-          // Only index regular items (not attachments, notes, etc.)
           if (item.isRegularItem?.()) {
             scheduleAutoUpdate(item.key);
+            continue;
+          }
+          // The Markdown attachments the indexer itself writes must not
+          // re-queue their own parent. This guard is the only thing stopping
+          // that loop: the import deliberately does NOT suppress the notifier,
+          // because suppressing it is what keeps the new attachment invisible
+          // in the items tree until a restart.
+          if (item.attachmentContentType === "text/markdown") {
+            continue;
+          }
+          // A PDF normally lands a few seconds after its parent, long after the
+          // parent was indexed from metadata alone. Re-queue the parent so the
+          // full text actually makes it into the index.
+          const parentKey =
+            item.parentItem?.key ||
+            (item.parentItemKey as string | undefined) ||
+            null;
+          if (parentKey) {
+            ztoolkit.log(`[MCP Plugin] Attachment added, re-queueing parent item: ${parentKey}`);
+            scheduleAutoUpdate(parentKey);
           }
         }
       } else if (event === 'delete') {
@@ -613,7 +636,7 @@ async function onNotify(
   extraData: { [key: string]: any },
 ) {
   // You can add your code to the corresponding notify type
-  ztoolkit.log("notify", event, type, ids, extraData);
+  ztoolkit.log(`[MCP Plugin] Zotero notification: ${event}/${type} (${Array.isArray(ids) ? ids.length : 0} ids)`);
 }
 
 /**
@@ -681,10 +704,10 @@ async function onPrefsEvent(type: string, data: { [key: string]: any }) {
  */
 function checkFirstInstallation() {
   try {
-    const hasShownPrompt = Zotero.Prefs.get("mcp.firstInstallPromptShown", false);
+    const hasShownPrompt = Zotero.Prefs.get("extensions.zotero.zotero-mcp-plugin.firstInstallPromptShown", false);
     if (!hasShownPrompt) {
       // Mark as shown immediately to prevent multiple prompts
-      Zotero.Prefs.set("mcp.firstInstallPromptShown", true);
+      Zotero.Prefs.set("extensions.zotero.zotero-mcp-plugin.firstInstallPromptShown", true);
       
       // Show prompt after a short delay to ensure UI is ready
       trackedSetTimeout(() => {
@@ -991,30 +1014,38 @@ async function handleIndexCollection(win: _ZoteroTypes.MainWindow, rebuild: bool
     const semanticService = getSemanticSearchService();
     await semanticService.initialize();
 
-    // Show starting notification
-    const startMessage = `${getString("menu-semantic-index-started" as any) || "Semantic indexing started"}: ${collection.name} (${itemKeys.length})`;
-    showNotification(win, startMessage);
+    // Live progress popup for the whole run
+    const live = createLiveIndexProgress(
+      win,
+      `${getString("menu-semantic-index-started" as any) || "Semantic indexing started"}: ${collection.name}`,
+    );
 
-    // Build index for collection items
+    // Build index for collection items ("build" forces the selected items;
+    // "rebuild" already clears everything first, so force would be redundant)
     semanticService.buildIndex({
       itemKeys,
       rebuild,
+      force: !rebuild,
       onProgress: (progress) => {
+        live.onProgress(progress);
         ztoolkit.log(`[MCP Plugin] Index progress: ${progress.processed}/${progress.total}`);
       }
     }).then((result) => {
+      live.finish();
       if (result.status === 'busy') {
         ztoolkit.log(`[MCP Plugin] Collection indexing skipped: another build is running`);
-        showNotification(win, getString("menu-semantic-index-busy" as any) || "An index build is already running, please wait for it to finish");
+        showNotice(win, {
+          type: "warning",
+          title: getString("menu-semantic-index-busy" as any) || "An index build is already running, please wait for it to finish",
+        });
         return;
       }
-      ztoolkit.log(`[MCP Plugin] Collection indexing completed: ${result.processed}/${result.total} items`);
+      ztoolkit.log(`[MCP Plugin] Collection indexing completed: ${result.processed}/${result.total} items, skipped=${result.skipped ?? 0}, minerUFailures=${result.minerUFailures ?? 0}`);
       // Refresh semantic column to show updated status
       refreshSemanticColumn();
-      // Show success notification
-      const completedMsg = `${getString("menu-semantic-index-completed" as any) || "Indexing completed"}: ${collection.name} (${result.processed}/${result.total})`;
-      showNotification(win, completedMsg);
+      showNotice(win, describeIndexResult(result, collection.name));
     }).catch((error) => {
+      live.finish();
       ztoolkit.log(`[MCP Plugin] Collection indexing failed: ${error}`, "error");
       // Refresh column anyway to show current status
       refreshSemanticColumn();
@@ -1120,16 +1151,38 @@ async function handleClearSelectedIndex(win: _ZoteroTypes.MainWindow) {
     const selectedItems = ZoteroPane.getSelectedItems();
     if (!selectedItems || selectedItems.length === 0) {
       ztoolkit.log("[MCP Plugin] No items selected");
+      showNotice(win, {
+        type: "warning",
+        title: getString("notice-index-no-selection" as any) || "Nothing selected",
+      });
       return;
     }
 
-    // Get item keys
-    const itemKeys = selectedItems
-      .filter((item: any) => item.isRegularItem?.())
-      .map((item: any) => item.key);
+    // Selecting the PDF row instead of its parent is the natural thing to do
+    // when you want that PDF re-read, so resolve attachments to their parent
+    // item rather than silently dropping them.
+    const seen = new Set<string>();
+    const itemKeys: string[] = [];
+    for (const item of selectedItems as any[]) {
+      const key = item.isRegularItem?.()
+        ? item.key
+        : item.parentItem?.key || (item.parentItemKey as string | undefined);
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        itemKeys.push(key);
+      }
+    }
 
     if (itemKeys.length === 0) {
-      ztoolkit.log("[MCP Plugin] No regular items selected");
+      ztoolkit.log("[MCP Plugin] No indexable items in selection");
+      showNotice(win, {
+        type: "warning",
+        title: getString("notice-index-no-eligible" as any) || "Nothing indexable in the selection",
+        lines: [
+          getString("notice-index-no-eligible-hint" as any) ||
+            "Select a bibliography item, or an attachment that belongs to one.",
+        ],
+      });
       return;
     }
 
@@ -1186,16 +1239,38 @@ async function handleIndexSelected(win: _ZoteroTypes.MainWindow) {
     const selectedItems = ZoteroPane.getSelectedItems();
     if (!selectedItems || selectedItems.length === 0) {
       ztoolkit.log("[MCP Plugin] No items selected");
+      showNotice(win, {
+        type: "warning",
+        title: getString("notice-index-no-selection" as any) || "Nothing selected",
+      });
       return;
     }
 
-    // Get item keys
-    const itemKeys = selectedItems
-      .filter((item: any) => item.isRegularItem?.())
-      .map((item: any) => item.key);
+    // Selecting the PDF row instead of its parent is the natural thing to do
+    // when you want that PDF re-read, so resolve attachments to their parent
+    // item rather than silently dropping them.
+    const seen = new Set<string>();
+    const itemKeys: string[] = [];
+    for (const item of selectedItems as any[]) {
+      const key = item.isRegularItem?.()
+        ? item.key
+        : item.parentItem?.key || (item.parentItemKey as string | undefined);
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        itemKeys.push(key);
+      }
+    }
 
     if (itemKeys.length === 0) {
-      ztoolkit.log("[MCP Plugin] No regular items selected");
+      ztoolkit.log("[MCP Plugin] No indexable items in selection");
+      showNotice(win, {
+        type: "warning",
+        title: getString("notice-index-no-eligible" as any) || "Nothing indexable in the selection",
+        lines: [
+          getString("notice-index-no-eligible-hint" as any) ||
+            "Select a bibliography item, or an attachment that belongs to one.",
+        ],
+      });
       return;
     }
 
@@ -1206,35 +1281,47 @@ async function handleIndexSelected(win: _ZoteroTypes.MainWindow) {
     const semanticService = getSemanticSearchService();
     await semanticService.initialize();
 
-    // Show starting notification
-    showNotification(win, `${getString("menu-semantic-index-started" as any) || "Semantic indexing started"}: ${itemKeys.length} ${getString("menu-semantic-items" as any) || "items"}`);
+    // Live progress popup for the whole run
+    const live = createLiveIndexProgress(
+      win,
+      getString("menu-semantic-index-started" as any) || "Semantic indexing started",
+    );
 
-    // Build index for selected items
+    // Build index for selected items. force: the user explicitly asked for
+    // these items, so "already in index_status" must not silently skip them.
     semanticService.buildIndex({
       itemKeys,
       rebuild: false,
+      force: true,
       onProgress: (progress) => {
+        live.onProgress(progress);
         ztoolkit.log(`[MCP Plugin] Index progress: ${progress.processed}/${progress.total}`);
       }
     }).then((result) => {
+      live.finish();
       if (result.status === 'busy') {
         ztoolkit.log(`[MCP Plugin] Indexing skipped: another build is running`);
-        showNotification(win, getString("menu-semantic-index-busy" as any) || "An index build is already running, please wait for it to finish");
+        showNotice(win, {
+          type: "warning",
+          title: getString("menu-semantic-index-busy" as any) || "An index build is already running, please wait for it to finish",
+        });
         return;
       }
-      ztoolkit.log(`[MCP Plugin] Indexing completed: ${result.processed}/${result.total} items`);
+      ztoolkit.log(`[MCP Plugin] Indexing completed: ${result.processed}/${result.total} items, skipped=${result.skipped ?? 0}, minerUFailures=${result.minerUFailures ?? 0}`);
       // Refresh semantic column to show updated status
       refreshSemanticColumn();
-      // Show success notification
-      const completedMsg = `${getString("menu-semantic-index-completed" as any) || "Indexing completed"}: ${result.processed}/${result.total} ${getString("menu-semantic-items" as any) || "items"}`;
-      showNotification(win, completedMsg);
+      showNotice(win, describeIndexResult(result));
     }).catch((error) => {
+      live.finish();
       ztoolkit.log(`[MCP Plugin] Indexing failed: ${error}`, "error");
       // Refresh column anyway to show current status
       refreshSemanticColumn();
-      // Show error notification
-      const errorMsg = `${getString("menu-semantic-index-error" as any) || "Indexing failed"}: ${error.message || error}`;
-      showNotification(win, errorMsg);
+      showNotice(win, {
+        type: "error",
+        title: getString("menu-semantic-index-error" as any) || "Indexing failed",
+        lines: [truncateEnd(String(error?.message || error), NOTICE_MAX_COLUMNS * 3)],
+        sticky: true,
+      });
     });
 
   } catch (error) {
@@ -1255,34 +1342,44 @@ async function handleIndexAll(win: _ZoteroTypes.MainWindow) {
     const semanticService = getSemanticSearchService();
     await semanticService.initialize();
 
-    // Show starting notification
-    showNotification(win, getString("menu-semantic-index-started" as any) || "Semantic indexing started");
+    // Live progress popup for the whole run
+    const live = createLiveIndexProgress(
+      win,
+      getString("menu-semantic-index-started" as any) || "Semantic indexing started",
+    );
 
     // Build index for all items
     semanticService.buildIndex({
       rebuild: false,
       onProgress: (progress) => {
+        live.onProgress(progress);
         ztoolkit.log(`[MCP Plugin] Index progress: ${progress.processed}/${progress.total}`);
       }
     }).then((result) => {
+      live.finish();
       if (result.status === 'busy') {
         ztoolkit.log(`[MCP Plugin] Indexing skipped: another build is running`);
-        showNotification(win, getString("menu-semantic-index-busy" as any) || "An index build is already running, please wait for it to finish");
+        showNotice(win, {
+          type: "warning",
+          title: getString("menu-semantic-index-busy" as any) || "An index build is already running, please wait for it to finish",
+        });
         return;
       }
-      ztoolkit.log(`[MCP Plugin] Indexing completed: ${result.processed}/${result.total} items`);
+      ztoolkit.log(`[MCP Plugin] Indexing completed: ${result.processed}/${result.total} items, skipped=${result.skipped ?? 0}, minerUFailures=${result.minerUFailures ?? 0}`);
       // Refresh semantic column to show updated status
       refreshSemanticColumn();
-      // Show success notification
-      const completedMsg = `${getString("menu-semantic-index-completed" as any) || "Indexing completed"}: ${result.processed}/${result.total} ${getString("menu-semantic-items" as any) || "items"}`;
-      showNotification(win, completedMsg);
+      showNotice(win, describeIndexResult(result));
     }).catch((error) => {
+      live.finish();
       ztoolkit.log(`[MCP Plugin] Indexing failed: ${error}`, "error");
       // Refresh column anyway to show current status
       refreshSemanticColumn();
-      // Show error notification
-      const errorMsg = `${getString("menu-semantic-index-error" as any) || "Indexing failed"}: ${error.message || error}`;
-      showNotification(win, errorMsg);
+      showNotice(win, {
+        type: "error",
+        title: getString("menu-semantic-index-error" as any) || "Indexing failed",
+        lines: [truncateEnd(String(error?.message || error), NOTICE_MAX_COLUMNS * 3)],
+        sticky: true,
+      });
     });
 
   } catch (error) {
@@ -1292,20 +1389,458 @@ async function handleIndexAll(win: _ZoteroTypes.MainWindow) {
 }
 
 /**
+ * A progress popup that stays up for the whole build.
+ *
+ * MinerU parsing is a minutes-long remote call, and the old flow showed one
+ * "started" toast and then nothing until the end. With no visible activity the
+ * only reasonable conclusion was that nothing had happened — so this reports
+ * both the item counter and which PDF is being parsed right now.
+ */
+interface LiveIndexProgress {
+  onProgress: (progress: any) => void;
+  finish: () => void;
+}
+
+function createLiveIndexProgress(
+  win: _ZoteroTypes.MainWindow,
+  headline: string,
+): LiveIndexProgress {
+  let progressWin: any = null;
+  let counterEntry: any = null;
+  let activityEntry: any = null;
+  let closed = false;
+  let lastCount = "";
+
+  // A build runs several items in parallel, so more than one PDF can be in
+  // MinerU at once; keep the whole set and surface the first one.
+  const parsing = new Map<string, string>();
+
+  const setActivity = (text: string) => {
+    try {
+      activityEntry?.setText(text);
+    } catch (e) {
+      /* ItemProgress.setText is not available on every Zotero build */
+    }
+  };
+
+  try {
+    progressWin = new Zotero.ProgressWindow({ closeOnClick: false });
+    progressWin.changeHeadline("Zotero MCP");
+    counterEntry = new progressWin.ItemProgress(
+      noticeIcon(),
+      truncateEnd(headline, NOTICE_MAX_COLUMNS),
+    );
+    activityEntry = new progressWin.ItemProgress(
+      noticeIcon(),
+      truncateEnd(
+        getString("notice-index-preparing" as any) || "Preparing…",
+        NOTICE_MAX_COLUMNS,
+      ),
+    );
+    progressWin.show();
+  } catch (error) {
+    ztoolkit.log(`[MCP Plugin] Live progress window unavailable: ${error}`, "warn");
+  }
+
+  const minerUListener = (event: any) => {
+    if (closed) return;
+    if (event.phase === "start") {
+      parsing.set(event.attachmentKey, event.fileName);
+    } else {
+      parsing.delete(event.attachmentKey);
+    }
+
+    if (parsing.size > 0) {
+      const [firstName] = Array.from(parsing.values());
+      const label = getString("notice-index-parsing" as any) || "Parsing with MinerU";
+      // The "+N" counter is fixed-width information; reserve its columns
+      // before handing what is left to the file name.
+      const more = parsing.size > 1 ? ` (+${parsing.size - 1})` : "";
+      setActivity(
+        fitLabelled(label, firstName, NOTICE_MAX_COLUMNS - displayWidth(more)) + more,
+      );
+    } else if (event.phase === "failed") {
+      setActivity(
+        fitLabelled(
+          getString("notice-mineru-failed" as any) || "MinerU could not parse",
+          event.fileName,
+          NOTICE_MAX_COLUMNS,
+        ),
+      );
+    } else {
+  setActivity(
+      truncateEnd(
+        getString("notice-index-embedding" as any) || "Writing vectors…",
+        NOTICE_MAX_COLUMNS,
+      ),
+    );
+    }
+  };
+
+  try {
+    getMinerUService().setProgressListener(minerUListener);
+  } catch (error) {
+    ztoolkit.log(`[MCP Plugin] Could not attach MinerU progress listener: ${error}`, "warn");
+  }
+
+  return {
+    onProgress(progress: any) {
+      if (closed) return;
+      const total = progress?.total ?? 0;
+      const processed = progress?.processed ?? 0;
+      const count = `${processed}/${total}`;
+      if (count === lastCount) return;
+      lastCount = count;
+      try {
+        counterEntry?.setText(
+          truncateEnd(`${headline} ${count}`, NOTICE_MAX_COLUMNS),
+        );
+        if (total > 0) {
+          counterEntry?.setProgress(Math.min(100, Math.round((processed / total) * 100)));
+        }
+      } catch (e) {
+        /* styling must never break the build */
+      }
+    },
+    finish() {
+      closed = true;
+      try {
+        getMinerUService().setProgressListener(null);
+      } catch (e) {
+        /* nothing to detach */
+      }
+      try {
+        progressWin?.close();
+      } catch (e) {
+        /* already gone */
+      }
+    },
+  };
+}
+
+/**
+ * Zotero's ProgressWindow is a fixed-width panel and does not reflow what we
+ * put in it: anything wider than the panel is simply cut off at the edge.
+ * Everything below exists to make our own text fit before it gets there.
+ *
+ * The budget is in display columns, not characters — CJK glyphs are twice as
+ * wide as latin ones, so a 40-character Chinese line is 80 columns and runs
+ * off the panel even though `length` looks harmless.
+ */
+const NOTICE_MAX_COLUMNS = 40;
+/** Cap the whole popup so a long error can't turn it into a wall of text */
+const NOTICE_MAX_LINES = 8;
+
+/** East Asian wide / fullwidth ranges — these occupy two columns */
+const WIDE_CHAR = /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/;
+
+function displayWidth(text: string): number {
+  let width = 0;
+  for (const ch of String(text || "")) {
+    width += WIDE_CHAR.test(ch) ? 2 : 1;
+  }
+  return width;
+}
+
+/** Cut from the end, leaving room for the ellipsis */
+function truncateEnd(value: string, maxColumns: number): string {
+  const text = String(value || "");
+  if (displayWidth(text) <= maxColumns) return text;
+  let width = 0;
+  let out = "";
+  for (const ch of text) {
+    const w = WIDE_CHAR.test(ch) ? 2 : 1;
+    if (width + w > maxColumns - 1) break;
+    out += ch;
+    width += w;
+  }
+  return `${out}…`;
+}
+
+/**
+ * Cut from the middle. File names are the case that matters: the tail carries
+ * the extension and the disambiguating part, so keeping both ends beats
+ * keeping a prefix that is identical across a dozen papers.
+ */
+function truncateMiddle(value: string, maxColumns: number): string {
+  const text = String(value || "");
+  if (displayWidth(text) <= maxColumns) return text;
+
+  const budget = Math.max(2, maxColumns - 1);
+  const headBudget = Math.ceil(budget / 2);
+  const tailBudget = budget - headBudget;
+
+  let head = "";
+  let headWidth = 0;
+  for (const ch of text) {
+    const w = WIDE_CHAR.test(ch) ? 2 : 1;
+    if (headWidth + w > headBudget) break;
+    head += ch;
+    headWidth += w;
+  }
+
+  const chars = Array.from(text);
+  let tail = "";
+  let tailWidth = 0;
+  for (let i = chars.length - 1; i >= 0; i--) {
+    const w = WIDE_CHAR.test(chars[i]) ? 2 : 1;
+    if (tailWidth + w > tailBudget) break;
+    tail = chars[i] + tail;
+    tailWidth += w;
+  }
+
+  return `${head}…${tail}`;
+}
+
+/**
+ * Break a line into panel-width segments, preferring spaces so latin text
+ * splits between words. CJK has no spaces, so it falls back to a hard cut —
+ * which is fine, that is exactly how it would wrap anyway.
+ */
+function wrapToWidth(value: string, maxColumns: number): string[] {
+  const text = String(value || "").trim();
+  if (!text) return [];
+  if (displayWidth(text) <= maxColumns) return [text];
+
+  const segments: string[] = [];
+  let current = "";
+  let width = 0;
+
+  for (const ch of text) {
+    const w = WIDE_CHAR.test(ch) ? 2 : 1;
+    if (width + w > maxColumns) {
+      // Back up to the last space so we don't split a word mid-way
+      const lastSpace = current.lastIndexOf(" ");
+      if (lastSpace > maxColumns / 3) {
+        segments.push(current.slice(0, lastSpace));
+        current = current.slice(lastSpace + 1);
+        width = displayWidth(current);
+      } else {
+        segments.push(current);
+        current = "";
+        width = 0;
+      }
+    }
+    current += ch;
+    width += w;
+  }
+  if (current.trim()) segments.push(current.trim());
+
+  // A hard cut lands a stray character or two on a line of its own — a lone
+  // "。" reads like a rendering bug. Pull text back from the previous segment
+  // until the tail carries its weight. Only the previous segment shrinks, so
+  // neither line can end up over budget.
+  if (segments.length >= 2) {
+    const lastIndex = segments.length - 1;
+    if (displayWidth(segments[lastIndex]) <= 4) {
+      const chars = Array.from(segments[lastIndex - 1]);
+      let moved = segments[lastIndex];
+      while (chars.length > 1 && displayWidth(moved) < 8) {
+        moved = (chars.pop() as string) + moved;
+      }
+      segments[lastIndex - 1] = chars.join("");
+      segments[lastIndex] = moved;
+    }
+  }
+
+  return segments;
+}
+
+/** Fit "<label>: <value>" into one line by shrinking the value, not the label */
+function fitLabelled(label: string, value: string, maxColumns: number): string {
+  const prefix = `${label}: `;
+  const room = maxColumns - displayWidth(prefix);
+  if (room < 8) {
+    // Pathological label — truncate the whole thing rather than emit garbage
+    return truncateEnd(`${prefix}${value}`, maxColumns);
+  }
+  return `${prefix}${truncateMiddle(value, room)}`;
+}
+
+/**
  * Show a simple notification
  */
-function showNotification(win: _ZoteroTypes.MainWindow, message: string) {
+type NoticeType = "info" | "success" | "warning" | "error";
+
+interface NoticeOptions {
+  /** Drives the icon, the marker and how long the popup sticks around */
+  type?: NoticeType;
+  /** One-line summary — the part people actually read */
+  title: string;
+  /** Optional detail lines shown under the title */
+  lines?: string[];
+  /** Keep it open until clicked (used for outcomes worth reading) */
+  sticky?: boolean;
+}
+
+/**
+ * Resolved lazily: the `addon` global is installed by index.ts after this
+ * module has been evaluated, so touching it at module scope would throw
+ * during bootstrap startup.
+ */
+function noticeIcon(): string {
+  return `chrome://${addon.data.config.addonRef}/content/icons/favicon.png`;
+}
+
+/** Successes disappear quickly; problems stay long enough to be read. */
+const NOTICE_DWELL_MS: Record<NoticeType, number> = {
+  info: 3500,
+  success: 4500,
+  warning: 9000,
+  error: 14000,
+};
+
+/** Warnings and errors stay on screen until dismissed */
+function isProblemNotice(type: NoticeType): boolean {
+  return type === "warning" || type === "error";
+}
+
+const NOTICE_MARK: Record<NoticeType, string> = {
+  info: "",
+  success: "✓ ",
+  warning: "! ",
+  error: "× ",
+};
+
+/**
+ * Show a Zotero progress-window notification.
+ *
+ * The ProgressWindow API varies a little across Zotero versions, so every
+ * embellishment is guarded — a styling failure must never swallow the message.
+ */
+function showNotice(win: _ZoteroTypes.MainWindow, options: NoticeOptions) {
+  const type = options.type || "info";
   try {
-    // Use Zotero's progress window for notification
     const progressWin = new Zotero.ProgressWindow({ closeOnClick: true });
     progressWin.changeHeadline("Zotero MCP");
-    progressWin.addDescription(message);
+
+    let rendered = false;
+    try {
+      const entry = new progressWin.ItemProgress(
+        noticeIcon(),
+        truncateEnd(
+          `${NOTICE_MARK[type]}${options.title}`,
+          NOTICE_MAX_COLUMNS,
+        ),
+      );
+      if (type === "error" || type === "warning") {
+        entry.setError();
+      } else {
+        entry.setProgress(100);
+      }
+      rendered = true;
+    } catch (e) {
+      ztoolkit.log(`[MCP Plugin] ItemProgress unavailable, falling back: ${e}`, "warn");
+    }
+    if (!rendered) {
+      progressWin.addDescription(
+        truncateEnd(`${NOTICE_MARK[type]}${options.title}`, NOTICE_MAX_COLUMNS),
+      );
+    }
+
+    let emitted = 0;
+    for (const line of options.lines || []) {
+      if (!line) continue;
+      for (const segment of wrapToWidth(line, NOTICE_MAX_COLUMNS)) {
+        if (emitted >= NOTICE_MAX_LINES) break;
+        progressWin.addDescription(segment);
+        emitted++;
+      }
+      if (emitted >= NOTICE_MAX_LINES) break;
+    }
+
     progressWin.show();
-    progressWin.startCloseTimer(3000);
+    if (!options.sticky) {
+      progressWin.startCloseTimer(NOTICE_DWELL_MS[type]);
+    }
   } catch (error) {
     ztoolkit.log(`[MCP Plugin] Error showing notification: ${error}`, "warn");
   }
 }
+
+/** Plain informational popup — kept for the simple call sites */
+function showNotification(win: _ZoteroTypes.MainWindow, message: string) {
+  showNotice(win, { type: "info", title: message });
+}
+
+/**
+ * Turn a finished build into something a human can act on. A bare "0/1" was
+ * the most confusing thing the old notification did, so the reason behind a
+ * zero is always spelled out.
+ */
+function describeIndexResult(result: any, prefix?: string): NoticeOptions {
+  const processed = result?.processed ?? 0;
+  const total = result?.total ?? 0;
+  const skipped = result?.skipped ?? 0;
+  const failed = result?.failedCount ?? 0;
+  const minerUFailures = result?.minerUFailures ?? 0;
+  const attachments = result?.minerUAttachments ?? 0;
+  // "processed" only means the item was visited; an item can be visited and
+  // left untouched because nothing changed. Report the two apart, otherwise a
+  // run that wrote nothing still reads as a triumphant "N/N".
+  const indexed = result?.indexed ?? 0;
+  const unchanged = result?.unchanged ?? 0;
+  const lines: string[] = [];
+  const scope = prefix ? `${prefix} · ` : "";
+
+  let type: NoticeType = "success";
+  let title: string;
+
+  if (total === 0 && skipped > 0) {
+    type = "info";
+    title = `${scope}${getString("notice-index-nothing-new" as any) || "Nothing new to index"}`;
+    lines.push(`${getString("notice-index-skipped" as any) || "Already indexed, skipped"}: ${skipped}`);
+  } else if (total === 0) {
+    type = "info";
+    title = `${scope}${getString("notice-index-nothing" as any) || "No indexable items found"}`;
+  } else {
+    title = `${scope}${getString("notice-index-done" as any) || "Indexing finished"}: ${processed}/${total}`;
+    if (indexed > 0) {
+      lines.push(`${getString("notice-index-written" as any) || "Vectors rewritten for"}: ${indexed}`);
+    } else if (unchanged === 0) {
+      // Nothing written AND nothing recognised as unchanged — the only case
+      // where a zero is actually suspicious. "Unchanged" is a successful
+      // outcome and must not be dressed up as a failure.
+      type = "warning";
+      lines.push(
+        getString("notice-index-zero-hint" as any) ||
+          "Nothing was written: no text could be extracted.",
+      );
+    }
+    if (unchanged > 0) {
+      lines.push(`${getString("notice-index-unchanged" as any) || "Already up to date"}: ${unchanged}`);
+    }
+    if (skipped > 0) {
+      lines.push(`${getString("notice-index-skipped" as any) || "Already indexed, skipped"}: ${skipped}`);
+    }
+  }
+
+  // Worth its own line: this is the file the user actually goes looking for
+  if (attachments > 0) {
+    lines.push(`${getString("notice-index-attached" as any) || "Markdown attached to items"}: ${attachments}`);
+  }
+
+  if (failed > 0) {
+    type = "warning";
+    lines.push(`${getString("notice-index-failed" as any) || "Failed items"}: ${failed}`);
+  }
+
+  if (minerUFailures > 0) {
+    type = "warning";
+    lines.push(
+      `${getString("notice-mineru-failed" as any) || "MinerU could not parse"}: ${minerUFailures} — ${
+        getString("notice-mineru-fallback" as any) || "fell back to built-in extraction"
+      }`,
+    );
+    if (result?.minerULastError) {
+      lines.push(truncateEnd(String(result.minerULastError), NOTICE_MAX_COLUMNS * 2));
+    }
+  }
+
+  return { type, title, lines, sticky: isProblemNotice(type) };
+}
+
+export { getMinerUService };
 
 export default {
   onStartup,

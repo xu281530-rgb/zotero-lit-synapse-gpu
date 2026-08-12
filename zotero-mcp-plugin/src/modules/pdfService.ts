@@ -7,6 +7,7 @@
 
 import { PDFProcessor } from "./pdfProcessor";
 import { TextFormatter } from "./textFormatter";
+import { getMinerUService } from "./mineru";
 
 declare const Zotero: any;
 
@@ -53,6 +54,14 @@ export class PDFService {
       throw new Error(
         `File path not found for PDF attachment of item ${itemKey}`,
       );
+    }
+
+    // MinerU 高精度解析：这是同步调用路径，默认只读已有缓存，
+    // 未命中就立刻回退内置提取（除非用户开启了 mineru.blockingOnDemand）
+    const minerUText =
+      await getMinerUService().getIndexTextForAttachment(attachment);
+    if (minerUText) {
+      return minerUText;
     }
 
     // Use the new PDFProcessor implementation with formatting

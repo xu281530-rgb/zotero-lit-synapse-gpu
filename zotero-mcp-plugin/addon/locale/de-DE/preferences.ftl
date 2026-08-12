@@ -1,5 +1,4 @@
 pref-help = { $name } Build { $version } { $time }
-
 pref-server-title = MCP-Server
 pref-section-server-desc = KI-Clients verbinden sich über diesen Dienst mit Ihrer Zotero-Bibliothek
 pref-server-enable =
@@ -14,7 +13,6 @@ pref-server-remote-text = Fernzugriff erlauben
 pref-server-remote-sub = Stellen Sie sicher, dass Ihr Netzwerk sicher ist, bevor Sie dies aktivieren
 pref-server-allow-remote-warning = Warnung: Dies macht den MCP-Server im Netzwerk verfügbar. Aktivieren Sie dies nur, wenn Sie Fernzugriff benötigen oder VPN-/Proxy-Probleme haben.
 pref-server-off-hint = MCP-Server ist deaktiviert. Aktivieren Sie ihn, um Clients und Suchfunktionen zu konfigurieren.
-
 pref-mcp-settings-title = Inhaltseinstellungen
 pref-mcp-settings-description = Konfigurieren Sie, wie der MCP-Server Inhalte verarbeitet und an KI-Clients zurückgibt
 pref-section-content-desc = Steuern Sie Umfang und Format der an die KI zurückgegebenen Inhalte
@@ -44,7 +42,6 @@ pref-include-metadata-label =
     .label = Element-Metadaten in Antworten einbeziehen
 pref-include-metadata-text = Metadaten einbeziehen
 pref-include-metadata-sub = Titel, Autoren, DOI und andere Felder zurückgeben
-
 pref-client-config-title = Client-Konfiguration
 pref-client-config-description = Erstellen Sie MCP-Server-Konfigurationsdateien für gängige KI-Clients, um sich einfach mit dem Zotero MCP-Server zu verbinden.
 pref-section-client-desc = Wählen Sie Ihren KI-Client und generieren Sie die Verbindungskonfiguration
@@ -65,13 +62,11 @@ pref-config-guide-title = Anleitung
 pref-config-guide-placeholder = Wählen Sie den Client-Typ und generieren Sie die Konfiguration, um hier eine detaillierte Einrichtungsanleitung anzuzeigen...
 pref-client-codex-cli = Codex CLI
 pref-client-custom-http = Benutzerdefinierter HTTP-Client
-
 pref-semantic-enable =
     .label = Semantische Suche aktivieren
 pref-semantic-enable-text = Semantische Suche aktivieren
 pref-semantic-enable-sub = Nur Stichwortsuche, wenn deaktiviert
 pref-semantic-disabled-hint = Die semantische Suche ist deaktiviert. Aktivieren Sie sie, um die natürlichsprachige Suche zu nutzen.
-
 pref-embedding-title = Semantische Suche
 pref-embedding-description = Konfigurieren Sie die Embedding-API für die semantische Suche. Unterstützt OpenAI-kompatible APIs.
 pref-section-semantic-desc = Natürlichsprachige Dokumentensuche über Vektor-Embeddings
@@ -104,14 +99,12 @@ pref-embedding-dimensions-auto = Automatisch (von API erkannt)
 pref-embedding-detected-dims = Erkannte Dimensionen
 pref-embedding-dimension-mismatch = Dimensionen stimmen nicht überein! Der Index verwendet andere Dimensionen. Bitte bauen Sie den Index neu auf, um die neue Konfiguration zu verwenden.
 pref-embedding-model-change-warning = Modell geändert. Der bestehende Index ist möglicherweise inkompatibel. Bitte testen Sie die Verbindung und bauen Sie den Index neu auf.
-
 pref-rate-limit-title = Rate und Kosten
 pref-rate-limit-rpm-label = Anfragen pro Minute:
 pref-rate-limit-tpm-label = Tokens pro Minute:
 pref-rate-limit-cost-label = $/1M Tokens
 pref-rate-limit-zero-hint = 0 = unbegrenzt
 pref-section-index-label = Index
-
 pref-api-usage-title = API-Nutzungsstatistiken
 pref-api-usage-total-tokens = Insgesamt verwendete Tokens:
 pref-api-usage-total-requests = API-Anfragen insgesamt:
@@ -129,12 +122,10 @@ pref-api-usage-reset-button =
     .label = Statistiken zurücksetzen
 pref-api-usage-reset-button-text = Statistiken zurücksetzen
 pref-api-usage-reset-confirm = Möchten Sie wirklich alle API-Nutzungsstatistiken zurücksetzen? Diese Aktion kann nicht rückgängig gemacht werden.
-
 pref-api-stat-tokens = Tokens
 pref-api-stat-requests = Anfragen
 pref-api-stat-cost = Kosten
 pref-api-stat-rate-hits = Ratenlimit-Treffer
-
 pref-semantic-stats-title = Status des semantischen Index
 pref-semantic-stats-loading = Laden...
 pref-semantic-stats-total-items = Indizierte Elemente:
@@ -158,12 +149,10 @@ pref-semantic-stats-refresh-button =
     .label = Aktualisieren
 pref-semantic-stats-not-initialized = Semantischer Suchdienst nicht initialisiert
 pref-semantic-stats-db-corrupted = Index-Datenbank ist beschädigt. Bitte starten Sie Zotero neu, um die automatische Reparatur durchzuführen.
-
 pref-stat-items = Elemente
 pref-stat-vectors = Vektoren
 pref-stat-database = Datenbank
 pref-stat-status = Status
-
 pref-semantic-index-control-title = Index-Operationen
 pref-semantic-auto-update =
     .label = Index automatisch aktualisieren, wenn Elemente geändert werden (Hinzufügen/Ändern)
@@ -211,20 +200,70 @@ pref-semantic-index-busy = Eine Indizierung läuft bereits, bitte warten Sie, bi
 pref-semantic-index-confirm-rebuild = Der gesamte Index wird neu aufgebaut. Sind Sie sicher?
 pref-semantic-index-confirm-clear = Alle Indexdaten werden gelöscht (der Inhalts-Cache bleibt erhalten). Sind Sie sicher?
 pref-semantic-index-cleared = Index gelöscht
-
 pref-detail-stats-title = Detaillierte Statistiken und API-Nutzung
 pref-detail-index-section = Index-Details
 pref-detail-api-section = API kumuliert
-
 first-install-title = Willkommen beim Zotero MCP Plugin
 first-install-prompt = Vielen Dank für die Installation des Zotero MCP Plugins! Um zu beginnen, müssen Sie Konfigurationsdateien für Ihre KI-Clients generieren. Möchten Sie jetzt die Einstellungsseite öffnen, um Konfigurationen zu erstellen?
 first-install-open-prefs = Einstellungen öffnen
 first-install-later = Später konfigurieren
-
 pref-write-enable-text = Schreiboperationen aktivieren
 pref-write-enable-sub = KI-Clients dürfen Notizen erstellen und bearbeiten (aus Sicherheitsgründen standardmäßig deaktiviert)
-
 pref-contact-title = Kontaktinformationen
 pref-contact-email = E-Mail: fransjone@mail.com
 pref-contact-github = GitHub: https://github.com/cookjohn/zotero-mcp
 pref-contact-wechat = WeChat: 未来论文实验室
+# ============ MinerU high-precision PDF parsing ============
+pref-mineru-title = High-precision PDF parsing (MinerU)
+pref-mineru-desc = Run PDFs through MinerU for layout reconstruction before they reach the vector index and the MCP full-text tools, yielding Markdown with heading structure, formulas and tables instead of Zotero's raw text extraction.
+pref-mineru-enable-text = Enable MinerU parsing
+pref-mineru-enable-sub = When off, everything falls back to Zotero's built-in PDF text extraction
+pref-mineru-mode-label = Deployment
+pref-mineru-mode-cloud = Cloud API (mineru.net)
+pref-mineru-mode-local = Local mineru-api
+pref-mineru-mode-hint = Cloud requires an API token and consumes your MinerU quota; local requires a self-hosted mineru-api (Python 3.10-3.13).
+pref-mineru-base-url-label = Service URL
+pref-mineru-token-label = API token
+pref-mineru-token-hint = Issued from your mineru.net account; cloud mode only.
+pref-mineru-model-label = Parsing model
+pref-mineru-model-vlm = VLM (higher accuracy)
+pref-mineru-model-pipeline = Pipeline (faster, cheaper)
+pref-mineru-model-hybrid = Hybrid (MinerU 3.4+, lokal)
+pref-mineru-language-label = Document language
+pref-mineru-language-hint = Betrifft nur gescannte Seiten, die OCR benötigen. Die Vorgabe ch deckt Chinesisch, Englisch und Japanisch ab; auto wird nicht akzeptiert.
+pref-mineru-vlm-hint = VLM analysiert die gesamte Seite visuell; „OCR erzwingen“ und „Dokumentsprache“ haben darauf keine Wirkung. Wechseln Sie zu Pipeline oder Hybrid, damit sie greifen.
+pref-mineru-ocr-text = Force OCR
+pref-mineru-ocr-sub = Only needed for scanned PDFs without a text layer; significantly slower
+pref-mineru-formula-text = Parse formulas
+pref-mineru-formula-sub = Reconstruct formulas as LaTeX
+pref-mineru-table-text = Parse tables
+pref-mineru-table-sub = Reconstruct tables as Markdown tables
+pref-mineru-test-button-text = Test connection
+pref-mineru-testing = Testing…
+pref-mineru-reindex-hint = Note: this only applies to PDFs parsed from now on. Already-indexed items need a full index rebuild before they use MinerU output.
+pref-mineru-attach-text = Ergebnis als Anhang am Eintrag ablegen
+pref-mineru-attach-sub = Nach erfolgreicher Analyse wird das Markdown als Unteranhang des übergeordneten Eintrags abgelegt und ist direkt zu öffnen. Eine erneute Analyse ersetzt es, statt Duplikate anzuhäufen.
+pref-mineru-advanced-title = Advanced options and parse cache
+pref-mineru-concurrency-label = Concurrency
+pref-mineru-timeout-label = Timeout (s)
+pref-mineru-max-size-label = Max file size (MB)
+pref-mineru-blocking-text = Allow on-demand parsing for MCP tools
+pref-mineru-blocking-sub = Off by default. When on, MCP full-text tools wait for MinerU on a cache miss, which can time out the AI client.
+pref-mineru-cache-refresh-button-text = Refresh cache stats
+pref-mineru-cache-clear-button-text = Clear parse cache
+pref-mineru-cache-clear-confirm = This deletes every cached MinerU result; the next index run will re-parse them. Continue?
+pref-mineru-cache-cleared = Parse cache cleared
+
+
+
+
+# Hardened build security settings
+pref-server-token-label = MCP access token
+pref-server-token-regenerate = Regenerate
+pref-server-token-hint = Required for remote access. Treat it as a password and send Authorization: Bearer <token> from the client.
+pref-write-confirm-text = Confirm every write in Zotero
+pref-write-confirm-sub = Recommended. MCP clients cannot bypass the local confirmation dialog.
+pref-file-import-text = Allow MCP to import local files
+pref-file-import-sub = High-risk capability; disabled by default. Enable only when explicitly needed.
+pref-expose-paths-text = Expose local file paths in MCP results
+pref-expose-paths-sub = Absolute paths are hidden by default to reduce local information disclosure.

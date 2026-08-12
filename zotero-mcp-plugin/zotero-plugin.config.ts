@@ -1,14 +1,15 @@
-import { defineConfig } from "zotero-plugin-scaffold";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import pkg from "./package.json";
 
-export default defineConfig({
+export default {
   source: ["src", "addon"],
   dist: ".scaffold/build",
   name: pkg.config.addonName,
   id: pkg.config.addonID,
   namespace: pkg.config.addonRef,
   updateURL: `https://github.com/cookjohn/zotero-mcp/releases/latest/download/${
-    pkg.version.includes("-") ? "update-beta.json" : "update.json"
+    pkg.config.addonVersion.includes("-") ? "update-beta.json" : "update.json"
   }`,
   xpiDownloadLink:
     "https://github.com/{{owner}}/{{repo}}/releases/download/v{{version}}/{{xpiName}}.xpi",
@@ -21,7 +22,93 @@ export default defineConfig({
       description: pkg.description,
       homepage: pkg.homepage,
       buildVersion: pkg.version,
+      addonVersion: pkg.config.addonVersion,
       buildTime: "{{buildTime}}",
+    },
+    hooks: {
+      async "build:fluent"(ctx: { dist: string }) {
+        for (const locale of ["en-US", "zh-CN"]) {
+          const targetDir = join(ctx.dist, "addon", "locale", locale);
+          await mkdir(targetDir, { recursive: true });
+          await copyFile(
+            join(
+              ctx.dist,
+              "addon",
+              "mark-reader",
+              "locale",
+              locale,
+              "zotero-mark-reader.ftl",
+            ),
+            join(targetDir, "zotero-mark-reader.ftl"),
+          );
+        }
+        for (const locale of [
+          "de-DE",
+          "en-US",
+          "es-ES",
+          "fr-FR",
+          "ja-JP",
+          "zh-CN",
+        ]) {
+          const path = join(
+            ctx.dist,
+            "addon",
+            "locale",
+            locale,
+            `${pkg.config.addonRef}-preferences.ftl`,
+          );
+          const contents = await readFile(path, "utf8");
+          await writeFile(
+            path,
+            contents
+              .replace(
+                "\n# Hardened build security settings",
+                "\n\n\n# Hardened build security settings",
+              )
+              .replace(
+                "\n# ============ PDF reading and translation",
+                "\n\n# ============ PDF reading and translation",
+              )
+              .replace(
+                "\n# ============ PDF 阅读与翻译",
+                "\n\n# ============ PDF 阅读与翻译",
+              )
+              .replace(
+                "\n# Unified PDF Markdown pipeline",
+                "\n\n# Unified PDF Markdown pipeline",
+              ),
+            "utf8",
+          );
+        }
+        await rm(join(ctx.dist, "addon", "mark-reader", "locale"), {
+          recursive: true,
+          force: true,
+        });
+      },
+      async "build:makeUpdateJSON"(ctx: { dist: string }) {
+        const stable = !pkg.config.addonVersion.includes("-");
+        await rm(join(ctx.dist, stable ? "update-beta.json" : "update.json"), {
+          force: true,
+        });
+        for (const name of ["update.json", "update-beta.json"]) {
+          const path = join(ctx.dist, name);
+          try {
+            const contents = await readFile(path, "utf8");
+            await writeFile(
+              path,
+              contents
+                .replaceAll(pkg.version, pkg.config.addonVersion)
+                .replaceAll(
+                  `/v${pkg.config.addonVersion}/zotero-mcp-plugin.xpi`,
+                  `/v${pkg.config.addonVersion}/zotero-mcp-plugin-${pkg.config.addonVersion}.xpi`,
+                ),
+              "utf8",
+            );
+          } catch (error: any) {
+            if (error?.code !== "ENOENT") throw error;
+          }
+        }
+      },
     },
     prefs: {
       prefix: pkg.config.prefsPrefix,
@@ -45,4 +132,4 @@ export default defineConfig({
 
   // If you need to see a more detailed log, uncomment the following line:
   // logLevel: "trace",
-});
+};
