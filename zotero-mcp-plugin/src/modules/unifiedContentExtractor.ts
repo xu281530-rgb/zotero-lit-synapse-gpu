@@ -11,6 +11,10 @@ import { PDFProcessor } from "./pdfProcessor";
 import { MCPSettingsService } from "./mcpSettingsService";
 import { IntelligentContentProcessor, ContentControl, ProcessingResult } from "./intelligentContentProcessor";
 import { TextFormatter } from "./textFormatter";
+import {
+  getPDFTextFromMarkdown,
+  isGeneratedMarkdownAttachment,
+} from "./pdfTextSource";
 
 declare let Zotero: any;
 declare let ztoolkit: ZToolkit;
@@ -217,6 +221,10 @@ export class UnifiedContentExtractor {
         const attachment = Zotero.Items.get(attachmentID);
         const contentType = attachment.attachmentContentType;
 
+        // MinerU 生成的 .md 附件与其源 PDF 内容完全重复，
+        // PDF 分支返回的就是这份 Markdown 的纯文本。
+        if (isGeneratedMarkdownAttachment(attachment)) continue;
+
         // Filter by type based on options
         const isPDF = this.isPDF(attachment, contentType);
         if (isPDF && !options.pdf) continue;
@@ -399,8 +407,9 @@ export class UnifiedContentExtractor {
     try {
       // Unified extraction logic based on file type
       if (this.isPDF(attachment, contentType)) {
-        content = await this.extractPDFText(filePath, attachment.id);
-        extractionMethod = 'pdf_cached_or_extracted';
+        const pdfText = await this.extractPDFText(filePath, attachment.id);
+        content = pdfText.text;
+        extractionMethod = pdfText.method;
       } else if (this.isHTML(contentType)) {
         content = await this.extractHTMLText(filePath);
         extractionMethod = 'html_parsing';
@@ -504,23 +513,26 @@ export class UnifiedContentExtractor {
   }
 
   /**
-   * Extract text from PDF - first try Zotero cache, then fallback to PDFProcessor
+   * Extract text from PDF - Doc2X/MinerU Markdown first, then Zotero cache,
+   * then PDFProcessor. The Markdown step is the shared entry point also used
+   * by search_fulltext, so both tools apply the same policy and the same
+   * 「允许 MCP 接口即时解析」 switch.
    */
-  private async extractPDFText(filePath: string, attachmentId?: number): Promise<string> {
-    // MinerU 高精度解析优先。这是同步接口，默认只读缓存，未命中立即回退。
+  private async extractPDFText(
+    filePath: string,
+    attachmentId?: number,
+  ): Promise<{ text: string; method: string }> {
     if (attachmentId) {
-      try {
-        const { getMinerUService } = await import('./mineru');
-        const attachment = await Zotero.Items.getAsync(attachmentId);
-        if (attachment) {
-          const minerUText = await getMinerUService().getIndexTextForAttachment(attachment);
-          if (minerUText) {
-            ztoolkit.log(`[UnifiedContentExtractor] Using MinerU markdown (${minerUText.length} chars)`);
-            return minerUText;
-          }
+      const attachment = await Zotero.Items.getAsync(attachmentId);
+      if (attachment) {
+        const minerU = await getPDFTextFromMarkdown(attachment);
+        if (minerU.text) {
+          ztoolkit.log(`[UnifiedContentExtractor] Using MinerU markdown (${minerU.text.length} chars)`);
+          return { text: minerU.text, method: minerU.method };
         }
-      } catch (minerUError) {
-        ztoolkit.log(`[UnifiedContentExtractor] MinerU lookup failed: ${minerUError}`, "warn");
+        ztoolkit.log(
+          `[UnifiedContentExtractor] No MinerU markdown for ${attachment.key} (${minerU.method}), falling back to PDF worker`,
+        );
       }
     }
 
@@ -528,7 +540,10 @@ export class UnifiedContentExtractor {
     if (attachmentId) {
       const cachedText = await this.getZoteroCachedFulltext(attachmentId);
       if (cachedText) {
-        return TextFormatter.formatPDFText(cachedText);
+        return {
+          text: TextFormatter.formatPDFText(cachedText),
+          method: 'zotero_fulltext_cache',
+        };
       }
     }
 
@@ -537,12 +552,18 @@ export class UnifiedContentExtractor {
     try {
       ztoolkit.log(`[UnifiedContentExtractor] Fallback to PDFProcessor for: ${filePath}`);
       const rawText = await processor.extractText(filePath);
-      return TextFormatter.formatPDFText(rawText);
+      return {
+        text: TextFormatter.formatPDFText(rawText),
+        method: 'pdf_processor',
+      };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       ztoolkit.log(`[UnifiedContentExtractor] PDF extraction failed: ${errorMsg}`, "warn");
       if (errorMsg.includes('timed out')) {
-        return `[PDF extraction timed out - file may be too large. Try indexing the PDF in Zotero first.]`;
+        return {
+          text: `[PDF extraction timed out - file may be too large. Try indexing the PDF in Zotero first.]`,
+          method: 'pdf_processor_timeout',
+        };
       }
       throw error;
     } finally {
