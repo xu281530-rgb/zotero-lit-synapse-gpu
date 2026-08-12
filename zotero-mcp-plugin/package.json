@@ -1,7 +1,7 @@
 {
   "name": "zotero-mcp-plugin",
   "type": "module",
-  "version": "1.6.6+1",
+  "version": "1.6.7",
   "description": "Zotero MCP Plugin with original-PDF-only indexing with direct Doc2X original-note Markdown reuse, MinerU parse reuse, and PDF-change-aware high-precision indexing for Zotero 9.0.x with MCP 2025-06-18 stateless Streamable HTTP compliance",
   "config": {
     "addonName": "Zotero MCP Plugin",
@@ -9,7 +9,7 @@
     "addonRef": "zotero-mcp-plugin",
     "addonInstance": "ZoteroMCP",
     "prefsPrefix": "extensions.zotero.zotero-mcp-plugin",
-    "addonVersion": "1.6.6.1"
+    "addonVersion": "1.6.7"
   },
   "repository": {
     "type": "git",

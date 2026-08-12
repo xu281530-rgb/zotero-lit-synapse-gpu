@@ -426,7 +426,7 @@ export class StreamableMCPServer {
         resources: {},
       },
       serverInfo: this.serverInfo,
-      instructions: `Use hybrid_search as the default first step for literature discovery. It fuses metadata keyword and semantic retrieval without scanning full documents. The library holds both Chinese and English literature, so every hybrid_search call must carry a complete natural-language query for the semantic branch plus keywords covering BOTH Chinese and English terms, translations, synonyms and abbreviations, regardless of the language the user asked in; never narrow the search to one language. Around 5-12 keywords is the recommended amount for best results, not a required range: any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted. If the user only asks which literature is relevant, return the matched titles and metadata directly. Only when the user requests passages, evidence, or full-text details, call search_fulltext with selected itemKeys from hybrid_search. Never perform unscoped whole-library full-text search.`,
+      instructions: `Use hybrid_search as the default first step for literature discovery. It fuses metadata keyword and semantic retrieval without scanning full documents. This server never calls an LLM of its own, so YOU are the query-understanding stage: before every hybrid_search call, (1) identify the discipline and the specific sub-field the question belongs to, (2) adopt that field's expert perspective for the rest of the call, (3) work out the real research intent behind the wording - the mechanism, quantity or phenomenon actually being asked about - and only then (4) write the query and keywords. Reason from domain knowledge, not from the surface words of the question: a materials-science question needs the underlying mechanism, the standard technical terms, the field's abbreviations, the governing variables and the accepted synonyms, not a paraphrase of what the user typed. The library holds both Chinese and English literature, so every call must carry a complete natural-language query for the semantic branch plus keywords covering BOTH Chinese and English terms, translations, synonyms and abbreviations, regardless of the language the user asked in; never narrow the search to one language. Keep every keyword defensible as a term a specialist would search: around 5-12 is the recommended amount, any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted, and padding the list with generic words that are only loosely related to the research intent makes the ranking worse, not better. If you omit keywords the server falls back to mechanical tokenization of the query and says so in the response; treat that warning as a signal to redo the call with proper domain keywords. If the user only asks which literature is relevant, return the matched titles and metadata directly. Only when the user requests passages, evidence, or full-text details, call search_fulltext with selected itemKeys from hybrid_search. Never perform unscoped whole-library full-text search.`,
     });
   }
 
@@ -472,13 +472,24 @@ export class StreamableMCPServer {
           '',
           'The library is bilingual, so every call must retrieve Chinese AND English literature, no matter which language the user asked in. Do NOT translate the question into a single language and do NOT restrict the search to the language of the question. You (the calling AI) are responsible for the query rewrite: this tool never calls an LLM of its own.',
           '',
+          'BEFORE writing any argument, run this analysis on the user question — it is the difference between a good and a useless search, and no part of it happens server-side:',
+          'A. Classify the question: which discipline, and which specific sub-field or research direction inside it?',
+          'B. Adopt that expert role for the rest of this call — reason as a specialist in that sub-field would, using the vocabulary of its literature.',
+          'C. Determine the real research intent: which mechanism, property, process, material system or quantitative relationship is actually being asked about, including what the user implied but did not say.',
+          'D. Only then derive query and keywords FROM that domain analysis, not from the surface wording of the question.',
+          '',
           'Build the arguments like this:',
-          '1. query — one complete natural-language sentence expressing the real information need of the user, used verbatim as the embedding input for cross-lingual semantic search. Do not reduce it to loose tokens. Writing it as an English phrasing followed by " / " and the Chinese phrasing is recommended, so the embedding sees both surface forms.',
-          `2. keywords — precise domain terms covering BOTH Chinese and English: the core concepts, their standard technical translations, common synonyms, and field abbreviations. For best results, providing about 5-12 relevant Chinese and/or English keywords is recommended; this is guidance, not a constraint — any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted. All of them are matched in a single pass over the candidate records (title, abstract, creator, publication title, tags), then scored by term specificity, field weight and how many distinct keywords each record matched, so short exact terms work far better than long sentences and extra keywords cost almost nothing.`,
+          '1. query — one complete natural-language sentence expressing the real information need as an expert in that field would state it, used verbatim as the embedding input for cross-lingual semantic search. Do not reduce it to loose tokens. Writing it as an English phrasing followed by " / " and the Chinese phrasing is recommended, so the embedding sees both surface forms.',
+          `2. keywords — the terms a specialist in that sub-field would actually search on, covering BOTH Chinese and English: the core concepts, the mechanism and governing variables behind the question, standard technical translations, accepted synonyms and variant phrasings, the field's abbreviations, and closely coupled concepts with a clear professional link to the intent. For best results, providing about 5-12 relevant Chinese and/or English keywords is recommended; this is guidance, not a constraint — any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted. All of them are matched in a single pass over the candidate records (title, abstract, creator, publication title, tags), then scored by term specificity, field weight and how many distinct keywords each record matched, so short exact terms work far better than long sentences.`,
+          '3. Do NOT pad the list. Every keyword must be defensible as a term of art tied to the research intent; generic, weakly related or category-level words dilute keyword-coverage scoring and push the right papers down the ranking.',
           '',
           'Worked example — user asks "温度梯度如何影响定向凝固中的柱状晶转变？":',
+          '  A/B/C: materials science → solidification / microstructure formation; reasoning as a solidification specialist, the real intent is how the thermal gradient G, together with the growth rate R, governs the columnar-to-equiaxed transition — i.e. G-R processing maps and nucleation ahead of the growth front.',
           '  query: "Effects of temperature gradient on columnar-to-equiaxed transition during directional solidification / 温度梯度对定向凝固柱状晶-等轴晶转变的影响"',
-          '  keywords: ["温度梯度", "定向凝固", "柱状晶", "等轴晶", "柱状晶-等轴晶转变", "temperature gradient", "directional solidification", "columnar grain", "equiaxed grain", "columnar-to-equiaxed transition", "CET"]',
+          '  keywords: ["温度梯度", "定向凝固", "柱状晶", "等轴晶", "柱状晶-等轴晶转变", "凝固速率", "temperature gradient", "directional solidification", "columnar grain", "equiaxed grain", "columnar-to-equiaxed transition", "CET", "growth rate"]',
+          '  Note what came from domain knowledge rather than from the question: the CET abbreviation, growth rate / 凝固速率 as the co-governing variable, and the columnar/equiaxed grain pair. Note also what was left out: "材料", "实验", "influence factors" — true of the question but too generic to discriminate between papers.',
+          '',
+          'If you do not pass keywords, the server falls back to mechanically tokenizing the query, returns keywordSource "fallback" and a warning stating the keywords were NOT produced by domain-expert analysis. That path exists only so the call still runs; when you see it, redo the search with proper keywords.',
           '',
           'Leave language at its "all" default so retrieval stays genuinely cross-lingual; the other language values only narrow recall. Return these literature matches directly when the user only asks which documents are relevant; call search_fulltext with the matched itemKeys only when the user asks for passages, evidence, or full-text details.',
         ].join('\n'),
@@ -487,14 +498,14 @@ export class StreamableMCPServer {
           properties: {
             query: {
               type: 'string',
-              description: 'Complete natural-language sentence describing the information need, embedded as-is for cross-lingual semantic search. Not a token list. Include both an English and a Chinese phrasing (separated by " / ") so the embedding covers both.'
+              description: 'Complete natural-language sentence describing the information need as a specialist in the question\'s sub-field would state it, written after you have classified the discipline and worked out the real research intent. Embedded as-is for cross-lingual semantic search, so it must read as prose, not a token list. Include both an English and a Chinese phrasing (separated by " / ") so the embedding covers both.'
             },
             keywords: {
               type: 'array',
               items: { type: 'string' },
               minItems: 1,
               maxItems: MAX_SUPPLIED_KEYWORDS,
-              description: `Optional lexical probes for the keyword branch: precise Chinese AND English domain terms, technical translations, synonyms and abbreviations. For best results, it is recommended to provide 5-12 relevant Chinese and/or English keywords. Fewer or more keywords are still allowed within the implemented input limit of 1 to ${MAX_HYBRID_KEYWORDS} entries. Always supply both scripts regardless of the language the user asked in. All keywords are matched together in one pass over title, abstract, creator, publicationTitle and tags, and ranked by term specificity, field weight and keyword coverage, so a broad word cannot outrank a discriminative phrase. Omitting this falls back to splitting the query, which can only probe the language the user typed in and is scored at a lower weight.`
+              description: `Lexical probes for the keyword branch, derived from your domain analysis of the question rather than from its wording: the core concepts and mechanism, precise Chinese AND English terms of art, standard technical translations, accepted synonyms, field abbreviations, and closely coupled concepts with a clear professional link to the research intent. For best results, it is recommended to provide 5-12 relevant Chinese and/or English keywords. Fewer or more keywords are still allowed within the implemented input limit of 1 to ${MAX_HYBRID_KEYWORDS} entries. Always supply both scripts regardless of the language the user asked in. Do not pad with generic or weakly related words — keyword coverage is part of the score, so filler actively hurts ranking. All keywords are matched together in one pass over title, abstract, creator, publicationTitle and tags, and ranked by term specificity, field weight and keyword coverage, so a broad word cannot outrank a discriminative phrase. Omitting this makes the server fall back to mechanically splitting the query: it can only probe the language the user typed in, is scored at a lower weight, and the response is flagged with keywordSource "fallback" plus an explicit warning.`
             },
             topK: {
               type: 'number',
@@ -1835,11 +1846,21 @@ export class StreamableMCPServer {
       `[StreamableMCP][HybridTiming] lexical=${searchResult.timings.keywordMs}ms semantic=${searchResult.timings.semanticMs}ms rrf=${searchResult.timings.rrfMs}ms total=${searchResult.timings.totalMs}ms keywords=${lexicalKeywords.length}(${keywordSource}) lexicalCandidates=${diagnostics?.candidateIDs ?? 0} lexicalScanned=${diagnostics?.scannedItems ?? 0} libraryID=${libraryID}`,
     );
 
+    // 'provided' means the calling AI did the domain analysis; 'fallback' means
+    // nobody did and the probes are mechanical tokens. The distinction has to
+    // reach the caller, not just the log, or a degraded search looks normal.
+    const keywordOrigin: 'ai' | 'fallback' =
+      keywordSource === 'fallback' ? 'fallback' : 'ai';
+    const fallbackWarning =
+      keywordOrigin === 'fallback'
+        ? `warning: Keywords were generated by mechanical fallback tokenization, not by AI/domain-expert analysis; retrieval quality may be lower. The lexical branch only covers the language the query was written in. Redo this search with a domain-expert keyword set: identify the sub-field, adopt its expert perspective, and pass bilingual Chinese and English terms of art, translations, synonyms and abbreviations. Around 5-12 keywords is the recommended amount, and any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted.`
+        : null;
+
     const hybridWarnings = [...searchResult.warnings];
-    if (keywordSource === 'fallback') {
-      hybridWarnings.push(
-        `keywords were not supplied, so the lexical branch was derived from the query and only covers the language it was written in. Pass bilingual Chinese and English keywords to recall literature in both languages; around 5-12 keywords is the recommended amount for best results, and any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted.`,
-      );
+    if (fallbackWarning) {
+      // Front of the list: it describes the input, so it outranks branch-level
+      // notes about what happened during retrieval.
+      hybridWarnings.unshift(fallbackWarning);
     }
     if (diagnostics?.failedKeywords.length) {
       hybridWarnings.push(
@@ -1858,12 +1879,15 @@ export class StreamableMCPServer {
       mode: 'hybrid',
       query: args.query,
       keywords: lexicalKeywords,
+      keywordSource: keywordOrigin,
+      // Top-level so the caller sees it without reading through metadata.
+      ...(fallbackWarning ? { warning: fallbackWarning } : {}),
       data: searchResult.results,
       metadata: {
         extractedAt: new Date().toISOString(),
         searchMode: 'hybrid',
         fusion: 'weighted_rrf',
-        keywordSource,
+        keywordSource: keywordOrigin,
         keywordCount: lexicalKeywords.length,
         keywordWeights: lexicalKeywordEntries.map((entry) => ({
           keyword: entry.text,
@@ -1902,7 +1926,10 @@ export class StreamableMCPServer {
             : undefined,
         },
         fulltextScanned: false,
-        nextStep: 'Return these matches directly unless the user requests passages, evidence, or full-text details; then call search_fulltext with selected itemKeys.',
+        nextStep:
+          keywordOrigin === 'fallback'
+            ? 'These keywords came from mechanical tokenization. Redo hybrid_search with domain-expert bilingual keywords before relying on this ranking; only then call search_fulltext with selected itemKeys if the user wants passages or evidence.'
+            : 'Return these matches directly unless the user requests passages, evidence, or full-text details; then call search_fulltext with selected itemKeys.',
       },
     };
   }
