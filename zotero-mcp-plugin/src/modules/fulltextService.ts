@@ -6,7 +6,16 @@
 declare let Zotero: any;
 declare let ztoolkit: ZToolkit;
 
+/** Title prefix of the Markdown attachments MinerUService writes. */
+const MARKDOWN_ATTACHMENT_PREFIX = "MinerU Markdown";
+/** Master switch for semantic search; mirrors the constant used in hooks.ts. */
+const SEMANTIC_ENABLED_PREF =
+  "extensions.zotero.zotero-mcp-plugin.semantic.enabled";
+
 export class FulltextService {
+  /** Parent items whose vector index was already refreshed during this search. */
+  private semanticRefreshed = new Set<string>();
+
   /**
    * Get comprehensive fulltext content for an item
    * @param itemKey - The item key
@@ -46,6 +55,11 @@ export class FulltextService {
       for (const attachmentID of attachments) {
         try {
           const attachment = Zotero.Items.get(attachmentID);
+          // MinerU 生成的 .md 附件与其源 PDF 内容完全重复，跳过以免同一段
+          // 文字被计两次命中。PDF 分支本身返回的就是这份 Markdown 的纯文本。
+          if (this.isGeneratedMarkdownAttachment(attachment)) {
+            continue;
+          }
           const attachmentText = await this.getAttachmentContent(attachment);
           if (attachmentText && attachmentText.content) {
             result.fulltext.attachments.push(attachmentText);
@@ -111,21 +125,21 @@ export class FulltextService {
 
       // Handle different attachment types
       if (this.isPDFAttachment(attachment, attachmentType)) {
-        // MinerU 高精度解析优先。同步接口默认只读缓存，未命中立即回退。
-        try {
-          const { getMinerUService } = await import('./mineru');
-          const minerUText = await getMinerUService().getIndexTextForAttachment(attachment);
-          if (minerUText) {
-            content = minerUText;
-            extractionMethod = 'mineru';
-          }
-        } catch (minerUError) {
-          ztoolkit.log(`[FulltextService] MinerU lookup failed for ${attachment.key}: ${minerUError}`, "warn");
+        // 全文检索的 PDF 文本一律来自 MinerU Markdown：
+        // 先复用已有 MD（缓存 / 已挂载的 .md / Doc2X 原文），没有就当场解析。
+        const minerU = await this.resolvePDFTextViaMinerU(attachment);
+        if (minerU.text) {
+          content = minerU.text;
+          extractionMethod = minerU.method;
         }
 
-        // Use PDFProcessor directly for PDF files (MinerU 未命中时的回退)
+        // PDF Worker 只在 MinerU 明确失败/不可用时兜底，不再因为“没有 MD”就走这条路。
         try {
           if (!content) {
+            ztoolkit.log(
+              `[FulltextService] MinerU unavailable for ${attachment.key} (${minerU.method}), falling back to PDF worker`,
+              "warn",
+            );
             const { PDFProcessor } = await import('./pdfProcessor');
             const { TextFormatter } = await import('./textFormatter');
             const processor = new PDFProcessor(ztoolkit);
@@ -375,6 +389,153 @@ export class FulltextService {
     } catch (error) {
       ztoolkit.log(`[FulltextService] Error in searchFulltext: ${error}`, "error");
       throw error;
+    }
+  }
+
+  /**
+   * Resolve the PDF text used by full-text search, always through MinerU Markdown.
+   *
+   * 顺序固定为：复用已有 MD（MinerU 缓存 / 已挂到条目上的 .md / Doc2X 原文）
+   * → 没有就当场解析 → 解析成功后按现有机制落盘并挂载 .md → 显式增量更新
+   * 父条目向量索引 → 返回纯文本。返回的 method 会写进结果的 extractionMethod，
+   * 便于区分“复用”“新解析”“MinerU 不可用”三种情况。
+   */
+  private async resolvePDFTextViaMinerU(
+    attachment: any,
+  ): Promise<{ text: string | null; method: string }> {
+    try {
+      const { getMinerUService, markdownToIndexText } = await import('./mineru');
+      const minerUService = getMinerUService();
+
+      // 1) 已有 Markdown 直接复用，绝不触发解析（allowParse:false）。
+      //    ignoreEnabled:true 让“MinerU 开关关掉但缓存/附件还在”时依然能复用。
+      const existing = await minerUService.getMarkdownForAttachment(attachment, {
+        allowParse: false,
+        ignoreEnabled: true,
+      });
+      if (existing) {
+        const reused = markdownToIndexText(existing).trim();
+        if (reused) {
+          ztoolkit.log(
+            `[FulltextService] Reusing existing MinerU Markdown for ${attachment.key} (${reused.length} chars)`,
+          );
+          return { text: reused, method: 'mineru_cache' };
+        }
+      }
+
+      // 2) 没有 MD：由全文检索主动触发解析并等待完成。
+      //    allowParse:true 显式覆盖 blockingOnDemand —— 这条路径必须阻塞等待。
+      if (!minerUService.isEnabled()) {
+        ztoolkit.log(
+          `[FulltextService] MinerU disabled; no Markdown available for ${attachment.key}`,
+          "warn",
+        );
+        return { text: null, method: 'mineru_disabled' };
+      }
+
+      ztoolkit.log(
+        `[FulltextService] No MinerU Markdown for ${attachment.key}, parsing on demand (blocking)`,
+      );
+      const markdown = await minerUService.getMarkdownForAttachment(attachment, {
+        allowParse: true,
+      });
+      if (!markdown) {
+        // 解析失败（含失败冷却、体积超限、Doc2X 生成件等明确拒绝）
+        return { text: null, method: 'mineru_failed' };
+      }
+
+      // 3) 缓存写入与 .md 附件挂载由 MinerUService.parseAndCache 内部完成，
+      //    这里不重复实现存储逻辑。
+      // 4) Markdown 落盘后，显式增量更新父条目的向量索引（只此一条，不重建）。
+      await this.refreshParentSemanticIndex(attachment);
+
+      const text = markdownToIndexText(markdown).trim();
+      if (!text) {
+        ztoolkit.log(
+          `[FulltextService] MinerU Markdown for ${attachment.key} produced empty index text`,
+          "warn",
+        );
+        return { text: null, method: 'mineru_failed' };
+      }
+      return { text, method: 'mineru' };
+    } catch (error) {
+      ztoolkit.log(
+        `[FulltextService] MinerU resolution failed for ${attachment?.key}: ${error}`,
+        "warn",
+      );
+      return { text: null, method: 'mineru_error' };
+    }
+  }
+
+  /**
+   * Explicitly re-index the parent item of a freshly parsed PDF.
+   *
+   * 只更新这一条父文献，不触碰其他条目、更不重建向量库。之所以要显式调用：
+   * notifier 会主动忽略 text/markdown 附件（防止索引回环），所以新挂上去的
+   * .md 不会自动触发索引；force=true 是必须的，否则 indexItem 的时间戳/内容
+   * 缓存快路径会认为“没变化”而跳过，旧的 PDF Worker 向量就留在库里了。
+   * 重新抽取时会再次命中 MinerU 缓存，不会二次调用 MinerU。
+   */
+  private async refreshParentSemanticIndex(attachment: any): Promise<void> {
+    const parentItemID = attachment?.parentItemID;
+    if (!parentItemID) return;
+
+    try {
+      const parent = await Zotero.Items.getAsync(parentItemID);
+      if (!parent?.isRegularItem?.()) return;
+
+      // 同一次全文检索里，一个父条目只更新一次（条目下可能有多个 PDF）。
+      if (this.semanticRefreshed.has(parent.key)) return;
+      this.semanticRefreshed.add(parent.key);
+
+      if (Zotero.Prefs.get(SEMANTIC_ENABLED_PREF, true) === false) {
+        ztoolkit.log(
+          `[FulltextService] Semantic search disabled, skipping index update for ${parent.key}`,
+        );
+        return;
+      }
+
+      const { getSemanticSearchService } = await import('./semantic');
+      const semanticService = getSemanticSearchService();
+      if (!(await semanticService.isReady())) {
+        ztoolkit.log(
+          `[FulltextService] Semantic service not ready, skipping index update for ${parent.key}`,
+          "warn",
+        );
+        return;
+      }
+      // 全库构建正在跑时不插队，那轮构建自己会读到同一份 MinerU 缓存。
+      if (semanticService.isBuildActive?.()) {
+        ztoolkit.log(
+          `[FulltextService] Index build in progress, skipping incremental update for ${parent.key}`,
+        );
+        return;
+      }
+
+      ztoolkit.log(
+        `[FulltextService] Incremental vector index update for parent item ${parent.key}`,
+      );
+      await semanticService.indexItemWithProcessor(parent, null, true);
+    } catch (error) {
+      // 索引失败不影响本次全文检索的结果返回。
+      ztoolkit.log(
+        `[FulltextService] Incremental index update failed for ${attachment?.key}: ${error}`,
+        "warn",
+      );
+    }
+  }
+
+  /**
+   * Detect the Markdown attachments generated by MinerU for a source PDF.
+   */
+  private isGeneratedMarkdownAttachment(attachment: any): boolean {
+    try {
+      if (!attachment?.isAttachment?.()) return false;
+      if (attachment.attachmentContentType !== 'text/markdown') return false;
+      const title = attachment.getField?.('title') || '';
+      return title.startsWith(MARKDOWN_ATTACHMENT_PREFIX);
+    } catch (error) {
+      return false;
     }
   }
 
