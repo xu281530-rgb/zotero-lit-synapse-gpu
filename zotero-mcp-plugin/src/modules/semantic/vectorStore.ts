@@ -1002,7 +1002,11 @@ export class VectorStore {
    */
   async searchCachedContent(
     searchTerm: string,
-    options: { limit?: number; caseSensitive?: boolean } = {}
+    options: {
+      limit?: number;
+      caseSensitive?: boolean;
+      itemKeys?: string[];
+    } = {}
   ): Promise<Array<{
     itemKey: string;
     snippet: string;
@@ -1010,13 +1014,23 @@ export class VectorStore {
   }>> {
     await this.ensureInitialized();
 
-    const { limit = 20, caseSensitive = false } = options;
+    const { limit = 20, caseSensitive = false, itemKeys } = options;
+
+    if (!itemKeys || itemKeys.length === 0) {
+      throw new Error(
+        'itemKeys is required; whole-library full-text scanning is disabled',
+      );
+    }
 
     // SQLite LIKE is case-insensitive by default for ASCII
     const searchPattern = `%${searchTerm}%`;
 
     // IMPORTANT: Single-line query to avoid Zotero queryAsync bug with multi-line SQL
-    const rows = await this.db.queryAsync(`SELECT item_key, full_content FROM content_cache WHERE full_content LIKE ? LIMIT ?`, [searchPattern, limit * 2]); // Fetch more to account for filtering
+    const placeholders = itemKeys.map(() => '?').join(',');
+    const rows = await this.db.queryAsync(
+      `SELECT item_key, full_content FROM content_cache WHERE item_key IN (${placeholders}) AND full_content LIKE ? LIMIT ?`,
+      [...itemKeys, searchPattern, limit * 2],
+    ); // Fetch more to account for filtering
 
     if (!rows || rows.length === 0) return [];
 

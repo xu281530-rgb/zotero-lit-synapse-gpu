@@ -301,17 +301,14 @@ export class FulltextService {
         caseSensitive ? 'g' : 'gi'
       );
 
-      // Get items to search
-      let itemsToSearch;
-      if (itemKeys && Array.isArray(itemKeys)) {
-        itemsToSearch = (await Promise.all(itemKeys.map(key =>
-          Zotero.Items.getByLibraryAndKeyAsync(libraryID, key)
-        ))).filter(item => item);
-      } else {
-        // Search all items (limit for performance)
-        const allItems = await Zotero.Items.getAll(libraryID);
-        itemsToSearch = allItems.slice(0, 1000); // Limit for performance
+      if (!Array.isArray(itemKeys) || itemKeys.length === 0) {
+        throw new Error(
+          'itemKeys from hybrid_search are required; whole-library full-text scanning is disabled',
+        );
       }
+      const itemsToSearch = (await Promise.all(itemKeys.map(key =>
+        Zotero.Items.getByLibraryAndKeyAsync(libraryID, key)
+      ))).filter(item => item);
 
       for (const item of itemsToSearch) {
         if (results.length >= maxResults) break;

@@ -20,6 +20,12 @@ import { UnifiedContentExtractor } from './unifiedContentExtractor';
 import { SmartAnnotationExtractor } from './smartAnnotationExtractor';
 import { MCPSettingsService } from './mcpSettingsService';
 import { getSemanticSearchService, SemanticSearchService } from './semantic';
+import {
+  runHybridSearch,
+  type HybridSearchOptions,
+  type KeywordSearchItem,
+  type SemanticSearchItem,
+} from './hybridSearch';
 
 export interface MCPRequest {
   jsonrpc: '2.0';
@@ -254,6 +260,7 @@ export class StreamableMCPServer {
         resources: {},
       },
       serverInfo: this.serverInfo,
+      instructions: 'Use hybrid_search as the default first step for literature discovery. It fuses metadata keyword and semantic retrieval without scanning full documents. If the user only asks which literature is relevant, return the matched titles and metadata directly. Only when the user requests passages, evidence, or full-text details, call search_fulltext with selected itemKeys from hybrid_search. Never perform unscoped whole-library full-text search.',
     });
   }
 
@@ -293,6 +300,53 @@ export class StreamableMCPServer {
   private handleToolsList(request: MCPRequest): MCPResponse {
     const tools = [
       {
+        name: 'hybrid_search',
+        description: 'DEFAULT FIRST STEP for locating literature. Runs Zotero metadata/field keyword retrieval and semantic vector retrieval in parallel, then fuses their rankings with weighted Reciprocal Rank Fusion (RRF). It does not scan full document text. Return these literature matches directly when the user only asks which documents are relevant; call search_fulltext with the matched itemKeys only when the user asks for passages, evidence, or full-text details.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description: 'Natural-language literature query'
+            },
+            topK: {
+              type: 'number',
+              description: 'Number of fused results to return (default: 10)'
+            },
+            candidateK: {
+              type: 'number',
+              description: 'Candidates retrieved from each branch before fusion (default: max(topK * 3, 20))'
+            },
+            minScore: {
+              type: 'number',
+              description: 'Minimum semantic similarity score 0-1 (default: 0.3)'
+            },
+            language: {
+              type: 'string',
+              enum: ['zh', 'en', 'all'],
+              description: 'Semantic result language filter (default: all)'
+            },
+            rrfK: {
+              type: 'number',
+              description: 'RRF rank constant (default: 60)'
+            },
+            keywordWeight: {
+              type: 'number',
+              description: 'Non-negative keyword branch weight (default: 1)'
+            },
+            semanticWeight: {
+              type: 'number',
+              description: 'Non-negative semantic branch weight (default: 1)'
+            },
+            libraryID: {
+              type: 'number',
+              description: 'Optional Zotero library ID for metadata keyword retrieval'
+            }
+          },
+          required: ['query']
+        }
+      },
+      {
         name: 'get_libraries',
         description: 'List all Zotero libraries available in the current client. Returns minimal library metadata for each library as a paginated array.',
         inputSchema: {
@@ -305,7 +359,7 @@ export class StreamableMCPServer {
       },
       {
         name: 'search_library',
-        description: 'Search the Zotero library with advanced parameters, boolean operators, relevance scoring, and pagination. Results are from user\'s personal library. Use itemKey with get_content for full text. To find standalone PDFs without metadata, use itemType="attachment" with includeAttachments="true".',
+        description: 'Structured Zotero metadata/field search for explicit title, author, year, item type, or other field constraints. For general literature discovery, use hybrid_search first. Attachment full-text search is not available through this tool. To find standalone PDFs without metadata, use itemType="attachment" with includeAttachments="true".',
         inputSchema: {
           type: 'object',
           properties: {
@@ -321,17 +375,6 @@ export class StreamableMCPServer {
               description: 'Title search operator'
             },
             yearRange: { type: 'string', description: 'Year range (e.g., "2020-2023")' },
-            fulltext: { type: 'string', description: 'Full-text search in attachments and notes' },
-            fulltextMode: {
-              type: 'string',
-              enum: ['attachment', 'note', 'both'],
-              description: 'Full-text search mode: attachment (PDFs only), note (notes only), both (default)'
-            },
-            fulltextOperator: {
-              type: 'string',
-              enum: ['contains', 'exact', 'regex'],
-              description: 'Full-text search operator (default: contains)'
-            },
             itemType: {
               type: 'string',
               description: 'Filter by item type (e.g., "attachment" to list standalone files like PDFs imported without metadata, "journalArticle", "book", etc.)'
@@ -756,7 +799,7 @@ export class StreamableMCPServer {
       },
       {
         name: 'search_fulltext',
-        description: 'Search within full-text content of all documents. Returns matching passages with context. Use get_content with itemKey for complete text of a result.',
+        description: 'SECOND-STAGE search within full text of specific documents already located by hybrid_search. itemKeys is required; unscoped whole-library full-text scanning is disabled. Use only when the user asks for passages, evidence, or full-text details.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -768,7 +811,8 @@ export class StreamableMCPServer {
             itemKeys: { 
               type: 'array', 
               items: { type: 'string' },
-              description: 'Limit search to specific items (optional)' 
+              minItems: 1,
+              description: 'Item keys returned by hybrid_search (required)'
             },
             mode: {
               type: 'string',
@@ -779,7 +823,7 @@ export class StreamableMCPServer {
             maxResults: { type: 'number', description: 'Maximum results to return (overrides mode default)' },
             caseSensitive: { type: 'boolean', description: 'Case sensitive search (default: false)' },
           },
-          required: ['q'],
+          required: ['q', 'itemKeys'],
         },
       },
       {
@@ -805,7 +849,7 @@ export class StreamableMCPServer {
       // Semantic Search Tools
       {
         name: 'semantic_search',
-        description: 'AI-powered semantic search using embeddings. Finds conceptually related content even without exact keyword matches. Combine with keyword search (search_library, search_fulltext) for comprehensive results.',
+        description: 'Pure embedding-similarity search. For normal literature discovery, use hybrid_search first; use this tool only when the user explicitly requests semantic-only retrieval.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -863,7 +907,7 @@ export class StreamableMCPServer {
       // Full-text Database Tool (read-only operations)
       {
         name: 'fulltext_database',
-        description: 'Access the cached full-text content database (read-only). Faster than re-extracting from Zotero. Actions: list (cached items), search (find text), get (retrieve content), stats (database info).',
+        description: 'Access the cached full-text database (read-only). The search action is second-stage only and requires itemKeys returned by hybrid_search; unscoped whole-library content scanning is disabled. Actions: list, search, get, stats.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -879,7 +923,8 @@ export class StreamableMCPServer {
             itemKeys: {
               type: 'array',
               items: { type: 'string' },
-              description: 'Item keys for get action'
+              minItems: 1,
+              description: 'Required for search and get actions'
             },
             limit: {
               type: 'number',
@@ -1106,7 +1151,17 @@ export class StreamableMCPServer {
           break;
 
         case 'search_library':
+          if (args?.fulltext) {
+            throw new Error('search_library.fulltext is disabled. Use hybrid_search first, then search_fulltext with matched itemKeys');
+          }
           result = await this.callSearchLibrary(args);
+          break;
+
+        case 'hybrid_search':
+          if (!args?.query) {
+            throw new Error('query is required');
+          }
+          result = await this.callHybridSearch(args);
           break;
 
         case 'search_annotations':
@@ -1239,7 +1294,16 @@ export class StreamableMCPServer {
           if (!args?.q) {
             throw new Error('q (query) is required');
           }
-          result = await this.callSearchFulltext(args);
+          {
+            const fulltextItemKeys = this.coerceStringArray(args?.itemKeys);
+            if (!fulltextItemKeys || fulltextItemKeys.length === 0) {
+              throw new Error('itemKeys from hybrid_search are required; whole-library full-text scanning is disabled');
+            }
+            result = await this.callSearchFulltext({
+              ...args,
+              itemKeys: fulltextItemKeys
+            });
+          }
           break;
 
         case 'get_item_abstract':
@@ -1272,6 +1336,13 @@ export class StreamableMCPServer {
         case 'fulltext_database':
           if (!args?.action) {
             throw new Error('action is required');
+          }
+          if (args.action === 'search') {
+            const cachedSearchItemKeys = this.coerceStringArray(args?.itemKeys);
+            if (!cachedSearchItemKeys || cachedSearchItemKeys.length === 0) {
+              throw new Error('itemKeys from hybrid_search are required for search; whole-library full-text scanning is disabled');
+            }
+            args.itemKeys = cachedSearchItemKeys;
           }
           result = await this.callFulltextDatabase(args);
           break;
@@ -1404,6 +1475,12 @@ export class StreamableMCPServer {
     });
     const response = await Promise.race([searchPromise, timeoutPromise]);
     let result = response.body ? JSON.parse(response.body) : response;
+    if (response.status < 200 || response.status >= 300 || result?.error) {
+      throw new Error(
+        result?.error ||
+          `Keyword metadata search failed with HTTP ${response.status}`,
+      );
+    }
     
     // Add mode information to metadata
     if (result && typeof result === 'object') {
@@ -1420,6 +1497,75 @@ export class StreamableMCPServer {
     }
     
     return result;
+  }
+
+  private async callHybridSearch(args: any): Promise<any> {
+    const topK = args.topK ?? 10;
+    const options: HybridSearchOptions = {
+      topK,
+      candidateK: args.candidateK ?? Math.max(topK * 3, 20),
+      rrfK: args.rrfK ?? 60,
+      keywordWeight: args.keywordWeight ?? 1,
+      semanticWeight: args.semanticWeight ?? 1,
+    };
+    const semanticEnabled = Zotero.Prefs.get(
+      'extensions.zotero.zotero-mcp-plugin.semantic.enabled',
+      true,
+    ) !== false;
+
+    const searchResult = await runHybridSearch(
+      { ...options, query: args.query },
+      {
+        keywordSearch: async (): Promise<KeywordSearchItem[]> => {
+          const keywordResponse = await this.callSearchLibrary({
+            q: args.query,
+            libraryID: args.libraryID,
+            relevanceScoring: true,
+            sort: 'relevance',
+            limit: options.candidateK,
+            offset: 0,
+            mode: 'complete',
+          });
+          return Array.isArray(keywordResponse?.results)
+            ? keywordResponse.results
+            : [];
+        },
+        semanticSearch: async (): Promise<SemanticSearchItem[]> => {
+          if (!semanticEnabled) {
+            throw new Error('semantic search is disabled in plugin preferences');
+          }
+          const semanticService = getSemanticSearchService();
+          await semanticService.initialize();
+          return semanticService.search(args.query, {
+            topK: options.candidateK,
+            minScore: args.minScore ?? 0.3,
+            language: args.language ?? 'all',
+          });
+        },
+      },
+    );
+
+    return {
+      mode: 'hybrid',
+      query: args.query,
+      data: searchResult.results,
+      metadata: {
+        extractedAt: new Date().toISOString(),
+        searchMode: 'hybrid',
+        fusion: 'weighted_rrf',
+        rrfK: options.rrfK,
+        keywordWeight: options.keywordWeight,
+        semanticWeight: options.semanticWeight,
+        candidateK: options.candidateK,
+        resultCount: searchResult.results.length,
+        keywordResultCount: searchResult.keywordResultCount,
+        semanticResultCount: searchResult.semanticResultCount,
+        degraded: searchResult.degraded,
+        warnings: searchResult.warnings,
+        fulltextScanned: false,
+        nextStep: 'Return these matches directly unless the user requests passages, evidence, or full-text details; then call search_fulltext with selected itemKeys.',
+      },
+    };
   }
 
   private async callSearchAnnotations(args: any): Promise<any> {
@@ -1842,7 +1988,14 @@ export class StreamableMCPServer {
             throw new Error('query is required for search action');
           }
 
-          const searchResults = await vectorStore.searchCachedContent(query, { limit, caseSensitive });
+          if (!itemKeys || itemKeys.length === 0) {
+            throw new Error('itemKeys is required for search action; whole-library full-text scanning is disabled');
+          }
+          const searchResults = await vectorStore.searchCachedContent(query, {
+            limit,
+            caseSensitive,
+            itemKeys,
+          });
 
           return {
             action: 'search',
@@ -2732,6 +2885,7 @@ export class StreamableMCPServer {
         'ping'
       ],
       availableTools: [
+        'hybrid_search',
         'get_libraries',
         'search_libraries',
         'search_library',

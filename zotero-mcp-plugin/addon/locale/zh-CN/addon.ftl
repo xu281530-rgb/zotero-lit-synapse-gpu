@@ -263,10 +263,11 @@ config-guide-json-header = ## 配置片段
 config-guide-steps-header = ## 配置步骤
 config-guide-tools-header = ## 可用工具
 config-guide-tools-list =
-    - search_library - 搜索 Zotero 文库
+    - hybrid_search - 文献定位默认第一步，不扫描全文
+    - search_library - 结构化元数据搜索
     - get_item_details - 获取文献详细信息
     - get_item_fulltext - 获取文献全文内容
-    - search_fulltext - 全文搜索
+    - search_fulltext - 二阶段全文搜索，必须传入 hybrid_search 返回的 itemKeys
     - get_collections - 获取收藏夹列表
     - search_annotations - 搜索注释和标注
     - 以及更多...

@@ -52,7 +52,13 @@ export async function testMCPIntegration(): Promise<{
     // Test the initialize method through private access
     const response = await (mcpServer as any).processRequest(request);
     
-    if (response.result && response.result.protocolVersion === '2024-11-05') {
+    if (
+      response.result &&
+      response.result.protocolVersion === '2024-11-05' &&
+      response.result.instructions?.includes(
+        'Use hybrid_search as the default first step',
+      )
+    ) {
       return { success: true, response };
     } else {
       throw new Error('Invalid initialize response');
@@ -75,22 +81,65 @@ export async function testMCPIntegration(): Promise<{
     
     if (response.result && response.result.tools && Array.isArray(response.result.tools)) {
       const tools = response.result.tools;
-      const expectedTools = ['search_library', 'search_annotations', 'get_item_details'];
+      const expectedTools = ['hybrid_search', 'search_library', 'search_annotations', 'get_item_details'];
       const hasExpectedTools = expectedTools.every(tool => 
         tools.some((t: any) => t.name === tool)
       );
-      
-      if (hasExpectedTools) {
+      const hybridIsFirst = tools[0]?.name === 'hybrid_search';
+      const librarySearch = tools.find((tool: any) => tool.name === 'search_library');
+      const fulltextSearch = tools.find((tool: any) => tool.name === 'search_fulltext');
+      const libraryHasNoFulltext =
+        !Object.prototype.hasOwnProperty.call(
+          librarySearch?.inputSchema?.properties || {},
+          'fulltext',
+        );
+      const fulltextRequiresItemKeys =
+        fulltextSearch?.inputSchema?.required?.includes('itemKeys') === true;
+
+      if (
+        hasExpectedTools &&
+        hybridIsFirst &&
+        libraryHasNoFulltext &&
+        fulltextRequiresItemKeys
+      ) {
         return { success: true, toolCount: tools.length, tools: tools.map((t: any) => t.name) };
       } else {
-        throw new Error('Missing expected tools');
+        throw new Error(
+          'Invalid hybrid-first tool contract',
+        );
       }
     } else {
       throw new Error('Invalid tools list response');
     }
   }, tests);
 
-  // Test 3: Tool Call - Ping
+  // Test 3: Full-text search must be scoped before touching Zotero content
+  await runTest('Scoped Full-text Required', async () => {
+    const request = {
+      jsonrpc: '2.0' as const,
+      id: 'test-3',
+      method: 'tools/call',
+      params: {
+        name: 'search_fulltext',
+        arguments: { q: 'evidence' }
+      }
+    };
+
+    const { StreamableMCPServer } = await import('./streamableMCPServer');
+    const mcpServer = new StreamableMCPServer();
+    const response = await (mcpServer as any).processRequest(request);
+
+    if (
+      response.error?.message?.includes(
+        'itemKeys from hybrid_search are required',
+      )
+    ) {
+      return { success: true, error: response.error };
+    }
+    throw new Error('Unscoped full-text search was not rejected');
+  }, tests);
+
+  // Test 4: Tool Call - Ping
   await runTest('Tool Call - Ping', async () => {
     const request = {
       jsonrpc: '2.0' as const,

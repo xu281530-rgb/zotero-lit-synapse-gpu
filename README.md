@@ -6,7 +6,7 @@ _This README is also available in: [:cn: 简体中文](./README-zh.md) | :gb: En
 [![zotero target version](https://img.shields.io/badge/Zotero-7-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-1.6.5.6-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-1.6.6-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -200,15 +200,29 @@ Here are some screenshots demonstrating the functionality of Zotero MCP:
 
 ## 🔧 API Reference (MCP Tools)
 
-The integrated MCP server provides **20 tools** in 5 categories:
+The integrated MCP server provides tools in 5 categories:
 
-### 1. Search & Query (7 tools)
+### 1. Search & Query (8 tools)
+
+#### `hybrid_search`
+
+Default first step for literature discovery. It searches Zotero metadata fields
+and the semantic index in parallel, then fuses both rankings with weighted RRF.
+It does not scan full document text.
+
+- `query` (required), `topK`, `candidateK`, `minScore`, `language`,
+  `rrfK`, `keywordWeight`, `semanticWeight`, `libraryID`
+- Return the matched titles and metadata directly when the user only asks which
+  literature is relevant.
+- Call `search_fulltext` only when the user asks for passages, evidence, or
+  full-text details, and pass the selected `itemKeys`.
 
 #### `search_library`
 
-Advanced library search with multi-dimensional filtering, boolean operators, relevance scoring, and intelligent mode control.
+Structured metadata search for explicit title, author, year, item type, or other
+field constraints. Use `hybrid_search` first for general literature discovery.
 
-- `q`, `title`, `titleOperator`, `yearRange`, `fulltext`, `fulltextMode`, `itemType`, `includeAttachments`, `mode` (minimal/preview/standard/complete), `relevanceScoring`, `sort`, `limit`, `offset`
+- `q`, `title`, `titleOperator`, `yearRange`, `itemType`, `includeAttachments`, `mode` (minimal/preview/standard/complete), `relevanceScoring`, `sort`, `limit`, `offset`
 
 #### `search_annotations`
 
@@ -218,9 +232,10 @@ Search annotations by query, colors, or tags with intelligent ranking.
 
 #### `search_fulltext`
 
-Full-text search across all document content with context snippets.
+Second-stage full-text search within documents already located by
+`hybrid_search`. Whole-library full-text scanning is disabled.
 
-- `q` (required), `itemKeys`, `mode`, `contextLength`, `caseSensitive`
+- `q` (required), `itemKeys` (required), `mode`, `contextLength`, `caseSensitive`
 
 #### `search_collections`
 

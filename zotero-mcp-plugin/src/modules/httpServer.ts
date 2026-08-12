@@ -844,6 +844,25 @@ private getCapabilities() {
     },
     tools: [
       {
+        name: "hybrid_search",
+        description: "Default first step for literature discovery. Searches Zotero metadata fields and the semantic index in parallel, then fuses rankings with weighted RRF. Does not scan full document text.",
+        category: "search",
+        parameters: {
+          query: { type: "string", description: "Natural-language literature query", required: true },
+          topK: { type: "number", description: "Number of fused results (default: 10)", required: false },
+          candidateK: { type: "number", description: "Candidates per retrieval branch before fusion", required: false },
+          minScore: { type: "number", description: "Minimum semantic similarity score", required: false },
+          language: { type: "string", enum: ["zh", "en", "all"], description: "Semantic language filter", required: false },
+          rrfK: { type: "number", description: "RRF rank constant (default: 60)", required: false },
+          keywordWeight: { type: "number", description: "Keyword branch weight (default: 1)", required: false },
+          semanticWeight: { type: "number", description: "Semantic branch weight (default: 1)", required: false },
+          libraryID: { type: "number", description: "Optional library for metadata retrieval", required: false }
+        },
+        examples: [
+          { query: { query: "dynamic recrystallization of nickel superalloys" }, description: "Locate literature without scanning full text" }
+        ]
+      },
+      {
         name: "get_libraries",
         description: "List all Zotero libraries available in the current client. Returns: [{libraryID, name, libraryType}]",
         category: "retrieval",
@@ -864,7 +883,7 @@ private getCapabilities() {
       },
       {
         name: "search_library",
-        description: "Search the Zotero library with advanced parameters including boolean operators, relevance scoring, fulltext search, and pagination. Returns: {query, pagination, searchTime, results: [{key, title, creators, date, attachments: [{key, filename, filePath, contentType, linkMode}], fulltextMatch: {query, mode, attachments: [{snippet, score}], notes: [{snippet, score}]}}], searchFeatures, version}",
+        description: "Structured Zotero metadata search for explicit title, author, year, item type, or field constraints. Use hybrid_search first for general literature discovery.",
         category: "search",
         parameters: {
           libraryID: { type: "number", description: "Optional target Zotero library ID. Defaults to the user library when omitted.", required: false },
@@ -877,19 +896,6 @@ private getCapabilities() {
             required: false
           },
           yearRange: { type: "string", description: "Year range (e.g., '2020-2023')", required: false },
-          fulltext: { type: "string", description: "Full-text search in attachments and notes", required: false },
-          fulltextMode: { 
-            type: "string", 
-            enum: ["attachment", "note", "both"],
-            description: "Full-text search mode: 'attachment' (PDFs only), 'note' (notes only), 'both' (default)",
-            required: false 
-          },
-          fulltextOperator: { 
-            type: "string", 
-            enum: ["contains", "exact", "regex"],
-            description: "Full-text search operator (default: 'contains')",
-            required: false 
-          },
           relevanceScoring: { type: "boolean", description: "Enable relevance scoring", required: false },
           sort: { 
             type: "string", 
@@ -903,9 +909,7 @@ private getCapabilities() {
         examples: [
           { query: { q: "machine learning" }, description: "Basic text search" },
           { query: { title: "deep learning", titleOperator: "contains" }, description: "Title-specific search" },
-          { query: { yearRange: "2020-2023", sort: "relevance" }, description: "Year-filtered search with relevance sorting" },
-          { query: { fulltext: "neural networks", fulltextMode: "attachment" }, description: "Full-text search in PDF attachments only" },
-          { query: { fulltext: "methodology", fulltextMode: "both", fulltextOperator: "exact" }, description: "Exact full-text search in both attachments and notes" }
+          { query: { yearRange: "2020-2023", sort: "relevance" }, description: "Year-filtered search with relevance sorting" }
         ]
       },
       {
@@ -1040,19 +1044,18 @@ private getCapabilities() {
       },
       {
         name: "search_fulltext",
-        description: "Search within fulltext content of items with context and relevance scoring",
+        description: "Second-stage full-text search within documents already located by hybrid_search. itemKeys is required; whole-library scanning is disabled.",
         category: "fulltext",
         parameters: {
           libraryID: { type: "number", description: "Optional target Zotero library ID. Defaults to the user library when omitted.", required: false },
           q: { type: "string", description: "Search query", required: true },
-          itemKeys: { type: "array", items: { type: "string" }, description: "Limit search to specific items (optional)", required: false },
+          itemKeys: { type: "array", items: { type: "string" }, description: "Item keys returned by hybrid_search", required: true },
           contextLength: { type: "number", description: "Context length around matches (default: 200)", required: false },
           maxResults: { type: "number", description: "Maximum results to return (default: 50)", required: false },
           caseSensitive: { type: "boolean", description: "Case sensitive search (default: false)", required: false }
         },
         examples: [
-          { query: { q: "machine learning" }, description: "Search for 'machine learning' in all fulltext" },
-          { query: { q: "neural networks", maxResults: 10, contextLength: 100 }, description: "Limited context search" }
+          { query: { q: "neural networks", itemKeys: ["ABCD1234"], maxResults: 10, contextLength: 100 }, description: "Search within selected hybrid-search matches" }
         ]
       },
       {

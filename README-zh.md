@@ -6,7 +6,7 @@ _This README is also available in: [:gb: English](./README.md) | :cn: 简体中�
 [![zotero target version](https://img.shields.io/badge/Zotero-7-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-1.6.5.6-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-1.6.6-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -324,6 +324,13 @@ MCP 服务器已集成在插件内，位于 `src/modules/streamableMCPServer.ts`
 插件集成的 MCP 服务器提供以下 **20 个工具**，分为 5 大类：
 
 ### 一、搜索与查询（7 个）
+
+#### `hybrid_search`
+
+文献定位的默认第一步。该工具并行执行 Zotero 元数据关键词检索和语义向量检索，
+再使用加权 RRF 融合排序，不扫描全库正文。若用户只询问相关文献，直接返回题名和
+元数据；只有用户要求原文段落、证据或全文细节时，才将命中的 `itemKeys` 传给
+`search_fulltext`。
 
 #### `search_library`
 

@@ -263,10 +263,11 @@ config-guide-json-header = ## Configuration Snippet
 config-guide-steps-header = ## Configuration Steps
 config-guide-tools-header = ## Available Tools
 config-guide-tools-list =
-    - search_library - Search Zotero library
+    - hybrid_search - Default first step for literature discovery; no full-text scan
+    - search_library - Structured metadata search
     - get_item_details - Get item details
     - get_item_fulltext - Get item full text content
-    - search_fulltext - Full text search
+    - search_fulltext - Second-stage search requiring itemKeys from hybrid_search
     - get_collections - Get collections list
     - search_annotations - Search annotations and highlights
     - And more...

@@ -676,6 +676,12 @@ export async function handleSearchRequest(
   );
   const startTime = Date.now();
 
+  if (params.fulltext) {
+    throw new Error(
+      "search_library.fulltext is disabled. Use hybrid_search first, then search_fulltext with matched itemKeys",
+    );
+  }
+
   // --- 1. 参数处理和验证 ---
   const libraryID = params.libraryID ?? Zotero.Libraries.userLibraryID;
   const limit = Math.min(parseInt(params.limit || "100", 10), 500);
@@ -792,7 +798,9 @@ export async function handleSearchRequest(
 
   // 普通搜索条件
   if (params.q) {
-    s.addCondition("quicksearch-everything", "contains", params.q);
+    // Discovery searches stay metadata-only. Full-text retrieval is an
+    // explicit second stage scoped to itemKeys returned by hybrid_search.
+    s.addCondition("quicksearch-fields", "contains", params.q);
   }
 
   const fieldMappings: { [key in keyof SearchParams]?: string } = {
@@ -1126,7 +1134,7 @@ export async function handleSearchRequest(
 
   // 添加搜索类型信息
   const searchFeatures: string[] = [];
-  if (params.q) searchFeatures.push("fulltext");
+  if (params.q) searchFeatures.push("metadata");
   if (queryTags.length > 0) searchFeatures.push("tags");
   if (params.yearRange) searchFeatures.push("dateRange");
   if (
