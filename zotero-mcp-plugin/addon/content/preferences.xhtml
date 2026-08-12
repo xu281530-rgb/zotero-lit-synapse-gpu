@@ -715,10 +715,18 @@
       border: 1px solid var(--border);
       border-radius: 7px;
       background: var(--bg);
+      /* 表格的 min-width 会顺着 prefpane 的 XUL box 往上传播（XUL box 按子元素
+         的固有最小宽度撑开，不会收缩），展开术语表时整个设置窗口就多出
+         一条横向滚动条。inline-size 包含让本容器的固有宽度与内容脱钩，
+         横向滚动回到它自己这个框内部。 */
+      width: 100%;
+      max-width: 100%;
+      contain: inline-size;
     }
     .zmp-glossary-table {
       width: 100%;
-      min-width: 680px;
+      /* 窗口宽度够时完全放得下，不够时在上方滚动框内横向滚动。 */
+      min-width: 560px;
       border-collapse: collapse;
       font-size: 11.5px;
     }
@@ -741,7 +749,7 @@
     .zmp-glossary-table td input[type="text"] {
       box-sizing: border-box;
       width: 100%;
-      min-width: 90px;
+      min-width: 70px;
       height: 28px;
       padding: 0 7px;
       border: 1px solid var(--border-strong);
@@ -785,16 +793,6 @@
       padding: 24px 28px 26px;
       margin-top: 16px;
     }
-    .zmp-ft-qr {
-      display: inline-block;
-      background: #fff;
-      padding: 5px;
-      border-radius: 10px;
-      margin-bottom: 10px;
-      border: 1px solid var(--border);
-      box-shadow: var(--shadow-card);
-    }
-    .zmp-ft-qr img { display: block; width: 96px; height: 96px; border-radius: 5px; }
     .zmp-ft-text {
       display: flex;
       align-items: center;
@@ -1754,9 +1752,6 @@
 
     <!-- ⑤ Footer -->
     <html:div class="zmp-ft">
-      <html:div class="zmp-ft-qr">
-        <html:img src="chrome://__addonRef__/content/icons/mp-qrcode.jpg" alt="公众号二维码" />
-      </html:div>
       <html:div class="zmp-ft-text">
         <html:label
           data-l10n-id="pref-help"
@@ -1764,8 +1759,6 @@
         ></html:label>
         <html:span class="zmp-d">·</html:span>
         <html:a href="https://github.com/cookjohn/zotero-mcp" onclick="Zotero.launchURL(this.href); event.preventDefault();" style="cursor:pointer">GitHub</html:a>
-        <html:span class="zmp-d">·</html:span>
-        <html:span>fransjone@mail.com</html:span>
       </html:div>
     </html:div>
 
