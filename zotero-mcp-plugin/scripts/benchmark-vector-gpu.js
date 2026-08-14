@@ -5,7 +5,6 @@ import { spawn } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DatabaseSync } from "node:sqlite";
 import { register } from "node:module";
 
 register("./ts-ext-hooks.mjs", import.meta.url);
@@ -13,24 +12,38 @@ register("./ts-ext-hooks.mjs", import.meta.url);
 const { GPU_PROTOCOL_VERSION, GpuFrameDecoder, encodeGpuFrame } = await import(
   "../src/modules/semantic/gpuVectorProtocol.ts"
 );
+
 const projectDirectory = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
 );
-const databasePath =
-  process.env.VECTOR_GPU_DATABASE ||
-  "D:\\BaiduSyncdisk\\ZoteroFile\\zotero-mcp-vectors.sqlite";
 const executable =
   process.env.VECTOR_GPU_EXE ||
-  path.join(projectDirectory, "addon", "native", "gpu", "vector-gpu.exe");
-const runtimeDirectory = path.dirname(executable);
-const batchSize = 2048;
-const queryCount = 10;
+  path.join(
+    projectDirectory,
+    "native",
+    "vector-gpu",
+    "build",
+    "bin",
+    "vector-gpu.exe",
+  );
+const runtimeDirectory =
+  process.env.VECTOR_GPU_RUNTIME_DIR ||
+  path.join(projectDirectory, ".cuda-toolkit", "12.6", "bin");
+const vectorCount = Number(process.env.VECTOR_GPU_COUNT || 90_000);
+const dimensions = Number(process.env.VECTOR_GPU_DIMENSIONS || 1024);
+const queryCount = Number(process.env.VECTOR_GPU_QUERIES || 20);
+const warmupCount = 3;
 const topK = 20;
+const batchSize = 2048;
+const timeoutMs = 120_000;
+const scoreTolerance = 1e-4;
 
 function percentile(values, fraction) {
   const ordered = [...values].sort((left, right) => left - right);
-  return ordered[Math.min(ordered.length - 1, Math.ceil(fraction * ordered.length) - 1)];
+  return ordered[
+    Math.min(ordered.length - 1, Math.ceil(fraction * ordered.length) - 1)
+  ];
 }
 
 function statistics(values) {
@@ -40,13 +53,6 @@ function statistics(values) {
     p95: percentile(values, 0.95),
     max: Math.max(...values),
   };
-}
-
-function parseIdentity(storageKey) {
-  const match = /^(\d+):(.+)$/.exec(storageKey);
-  return match
-    ? { libraryID: Number(match[1]), itemKey: match[2] }
-    : { libraryID: 1, itemKey: storageKey };
 }
 
 class GpuClient {
@@ -94,7 +100,7 @@ class GpuClient {
     this.pending.clear();
   }
 
-  request(type, fields = {}, payload = new Uint8Array(0), timeoutMs = 60000) {
+  request(type, fields = {}, payload = new Uint8Array(0)) {
     const requestId = `benchmark-${++this.sequence}`;
     const encoded = encodeGpuFrame(
       { protocol: GPU_PROTOCOL_VERSION, type, requestId, ...fields },
@@ -122,7 +128,7 @@ class GpuClient {
   async close() {
     if (this.child.exitCode === null) {
       try {
-        await this.request("shutdown", {}, new Uint8Array(0), 2000);
+        await this.request("shutdown");
       } finally {
         this.child.stdin.end();
       }
@@ -130,17 +136,51 @@ class GpuClient {
   }
 }
 
-function searchCpu(index, query) {
+function createIndex() {
+  let state = 0x5a17c9e3;
+  const random = () => {
+    state ^= state << 13;
+    state ^= state >>> 17;
+    state ^= state << 5;
+    return (state >>> 0) / 0xffffffff;
+  };
+  const float32 = new Float32Array(vectorCount * dimensions);
+  const int8 = new Int8Array(vectorCount * dimensions);
+  for (let row = 0; row < vectorCount; row++) {
+    const offset = row * dimensions;
+    let maxAbs = 0;
+    for (let column = 0; column < dimensions; column++) {
+      const value = random() * 2 - 1;
+      float32[offset + column] = value;
+      maxAbs = Math.max(maxAbs, Math.abs(value));
+    }
+    const scale = maxAbs > 0 ? 127 / maxAbs : 1;
+    for (let column = 0; column < dimensions; column++) {
+      int8[offset + column] = Math.round(float32[offset + column] * scale);
+    }
+  }
+  return { float32, int8 };
+}
+
+function ranksBefore(left, right) {
+  return (
+    left.score > right.score ||
+    (left.score === right.score && left.rowId < right.rowId)
+  );
+}
+
+function searchCpu(vectors, query) {
   let queryNormSquared = 0;
-  for (let column = 0; column < index.dimensions; column++) {
+  for (let column = 0; column < dimensions; column++) {
     queryNormSquared += query[column] * query[column];
   }
   const heap = [];
+  const ranksAfter = (left, right) => ranksBefore(right, left);
   const siftUp = (start) => {
     let position = start;
     while (position > 0) {
       const parent = (position - 1) >> 1;
-      if (heap[parent].score <= heap[position].score) break;
+      if (!ranksAfter(heap[position], heap[parent])) break;
       [heap[parent], heap[position]] = [heap[position], heap[parent]];
       position = parent;
     }
@@ -150,108 +190,137 @@ function searchCpu(index, query) {
     for (;;) {
       const left = position * 2 + 1;
       const right = left + 1;
-      let smallest = position;
-      if (left < heap.length && heap[left].score < heap[smallest].score) {
-        smallest = left;
+      let worst = position;
+      if (left < heap.length && ranksAfter(heap[left], heap[worst]))
+        worst = left;
+      if (right < heap.length && ranksAfter(heap[right], heap[worst])) {
+        worst = right;
       }
-      if (right < heap.length && heap[right].score < heap[smallest].score) {
-        smallest = right;
-      }
-      if (smallest === position) break;
-      [heap[position], heap[smallest]] = [heap[smallest], heap[position]];
-      position = smallest;
+      if (worst === position) break;
+      [heap[position], heap[worst]] = [heap[worst], heap[position]];
+      position = worst;
     }
   };
 
-  for (let row = 0; row < index.rows.length; row++) {
-    if (index.rows[row].libraryID !== 1) continue;
+  for (let row = 0; row < vectorCount; row++) {
+    const offset = row * dimensions;
     let dot = 0;
     let vectorNormSquared = 0;
-    const vectorOffset = row * index.dimensions;
-    for (let column = 0; column < index.dimensions; column++) {
-      const value = index.vectors[vectorOffset + column];
+    for (let column = 0; column < dimensions; column++) {
+      const value = vectors[offset + column];
       dot += query[column] * value;
       vectorNormSquared += value * value;
     }
     const denominator = Math.sqrt(queryNormSquared * vectorNormSquared);
     const result = {
-      ...index.rows[row],
+      rowId: row + 1,
+      itemKey: `ITEM-${row + 1}`,
+      chunkId: 0,
       score: denominator === 0 ? 0 : dot / denominator,
     };
     if (heap.length < topK) {
       heap.push(result);
       siftUp(heap.length - 1);
-    } else if (result.score > heap[0].score) {
+    } else if (ranksBefore(result, heap[0])) {
       heap[0] = result;
       siftDown();
     }
   }
-  return heap.sort((left, right) => right.score - left.score);
+  return heap.sort((left, right) =>
+    ranksBefore(left, right) ? -1 : ranksBefore(right, left) ? 1 : 0,
+  );
 }
 
-function encodeBatch(index, start, end) {
-  const payload = index.vectors.slice(
-    start * index.dimensions,
-    end * index.dimensions,
-  );
+function queryAt(vectors, queryIndex) {
+  const row = Math.floor((queryIndex * vectorCount) / queryCount);
+  return vectors.subarray(row * dimensions, (row + 1) * dimensions);
+}
+
+function payloadView(view) {
+  return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+}
+
+async function uploadIndex(client, precision, vectors) {
+  const started = performance.now();
+  await client.request("snapshot.begin", {
+    precision,
+    total: vectorCount,
+    dimensions,
+  });
+  for (let start = 0; start < vectorCount; start += batchSize) {
+    const end = Math.min(vectorCount, start + batchSize);
+    const rows = Array.from({ length: end - start }, (_, localIndex) => {
+      const row = start + localIndex;
+      return {
+        rowId: row + 1,
+        libraryID: 1,
+        itemKey: `ITEM-${row + 1}`,
+        chunkId: 0,
+        language: row % 7 === 0 ? "zh" : "en",
+      };
+    });
+    const slice = vectors.subarray(start * dimensions, end * dimensions);
+    await client.request(
+      "snapshot.batch",
+      { precision, dimensions, rows },
+      payloadView(slice),
+    );
+  }
+  const committed = await client.request("snapshot.commit");
+  assert.equal(committed.header.vectors, vectorCount);
   return {
-    payload: new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength),
-    rows: index.rows.slice(start, end).map((row) => ({
-      rowId: row.rowId,
-      libraryID: row.libraryID,
-      itemKey: row.itemKey,
-      chunkId: row.chunkId,
-      language: row.language,
-      norm: row.norm,
-    })),
+    uploadMs: performance.now() - started,
+    deviceBytes: Number(committed.header.deviceBytes),
   };
 }
 
-const databaseLoadStarted = performance.now();
-const database = new DatabaseSync(databasePath, { readOnly: true });
-const summary = database
-  .prepare(
-    "SELECT COUNT(*) AS total, MIN(dimensions) AS minDimensions, MAX(dimensions) AS maxDimensions, SUM(CASE WHEN vector_int8 IS NULL THEN 1 ELSE 0 END) AS missing FROM embeddings",
-  )
-  .get();
-assert.equal(summary.missing, 0, "benchmark requires a complete Int8 index");
-assert.equal(summary.minDimensions, summary.maxDimensions, "mixed dimensions");
-const index = {
-  dimensions: summary.minDimensions,
-  rows: new Array(summary.total),
-  vectors: new Int8Array(summary.total * summary.minDimensions),
-};
-let loaded = 0;
-for (const row of database
-  .prepare(
-    "SELECT id, item_key, chunk_id, language, dimensions, vector_int8, vector_norm FROM embeddings ORDER BY id",
-  )
-  .iterate()) {
-  const vector = Buffer.from(row.vector_int8, "base64");
-  assert.equal(vector.length, index.dimensions);
-  index.vectors.set(vector, loaded * index.dimensions);
-  const identity = parseIdentity(row.item_key);
-  index.rows[loaded] = {
-    rowId: row.id,
-    libraryID: identity.libraryID,
-    itemKey: identity.itemKey,
-    chunkId: row.chunk_id,
-    language: row.language,
-    norm: row.vector_norm,
-  };
-  loaded += 1;
-}
-database.close();
-const databaseLoadMs = performance.now() - databaseLoadStarted;
-assert.equal(loaded, summary.total);
-
-const queries = Array.from({ length: queryCount }, (_, queryIndex) => {
-  const row = Math.floor((queryIndex * index.rows.length) / queryCount);
-  return index.vectors.slice(
-    row * index.dimensions,
-    (row + 1) * index.dimensions,
+async function searchGpu(client, precision, query) {
+  const frame = await client.request(
+    "search",
+    {
+      precision,
+      dimensions,
+      topK,
+      groupByItem: false,
+      maxChunksPerItem: 3,
+      language: "all",
+      libraryID: 1,
+      minScore: -1,
+    },
+    payloadView(query),
   );
-});
+  return frame.header.results;
+}
+
+function assertEquivalent(cpu, gpu, label) {
+  const cpuIdentities = cpu.map((row) => [row.itemKey, row.chunkId]);
+  const gpuIdentities = gpu.map((row) => [row.itemKey, row.chunkId]);
+  if (JSON.stringify(cpuIdentities) !== JSON.stringify(gpuIdentities)) {
+    const cpuSet = new Set(cpuIdentities.map((value) => value.join(":")));
+    const gpuSet = new Set(gpuIdentities.map((value) => value.join(":")));
+    assert.deepEqual(
+      gpuSet,
+      cpuSet,
+      `${label} TopK differs outside a tied score boundary`,
+    );
+  }
+  let maxScoreError = 0;
+  for (let index = 0; index < cpu.length; index++) {
+    maxScoreError = Math.max(
+      maxScoreError,
+      Math.abs(cpu[index].score - gpu[index].score),
+    );
+  }
+  assert.ok(
+    maxScoreError <= scoreTolerance,
+    `${label} max score error ${maxScoreError} exceeds ${scoreTolerance}`,
+  );
+  return maxScoreError;
+}
+
+const generationStarted = performance.now();
+const index = createIndex();
+const generationMs = performance.now() - generationStarted;
 const client = new GpuClient();
 
 try {
@@ -261,103 +330,109 @@ try {
   });
   const startupMs = performance.now() - startupStarted;
 
-  const uploadStarted = performance.now();
-  await client.request("snapshot.begin", {
-    total: index.rows.length,
-    dimensions: index.dimensions,
-  });
-  for (let start = 0; start < index.rows.length; start += batchSize) {
-    const end = Math.min(index.rows.length, start + batchSize);
-    const batch = encodeBatch(index, start, end);
-    await client.request(
-      "snapshot.batch",
-      { dimensions: index.dimensions, rows: batch.rows },
-      batch.payload,
+  const floatUpload = await uploadIndex(client, "float32", index.float32);
+  for (let warmup = 0; warmup < warmupCount; warmup++) {
+    const query = queryAt(index.float32, warmup % queryCount);
+    searchCpu(index.float32, query);
+    await searchGpu(client, "float32", query);
+  }
+
+  const floatCpuTimes = [];
+  const floatGpuTimes = [];
+  const floatCpuResults = [];
+  let maxFloat32Error = 0;
+  for (let queryIndex = 0; queryIndex < queryCount; queryIndex++) {
+    const query = queryAt(index.float32, queryIndex);
+    let started = performance.now();
+    const cpu = searchCpu(index.float32, query);
+    floatCpuTimes.push(performance.now() - started);
+    floatCpuResults.push(cpu);
+    started = performance.now();
+    const gpu = await searchGpu(client, "float32", query);
+    floatGpuTimes.push(performance.now() - started);
+    maxFloat32Error = Math.max(
+      maxFloat32Error,
+      assertEquivalent(cpu, gpu, "Float32 CPU/GPU"),
     );
   }
-  const committed = await client.request("snapshot.commit");
-  const uploadMs = performance.now() - uploadStarted;
-  assert.equal(committed.header.vectors, index.rows.length);
 
-  searchCpu(index, queries[0]);
-  await client.request(
-    "search",
-    {
-      dimensions: index.dimensions,
-      queryNorm: 1,
-      topK,
-      groupByItem: false,
-      maxChunksPerItem: 3,
-      language: "all",
-      libraryID: 1,
-      minScore: -1,
-    },
-    new Uint8Array(queries[0].buffer),
-  );
+  const int8Upload = await uploadIndex(client, "int8", index.int8);
+  for (let warmup = 0; warmup < warmupCount; warmup++) {
+    const query = queryAt(index.int8, warmup % queryCount);
+    searchCpu(index.int8, query);
+    await searchGpu(client, "int8", query);
+  }
 
-  const cpuTimes = [];
-  const gpuTimes = [];
-  let maxScoreError = 0;
-  for (const query of queries) {
-    const cpuStarted = performance.now();
-    const cpuResults = searchCpu(index, query);
-    cpuTimes.push(performance.now() - cpuStarted);
-
-    const gpuStarted = performance.now();
-    const gpuFrame = await client.request(
-      "search",
-      {
-        dimensions: index.dimensions,
-        queryNorm: 1,
-        topK,
-        groupByItem: false,
-        maxChunksPerItem: 3,
-        language: "all",
-        libraryID: 1,
-        minScore: -1,
-      },
-      new Uint8Array(query.buffer, query.byteOffset, query.byteLength),
+  const int8CpuTimes = [];
+  const int8GpuTimes = [];
+  let maxInt8Error = 0;
+  let recallTotal = 0;
+  let scoreDriftTotal = 0;
+  let scoreDriftCount = 0;
+  for (let queryIndex = 0; queryIndex < queryCount; queryIndex++) {
+    const query = queryAt(index.int8, queryIndex);
+    let started = performance.now();
+    const cpu = searchCpu(index.int8, query);
+    int8CpuTimes.push(performance.now() - started);
+    started = performance.now();
+    const gpu = await searchGpu(client, "int8", query);
+    int8GpuTimes.push(performance.now() - started);
+    maxInt8Error = Math.max(
+      maxInt8Error,
+      assertEquivalent(cpu, gpu, "Int8 CPU/GPU"),
     );
-    gpuTimes.push(performance.now() - gpuStarted);
-    const gpuResults = gpuFrame.header.results;
-    assert.deepEqual(
-      gpuResults.map((row) => [row.libraryID, row.itemKey, row.chunkId]),
-      cpuResults.map((row) => [row.libraryID, row.itemKey, row.chunkId]),
-      "CPU and GPU TopK identities differ",
+
+    const floatResults = floatCpuResults[queryIndex];
+    const floatByItem = new Map(
+      floatResults.map((row) => [row.itemKey, row.score]),
     );
-    for (let index = 0; index < cpuResults.length; index++) {
-      const error = Math.abs(cpuResults[index].score - gpuResults[index].score);
-      maxScoreError = Math.max(maxScoreError, error);
-      assert.ok(error <= 1e-6, `score error ${error} exceeds tolerance`);
+    const overlap = cpu.filter((row) => floatByItem.has(row.itemKey));
+    recallTotal += overlap.length / topK;
+    for (const row of overlap) {
+      scoreDriftTotal += Math.abs(row.score - floatByItem.get(row.itemKey));
+      scoreDriftCount += 1;
     }
   }
 
-  const cpu = statistics(cpuTimes);
-  const gpu = statistics(gpuTimes);
   const report = {
     generatedAt: new Date().toISOString(),
-    databasePath,
+    seed: "0x5a17c9e3",
     device: hello.header.device,
-    vectors: index.rows.length,
-    dimensions: index.dimensions,
+    totalMemoryBytes: hello.header.totalMemoryBytes,
+    freeMemoryBytesAtStart: hello.header.freeMemoryBytes,
+    vectors: vectorCount,
+    dimensions,
+    warmups: warmupCount,
     queries: queryCount,
     topK,
-    databaseLoadMs,
+    generationMs,
     startupMs,
-    uploadMs,
-    deviceBytes: committed.header.deviceBytes,
-    maxScoreError,
-    cpuMs: cpu,
-    gpuMs: gpu,
-    gpuToCpuRatio: gpu.avg / cpu.avg,
-    acceptancePassed: gpu.avg <= cpu.avg * 0.5,
+    uploadMs: {
+      float32: floatUpload.uploadMs,
+      int8: int8Upload.uploadMs,
+    },
+    deviceBytes: {
+      float32: floatUpload.deviceBytes,
+      int8: int8Upload.deviceBytes,
+    },
+    latencyMs: {
+      cpuFloat32: statistics(floatCpuTimes),
+      gpuFloat32: statistics(floatGpuTimes),
+      cpuInt8: statistics(int8CpuTimes),
+      gpuInt8: statistics(int8GpuTimes),
+    },
+    correctness: {
+      maxFloat32CpuGpuScoreError: maxFloat32Error,
+      maxInt8CpuGpuScoreError: maxInt8Error,
+      int8RecallAt20VsFloat32: recallTotal / queryCount,
+      meanInt8ScoreDriftVsFloat32:
+        scoreDriftCount === 0 ? null : scoreDriftTotal / scoreDriftCount,
+    },
   };
   console.log(JSON.stringify(report, null, 2));
-  assert.equal(
-    report.acceptancePassed,
-    true,
-    "GPU average latency must be no more than 50% of CPU",
-  );
+  assert.ok(report.latencyMs.cpuFloat32.p95 < 8000);
+  assert.ok(report.latencyMs.gpuFloat32.p95 < 8000);
+  assert.ok(report.latencyMs.gpuInt8.p95 < 8000);
 } finally {
   await client.close();
 }

@@ -58,6 +58,7 @@ const {
 
 prefs.clear();
 const defaults = getHybridSearchSettings();
+assert.equal(defaults.gpuPrecision, "auto");
 assert.equal(defaults.maxDocuments, 20);
 assert.equal("candidateK" in defaults, false);
 assert.equal(defaults.maxChunksPerItem, 5);
@@ -66,6 +67,11 @@ assert.equal(defaults.minScore, 0.6);
 assert.equal(defaults.chunkTargetChars, 1000);
 assert.equal(defaults.chunkAppendToleranceChars, 500);
 assert.equal(defaults.neighborRadius, 1);
+prefs.set(PREFIX + "hybrid.gpuPrecision", "float32");
+assert.equal(getHybridSearchSettings().gpuPrecision, "float32");
+prefs.set(PREFIX + "hybrid.gpuPrecision", "corrupt");
+assert.equal(getHybridSearchSettings().gpuPrecision, "auto");
+prefs.clear();
 
 // The threshold is stored as a string because preference files have no float
 // type; reading it must still yield a number.

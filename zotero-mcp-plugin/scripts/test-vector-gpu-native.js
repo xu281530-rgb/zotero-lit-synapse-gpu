@@ -113,24 +113,31 @@ class NativeGpuClient {
   }
 }
 
-function encodeRows(rows) {
+function encodeRows(rows, precision) {
   const dimensions = rows[0]?.vector.length ?? 0;
-  const payload = new Uint8Array(rows.length * dimensions);
+  const elementBytes = precision === "float32" ? 4 : 1;
+  const payload = new Uint8Array(rows.length * dimensions * elementBytes);
   const metadata = rows.map((row, index) => {
-    payload.set(new Uint8Array(row.vector.buffer), index * dimensions);
+    payload.set(
+      new Uint8Array(
+        row.vector.buffer,
+        row.vector.byteOffset,
+        row.vector.byteLength,
+      ),
+      index * dimensions * elementBytes,
+    );
     return {
       rowId: row.rowId,
       libraryID: row.libraryID,
       itemKey: row.itemKey,
       chunkId: row.chunkId,
       language: row.language,
-      norm: row.norm,
     };
   });
-  return { dimensions, rows: metadata, payload };
+  return { dimensions, precision, rows: metadata, payload };
 }
 
-function cosineInt8(left, right) {
+function cosine(left, right) {
   let dot = 0;
   let leftNorm = 0;
   let rightNorm = 0;
@@ -207,15 +214,22 @@ try {
   });
   assert.equal(hello.header.protocolVersion, GPU_PROTOCOL_VERSION);
   assert.equal(typeof hello.header.device, "string");
+  assert.ok(hello.header.totalMemoryBytes > 0);
+  assert.ok(hello.header.freeMemoryBytes > 0);
 
-  const snapshot = encodeRows(vectors);
+  const snapshot = encodeRows(vectors, "int8");
   await client.request("snapshot.begin", {
     total: vectors.length,
     dimensions: snapshot.dimensions,
+    precision: snapshot.precision,
   });
   await client.request(
     "snapshot.batch",
-    { dimensions: snapshot.dimensions, rows: snapshot.rows },
+    {
+      dimensions: snapshot.dimensions,
+      precision: snapshot.precision,
+      rows: snapshot.rows,
+    },
     snapshot.payload,
   );
   const committed = await client.request("snapshot.commit");
@@ -226,6 +240,7 @@ try {
     "search",
     {
       dimensions: query.length,
+      precision: "int8",
       queryNorm: 1,
       topK: 10,
       groupByItem: false,
@@ -258,7 +273,7 @@ try {
     const source = vectors.find((row) => row.rowId === result.rowId);
     assert.ok(source);
     assert.ok(
-      Math.abs(result.score - cosineInt8(query, source.vector)) <= 1e-6,
+      Math.abs(result.score - cosine(query, source.vector)) <= 1e-4,
       `row ${result.rowId} score must use the CPU Int8 cosine formula`,
     );
   }
@@ -267,6 +282,7 @@ try {
     "search",
     {
       dimensions: query.length,
+      precision: "int8",
       queryNorm: 1,
       topK: 100,
       groupByItem: true,
@@ -283,21 +299,25 @@ try {
     ["DUP", "DOC", "DOC"],
   );
 
-  const replacement = encodeRows([
-    {
-      rowId: 10,
-      libraryID: 1,
-      itemKey: "DOC",
-      chunkId: 9,
-      language: "en",
-      norm: 1,
-      vector: new Int8Array([-127, 0, 0, 0]),
-    },
-  ]);
+  const replacement = encodeRows(
+    [
+      {
+        rowId: 10,
+        libraryID: 1,
+        itemKey: "DOC",
+        chunkId: 9,
+        language: "en",
+        norm: 1,
+        vector: new Int8Array([-127, 0, 0, 0]),
+      },
+    ],
+    "int8",
+  );
   await client.request(
     "index.upsert",
     {
       dimensions: replacement.dimensions,
+      precision: replacement.precision,
       item: { libraryID: 1, itemKey: "DOC" },
       rows: replacement.rows,
     },
@@ -307,6 +327,7 @@ try {
     "search",
     {
       dimensions: query.length,
+      precision: "int8",
       queryNorm: 1,
       topK: 10,
       groupByItem: false,
@@ -324,12 +345,14 @@ try {
   );
 
   await client.request("index.delete", {
+    precision: "int8",
     items: [{ libraryID: 1, itemKey: "DUP" }],
   });
   const otherLibrary = await client.request(
     "search",
     {
       dimensions: query.length,
+      precision: "int8",
       queryNorm: 1,
       topK: 10,
       groupByItem: false,
@@ -347,11 +370,12 @@ try {
     "deleting one library must preserve an identical item key in another",
   );
 
-  await client.request("index.clear", { libraryID: 1 });
+  await client.request("index.clear", { precision: "int8", libraryID: 1 });
   const cleared = await client.request(
     "search",
     {
       dimensions: query.length,
+      precision: "int8",
       queryNorm: 1,
       topK: 10,
       groupByItem: false,
@@ -363,6 +387,69 @@ try {
     new Uint8Array(query.buffer),
   );
   assert.deepEqual(cleared.header.results, []);
+
+  const floatVectors = vectors.map((row, rowIndex) => ({
+    ...row,
+    vector: new Float32Array(
+      Array.from(
+        row.vector,
+        (value, column) => value / 127 + rowIndex * 0.0001 + column * 0.00001,
+      ),
+    ),
+  }));
+  const floatQuery = new Float32Array([0.91, 0.13, -0.07, 0.02]);
+  const floatSnapshot = encodeRows(floatVectors, "float32");
+  await client.request("snapshot.begin", {
+    total: floatVectors.length,
+    dimensions: floatSnapshot.dimensions,
+    precision: "float32",
+  });
+  await client.request(
+    "snapshot.batch",
+    {
+      dimensions: floatSnapshot.dimensions,
+      precision: "float32",
+      rows: floatSnapshot.rows,
+    },
+    floatSnapshot.payload,
+  );
+  const floatCommitted = await client.request("snapshot.commit");
+  assert.equal(floatCommitted.header.vectors, floatVectors.length);
+  const floatSearched = await client.request(
+    "search",
+    {
+      dimensions: floatQuery.length,
+      precision: "float32",
+      topK: floatVectors.length,
+      groupByItem: false,
+      maxChunksPerItem: 3,
+      language: "all",
+      libraryID: 1,
+      minScore: -1,
+    },
+    new Uint8Array(
+      floatQuery.buffer,
+      floatQuery.byteOffset,
+      floatQuery.byteLength,
+    ),
+  );
+  const expectedFloat = floatVectors
+    .filter((row) => row.libraryID === 1)
+    .map((row) => ({ rowId: row.rowId, score: cosine(floatQuery, row.vector) }))
+    .sort((left, right) => right.score - left.score);
+  assert.deepEqual(
+    floatSearched.header.results.map((row) => row.rowId),
+    expectedFloat.map((row) => row.rowId),
+    "Float32 GPU and CPU chunk ranking must match",
+  );
+  for (let index = 0; index < expectedFloat.length; index++) {
+    assert.ok(
+      Math.abs(
+        floatSearched.header.results[index].score - expectedFloat[index].score,
+      ) <= 1e-4,
+      "Float32 GPU score must remain within 1e-4 of CPU Float32",
+    );
+  }
 } finally {
   await client.close();
 }

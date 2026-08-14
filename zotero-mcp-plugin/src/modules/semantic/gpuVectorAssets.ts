@@ -8,7 +8,7 @@ declare const IOUtils: any;
 export interface GpuAssetManifest {
   schemaVersion: 1;
   assetVersion: string;
-  protocol: "vector-gpu/1";
+  protocol: "vector-gpu/2";
   platform: "windows-x64";
   files: Array<{
     name: string;
@@ -72,7 +72,7 @@ export async function extractGpuAssets(): Promise<ExtractedGpuAssets> {
   }
   if (
     manifest.schemaVersion !== 1 ||
-    manifest.protocol !== "vector-gpu/1" ||
+    manifest.protocol !== "vector-gpu/2" ||
     manifest.platform !== "windows-x64" ||
     !manifest.assetVersion ||
     !Array.isArray(manifest.files)
@@ -106,7 +106,9 @@ export async function extractGpuAssets(): Promise<ExtractedGpuAssets> {
       bytes.byteLength !== file.size ||
       (await sha256(bytes)) !== file.sha256.toLowerCase()
     ) {
-      throw resourceError(`Bundled GPU asset failed verification: ${file.name}`);
+      throw resourceError(
+        `Bundled GPU asset failed verification: ${file.name}`,
+      );
     }
     await IOUtils.write(target, bytes, {
       tmpPath: `${target}.tmp`,
@@ -116,7 +118,9 @@ export async function extractGpuAssets(): Promise<ExtractedGpuAssets> {
       await IOUtils.computeHexDigest(target, "sha256"),
     ).toLowerCase();
     if (writtenHash !== file.sha256.toLowerCase()) {
-      throw resourceError(`Extracted GPU asset failed verification: ${file.name}`);
+      throw resourceError(
+        `Extracted GPU asset failed verification: ${file.name}`,
+      );
     }
   }
 

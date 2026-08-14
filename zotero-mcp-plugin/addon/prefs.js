@@ -27,6 +27,7 @@ pref("hybrid.chunkAppendToleranceChars", 500);
 pref("hybrid.neighborRadius", 1);
 pref("hybrid.searchTimeoutMs", 8000);
 pref("hybrid.gpuAccelerationEnabled", false);
+pref("hybrid.gpuPrecision", "auto");
 pref("semantic.enabled", false);
 pref("semantic.autoUpdate", false);
 pref("embedding.apiBase", "");

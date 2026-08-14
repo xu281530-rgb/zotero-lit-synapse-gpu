@@ -372,37 +372,78 @@ function bindHybridSearchSettings(doc: Document) {
     `#zotero-prefpane-${ref}-hybrid-gpu-enabled`,
   ) as HTMLInputElement;
   const gpuStatus = doc?.querySelector("#hybrid-gpu-status") as HTMLElement;
+  const gpuPrecision = doc?.querySelector(
+    `#zotero-prefpane-${ref}-hybrid-gpu-precision`,
+  ) as HTMLSelectElement;
   if (gpuToggle && gpuStatus) {
     const { getGpuVectorService } = require("./semantic/gpuVectorService");
     const { getVectorStore } = require("./semantic/vectorStore");
     const gpuService = getGpuVectorService();
     gpuToggle.checked = Zotero.Prefs.get(P + "gpuAccelerationEnabled", true) === true;
+    const storedPrecision = String(
+      Zotero.Prefs.get(P + "gpuPrecision", true) || "auto",
+    );
+    if (gpuPrecision) {
+      gpuPrecision.value =
+        storedPrecision === "float32" || storedPrecision === "int8"
+          ? storedPrecision
+          : "auto";
+      gpuPrecision.disabled = !gpuToggle.checked;
+    }
     const renderGpuStatus = (status: any) => {
       gpuStatus.style.color = "";
+      const backend =
+        status.phase === "fallback" || status.phase === "disabled"
+          ? "CPU"
+          : "GPU";
+      const precision = status.precision === "float32" ? "Float32" : "Int8";
       if (status.phase === "preparing") {
         gpuStatus.textContent = getString(
           "pref-hybrid-gpu-status-preparing" as any,
+          { args: { backend, precision } },
         );
       } else if (status.phase === "loading") {
         gpuStatus.textContent = getString(
           "pref-hybrid-gpu-status-loading" as any,
-          { args: { loaded: status.loaded, total: status.total } },
+          {
+            args: {
+              backend,
+              precision,
+              loaded: status.loaded,
+              total: status.total,
+            },
+          },
         );
       } else if (status.phase === "available") {
         gpuStatus.textContent = getString(
           "pref-hybrid-gpu-status-available" as any,
-          { args: { device: status.device, vectors: status.vectors } },
+          {
+            args: {
+              backend,
+              precision,
+              device: status.device,
+              vectors: status.vectors,
+            },
+          },
         );
         gpuStatus.style.color = "var(--color-ok)";
       } else if (status.phase === "fallback") {
         gpuStatus.textContent = getString(
           "pref-hybrid-gpu-status-fallback" as any,
-          { args: { code: status.code, reason: status.reason } },
+          {
+            args: {
+              backend,
+              precision,
+              code: status.code,
+              reason: status.reason,
+            },
+          },
         );
         gpuStatus.style.color = "var(--msg-error-text)";
       } else {
         gpuStatus.textContent = getString(
           "pref-hybrid-gpu-status-disabled" as any,
+          { args: { backend, precision } },
         );
       }
     };
@@ -411,6 +452,7 @@ function bindHybridSearchSettings(doc: Document) {
 
     gpuToggle.addEventListener("change", async () => {
       gpuToggle.disabled = true;
+      if (gpuPrecision) gpuPrecision.disabled = true;
       try {
         if (gpuToggle.checked) getVectorStore();
         await gpuService.setEnabled(gpuToggle.checked);
@@ -418,6 +460,22 @@ function bindHybridSearchSettings(doc: Document) {
         // The service has already switched to an explicit fallback status.
       } finally {
         gpuToggle.disabled = false;
+        if (gpuPrecision) gpuPrecision.disabled = !gpuToggle.checked;
+      }
+    });
+
+    gpuPrecision?.addEventListener("change", async () => {
+      const precision =
+        gpuPrecision.value === "float32" || gpuPrecision.value === "int8"
+          ? gpuPrecision.value
+          : "auto";
+      gpuPrecision.disabled = true;
+      try {
+        await gpuService.setPrecision(precision);
+      } catch {
+        // The status subscription renders the fallback reason.
+      } finally {
+        gpuPrecision.disabled = !gpuToggle.checked;
       }
     });
 

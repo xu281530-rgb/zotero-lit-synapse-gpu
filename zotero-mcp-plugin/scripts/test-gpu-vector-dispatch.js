@@ -13,33 +13,41 @@ const { VectorStore } = await import("../src/modules/semantic/vectorStore.ts");
 function backend(enabled, search) {
   return {
     isEnabled: () => enabled,
+    getEffectivePrecision: () => "float32",
+    reportCpuPrecision: () => {},
     registerProvider: () => {},
     startIfEnabled: async () => {},
     search,
     publishMutation: async () => {},
     fallback: () => {},
+    setEnabled: async () => {},
+    setPrecision: async () => {},
     shutdown: async () => {},
   };
 }
 
 const query = new Float32Array([1, 0]);
-const gpuResult = [{
-  libraryID: 1,
-  itemKey: "GPU",
-  chunkId: 3,
-  score: 0.9,
-  chunkText: "",
-  language: "en",
-  rowId: 7,
-}];
+const gpuResult = [
+  {
+    libraryID: 1,
+    itemKey: "GPU",
+    chunkId: 3,
+    score: 0.9,
+    chunkText: "",
+    language: "en",
+    rowId: 7,
+  },
+];
 
 {
   let cpuCalls = 0;
   let gpuCalls = 0;
-  const store = new VectorStore(backend(false, async () => {
-    gpuCalls += 1;
-    return gpuResult;
-  }));
+  const store = new VectorStore(
+    backend(false, async () => {
+      gpuCalls += 1;
+      return gpuResult;
+    }),
+  );
   store.initialized = true;
   store.searchCpu = async () => {
     cpuCalls += 1;

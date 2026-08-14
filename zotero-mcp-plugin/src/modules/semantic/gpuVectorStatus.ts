@@ -1,3 +1,5 @@
+import type { GpuVectorPrecision } from "./gpuVectorBackend";
+
 export type GpuVectorFailureCode =
   | "NO_CUDA_DEVICE"
   | "DRIVER_INCOMPATIBLE"
@@ -13,12 +15,26 @@ export type GpuVectorFailureCode =
   | "UNKNOWN";
 
 export type GpuVectorStatus =
-  | { phase: "disabled" }
-  | { phase: "preparing" }
-  | { phase: "loading"; loaded: number; total: number }
-  | { phase: "available"; vectors: number; device: string }
+  | { phase: "disabled"; backend: "cpu"; precision: GpuVectorPrecision }
+  | { phase: "preparing"; precision?: GpuVectorPrecision }
+  | {
+      phase: "loading";
+      loaded: number;
+      total: number;
+      precision: GpuVectorPrecision;
+    }
+  | {
+      phase: "available";
+      backend: "gpu";
+      vectors: number;
+      device: string;
+      precision: GpuVectorPrecision;
+      deviceBytes: number;
+    }
   | {
       phase: "fallback";
+      backend: "cpu";
+      precision: GpuVectorPrecision;
       code: GpuVectorFailureCode;
       reason: string;
       preferenceEnabled: boolean;
@@ -27,7 +43,11 @@ export type GpuVectorStatus =
 export type GpuVectorStatusListener = (status: GpuVectorStatus) => void;
 
 export class GpuVectorStatusController {
-  private status: GpuVectorStatus = { phase: "disabled" };
+  private status: GpuVectorStatus = {
+    phase: "disabled",
+    backend: "cpu",
+    precision: "int8",
+  };
   private listeners = new Set<GpuVectorStatusListener>();
 
   get(): GpuVectorStatus {
@@ -43,8 +63,16 @@ export class GpuVectorStatusController {
     code: GpuVectorFailureCode,
     reason: string,
     preferenceEnabled: boolean,
+    precision: GpuVectorPrecision,
   ): void {
-    this.set({ phase: "fallback", code, reason, preferenceEnabled });
+    this.set({
+      phase: "fallback",
+      backend: "cpu",
+      precision,
+      code,
+      reason,
+      preferenceEnabled,
+    });
   }
 
   subscribe(listener: GpuVectorStatusListener): () => void {

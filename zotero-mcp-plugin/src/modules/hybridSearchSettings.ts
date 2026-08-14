@@ -14,6 +14,8 @@ const PREF_PREFIX = "extensions.zotero.zotero-mcp-plugin.";
 export interface HybridSearchSettings {
   /** Use the bundled NVIDIA CUDA worker when it is available. */
   gpuAccelerationEnabled: boolean;
+  /** GPU resident-vector precision; auto selects from the current device. */
+  gpuPrecision: "auto" | "float32" | "int8";
   /** Upper bound on documents returned by library-level hybrid search. */
   maxDocuments: number;
   /** Upper bound on chunks returned per document by search_fulltext. */
@@ -32,6 +34,7 @@ export interface HybridSearchSettings {
 
 export const HYBRID_SETTING_DEFAULTS: HybridSearchSettings = {
   gpuAccelerationEnabled: false,
+  gpuPrecision: "auto",
   maxDocuments: 20,
   maxChunksPerItem: 5,
   minScore: 0.6,
@@ -53,6 +56,7 @@ export const HYBRID_SETTING_BOUNDS = {
 
 export const HYBRID_SETTING_PREF_KEYS = {
   gpuAccelerationEnabled: "hybrid.gpuAccelerationEnabled",
+  gpuPrecision: "hybrid.gpuPrecision",
   maxDocuments: "hybrid.maxDocuments",
   maxChunksPerItem: "hybrid.maxChunksPerItem",
   minScore: "hybrid.minScore",
@@ -70,13 +74,10 @@ function clamp(value: number, min: number, max: number): number {
 
 type NumericHybridSetting = Exclude<
   keyof HybridSearchSettings,
-  "gpuAccelerationEnabled"
+  "gpuAccelerationEnabled" | "gpuPrecision"
 >;
 
-function readNumberPref(
-  key: NumericHybridSetting,
-  integer: boolean,
-): number {
+function readNumberPref(key: NumericHybridSetting, integer: boolean): number {
   const fallback = HYBRID_SETTING_DEFAULTS[key];
   const bounds = HYBRID_SETTING_BOUNDS[key];
   let raw: unknown;
@@ -95,19 +96,31 @@ function readNumberPref(
 
 export function getHybridSearchSettings(): HybridSearchSettings {
   return {
-    gpuAccelerationEnabled:
-      (() => {
-        try {
-          return (
-            Zotero.Prefs.get(
-              PREF_PREFIX + HYBRID_SETTING_PREF_KEYS.gpuAccelerationEnabled,
-              true,
-            ) === true
-          );
-        } catch {
-          return HYBRID_SETTING_DEFAULTS.gpuAccelerationEnabled;
-        }
-      })(),
+    gpuAccelerationEnabled: (() => {
+      try {
+        return (
+          Zotero.Prefs.get(
+            PREF_PREFIX + HYBRID_SETTING_PREF_KEYS.gpuAccelerationEnabled,
+            true,
+          ) === true
+        );
+      } catch {
+        return HYBRID_SETTING_DEFAULTS.gpuAccelerationEnabled;
+      }
+    })(),
+    gpuPrecision: (() => {
+      try {
+        const value = String(
+          Zotero.Prefs.get(
+            PREF_PREFIX + HYBRID_SETTING_PREF_KEYS.gpuPrecision,
+            true,
+          ),
+        );
+        return value === "float32" || value === "int8" ? value : "auto";
+      } catch {
+        return HYBRID_SETTING_DEFAULTS.gpuPrecision;
+      }
+    })(),
     maxDocuments: readNumberPref("maxDocuments", true),
     maxChunksPerItem: readNumberPref("maxChunksPerItem", true),
     minScore: readNumberPref("minScore", false),
@@ -230,7 +243,12 @@ function readStoredChunkingSignatures(): StoredChunkingSignatures {
   try {
     const value = Zotero.Prefs.get(INDEX_CHUNK_SIGNATURE_PREF, true);
     if (typeof value !== "string" || !value.trim()) {
-      return { version: 1, legacyUntrusted: false, libraries: {}, incompleteLibraries: {} };
+      return {
+        version: 1,
+        legacyUntrusted: false,
+        libraries: {},
+        incompleteLibraries: {},
+      };
     }
     try {
       const parsed = JSON.parse(value) as Partial<StoredChunkingSignatures>;
@@ -252,7 +270,10 @@ function readStoredChunkingSignatures(): StoredChunkingSignatures {
             parsed.incompleteLibraries &&
             typeof parsed.incompleteLibraries === "object"
               ? Object.fromEntries(
-                  Object.keys(parsed.incompleteLibraries).map((key) => [key, true]),
+                  Object.keys(parsed.incompleteLibraries).map((key) => [
+                    key,
+                    true,
+                  ]),
                 )
               : {},
         };
@@ -260,9 +281,19 @@ function readStoredChunkingSignatures(): StoredChunkingSignatures {
     } catch {
       // The old format stored the signature itself instead of JSON.
     }
-    return { version: 1, legacyUntrusted: true, libraries: {}, incompleteLibraries: {} };
+    return {
+      version: 1,
+      legacyUntrusted: true,
+      libraries: {},
+      incompleteLibraries: {},
+    };
   } catch {
-    return { version: 1, legacyUntrusted: false, libraries: {}, incompleteLibraries: {} };
+    return {
+      version: 1,
+      legacyUntrusted: false,
+      libraries: {},
+      incompleteLibraries: {},
+    };
   }
 }
 
@@ -285,11 +316,7 @@ export function setStoredChunkingSignature(
     const state = readStoredChunkingSignatures();
     state.libraries[String(libraryID)] = signature;
     delete state.incompleteLibraries?.[String(libraryID)];
-    Zotero.Prefs.set(
-      INDEX_CHUNK_SIGNATURE_PREF,
-      JSON.stringify(state),
-      true,
-    );
+    Zotero.Prefs.set(INDEX_CHUNK_SIGNATURE_PREF, JSON.stringify(state), true);
   } catch (error) {
     ztoolkit.log(
       `[HybridSettings] Failed to store chunking signature: ${error}`,
@@ -305,11 +332,7 @@ export function invalidateStoredChunkingSignature(libraryID: number): void {
     delete state.libraries[String(libraryID)];
     state.incompleteLibraries ??= {};
     state.incompleteLibraries[String(libraryID)] = true;
-    Zotero.Prefs.set(
-      INDEX_CHUNK_SIGNATURE_PREF,
-      JSON.stringify(state),
-      true,
-    );
+    Zotero.Prefs.set(INDEX_CHUNK_SIGNATURE_PREF, JSON.stringify(state), true);
   } catch (error) {
     ztoolkit.log(
       `[HybridSettings] Failed to invalidate chunking signature: ${error}`,
@@ -320,9 +343,10 @@ export function invalidateStoredChunkingSignature(libraryID: number): void {
 }
 
 export function hasIncompleteFullLibraryRebuild(libraryID: number): boolean {
-  return readStoredChunkingSignatures().incompleteLibraries?.[
-    String(libraryID)
-  ] === true;
+  return (
+    readStoredChunkingSignatures().incompleteLibraries?.[String(libraryID)] ===
+    true
+  );
 }
 
 export function shouldRecordFullLibraryChunkingSignature(params: {

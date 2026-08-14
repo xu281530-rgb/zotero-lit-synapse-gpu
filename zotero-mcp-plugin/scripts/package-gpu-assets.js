@@ -76,14 +76,16 @@ if (
 }
 const executable = sourceContents.get("vector-gpu.exe");
 if (executable.length < 2 || executable[0] !== 0x4d || executable[1] !== 0x5a) {
-  throw new Error("vector-gpu.exe is missing or is not a Windows PE executable");
+  throw new Error(
+    "vector-gpu.exe is missing or is not a Windows PE executable",
+  );
 }
 
 const executableHash = sha256(executable);
 const manifest = {
   schemaVersion: 1,
-  assetVersion: `vector-gpu-1.0.0-cuda${expectedCudart.version}-${executableHash.slice(0, 12)}`,
-  protocol: "vector-gpu/1",
+  assetVersion: `vector-gpu-2.0.0-cuda${expectedCudart.version}-${executableHash.slice(0, 12)}`,
+  protocol: "vector-gpu/2",
   platform: "windows-x64",
   files: [],
 };

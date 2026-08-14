@@ -22,16 +22,17 @@ using json = nlohmann::json;
 using zotero_gpu::IncomingRow;
 using zotero_gpu::ItemIdentity;
 using zotero_gpu::SearchOptions;
+using zotero_gpu::VectorPrecision;
 using zotero_gpu::VectorGpuError;
 using zotero_gpu::VectorIndex;
 
 constexpr std::uint32_t kMaxHeaderBytes = 8U * 1024U * 1024U;
 constexpr std::uint32_t kMaxPayloadBytes = 32U * 1024U * 1024U;
-constexpr const char* kProtocol = "vector-gpu/1";
+constexpr const char* kProtocol = "vector-gpu/2";
 
 struct Frame {
   json header;
-  std::vector<std::int8_t> payload;
+  std::vector<std::uint8_t> payload;
 };
 
 bool read_exact(void* destination, std::size_t length) {
@@ -122,10 +123,23 @@ std::vector<IncomingRow> parse_rows(const json& header) {
     row.item_key = value.at("itemKey").get<std::string>();
     row.chunk_id = value.at("chunkId").get<std::int32_t>();
     row.language = value.at("language").get<std::string>();
-    row.norm = value.at("norm").get<double>();
     rows.push_back(std::move(row));
   }
   return rows;
+}
+
+VectorPrecision parse_precision(const json& header) {
+  const std::string value = header.value("precision", "");
+  if (value == "float32") return VectorPrecision::Float32;
+  if (value == "int8") return VectorPrecision::Int8;
+  throw VectorGpuError("INVALID_FRAME", "precision must be float32 or int8");
+}
+
+void require_precision(const VectorIndex& index, const json& header) {
+  if (parse_precision(header) != index.precision()) {
+    throw VectorGpuError("INVALID_FRAME",
+                         "Command precision does not match the resident index");
+  }
 }
 
 ItemIdentity parse_item(const json& value) {
@@ -164,10 +178,16 @@ int main(int argc, char** argv) {
       if (!read_frame(request)) break;
       const std::string type = request.header.at("type").get<std::string>();
       if (type == "hello") {
+        if (request.header.value("expectedProtocol", "") != kProtocol) {
+          throw VectorGpuError("INVALID_FRAME", "Protocol version mismatch");
+        }
         index = std::make_unique<VectorIndex>();
+        const auto memory = index->memory_info();
         json response = success(request);
         response["device"] = index->device_name();
         response["protocolVersion"] = kProtocol;
+        response["totalMemoryBytes"] = memory.total_bytes;
+        response["freeMemoryBytes"] = memory.free_bytes;
         write_frame(response);
       } else if (type == "ping") {
         write_frame(success(request));
@@ -180,9 +200,11 @@ int main(int argc, char** argv) {
         }
         if (type == "snapshot.begin") {
           index->reset(request.header.value("dimensions", 0U),
-                       request.header.value("total", 0U));
+                       request.header.value("total", 0U),
+                       parse_precision(request.header));
           write_frame(success(request));
         } else if (type == "snapshot.batch") {
+          require_precision(*index, request.header);
           const auto rows = parse_rows(request.header);
           index->append(rows, request.payload,
                         request.header.value("dimensions", 0U));
@@ -193,12 +215,14 @@ int main(int argc, char** argv) {
           response["deviceBytes"] = index->device_bytes();
           write_frame(response);
         } else if (type == "index.upsert") {
+          require_precision(*index, request.header);
           const auto rows = parse_rows(request.header);
           index->upsert(parse_item(request.header.at("item")), rows,
                         request.payload,
                         request.header.value("dimensions", 0U));
           write_frame(success(request));
         } else if (type == "index.delete") {
+          require_precision(*index, request.header);
           std::vector<ItemIdentity> items;
           for (const json& value : request.header.at("items")) {
             items.push_back(parse_item(value));
@@ -206,14 +230,19 @@ int main(int argc, char** argv) {
           index->erase_items(items);
           write_frame(success(request));
         } else if (type == "index.clear") {
+          require_precision(*index, request.header);
           if (request.header.value("all", false)) {
             index->clear_all();
           } else {
             index->clear_library(
                 request.header.at("libraryID").get<std::int64_t>());
           }
-          write_frame(success(request));
+          json response = success(request);
+          response["vectors"] = index->active_count();
+          response["deviceBytes"] = index->device_bytes();
+          write_frame(response);
         } else if (type == "search") {
+          require_precision(*index, request.header);
           SearchOptions options;
           options.top_k = request.header.value("topK", 10U);
           options.group_by_item = request.header.value("groupByItem", false);
@@ -233,9 +262,7 @@ int main(int argc, char** argv) {
           options.min_score = request.header.value("minScore", 0.0);
           options.library_id =
               request.header.at("libraryID").get<std::int64_t>();
-          const auto result = index->search(
-              request.payload, request.header.at("queryNorm").get<double>(),
-              options);
+          const auto result = index->search(request.payload, options);
           json response = success(request);
           response["scanned"] = result.scanned;
           response["gpuMs"] = result.gpu_ms;

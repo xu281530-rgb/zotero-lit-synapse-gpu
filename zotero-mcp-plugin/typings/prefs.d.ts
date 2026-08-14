@@ -36,6 +36,7 @@ declare namespace _ZoteroTypes {
       "hybrid.neighborRadius": number;
       "hybrid.searchTimeoutMs": number;
       "hybrid.gpuAccelerationEnabled": boolean;
+      "hybrid.gpuPrecision": string;
       "semantic.enabled": boolean;
       "semantic.autoUpdate": boolean;
       "embedding.apiBase": string;

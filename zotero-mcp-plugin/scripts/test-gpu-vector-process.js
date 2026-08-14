@@ -53,7 +53,7 @@ const handle = {
       );
       stdout.enqueue(
         encodeGpuFrame({
-          protocol: "vector-gpu/1",
+          protocol: "vector-gpu/2",
           type: `${request.header.type}.result`,
           requestId: request.header.requestId,
           ok: true,

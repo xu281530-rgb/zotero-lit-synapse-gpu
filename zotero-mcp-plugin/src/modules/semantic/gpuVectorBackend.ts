@@ -1,5 +1,8 @@
 import type { GpuVectorFailureCode } from "./gpuVectorStatus";
 
+export type GpuVectorPrecision = "float32" | "int8";
+export type GpuVectorPrecisionPreference = "auto" | GpuVectorPrecision;
+
 export interface GpuVectorSearchResult {
   libraryID: number;
   itemKey: string;
@@ -11,8 +14,7 @@ export interface GpuVectorSearchResult {
 }
 
 export interface GpuVectorSearchRequest {
-  query: Int8Array;
-  queryNorm: number;
+  query: Float32Array;
   topK: number;
   groupByItem: boolean;
   documentLimit?: number;
@@ -33,13 +35,14 @@ export interface GpuVectorSnapshotRow {
   chunkId: number;
   language: "zh" | "en";
   dimensions: number;
-  norm: number;
-  vector: Int8Array;
+  vector: Float32Array | Int8Array;
 }
 
 export interface GpuVectorSnapshotInfo {
   total: number;
   dimensions: number;
+  float32Count: number;
+  int8Count: number;
 }
 
 export interface GpuVectorIdentity {
@@ -52,9 +55,11 @@ export interface GpuVectorDataProvider {
   readSnapshotBatch(
     afterRowId: number,
     limit: number,
+    precision: GpuVectorPrecision,
   ): Promise<GpuVectorSnapshotRow[]>;
   readItems(
     identities: GpuVectorIdentity[],
+    precision: GpuVectorPrecision,
   ): Promise<GpuVectorSnapshotRow[]>;
 }
 
@@ -66,12 +71,15 @@ export type GpuVectorMutation =
 
 export interface GpuVectorSearchBackend {
   isEnabled(): boolean;
+  getEffectivePrecision(): GpuVectorPrecision;
+  reportCpuPrecision(precision: GpuVectorPrecision): void;
   registerProvider(provider: GpuVectorDataProvider): void;
   startIfEnabled(): Promise<void>;
   search(request: GpuVectorSearchRequest): Promise<GpuVectorSearchResult[]>;
   publishMutation(mutation: GpuVectorMutation): Promise<void>;
   fallback(error: unknown): void;
   setEnabled(enabled: boolean): Promise<void>;
+  setPrecision(precision: GpuVectorPrecisionPreference): Promise<void>;
   shutdown(): Promise<void>;
 }
 

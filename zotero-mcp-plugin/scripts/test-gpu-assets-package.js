@@ -14,7 +14,9 @@ const projectDirectory = path.resolve(
   "..",
 );
 const assetDirectory = path.join(projectDirectory, "addon", "native", "gpu");
-const manifestBytes = await readFile(path.join(assetDirectory, "manifest.json"));
+const manifestBytes = await readFile(
+  path.join(assetDirectory, "manifest.json"),
+);
 const manifest = JSON.parse(manifestBytes.toString("utf8"));
 
 function sha256(bytes) {
@@ -22,9 +24,9 @@ function sha256(bytes) {
 }
 
 assert.equal(manifest.schemaVersion, 1);
-assert.equal(manifest.protocol, "vector-gpu/1");
+assert.equal(manifest.protocol, "vector-gpu/2");
 assert.equal(manifest.platform, "windows-x64");
-assert.match(manifest.assetVersion, /^vector-gpu-1\.0\.0-cuda12\.6\.77-/);
+assert.match(manifest.assetVersion, /^vector-gpu-2\.0\.0-cuda12\.6\.77-/);
 assert.deepEqual(
   manifest.files.map((file) => file.name),
   [
@@ -66,8 +68,13 @@ const xpiArgument = process.argv.indexOf("--xpi");
 if (xpiArgument !== -1) {
   const xpiPath = path.resolve(projectDirectory, process.argv[xpiArgument + 1]);
   const xpi = new AdmZip(xpiPath);
-  const entries = new Map(xpi.getEntries().map((entry) => [entry.entryName, entry]));
-  for (const name of ["manifest.json", ...manifest.files.map((file) => file.name)]) {
+  const entries = new Map(
+    xpi.getEntries().map((entry) => [entry.entryName, entry]),
+  );
+  for (const name of [
+    "manifest.json",
+    ...manifest.files.map((file) => file.name),
+  ]) {
     const entryName = `native/gpu/${name}`;
     const entry = entries.get(entryName);
     assert.ok(entry, `${entryName} must be present in the XPI`);

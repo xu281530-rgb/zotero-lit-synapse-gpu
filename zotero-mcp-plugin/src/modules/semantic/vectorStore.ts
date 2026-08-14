@@ -21,6 +21,7 @@ import type {
   GpuVectorDataProvider,
   GpuVectorIdentity,
   GpuVectorMutation,
+  GpuVectorPrecision,
   GpuVectorSearchBackend,
   GpuVectorSearchRequest,
   GpuVectorSnapshotInfo,
@@ -159,9 +160,10 @@ export class VectorStore {
     this.gpuBackend = gpuBackend;
     this.gpuDataProvider = {
       getSnapshotInfo: () => this.getGpuSnapshotInfo(),
-      readSnapshotBatch: (afterRowId, limit) =>
-        this.readGpuSnapshotBatch(afterRowId, limit),
-      readItems: (identities) => this.readGpuItems(identities),
+      readSnapshotBatch: (afterRowId, limit, precision) =>
+        this.readGpuSnapshotBatch(afterRowId, limit, precision),
+      readItems: (identities, precision) =>
+        this.readGpuItems(identities, precision),
     };
     this.gpuBackend.registerProvider(this.gpuDataProvider);
     this.instanceId = ++vectorStoreInstanceCounter;
@@ -832,11 +834,8 @@ export class VectorStore {
       return [];
     }
 
-    const quantized = this.quantizeWithNorm(queryVector);
-    if (quantized.norm === 0) return [];
     const request: GpuVectorSearchRequest = {
-      query: quantized.int8Data,
-      queryNorm: quantized.norm,
+      query: queryVector,
       topK: options.topK ?? 10,
       groupByItem: options.groupByItem ?? false,
       documentLimit: options.documentLimit,
@@ -864,14 +863,16 @@ export class VectorStore {
       if (options.signal?.aborted) {
         throw new Error('Vector scan cancelled');
       }
+      const fallbackPrecision = this.gpuBackend.getEffectivePrecision();
       this.gpuBackend.fallback(error);
-      return this.searchCpu(queryVector, options);
+      return this.searchCpu(queryVector, options, fallbackPrecision);
     }
   }
 
   private async searchCpu(
     queryVector: Float32Array,
     options: VectorSearchOptions = {},
+    forcedPrecision?: GpuVectorPrecision,
   ): Promise<SearchResult[]> {
     await this.ensureInitialized();
 
@@ -957,7 +958,13 @@ export class VectorStore {
     // New databases have Int8 data for every row. If the first row is from a
     // legacy database, scan through the Float32 table instead; mixed Int8
     // batches retain a batched Float32 fallback for individual missing rows.
-    const useInt8 = Boolean(Number(metadataRows[0].has_int8));
+    const useInt8 =
+      forcedPrecision === 'float32'
+        ? false
+        : forcedPrecision === 'int8'
+          ? true
+          : Boolean(Number(metadataRows[0].has_int8));
+    this.gpuBackend.reportCpuPrecision(useInt8 ? 'int8' : 'float32');
 
     ztoolkit.log(`[VectorStore] search() using ${useInt8 ? 'Int8 optimized' : 'Float32 fallback'} search`);
 
@@ -1278,18 +1285,12 @@ export class VectorStore {
   private async getGpuSnapshotInfo(): Promise<GpuVectorSnapshotInfo> {
     await this.ensureInitialized();
     const rows = await this.db.queryAsync(
-      `SELECT COUNT(*) AS total, MIN(dimensions) AS min_dimensions, MAX(dimensions) AS max_dimensions, SUM(CASE WHEN vector_int8 IS NULL OR vector_norm IS NULL THEN 1 ELSE 0 END) AS missing_int8 FROM embeddings`,
+      `SELECT COUNT(*) AS total, MIN(dimensions) AS min_dimensions, MAX(dimensions) AS max_dimensions, SUM(CASE WHEN vector_int8 IS NOT NULL THEN 1 ELSE 0 END) AS int8_count, (SELECT COUNT(*) FROM vectors_f32) AS float32_count FROM embeddings`,
     );
     const row = rows?.[0] ?? {};
     const total = Number(row.total ?? 0);
-    if (total === 0) return { total: 0, dimensions: 0 };
-    if (Number(row.missing_int8 ?? 0) > 0) {
-      throw Object.assign(
-        new Error(
-          'The semantic index contains vectors without Int8 data; rebuild the index before enabling GPU acceleration',
-        ),
-        { code: 'INDEX_UNSUPPORTED' },
-      );
+    if (total === 0) {
+      return { total: 0, dimensions: 0, float32Count: 0, int8Count: 0 };
     }
     const minDimensions = Number(row.min_dimensions);
     const maxDimensions = Number(row.max_dimensions);
@@ -1305,10 +1306,18 @@ export class VectorStore {
         { code: 'DIMENSION_MISMATCH' },
       );
     }
-    return { total, dimensions: minDimensions };
+    return {
+      total,
+      dimensions: minDimensions,
+      float32Count: Number(row.float32_count ?? 0),
+      int8Count: Number(row.int8_count ?? 0),
+    };
   }
 
-  private mapGpuSnapshotRow(row: any): GpuVectorSnapshotRow {
+  private mapGpuSnapshotRow(
+    row: any,
+    precision: GpuVectorPrecision,
+  ): GpuVectorSnapshotRow {
     const identity = this.fromStorageKey(String(row.item_key));
     const dimensions = Number(row.dimensions);
     return {
@@ -1318,25 +1327,37 @@ export class VectorStore {
       chunkId: Number(row.chunk_id),
       language: row.language === 'zh' ? 'zh' : 'en',
       dimensions,
-      norm: Number(row.vector_norm),
-      vector: this.bufferToInt8Array(row.vector_int8, dimensions),
+      vector:
+        precision === 'float32'
+          ? this.bufferToFloat32Array(row.vector_f32, dimensions)
+          : this.bufferToInt8Array(row.vector_int8, dimensions),
     };
   }
 
   private async readGpuSnapshotBatch(
     afterRowId: number,
     limit: number,
+    precision: GpuVectorPrecision,
   ): Promise<GpuVectorSnapshotRow[]> {
     await this.ensureInitialized();
-    const rows = await this.db.queryAsync(
-      `SELECT id, item_key, chunk_id, language, dimensions, vector_int8, vector_norm FROM embeddings WHERE id > ? ORDER BY id LIMIT ?`,
-      [afterRowId, limit],
+    const rows =
+      precision === 'float32'
+        ? await this.db.queryAsync(
+            `SELECT e.id, e.item_key, e.chunk_id, e.language, e.dimensions, f.vector AS vector_f32 FROM embeddings e JOIN vectors_f32 f ON f.item_key = e.item_key AND f.chunk_id = e.chunk_id WHERE e.id > ? ORDER BY e.id LIMIT ?`,
+            [afterRowId, limit],
+          )
+        : await this.db.queryAsync(
+            `SELECT id, item_key, chunk_id, language, dimensions, vector_int8 FROM embeddings WHERE id > ? ORDER BY id LIMIT ?`,
+            [afterRowId, limit],
+          );
+    return (rows || []).map((row: any) =>
+      this.mapGpuSnapshotRow(row, precision),
     );
-    return (rows || []).map((row: any) => this.mapGpuSnapshotRow(row));
   }
 
   private async readGpuItems(
     identities: GpuVectorIdentity[],
+    precision: GpuVectorPrecision,
   ): Promise<GpuVectorSnapshotRow[]> {
     await this.ensureInitialized();
     const storageKeys = Array.from(
@@ -1350,12 +1371,20 @@ export class VectorStore {
     for (let offset = 0; offset < storageKeys.length; offset += 400) {
       const batch = storageKeys.slice(offset, offset + 400);
       const placeholders = batch.map(() => '?').join(',');
-      const rows = await this.db.queryAsync(
-        `SELECT id, item_key, chunk_id, language, dimensions, vector_int8, vector_norm FROM embeddings WHERE item_key IN (${placeholders}) ORDER BY id`,
-        batch,
-      );
+      const rows =
+        precision === 'float32'
+          ? await this.db.queryAsync(
+              `SELECT e.id, e.item_key, e.chunk_id, e.language, e.dimensions, f.vector AS vector_f32 FROM embeddings e JOIN vectors_f32 f ON f.item_key = e.item_key AND f.chunk_id = e.chunk_id WHERE e.item_key IN (${placeholders}) ORDER BY e.id`,
+              batch,
+            )
+          : await this.db.queryAsync(
+              `SELECT id, item_key, chunk_id, language, dimensions, vector_int8 FROM embeddings WHERE item_key IN (${placeholders}) ORDER BY id`,
+              batch,
+            );
       result.push(
-        ...(rows || []).map((row: any) => this.mapGpuSnapshotRow(row)),
+        ...(rows || []).map((row: any) =>
+          this.mapGpuSnapshotRow(row, precision),
+        ),
       );
     }
     return result;

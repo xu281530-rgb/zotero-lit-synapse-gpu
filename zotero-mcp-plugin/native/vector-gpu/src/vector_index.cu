@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <cstring>
 #include <numeric>
 #include <string>
 #include <unordered_map>
@@ -73,6 +74,25 @@ __global__ void cosine_int8_kernel(const std::int8_t* vectors,
   scores[row] = denominator > 0.0 ? static_cast<double>(dot) / denominator : 0.0;
 }
 
+__global__ void cosine_float32_kernel(const float* vectors,
+                                      const double* norms_squared,
+                                      const float* query,
+                                      double query_norm_squared,
+                                      double* scores,
+                                      std::size_t rows,
+                                      std::size_t dimensions) {
+  const std::size_t row =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (row >= rows) return;
+  const float* vector = vectors + row * dimensions;
+  float dot = 0.0F;
+  for (std::size_t column = 0; column < dimensions; ++column) {
+    dot += query[column] * vector[column];
+  }
+  const double denominator = sqrt(query_norm_squared * norms_squared[row]);
+  scores[row] = denominator > 0.0 ? static_cast<double>(dot) / denominator : 0.0;
+}
+
 std::string item_token(std::int64_t library_id, const std::string& item_key) {
   return std::to_string(library_id) + ":" + item_key;
 }
@@ -89,8 +109,9 @@ struct VectorIndex::Impl {
   std::size_t dimensions = 0;
   std::size_t capacity = 0;
   std::size_t active = 0;
-  std::int8_t* device_vectors = nullptr;
-  std::int8_t* device_query = nullptr;
+  VectorPrecision precision = VectorPrecision::Int8;
+  void* device_vectors = nullptr;
+  void* device_query = nullptr;
   double* device_norms = nullptr;
   double* device_scores = nullptr;
   std::vector<Slot> slots;
@@ -124,23 +145,36 @@ struct VectorIndex::Impl {
     capacity = 0;
   }
 
-  void reset(std::size_t new_dimensions, std::size_t expected_rows) {
+  std::size_t element_bytes() const {
+    return precision == VectorPrecision::Float32 ? sizeof(float)
+                                                 : sizeof(std::int8_t);
+  }
+
+  std::size_t vector_bytes(std::size_t rows) const {
+    return rows * dimensions * element_bytes();
+  }
+
+  void reset(std::size_t new_dimensions, std::size_t expected_rows,
+             VectorPrecision new_precision) {
     release();
     dimensions = new_dimensions;
+    precision = new_precision;
     active = 0;
     slots.clear();
     free_slots.clear();
     item_slots.clear();
     if (dimensions == 0 || expected_rows == 0) return;
-    allocate(std::max<std::size_t>(expected_rows, 1024));
+    const std::size_t growth_capacity = expected_rows + expected_rows / 4 +
+                                        (expected_rows % 4 == 0 ? 0 : 1);
+    allocate(std::max<std::size_t>(growth_capacity, 1024));
   }
 
   void allocate(std::size_t new_capacity) {
     if (dimensions == 0 || new_capacity == 0) return;
-    std::int8_t* new_vectors = nullptr;
+    void* new_vectors = nullptr;
     double* new_norms = nullptr;
     double* new_scores = nullptr;
-    check_cuda(cudaMalloc(&new_vectors, new_capacity * dimensions),
+    check_cuda(cudaMalloc(&new_vectors, vector_bytes(new_capacity)),
                "cudaMalloc vectors");
     try {
       check_cuda(cudaMalloc(&new_norms, new_capacity * sizeof(double)),
@@ -149,7 +183,7 @@ struct VectorIndex::Impl {
                  "cudaMalloc scores");
       if (device_vectors && !slots.empty()) {
         check_cuda(cudaMemcpy(new_vectors, device_vectors,
-                              slots.size() * dimensions,
+                              vector_bytes(slots.size()),
                               cudaMemcpyDeviceToDevice),
                    "cudaMemcpy grow vectors");
         check_cuda(cudaMemcpy(new_norms, device_norms,
@@ -171,7 +205,8 @@ struct VectorIndex::Impl {
     device_scores = new_scores;
     capacity = new_capacity;
     if (!device_query) {
-      check_cuda(cudaMalloc(&device_query, dimensions), "cudaMalloc query");
+      check_cuda(cudaMalloc(&device_query, dimensions * element_bytes()),
+                 "cudaMalloc query");
     }
   }
 
@@ -209,29 +244,40 @@ struct VectorIndex::Impl {
   }
 
   void append_rows(const std::vector<IncomingRow>& rows,
-                   const std::vector<std::int8_t>& vectors,
+                   const std::vector<std::uint8_t>& vectors,
                    std::size_t incoming_dimensions) {
     if (rows.empty()) return;
     if (dimensions == 0) dimensions = incoming_dimensions;
     if (incoming_dimensions != dimensions ||
-        vectors.size() != rows.size() * dimensions) {
+        vectors.size() != rows.size() * dimensions * element_bytes()) {
       throw VectorGpuError("DIMENSION_MISMATCH",
                            "GPU index vector dimensions do not match");
     }
     ensure_capacity(rows.size());
     for (std::size_t index = 0; index < rows.size(); ++index) {
       double norm_squared = 0.0;
-      const std::int8_t* vector = vectors.data() + index * dimensions;
+      const std::uint8_t* vector =
+          vectors.data() + index * dimensions * element_bytes();
       for (std::size_t column = 0; column < dimensions; ++column) {
-        const double value = static_cast<double>(vector[column]);
+        double value = 0.0;
+        if (precision == VectorPrecision::Float32) {
+          float float_value = 0.0F;
+          std::memcpy(&float_value, vector + column * sizeof(float),
+                      sizeof(float));
+          value = static_cast<double>(float_value);
+        } else {
+          value = static_cast<double>(
+              static_cast<std::int8_t>(vector[column]));
+        }
         norm_squared += value * value;
       }
       const std::size_t slot = acquire_slot();
       slots[slot] = {true, rows[index]};
       item_slots[item_token(rows[index].library_id, rows[index].item_key)]
           .push_back(slot);
-      check_cuda(cudaMemcpy(device_vectors + slot * dimensions,
-                            vector, dimensions,
+      check_cuda(cudaMemcpy(static_cast<std::uint8_t*>(device_vectors) +
+                                slot * dimensions * element_bytes(),
+                            vector, dimensions * element_bytes(),
                             cudaMemcpyHostToDevice),
                  "cudaMemcpy vector upload");
       check_cuda(cudaMemcpy(device_norms + slot, &norm_squared,
@@ -245,7 +291,7 @@ struct VectorIndex::Impl {
     if (slots.size() < 1024 || free_slots.size() * 4 < slots.size()) return;
     const std::size_t new_capacity =
         std::max<std::size_t>(1024, active + active / 4 + 1);
-    std::int8_t* old_vectors = device_vectors;
+    void* old_vectors = device_vectors;
     double* old_norms = device_norms;
     double* old_scores = device_scores;
     const std::size_t old_capacity = capacity;
@@ -262,8 +308,12 @@ struct VectorIndex::Impl {
       if (!slots[old_slot].active) continue;
       const std::size_t new_slot = compacted.size();
       compacted.push_back(slots[old_slot]);
-      check_cuda(cudaMemcpy(device_vectors + new_slot * dimensions,
-                            old_vectors + old_slot * dimensions, dimensions,
+      check_cuda(cudaMemcpy(
+                            static_cast<std::uint8_t*>(device_vectors) +
+                                new_slot * dimensions * element_bytes(),
+                            static_cast<std::uint8_t*>(old_vectors) +
+                                old_slot * dimensions * element_bytes(),
+                            dimensions * element_bytes(),
                             cudaMemcpyDeviceToDevice),
                  "cudaMemcpy compact vector");
       check_cuda(cudaMemcpy(device_norms + new_slot, old_norms + old_slot,
@@ -288,19 +338,27 @@ const std::string& VectorIndex::device_name() const {
   return impl_->device_name;
 }
 
-void VectorIndex::reset(std::size_t dimensions, std::size_t expected_rows) {
-  impl_->reset(dimensions, expected_rows);
+DeviceMemoryInfo VectorIndex::memory_info() const {
+  DeviceMemoryInfo info;
+  check_cuda(cudaMemGetInfo(&info.free_bytes, &info.total_bytes),
+             "cudaMemGetInfo");
+  return info;
+}
+
+void VectorIndex::reset(std::size_t dimensions, std::size_t expected_rows,
+                        VectorPrecision precision) {
+  impl_->reset(dimensions, expected_rows, precision);
 }
 
 void VectorIndex::append(const std::vector<IncomingRow>& rows,
-                         const std::vector<std::int8_t>& vectors,
+                         const std::vector<std::uint8_t>& vectors,
                          std::size_t dimensions) {
   impl_->append_rows(rows, vectors, dimensions);
 }
 
 void VectorIndex::upsert(const ItemIdentity& item,
                          const std::vector<IncomingRow>& rows,
-                         const std::vector<std::int8_t>& vectors,
+                         const std::vector<std::uint8_t>& vectors,
                          std::size_t dimensions) {
   impl_->remove_item(item);
   impl_->append_rows(rows, vectors, dimensions);
@@ -323,22 +381,31 @@ void VectorIndex::clear_library(std::int64_t library_id) {
   erase_items(items);
 }
 
-void VectorIndex::clear_all() { impl_->reset(0, 0); }
+void VectorIndex::clear_all() { impl_->reset(0, 0, impl_->precision); }
 
-SearchResponse VectorIndex::search(const std::vector<std::int8_t>& query,
-                                   double query_norm,
+SearchResponse VectorIndex::search(const std::vector<std::uint8_t>& query,
                                    const SearchOptions& options) {
   if (impl_->active == 0) return {};
-  if (query.size() != impl_->dimensions || !(query_norm > 0.0)) {
+  if (query.size() != impl_->dimensions * impl_->element_bytes()) {
     throw VectorGpuError("DIMENSION_MISMATCH",
                          "Query dimensions do not match the GPU index");
   }
 
-  double int8_query_norm_squared = 0.0;
-  for (const std::int8_t value : query) {
-    const double converted = static_cast<double>(value);
-    int8_query_norm_squared += converted * converted;
+  double query_norm_squared = 0.0;
+  for (std::size_t column = 0; column < impl_->dimensions; ++column) {
+    double value = 0.0;
+    if (impl_->precision == VectorPrecision::Float32) {
+      float float_value = 0.0F;
+      std::memcpy(&float_value, query.data() + column * sizeof(float),
+                  sizeof(float));
+      value = static_cast<double>(float_value);
+    } else {
+      value = static_cast<double>(
+          static_cast<std::int8_t>(query[column]));
+    }
+    query_norm_squared += value * value;
   }
+  if (!(query_norm_squared > 0.0)) return {};
   check_cuda(cudaMemcpy(impl_->device_query, query.data(), query.size(),
                         cudaMemcpyHostToDevice),
              "cudaMemcpy query");
@@ -346,12 +413,23 @@ SearchResponse VectorIndex::search(const std::vector<std::int8_t>& query,
   constexpr int block_size = 256;
   const int blocks = static_cast<int>(
       (impl_->slots.size() + block_size - 1) / block_size);
-  cosine_int8_kernel<<<blocks, block_size>>>(
-      impl_->device_vectors, impl_->device_norms, impl_->device_query,
-      int8_query_norm_squared, impl_->device_scores, impl_->slots.size(),
-      impl_->dimensions);
-  check_cuda(cudaGetLastError(), "cosine_int8_kernel launch");
-  check_cuda(cudaDeviceSynchronize(), "cosine_int8_kernel synchronize");
+  if (impl_->precision == VectorPrecision::Float32) {
+    cosine_float32_kernel<<<blocks, block_size>>>(
+        static_cast<const float*>(impl_->device_vectors), impl_->device_norms,
+        static_cast<const float*>(impl_->device_query), query_norm_squared,
+        impl_->device_scores, impl_->slots.size(), impl_->dimensions);
+    check_cuda(cudaGetLastError(), "cosine_float32_kernel launch");
+    check_cuda(cudaDeviceSynchronize(), "cosine_float32_kernel synchronize");
+  } else {
+    cosine_int8_kernel<<<blocks, block_size>>>(
+        static_cast<const std::int8_t*>(impl_->device_vectors),
+        impl_->device_norms,
+        static_cast<const std::int8_t*>(impl_->device_query),
+        query_norm_squared, impl_->device_scores, impl_->slots.size(),
+        impl_->dimensions);
+    check_cuda(cudaGetLastError(), "cosine_int8_kernel launch");
+    check_cuda(cudaDeviceSynchronize(), "cosine_int8_kernel synchronize");
+  }
   const auto completed = std::chrono::steady_clock::now();
 
   std::vector<double> scores(impl_->slots.size());
@@ -472,9 +550,11 @@ SearchResponse VectorIndex::search(const std::vector<std::int8_t>& query,
 
 std::size_t VectorIndex::active_count() const { return impl_->active; }
 std::size_t VectorIndex::device_bytes() const {
-  return impl_->capacity * (impl_->dimensions + 2 * sizeof(double)) +
-         impl_->dimensions;
+  return impl_->capacity *
+             (impl_->dimensions * impl_->element_bytes() + 2 * sizeof(double)) +
+         impl_->dimensions * impl_->element_bytes();
 }
 std::size_t VectorIndex::dimensions() const { return impl_->dimensions; }
+VectorPrecision VectorIndex::precision() const { return impl_->precision; }
 
 }  // namespace zotero_gpu

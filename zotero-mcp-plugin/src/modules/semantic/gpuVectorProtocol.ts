@@ -1,4 +1,4 @@
-export const GPU_PROTOCOL_VERSION = "vector-gpu/1";
+export const GPU_PROTOCOL_VERSION = "vector-gpu/2";
 export const MAX_GPU_HEADER_BYTES = 8 * 1024 * 1024;
 export const MAX_GPU_PAYLOAD_BYTES = 32 * 1024 * 1024;
 
@@ -86,11 +86,7 @@ export function decodeGpuFrame(frame: Uint8Array): GpuFrame {
   if (frame.byteLength < 8) {
     throw new Error("GPU protocol frame is truncated");
   }
-  const view = new DataView(
-    frame.buffer,
-    frame.byteOffset,
-    frame.byteLength,
-  );
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
   const headerLength = view.getUint32(0, true);
   if (headerLength > MAX_GPU_HEADER_BYTES) {
     throw new Error("GPU protocol header is too large");
@@ -113,9 +109,7 @@ export function decodeGpuFrame(frame: Uint8Array): GpuFrame {
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(
-      decoder.decode(frame.subarray(4, 4 + headerLength)),
-    );
+    parsed = JSON.parse(decoder.decode(frame.subarray(4, 4 + headerLength)));
   } catch (error) {
     throw new Error(`GPU protocol header is invalid JSON: ${error}`);
   }

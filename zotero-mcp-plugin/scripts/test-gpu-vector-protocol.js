@@ -39,7 +39,7 @@ assert.equal(
 
 const decoded = decodeGpuFrame(encoded);
 assert.deepEqual(decoded.header, {
-  protocol: "vector-gpu/1",
+  protocol: "vector-gpu/2",
   type: "search",
   requestId: "request-7",
   topK: 20,

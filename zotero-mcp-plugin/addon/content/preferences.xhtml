@@ -46,6 +46,7 @@
     <preference id="extensions.zotero.__addonRef__.hybrid.chunkAppendToleranceChars" name="extensions.zotero.__addonRef__.hybrid.chunkAppendToleranceChars" type="int" />
     <preference id="extensions.zotero.__addonRef__.hybrid.neighborRadius" name="extensions.zotero.__addonRef__.hybrid.neighborRadius" type="int" />
     <preference id="extensions.zotero.__addonRef__.hybrid.gpuAccelerationEnabled" name="extensions.zotero.__addonRef__.hybrid.gpuAccelerationEnabled" type="bool" />
+    <preference id="extensions.zotero.__addonRef__.hybrid.gpuPrecision" name="extensions.zotero.__addonRef__.hybrid.gpuPrecision" type="string" />
     <!-- MinerU high-precision PDF parsing -->
     <preference id="extensions.zotero.__addonRef__.mineru.mode" name="extensions.zotero.__addonRef__.mineru.mode" type="string" />
     <preference id="extensions.zotero.__addonRef__.mineru.baseURL" name="extensions.zotero.__addonRef__.mineru.baseURL" type="string" />
@@ -1497,6 +1498,19 @@
             />
             <html:span class="zmp-tog-track"></html:span>
           </html:label>
+        </html:div>
+        <html:div class="zmp-sw zmp-nrow" id="hybrid-gpu-precision-row">
+          <html:div>
+            <html:div class="zmp-sw-text" data-l10n-id="pref-hybrid-gpu-precision-label"></html:div>
+            <html:div class="zmp-sw-sub" data-l10n-id="pref-hybrid-gpu-precision-hint"></html:div>
+          </html:div>
+          <html:select class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-hybrid-gpu-precision"
+            preference="extensions.zotero.__addonRef__.hybrid.gpuPrecision">
+            <html:option value="auto" data-l10n-id="pref-hybrid-gpu-precision-auto"></html:option>
+            <html:option value="float32">Float32</html:option>
+            <html:option value="int8">Int8</html:option>
+          </html:select>
         </html:div>
         <html:div class="zmp-res" id="hybrid-gpu-status" aria-live="polite"></html:div>
 

@@ -9,6 +9,13 @@
 
 namespace zotero_gpu {
 
+enum class VectorPrecision { Float32, Int8 };
+
+struct DeviceMemoryInfo {
+  std::size_t free_bytes = 0;
+  std::size_t total_bytes = 0;
+};
+
 class VectorGpuError : public std::runtime_error {
  public:
   VectorGpuError(std::string code, const std::string& message)
@@ -31,7 +38,6 @@ struct IncomingRow {
   std::string item_key;
   std::int32_t chunk_id = 0;
   std::string language;
-  double norm = 0.0;
 };
 
 struct SearchOptions {
@@ -68,24 +74,26 @@ class VectorIndex {
   VectorIndex& operator=(const VectorIndex&) = delete;
 
   const std::string& device_name() const;
-  void reset(std::size_t dimensions, std::size_t expected_rows);
+  DeviceMemoryInfo memory_info() const;
+  void reset(std::size_t dimensions, std::size_t expected_rows,
+             VectorPrecision precision);
   void append(const std::vector<IncomingRow>& rows,
-              const std::vector<std::int8_t>& vectors,
+              const std::vector<std::uint8_t>& vectors,
               std::size_t dimensions);
   void upsert(const ItemIdentity& item,
               const std::vector<IncomingRow>& rows,
-              const std::vector<std::int8_t>& vectors,
+              const std::vector<std::uint8_t>& vectors,
               std::size_t dimensions);
   void erase_items(const std::vector<ItemIdentity>& items);
   void clear_library(std::int64_t library_id);
   void clear_all();
-  SearchResponse search(const std::vector<std::int8_t>& query,
-                        double query_norm,
+  SearchResponse search(const std::vector<std::uint8_t>& query,
                         const SearchOptions& options);
 
   std::size_t active_count() const;
   std::size_t device_bytes() const;
   std::size_t dimensions() const;
+  VectorPrecision precision() const;
 
  private:
   struct Impl;

@@ -10,6 +10,7 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
 cmake --build build --config Release
 ```
 
-The process exposes only the framed `vector-gpu/1` protocol on standard input
-and output. It is launched by Zotero from the plugin data directory; it is not
-intended to be installed or run separately.
+The process exposes only the framed `vector-gpu/2` protocol on standard input
+and output. A resident snapshot uses either original Float32 vectors or the
+existing Int8 representation. It is launched by Zotero from the plugin data
+directory; it is not intended to be installed or run separately.
