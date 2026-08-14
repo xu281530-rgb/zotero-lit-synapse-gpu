@@ -290,6 +290,81 @@ assert.ok(
 }
 
 {
+  let launches = 0;
+  let notifications = 0;
+  const loadedPrecisions = [];
+  const service = new GpuVectorService({
+    readPreference: () => true,
+    writePreference: () => {},
+    readPrecision: () => "auto",
+    writePrecision: () => {},
+    assertPlatform: () => {},
+    extractAssets: async () => ({
+      directory: "C:\\gpu",
+      executable: "C:\\gpu\\vector-gpu.exe",
+      manifest: {},
+    }),
+    launchProcess: async () => {
+      launches += 1;
+      const launch = launches;
+      return {
+        request: async (type, fields) => {
+          if (type === "hello") {
+            return response({
+              device: "RTX Test",
+              totalMemoryBytes: 8 * 1024 ** 3,
+              freeMemoryBytes: 7 * 1024 ** 3,
+            });
+          }
+          if (type === "snapshot.begin") {
+            loadedPrecisions.push(fields.precision);
+          }
+          if (type === "snapshot.commit") return response({ vectors: 1 });
+          if (type === "index.upsert" && launch === 1) {
+            throw Object.assign(new Error("capacity growth OOM"), {
+              code: "OUT_OF_MEMORY",
+            });
+          }
+          return response();
+        },
+        stop: async () => {},
+      };
+    },
+    notifyFallback: () => {
+      notifications += 1;
+    },
+  });
+  service.registerProvider({
+    getSnapshotInfo: async () => ({
+      total: 1,
+      dimensions: 4,
+      float32Count: 1,
+      int8Count: 1,
+    }),
+    readSnapshotBatch: async (afterRowId, _limit, selectedPrecision) =>
+      afterRowId === 0
+        ? selectedPrecision === "float32"
+          ? float32Rows
+          : int8Rows
+        : [],
+    readItems: async (_identities, selectedPrecision) =>
+      selectedPrecision === "float32" ? float32Rows : int8Rows,
+  });
+  await service.startIfEnabled();
+  assert.equal(service.getStatus().precision, "float32");
+  await service.publishMutation({
+    kind: "itemChanged",
+    libraryID: 1,
+    itemKey: "A",
+  });
+  assert.equal(launches, 2, "incremental Float32 OOM relaunches the worker");
+  assert.deepEqual(loadedPrecisions, ["float32", "int8"]);
+  assert.equal(service.getStatus().phase, "available");
+  assert.equal(service.getStatus().precision, "int8");
+  assert.equal(notifications, 0, "successful Int8 retry must not report CPU fallback");
+}
+
+{
   let enabled = false;
   let notifications = 0;
   const service = new GpuVectorService({
@@ -297,7 +372,7 @@ assert.ok(
     writePreference: (value) => {
       enabled = value;
     },
-    readPrecision: () => "auto",
+    readPrecision: () => "float32",
     writePrecision: () => {},
     assertPlatform: () => {
       throw Object.assign(new Error("No NVIDIA device"), {
@@ -329,6 +404,7 @@ assert.ok(
   assert.equal(service.isEnabled(), false, "the failed session is fused off");
   assert.equal(service.getStatus().phase, "fallback");
   assert.equal(service.getStatus().code, "NO_CUDA_DEVICE");
+  assert.equal(service.getCpuFallbackPrecision(), "float32");
   assert.equal(notifications, 1);
 }
 

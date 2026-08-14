@@ -72,6 +72,7 @@ export type GpuVectorMutation =
 export interface GpuVectorSearchBackend {
   isEnabled(): boolean;
   getEffectivePrecision(): GpuVectorPrecision;
+  getCpuFallbackPrecision(): GpuVectorPrecision | undefined;
   reportCpuPrecision(precision: GpuVectorPrecision): void;
   registerProvider(provider: GpuVectorDataProvider): void;
   startIfEnabled(): Promise<void>;

@@ -281,6 +281,7 @@ pref-hybrid-gpu-status-preparing = GPU-Ressourcen werden vorbereitet...
 pref-hybrid-gpu-status-loading = { $backend } · { $precision }; Vektoren werden geladen ({ $loaded }/{ $total })...
 pref-hybrid-gpu-status-available = { $backend } · { $precision }; { $device }, { $vectors } Vektoren im Speicher.
 pref-hybrid-gpu-status-fallback = { $backend } · { $precision }; GPU nicht verfügbar ({ $code }): { $reason }
+pref-hybrid-gpu-fallback-notification = GPU-Vektorbeschleunigung nicht verfügbar; CPU wird verwendet ({ $code }): { $reason }
 pref-hybrid-retrieval-label = Retrieval limits
 pref-hybrid-max-documents-label = Max highly relevant documents
 pref-hybrid-max-documents-hint = How many documents one library-wide search may return. An upper bound only - weaker matches are never added to fill it.

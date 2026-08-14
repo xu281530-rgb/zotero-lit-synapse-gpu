@@ -24,6 +24,7 @@ import { GpuVectorProcess } from "./gpuVectorProcess";
 import { GPU_PROTOCOL_VERSION, type GpuFrame } from "./gpuVectorProtocol";
 
 declare const Zotero: any;
+declare const addon: any;
 declare let ztoolkit: ZToolkit;
 
 export const GPU_ACCELERATION_PREF =
@@ -74,6 +75,21 @@ const FAILURE_CODES = new Set<GpuVectorFailureCode>([
   "UNKNOWN",
 ]);
 
+function formatFallbackNotification(code: string, reason: string): string {
+  try {
+    const message = addon.data.locale?.current.formatMessagesSync([
+      {
+        id: "zotero-mcp-plugin-pref-hybrid-gpu-fallback-notification",
+        args: { code, reason },
+      },
+    ])?.[0]?.value;
+    if (message) return message;
+  } catch {
+    // Locale initialization must not affect retrieval fallback.
+  }
+  return `GPU vector acceleration is unavailable; using CPU (${code}): ${reason}`;
+}
+
 function defaultDependencies(): GpuVectorServiceDependencies {
   return {
     readPreference: () => {
@@ -109,7 +125,7 @@ function defaultDependencies(): GpuVectorServiceDependencies {
           closeOtherProgressWindows: false,
         })
           .createLine({
-            text: `GPU 向量加速不可用，已回退 CPU（${code}）：${reason}`,
+            text: formatFallbackNotification(code, reason),
             type: "default",
           })
           .show();
@@ -286,6 +302,12 @@ export class GpuVectorService implements GpuVectorSearchBackend {
 
   getEffectivePrecision(): GpuVectorPrecision {
     return this.effectivePrecision;
+  }
+
+  getCpuFallbackPrecision(): GpuVectorPrecision | undefined {
+    return this.sessionFailed && this.dependencies.readPreference()
+      ? this.effectivePrecision
+      : undefined;
   }
 
   reportCpuPrecision(precision: GpuVectorPrecision): void {
@@ -568,8 +590,34 @@ export class GpuVectorService implements GpuVectorSearchBackend {
     try {
       await operation;
     } catch (error) {
+      if (
+        this.dependencies.readPrecision() === "auto" &&
+        this.effectivePrecision === "float32" &&
+        errorCode(error) === "OUT_OF_MEMORY"
+      ) {
+        try {
+          await this.reloadSnapshotAsInt8();
+          return;
+        } catch (retryError) {
+          this.fallback(retryError);
+          return;
+        }
+      }
       this.fallback(error);
     }
+  }
+
+  private async reloadSnapshotAsInt8(): Promise<void> {
+    if (!this.provider) {
+      throw Object.assign(new Error("GPU vector data provider is unavailable"), {
+        code: "PROCESS_START_FAILED",
+      });
+    }
+    this.status.set({ phase: "preparing", precision: "int8" });
+    await this.stopProcess(true);
+    const assets = await this.dependencies.extractAssets();
+    const snapshot = await this.provider.getSnapshotInfo();
+    await this.launchAndLoad(assets, snapshot, "int8");
   }
 
   private async syncMutation(mutation: GpuVectorMutation): Promise<void> {
@@ -638,7 +686,9 @@ export class GpuVectorService implements GpuVectorSearchBackend {
         `[GpuVectorService] ${code}: ${reason}; falling back to CPU`,
         "error",
       );
-    } catch {}
+    } catch {
+      // Logging is best-effort during shutdown or partial initialization.
+    }
     this.dependencies.notifyFallback(code, reason);
     void this.stopProcess(true);
   }

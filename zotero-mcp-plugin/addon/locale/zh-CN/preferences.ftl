@@ -328,6 +328,7 @@ pref-hybrid-gpu-status-preparing = 正在准备 GPU 资源...
 pref-hybrid-gpu-status-loading = { $backend } · { $precision }；正在加载向量（{ $loaded }/{ $total }）...
 pref-hybrid-gpu-status-available = { $backend } · { $precision }；{ $device }，显存中常驻 { $vectors } 条向量。
 pref-hybrid-gpu-status-fallback = { $backend } · { $precision }；GPU 不可用（{ $code }）：{ $reason }
+pref-hybrid-gpu-fallback-notification = GPU 向量加速不可用，已回退 CPU（{ $code }）：{ $reason }
 pref-hybrid-retrieval-label = 检索上限
 pref-hybrid-max-documents-label = 最多返回高相关文献数
 pref-hybrid-max-documents-hint = 一次全库检索最多返回几篇文献。只是上限，达不到相关度的不会被补进来凑数。

@@ -161,6 +161,7 @@ export type FluentMessageId =
   | 'pref-hybrid-chunk-tolerance-hint'
   | 'pref-hybrid-chunk-tolerance-label'
   | 'pref-hybrid-desc'
+  | 'pref-hybrid-gpu-fallback-notification'
   | 'pref-hybrid-gpu-hint'
   | 'pref-hybrid-gpu-label'
   | 'pref-hybrid-gpu-precision-auto'

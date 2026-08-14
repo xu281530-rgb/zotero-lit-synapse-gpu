@@ -10,10 +10,11 @@ globalThis.ztoolkit = { log: () => {} };
 
 const { VectorStore } = await import("../src/modules/semantic/vectorStore.ts");
 
-function backend(enabled, search) {
+function backend(enabled, search, fallbackPrecision) {
   return {
     isEnabled: () => enabled,
     getEffectivePrecision: () => "float32",
+    getCpuFallbackPrecision: () => fallbackPrecision,
     reportCpuPrecision: () => {},
     registerProvider: () => {},
     startIfEnabled: async () => {},
@@ -38,6 +39,25 @@ const gpuResult = [
     rowId: 7,
   },
 ];
+
+{
+  let forcedPrecision;
+  const store = new VectorStore(
+    backend(false, async () => gpuResult, "float32"),
+  );
+  store.initialized = true;
+  store.searchCpu = async (_query, _options, precision) => {
+    forcedPrecision = precision;
+    return [{ ...gpuResult[0], itemKey: "CPU-FLOAT32-FALLBACK" }];
+  };
+  const result = await store.search(query);
+  assert.equal(result[0].itemKey, "CPU-FLOAT32-FALLBACK");
+  assert.equal(
+    forcedPrecision,
+    "float32",
+    "a failed Float32 GPU session must keep using CPU Float32 on later queries",
+  );
+}
 
 {
   let cpuCalls = 0;

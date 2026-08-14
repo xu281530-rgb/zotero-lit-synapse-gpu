@@ -1205,7 +1205,7 @@ export class SemanticSearchService {
         records: [],
         contentHash: 'empty',
         contentLength: 0,
-        sourceKind: 'zotero-markdown-on-demand',
+        sourceKind: 'zotero-content-on-demand',
         itemModified,
         attachmentModified,
         buildID: this._activeBuildID ?? undefined,
@@ -1241,7 +1241,7 @@ export class SemanticSearchService {
             item.key, status.chunkCount, contentHash, itemModified, attachmentModified,
             item.libraryID,
             content.length,
-            'zotero-markdown-on-demand',
+            'zotero-content-on-demand',
         );
       }
       this.indexProgress.unchanged = (this.indexProgress.unchanged || 0) + 1;
@@ -1297,7 +1297,7 @@ export class SemanticSearchService {
       records,
       contentHash,
       contentLength: content.length,
-      sourceKind: 'zotero-markdown-on-demand',
+      sourceKind: 'zotero-content-on-demand',
       itemModified,
       attachmentModified,
       buildID: this._activeBuildID ?? undefined,

@@ -907,7 +907,11 @@ export class VectorStore {
     options: VectorSearchOptions = {},
   ): Promise<SearchResult[]> {
     if (!this.gpuBackend.isEnabled()) {
-      return this.searchCpu(queryVector, options);
+      return this.searchCpu(
+        queryVector,
+        options,
+        this.gpuBackend.getCpuFallbackPrecision(),
+      );
     }
 
     await this.ensureInitialized();
