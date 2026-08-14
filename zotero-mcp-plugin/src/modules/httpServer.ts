@@ -7,93 +7,35 @@ import {
   checkProtocolVersionHeader,
   getMCPMethodResponse,
 } from "./mcpTransport";
-import { checkRequestAccess, parseRequestHeaders } from "./httpAccessControl";
+import { checkRequestAccess } from "./httpAccessControl";
+import {
+  readHttpRequest,
+  utf8Decode,
+  utf8Encode,
+  writeAllBytes,
+} from "./httpFraming";
 import { MAX_HYBRID_KEYWORDS } from "./hybridSearch";
 import { sanitizeForPrivacy } from "../utils/privacy";
 import { config } from "../../package.json";
 
 declare let ztoolkit: ZToolkit;
 
-/**
- * Helper to get UTF-8 byte length of a string
- */
-function getByteLength(str: string): number {
-  // Use TextEncoder for accurate UTF-8 byte count
-  try {
-    return new TextEncoder().encode(str).length;
-  } catch {
-    // Fallback for environments without TextEncoder
-    let bytes = 0;
-    for (let i = 0; i < str.length; i++) {
-      const charCode = str.charCodeAt(i);
-      if (charCode < 0x80) bytes += 1;
-      else if (charCode < 0x800) bytes += 2;
-      else if (charCode < 0xd800 || charCode >= 0xe000) bytes += 3;
-      else { // surrogate pair
-        i++;
-        bytes += 4;
-      }
-    }
-    return bytes;
-  }
-}
+/** 读取/写出请求时的时间上限，防止任何一条连接无限期挂着。 */
+const REQUEST_IDLE_TIMEOUT_MS = 15000;
+const REQUEST_TOTAL_TIMEOUT_MS = 60000;
+const RESPONSE_WRITE_TIMEOUT_MS = 60000;
+const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
+/** 单次 write 的切片上限，避免给非阻塞管道一次塞进过大的字符串。 */
+const WRITE_SLICE_BYTES = 32 * 1024;
 
-/**
- * Slice string by UTF-8 byte length without splitting multibyte characters.
- */
-function sliceByUtf8Bytes(str: string, maxBytes: number): string {
-  if (maxBytes <= 0 || !str) {
-    return "";
-  }
+/** 请求流水号：把同一次调用的读取、分发、写出三段日志串起来。 */
+let requestSequence = 0;
 
-  let bytes = 0;
-  let end = 0;
-
-  for (let i = 0; i < str.length; i++) {
-    const code = str.charCodeAt(i);
-    let charBytes = 0;
-
-    if (code < 0x80) {
-      charBytes = 1;
-    } else if (code < 0x800) {
-      charBytes = 2;
-    } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < str.length) {
-      const next = str.charCodeAt(i + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        charBytes = 4;
-      } else {
-        charBytes = 3;
-      }
-    } else {
-      charBytes = 3;
-    }
-
-    if (bytes + charBytes > maxBytes) {
-      break;
-    }
-
-    bytes += charBytes;
-    end = i + 1;
-
-    // Skip low surrogate after consuming a valid pair.
-    if (charBytes === 4) {
-      i++;
-      end = i + 1;
-    }
-  }
-
-  return str.substring(0, end);
-}
-
-/**
- * Write string to output stream with correct UTF-8 encoding
- */
-function writeStringToStream(output: any, str: string): void {
-  const converterStream = Cc["@mozilla.org/intl/converter-output-stream;1"]
-    .createInstance(Ci.nsIConverterOutputStream);
-  (converterStream as any).init(output, "UTF-8", 0, 0);
-  converterStream.writeString(str);
-  converterStream.flush();
+/** 请求体的头尾预览，只用于诊断，不记录完整内容。 */
+function bodyPreview(body: string): string {
+  const clean = (value: string) => value.replace(/\s+/g, " ");
+  if (body.length <= 90) return `"${clean(body)}"`;
+  return `"${clean(body.substring(0, 60))}"..."${clean(body.substring(body.length - 30))}"`;
 }
 
 export class HttpServer {
@@ -305,20 +247,15 @@ export class HttpServer {
 
   /**
    * Determine if connection should be kept alive based on request
+   *
+   * 监听器对每条 socket 只处理一个请求，并在 finally 里关流，因此永远不能
+   * 对外宣称 keep-alive：客户端把这条连接留在池里复用，实际早已被服务端
+   * 关掉，下一个请求就会撞上一个死连接。
    */
-  private shouldKeepAlive(requestText: string, path: string): boolean {
-    // Current listener lifecycle handles one request per socket and closes
-    // streams in finally. Do not advertise keep-alive for MCP endpoints.
-    if (path === "/mcp" || path.startsWith("/mcp/")) {
-      return false;
-    }
-    
-    // Check for Connection header in request
-    const connectionHeader = requestText.match(/Connection:\s*([^\r\n]+)/i);
-    if (connectionHeader && connectionHeader[1].toLowerCase().includes('keep-alive')) {
-      return true;
-    }
-    
+  private shouldKeepAlive(
+    _headers: Map<string, string>,
+    _path: string,
+  ): boolean {
     return false;
   }
 
@@ -360,28 +297,48 @@ export class HttpServer {
 
   /**
    * 把一个 {status, headers, body} 结果完整写回输出流。
-   * 统一在这里计算 UTF-8 Content-Length，避免各分支各写一遍。
+   *
+   * Content-Length 取真正的 UTF-8 字节串长度，正文也按同一串字节写出，
+   * 并且一直写到最后一个字节为止（writeAllBytes 负责处理部分写）——
+   * 响应头声明多少字节，客户端就一定收得到多少字节。
    */
-  private writeResult(
+  private async writeResult(
     output: any,
     result: { status: number; statusText: string; headers?: Record<string, string>; body: string },
     keepAlive: boolean,
     sessionId?: string,
-  ): void {
-    const body = result.body || "";
-    const byteLength = getByteLength(body);
+    requestId = 0,
+    state?: { started: boolean },
+  ): Promise<void> {
+    // 一条连接只能有一个响应。标记必须在写出任何字节之前置位，
+    // 否则写到一半失败时，错误分支会把第二份响应头接在正文后面，
+    // 客户端按 Content-Length 读到的就是一段被污染的 JSON。
+    if (state) state.started = true;
+    const bodyBytes = utf8Encode(result.body || "");
     const headers = this.buildHttpHeaders(result, keepAlive, sessionId) +
-      `Content-Length: ${byteLength}\r\n` +
+      `Content-Length: ${bodyBytes.length}\r\n` +
       "\r\n";
-    output.write(headers, headers.length);
-    if (byteLength > 0) {
-      writeStringToStream(output, body);
-    }
+
+    ztoolkit.log(
+      `[HttpServer] #${requestId} response start: ${result.status} ${result.statusText}, body ${bodyBytes.length}B`,
+    );
+
+    const written = await writeAllBytes(
+      output,
+      headers + bodyBytes,
+      Date.now() + RESPONSE_WRITE_TIMEOUT_MS,
+      WRITE_SLICE_BYTES,
+    );
+
     try {
       output.flush();
     } catch (flushError) {
       // Some streams don't support flush, ignore
     }
+
+    ztoolkit.log(
+      `[HttpServer] #${requestId} response end: ${written}B written (headers ${headers.length}B + body ${bodyBytes.length}B)`,
+    );
   }
 
   private listener = {
@@ -389,274 +346,171 @@ export class HttpServer {
       let input: any = null;
       let output: any = null;
       let sin: any = null;
-      const converterStream: any = null;
+      const requestId = (requestSequence += 1);
+      const acceptedAt = Date.now();
+      const responseState = { started: false };
 
       // Track this transport for cleanup on shutdown
       this.activeTransports.add(transport);
 
-      ztoolkit.log(`[HttpServer] New connection accepted from transport: ${transport.host || 'unknown'}:${transport.port || 'unknown'}`);
+      ztoolkit.log(
+        `[HttpServer] #${requestId} connection accepted from ${transport.host || "unknown"}:${transport.port || "unknown"}`,
+      );
 
       try {
         input = transport.openInputStream(0, 0, 0);
         output = transport.openOutputStream(0, 0, 0);
 
-        // 使用转换输入流来正确处理UTF-8编码
-        const converterStream = Cc[
-          "@mozilla.org/intl/converter-input-stream;1"
-        ].createInstance(Ci.nsIConverterInputStream);
-        converterStream.init(input, "UTF-8", 0, 0);
-
+        // 只用 nsIScriptableInputStream 拿原始字节；不再叠加
+        // nsIConverterInputStream，两者混用会让已被转换流吞进内部缓冲区的
+        // 字节丢失或错序。
         sin = Cc["@mozilla.org/scriptableinputstream;1"].createInstance(
           Ci.nsIScriptableInputStream,
         );
         sin.init(input);
 
-        // 改进请求读取逻辑 - 读取完整的HTTP请求（包括body）
-        let requestText = "";
-        let totalBytesRead = 0;
-        const maxRequestSize = 1024 * 1024; // 1MB max request size
-        let waitAttempts = 0;
-        const maxWaitAttempts = 50; // Increase wait attempts for larger requests
-        let headersComplete = false;
-        let contentLength = 0;
-        let bodyStartIndex = -1;
+        const { raw, frame, outcome } = await readHttpRequest(input, sin, {
+          idleTimeoutMs: REQUEST_IDLE_TIMEOUT_MS,
+          totalTimeoutMs: REQUEST_TOTAL_TIMEOUT_MS,
+          maxBytes: MAX_REQUEST_BYTES,
+        });
 
-        try {
-          // Step 1: Read headers until we find \r\n\r\n
-          while (totalBytesRead < maxRequestSize && !headersComplete) {
-            const bytesToRead = Math.min(4096, maxRequestSize - totalBytesRead);
-            const available = input.available();
-
-            // Attempt the read even when available === 0: the converter
-            // stream buffers up to 8KB drained from the socket per fill, and
-            // input.available() only reflects un-consumed raw socket bytes —
-            // gating reads on it strands buffered data and stalls the request
-            let chunk = "";
-            try {
-              const str: { value?: string } = {};
-              converterStream.readString(available > 0 ? Math.min(bytesToRead, available) : bytesToRead, str);
-              chunk = str.value || "";
-            } catch (converterError) {
-              // NS_BASE_STREAM_WOULD_BLOCK when both the converter buffer and
-              // the socket are empty; fall back to a raw read only when the
-              // socket reports data (decode failure on a live stream)
-              try {
-                chunk = available > 0 ? sin.read(Math.min(bytesToRead, available)) : "";
-              } catch {
-                chunk = "";
-              }
-            }
-
-            if (!chunk) {
-              if (available === 0) {
-                waitAttempts++;
-                if (waitAttempts > maxWaitAttempts) {
-                  ztoolkit.log(`[HttpServer] Timeout waiting for headers after ${waitAttempts} attempts, TotalBytes: ${totalBytesRead}`, "warn");
-                  break;
-                }
-                await new Promise((resolve) => setTimeout(resolve, 10));
-                continue;
-              }
-              // Socket reported data but the read returned nothing - EOF
-              break;
-            }
-
-            waitAttempts = 0;
-            requestText += chunk;
-            totalBytesRead += chunk.length;
-
-            // Check if headers are complete
-            bodyStartIndex = requestText.indexOf("\r\n\r\n");
-            if (bodyStartIndex !== -1) {
-              headersComplete = true;
-              // Parse Content-Length from headers
-              const headersSection = requestText.substring(0, bodyStartIndex);
-              const contentLengthMatch = headersSection.match(/Content-Length:\s*(\d+)/i);
-              if (contentLengthMatch) {
-                contentLength = parseInt(contentLengthMatch[1], 10);
-              }
-            }
-          }
-
-          // Step 2: Read body based on Content-Length (for POST requests)
-          if (headersComplete && contentLength > 0) {
-            const bodyStart = bodyStartIndex + 4; // Skip \r\n\r\n
-            // Content-Length is byte-denominated: compare UTF-8 byte counts,
-            // not UTF-16 char counts, or multibyte (CJK) bodies never satisfy
-            // the comparison and stall here until the wait timeout
-            let bodyBytesRead = getByteLength(requestText.substring(bodyStart));
-
-            ztoolkit.log(`[HttpServer] Reading body: Content-Length=${contentLength}, current=${bodyBytesRead}, remaining=${contentLength - bodyBytesRead}`);
-
-            waitAttempts = 0; // Reset wait counter for body reading
-            while (bodyBytesRead < contentLength) {
-              const available = input.available();
-              const budget = Math.min(8192, contentLength - bodyBytesRead);
-
-              // Attempt the read even when available === 0: body bytes may be
-              // sitting in the converter's internal buffer, drained from the
-              // socket during the header read (see header loop note)
-              let chunk = "";
-              try {
-                const str: { value?: string } = {};
-                converterStream.readString(available > 0 ? Math.min(budget, available) : budget, str);
-                chunk = str.value || "";
-              } catch (converterError) {
-                try {
-                  chunk = available > 0 ? sin.read(Math.min(budget, available)) : "";
-                } catch {
-                  chunk = "";
-                }
-              }
-
-              if (!chunk) {
-                if (available === 0) {
-                  waitAttempts++;
-                  if (waitAttempts > maxWaitAttempts) {
-                    ztoolkit.log(`[HttpServer] Timeout waiting for body after ${waitAttempts} attempts`, "warn");
-                    break;
-                  }
-                  await new Promise((resolve) => setTimeout(resolve, 10));
-                  continue;
-                }
-                // Socket reported data but the read returned nothing - EOF
-                break;
-              }
-
-              waitAttempts = 0;
-              requestText += chunk;
-              const chunkBytes = getByteLength(chunk);
-              bodyBytesRead += chunkBytes;
-              totalBytesRead += chunkBytes;
-            }
-          }
-        } catch (readError) {
-          ztoolkit.log(
-            `[HttpServer] Error reading request: ${readError}, BytesRead: ${totalBytesRead}, InputStream available: ${input?.available ? input.available() : 'N/A'}`,
-            "error",
-          );
-          requestText = requestText || "INVALID_REQUEST";
-        }
-
-        ztoolkit.log(`[HttpServer] Total bytes read: ${totalBytesRead}, request text length: ${requestText.length}`);
-
-        try {
-          if (converterStream) converterStream.close();
-        } catch (e) {
-          ztoolkit.log(
-            `[HttpServer] Error closing converter stream: ${e}`,
-            "error",
-          );
-        }
-
-        if (sin) sin.close();
-
-        // Handle empty connections (likely health checks or probes)
-        if (totalBytesRead === 0 && requestText.length === 0) {
-          ztoolkit.log(
-            `[HttpServer] Empty connection detected - likely health check/probe. Closing gracefully.`,
-            "info",
-          );
-          return; // Gracefully close without sending error response
-        }
-
-        const requestLine = requestText.split("\r\n")[0];
+        // 诊断：一次请求一行，只记长度与头尾片段，不记完整请求体。
         ztoolkit.log(
-          `[HttpServer] Received request: ${requestLine} (${requestText.length} bytes)`,
+          `[HttpServer] #${requestId} read=${outcome} line="${frame.requestLine || "<none>"}" ` +
+            `raw=${raw.length}B ct=${frame.headers.get("content-type") || "-"} ` +
+            `cl=${frame.contentLength} te=${frame.headers.get("transfer-encoding") || "-"} ` +
+            `bodyRecv=${frame.bodyBytesReceived}B trailing=${frame.trailingBytes}B ` +
+            `in=${Date.now() - acceptedAt}ms${frame.error ? ` frameError=${frame.error}` : ""}`,
         );
 
-        // 验证请求格式
-        if (!requestLine || !requestLine.includes("HTTP/")) {
+        if (outcome === "empty") {
+          // 端口探活 / 连接池预热：一个字节都没发，安静关闭即可。
           ztoolkit.log(
-            `[HttpServer] Invalid request format - RequestLine: "${requestLine || '<empty>'}", TotalBytes: ${totalBytesRead}, RequestLength: ${requestText.length}, RequestPreview: "${requestText.substring(0, 100).replace(/\r?\n/g, '\\n')}"`,
-            "error",
-          );
-          try {
-            const badRequestResult = {
-              status: 400,
-              statusText: "Bad Request",
-              headers: { "Content-Type": "text/plain; charset=utf-8" }
-            };
-            const badRequestHeaders = this.buildHttpHeaders(badRequestResult, false) +
-              "Content-Length: 11\r\n" +
-              "\r\n";
-            const errorResponse = badRequestHeaders + "Bad Request";
-            output.write(errorResponse, errorResponse.length);
-          } catch (e) {
-            ztoolkit.log(
-              `[HttpServer] Error sending bad request response: ${e}`,
-              "error",
-            );
-          }
-          ztoolkit.log(
-            `[HttpServer] Returned 400 Bad Request due to invalid format. Connection will be closed.`,
-            "warn",
+            `[HttpServer] #${requestId} empty connection (probe), closing without response`,
           );
           return;
         }
 
-        try {
-          const requestParts = requestLine.split(" ");
-          const method = requestParts[0];
-          const urlPath = requestParts[1];
-          const url = new URL(urlPath, "http://127.0.0.1");
-          const query = new URLSearchParams(url.search);
-          const path = url.pathname;
-          const headers = parseRequestHeaders(requestText);
+        const requestLine = frame.requestLine;
+        const requestParts = requestLine.split(" ");
+        const method = requestParts[0];
+        const rawPath = requestParts[1];
 
+        // 验证请求格式
+        if (!requestLine.includes("HTTP/") || !method || !rawPath) {
+          ztoolkit.log(
+            `[HttpServer] #${requestId} invalid request line: "${requestLine.substring(0, 120)}" (${raw.length}B read)`,
+            "error",
+          );
+          await this.writeResult(
+            output,
+            {
+              status: 400,
+              statusText: "Bad Request",
+              headers: { "Content-Type": "text/plain; charset=utf-8" },
+              body: "Bad Request",
+            },
+            false,
+            undefined,
+            requestId,
+            responseState,
+          );
+          return;
+        }
+
+        const url = new URL(rawPath, "http://127.0.0.1");
+        const path = url.pathname;
+        const headers = frame.headers;
+        const isMCPPath =
+          path === "/mcp" ||
+          (path.startsWith("/mcp/") && !path.includes(".well-known"));
+
+        // 请求没收全就绝不往下走：截断的请求体交给 JSON.parse 只会得到一个
+        // 误导性的 -32700，真正的问题是传输层没读完。
+        if (outcome !== "complete") {
+          const detail =
+            outcome === "too-large"
+              ? `request exceeds ${MAX_REQUEST_BYTES} bytes`
+              : frame.error
+                ? frame.error
+                : `incomplete request body: received ${frame.bodyBytesReceived} of ${frame.contentLength >= 0 ? frame.contentLength : "unknown"} bytes (${outcome})`;
+          const status = outcome === "too-large" ? 413 : 400;
+          ztoolkit.log(
+            `[HttpServer] #${requestId} ${status} - ${detail}`,
+            "error",
+          );
+          await this.writeResult(
+            output,
+            {
+              status,
+              statusText: status === 413 ? "Payload Too Large" : "Bad Request",
+              headers: { "Content-Type": "application/json; charset=utf-8" },
+              body: isMCPPath
+                ? JSON.stringify({
+                    jsonrpc: "2.0",
+                    id: null,
+                    error: { code: -32600, message: `Invalid Request: ${detail}` },
+                  })
+                : JSON.stringify({ error: detail }),
+            },
+            false,
+            undefined,
+            requestId,
+            responseState,
+          );
+          return;
+        }
+
+        if (frame.trailingBytes > 0) {
+          // 本服务器对每条连接只处理一个请求并回 Connection: close，
+          // 流水线过来的第二个请求不会被执行，必须显式记录而不是默默丢弃。
+          ztoolkit.log(
+            `[HttpServer] #${requestId} ${frame.trailingBytes} extra bytes after the request body were not processed (pipelining is not supported)`,
+            "warn",
+          );
+        }
+
+        try {
           // 访问控制先于任何业务处理：Origin/Host 防跨源与 DNS rebinding，
           // Bearer Token 在开启远程访问（或用户显式要求鉴权）时强制生效。
           const accessFailure = checkRequestAccess(path, headers);
           if (accessFailure) {
             ztoolkit.log(
-              `[HttpServer] Request rejected by access control: ${method} ${path} -> ${accessFailure.status}`,
+              `[HttpServer] #${requestId} rejected by access control: ${method} ${path} -> ${accessFailure.status}`,
               "warn",
             );
-            this.writeResult(output, accessFailure, false);
+            await this.writeResult(
+              output,
+              accessFailure,
+              false,
+              undefined,
+              requestId,
+              responseState,
+            );
             return;
           }
 
-          // 提取POST请求的body
-          let requestBody = "";
-          if (method === "POST") {
-            const bodyStart = requestText.indexOf("\r\n\r\n");
-            if (bodyStart !== -1) {
-              const rawBody = requestText.substring(bodyStart + 4);
-
-              // Only consume the current request body. Extra bytes may belong to
-              // a pipelined next request on the same socket.
-              if (contentLength > 0) {
-                requestBody = sliceByUtf8Bytes(rawBody, contentLength);
-                const rawBodyBytes = getByteLength(rawBody);
-                if (rawBodyBytes > contentLength) {
-                  ztoolkit.log(
-                    `[HttpServer] Detected trailing bytes after request body (${rawBodyBytes - contentLength} bytes), ignoring extra data for this request`,
-                    "warn",
-                  );
-                }
-              } else {
-                requestBody = rawBody;
-              }
-            }
+          // 请求体到这里才做一次 UTF-8 解码：字节已经确认收全。
+          const requestBody = method === "POST" ? utf8Decode(frame.body) : "";
+          if (requestBody) {
+            ztoolkit.log(
+              `[HttpServer] #${requestId} body decoded: ${frame.body.length}B -> ${requestBody.length} chars ${bodyPreview(requestBody)}`,
+            );
           }
 
           // Extract existing session ID or create new one for MCP requests
-          let sessionId: string | undefined;
-          const mcpSessionHeader = requestText.match(/Mcp-Session-Id:\s*([^\r\n]+)/i);
-          
-          if (path === "/mcp" || (path.startsWith("/mcp/") && !path.includes(".well-known"))) {
-            if (mcpSessionHeader && mcpSessionHeader[1]) {
-              const incomingSessionId = mcpSessionHeader[1].trim();
-              this.updateSessionActivity(incomingSessionId);
-              ztoolkit.log(
-                `[HttpServer] Received client MCP session header: ${incomingSessionId}`,
-              );
-            }
+          const sessionId: string | undefined = undefined;
+          const incomingSessionId = headers.get("mcp-session-id");
+          if (isMCPPath && incomingSessionId) {
+            this.updateSessionActivity(incomingSessionId.trim());
+            ztoolkit.log(
+              `[HttpServer] #${requestId} client MCP session header: ${incomingSessionId.trim()}`,
+            );
           }
 
           // Determine if connection should be kept alive
-          const keepAlive = this.shouldKeepAlive(requestText, path);
-          ztoolkit.log(`[HttpServer] Keep-alive for ${path}: ${keepAlive}`);
+          const keepAlive = this.shouldKeepAlive(headers, path);
 
           let result;
 
@@ -676,7 +530,7 @@ export class HttpServer {
               result = methodResponse;
             } else {
               // Handle MCP requests via streamable HTTP
-              result = await this.mcpServer!.handleMCPRequest(requestBody);
+              result = await this.mcpServer!.handleMCPRequest(requestBody, requestId);
             }
           } else if (path === "/mcp/status") {
             // MCP server status endpoint
@@ -714,106 +568,97 @@ export class HttpServer {
               body: JSON.stringify(sanitizeForPrivacy(testResult)),
             };
           } else if (path.startsWith("/ping")) {
-            const pingResult = {
+            result = {
               status: 200,
               statusText: "OK",
-              headers: { "Content-Type": "text/plain; charset=utf-8" }
+              headers: { "Content-Type": "text/plain; charset=utf-8" },
+              body: "pong",
             };
-            const pingHeaders = this.buildHttpHeaders(pingResult, keepAlive) +
-              "Content-Length: 4\r\n" +
-              "\r\n";
-            const response = pingHeaders + "pong";
-            output.write(response, response.length);
-            return;
           } else {
-            const notFoundBody = JSON.stringify({ error: "Not Found" });
-            const notFoundBytes = getByteLength(notFoundBody);
-            const notFoundResult = {
+            result = {
               status: 404,
               statusText: "Not Found",
-              headers: { "Content-Type": "application/json; charset=utf-8" }
+              headers: { "Content-Type": "application/json; charset=utf-8" },
+              body: JSON.stringify({ error: "Not Found" }),
             };
-            const notFoundHeaders = this.buildHttpHeaders(notFoundResult, false) +
-              `Content-Length: ${notFoundBytes}\r\n` +
-              "\r\n";
-            const response = notFoundHeaders + notFoundBody;
-            output.write(response, response.length);
-            return;
           }
 
-          const body = result.body || "";
-
-          // Calculate UTF-8 byte length for Content-Length header
-          const byteLength = getByteLength(body);
-
-          // Build headers with session and connection management
-          const finalHeaders = this.buildHttpHeaders(result, keepAlive, sessionId) +
-            `Content-Length: ${byteLength}\r\n` +
-            "\r\n";
-
-          ztoolkit.log(`[HttpServer] Sending response: ${byteLength} bytes (chars: ${body.length})`);
-
-          // Write headers (ASCII only, so length is safe)
-          output.write(finalHeaders, finalHeaders.length);
-
-          // Write body using converter stream for proper UTF-8 encoding
-          if (byteLength > 0) {
-            writeStringToStream(output, body);
-          }
-
-          // Ensure data is flushed
-          try {
-            output.flush();
-          } catch (flushError) {
-            // Some streams don't support flush, ignore
-          }
+          await this.writeResult(
+            output,
+            result,
+            keepAlive,
+            sessionId,
+            requestId,
+            responseState,
+          );
+          ztoolkit.log(
+            `[HttpServer] #${requestId} completed ${method} ${path} -> ${result.status} in ${Date.now() - acceptedAt}ms`,
+          );
         } catch (e) {
           const error = e instanceof Error ? e : new Error(String(e));
           ztoolkit.log(
-            `[HttpServer] Error in request handling: ${error.message}`,
+            `[HttpServer] #${requestId} error in request handling: ${error.message}`,
             "error",
           );
+          if (responseState.started) {
+            // 响应已经开始写了，再写一份只会污染正文；这条连接就此结束。
+            ztoolkit.log(
+              `[HttpServer] #${requestId} response already started, closing without an error body`,
+              "warn",
+            );
+            return;
+          }
           // 异常信息常带本机路径（文件读取失败、导入失败等），
           // 这是绕过 MCP 层 sanitizer 的另一个出口，必须单独脱敏。
           const errorBody = JSON.stringify(sanitizeForPrivacy({ error: error.message }));
-          // Use getByteLength for accurate Content-Length with non-ASCII characters
-          const errorByteLength = getByteLength(errorBody);
-          const errorResult = {
-            status: 500,
-            statusText: "Internal Server Error",
-            headers: { "Content-Type": "application/json; charset=utf-8" }
-          };
-          const errorHeaders = this.buildHttpHeaders(errorResult, false) +
-            `Content-Length: ${errorByteLength}\r\n` +
-            "\r\n";
-          output.write(errorHeaders, errorHeaders.length);
-          writeStringToStream(output, errorBody);
+          await this.writeResult(
+            output,
+            {
+              status: 500,
+              statusText: "Internal Server Error",
+              headers: { "Content-Type": "application/json; charset=utf-8" },
+              body: errorBody,
+            },
+            false,
+            undefined,
+            requestId,
+            responseState,
+          );
         }
       } catch (e) {
         const error = e instanceof Error ? e : new Error(String(e));
         ztoolkit.log(
-          `[HttpServer] Error handling request: ${error.message}`,
+          `[HttpServer] #${requestId} error handling request: ${error.message}`,
           "error",
         );
-        ztoolkit.log(`[HttpServer] Error stack: ${error.stack}`, "error");
+        ztoolkit.log(`[HttpServer] #${requestId} error stack: ${error.stack}`, "error");
+        if (responseState.started) {
+          ztoolkit.log(
+            `[HttpServer] #${requestId} response already started, closing without an error body`,
+            "warn",
+          );
+          return;
+        }
         try {
           if (!output) {
             output = transport.openOutputStream(0, 0, 0);
           }
-          const criticalErrorResult = {
-            status: 500,
-            statusText: "Internal Server Error",
-            headers: { "Content-Type": "text/plain; charset=utf-8" }
-          };
-          const criticalErrorHeaders = this.buildHttpHeaders(criticalErrorResult, false) +
-            "Content-Length: 21\r\n" +
-            "\r\n";
-          const errorResponse = criticalErrorHeaders + "Internal Server Error";
-          output.write(errorResponse, errorResponse.length);
-          ztoolkit.log(`[HttpServer] Error response sent`);
+          await this.writeResult(
+            output,
+            {
+              status: 500,
+              statusText: "Internal Server Error",
+              headers: { "Content-Type": "text/plain; charset=utf-8" },
+              body: "Internal Server Error",
+            },
+            false,
+            undefined,
+            requestId,
+            responseState,
+          );
         } catch (closeError) {
           ztoolkit.log(
-            `[HttpServer] Error sending error response: ${closeError}`,
+            `[HttpServer] #${requestId} error sending error response: ${closeError}`,
             "error",
           );
         }
@@ -821,15 +666,23 @@ export class HttpServer {
         // Remove transport from tracking
         this.activeTransports.delete(transport);
 
-        // 确保资源清理
+        // 确保资源清理：无论走哪条分支，这条连接的生命周期都在这里明确结束。
         try {
           if (output) {
             output.close();
-            ztoolkit.log(`[HttpServer] Output stream closed`);
           }
         } catch (e) {
           ztoolkit.log(
-            `[HttpServer] Error closing output stream: ${e}`,
+            `[HttpServer] #${requestId} error closing output stream: ${e}`,
+            "error",
+          );
+        }
+
+        try {
+          if (sin) sin.close();
+        } catch (e) {
+          ztoolkit.log(
+            `[HttpServer] #${requestId} error closing scriptable stream: ${e}`,
             "error",
           );
         }
@@ -837,14 +690,17 @@ export class HttpServer {
         try {
           if (input) {
             input.close();
-            ztoolkit.log(`[HttpServer] Input stream closed`);
           }
         } catch (e) {
           ztoolkit.log(
-            `[HttpServer] Error closing input stream: ${e}`,
+            `[HttpServer] #${requestId} error closing input stream: ${e}`,
             "error",
           );
         }
+
+        ztoolkit.log(
+          `[HttpServer] #${requestId} connection closed after ${Date.now() - acceptedAt}ms`,
+        );
       }
     },
     onStopListening: (socket: any, status: any) => {
@@ -905,16 +761,17 @@ private getCapabilities() {
     tools: [
       {
         name: "hybrid_search",
-        description: "Default first step for literature discovery. Searches Zotero metadata fields and the semantic index in parallel, then fuses rankings with weighted RRF. Does not scan full document text. Always covers Chinese and English literature together: pass a complete natural-language query for the semantic branch plus bilingual keywords for the lexical branch, whichever language the user asked in. About 5-12 keywords is the recommended amount for best results, not a required range; any number from 1 to " + MAX_HYBRID_KEYWORDS + " is accepted.",
+        description: "Default first step for literature discovery. Searches Zotero metadata fields and the semantic index in parallel, then fuses them into one normalized 0-1 relevance score (the stronger branch sets the score, the weaker one adds a bounded agreement bonus; Reciprocal Rank Fusion is only the tie-break). Does not scan full document text. Always covers Chinese and English literature together: pass a complete natural-language query for the semantic branch plus bilingual keywords for the lexical branch, whichever language the user asked in. About 5-12 keywords is the recommended amount for best results, not a required range; any number from 1 to " + MAX_HYBRID_KEYWORDS + " is accepted. Returns ONE PAGE of lightweight candidate rows (itemKey, title, creators, year, venue, language, fused score, matched keywords/fields, a short evidence snippet, and whether an abstract exists), plus a pagination block with appliedMinScore, totalRelevant, returned, hasMore and nextCursor. The relevance threshold is applied BEFORE paging, so no page contains a document below it and a short last page is never padded; pass nextCursor back as cursor to window further down the same ranking. Abstracts are searched but NOT returned: fetch one with get_item_abstract only for a candidate worth going deeper on, then dig into that single paper with search_fulltext.",
         category: "search",
         parameters: {
           query: { type: "string", description: "Complete natural-language sentence describing the information need, embedded as-is for cross-lingual semantic search. Include an English and a Chinese phrasing separated by ' / '.", required: true },
           keywords: { type: "array", items: { type: "string" }, description: "Precise Chinese AND English domain terms, translations, synonyms and abbreviations. For best results, it is recommended to provide 5-12 relevant Chinese and/or English keywords; fewer or more are still allowed, from 1 up to " + MAX_HYBRID_KEYWORDS + " entries. Each is searched separately over title, abstract, creator, publicationTitle and tags, then aggregated, deduplicated and scored with a coverage bonus. Omitting this falls back to splitting the query, which only probes the language the user typed in.", required: false },
-          topK: { type: "number", description: "Number of fused results (default: 10)", required: false },
+          topK: { type: "number", description: "Page size: how many documents one response carries (capped by the user setting). Anything past it is reachable with cursor, not lost.", required: false },
+          cursor: { type: "string", description: "Continue a previous hybrid_search by passing the nextCursor it returned. Returns the next page of the SAME ranked, threshold-filtered result set without re-running retrieval. Send the other search arguments unchanged or omitted; changing them is a new search.", required: false },
           candidateK: { type: "number", description: "Candidates per retrieval branch before fusion", required: false },
           minScore: { type: "number", description: "Minimum semantic similarity score", required: false },
           language: { type: "string", enum: ["zh", "en", "all", "auto"], description: "Semantic branch language filter. Keep the 'all' default for cross-lingual recall; zh/en/auto drop literature written in the other language", required: false },
-          rrfK: { type: "number", description: "RRF rank constant (default: 60)", required: false },
+          rrfK: { type: "number", description: "Rank constant for the Reciprocal Rank Fusion TIE-BREAK (default: 60). Ranking is decided by the fused 0-1 relevance score; RRF only separates candidates whose fused scores are equal.", required: false },
           keywordWeight: { type: "number", description: "Keyword branch weight (default: 1)", required: false },
           semanticWeight: { type: "number", description: "Semantic branch weight (default: 1)", required: false },
           libraryID: { type: "number", description: "Library used by keyword and semantic retrieval", required: false },
@@ -1113,23 +970,28 @@ private getCapabilities() {
       },
       {
         name: "search_fulltext",
-        description: "Second-stage full-text search within documents already located by hybrid_search. itemKeys is required; whole-library scanning is disabled.",
+        description: "Final stage of the retrieval funnel: hybrid keyword + semantic search over the passages of ONE document located by hybrid_search, fused into the same normalized 0-1 score and filtered by the user's relevance threshold. Read that paper's abstract with get_item_abstract first, re-fit domain/expertRole to it, and write query and keywords from its own subject matter in its own language. Also serves neighbouring-passage context expansion via chunkIds. Whole-library scanning is disabled.",
         category: "fulltext",
         parameters: {
           libraryID: { type: "number", description: "Optional target Zotero library ID. Defaults to the user library when omitted.", required: false },
-          q: { type: "string", description: "Search query", required: true },
-          itemKeys: { type: "array", items: { type: "string" }, description: "Item keys returned by hybrid_search", required: true },
-          contextLength: { type: "number", description: "Context length around matches (default: 200)", required: false },
-          maxResults: { type: "number", description: "Maximum results to return (default: 50)", required: false },
-          caseSensitive: { type: "boolean", description: "Case sensitive search (default: false)", required: false }
+          itemKey: { type: "string", description: "The single item key to dig into, from hybrid_search", required: true },
+          q: { type: "string", description: "Natural-language query written for THIS paper", required: true },
+          keywords: { type: "string", description: "Comma-separated probes specific to this paper, written in the language THIS paper is written in (one language, not both - the other language matches nothing inside a single document)", required: false },
+          domain: { type: "string", description: "Discipline / sub-field of this paper", required: false },
+          expertRole: { type: "string", description: "Expert perspective adopted for this paper", required: false },
+          maxChunks: { type: "number", description: "Upper bound on returned passages; capped by the user setting", required: false },
+          minScore: { type: "number", description: "Relevance floor 0-1; may only be stricter than the user setting", required: false },
+          chunkIds: { type: "string", description: "Comma-separated chunk ids for context expansion mode", required: false },
+          neighborRadius: { type: "number", description: "Neighbour radius for context expansion; capped by the user setting", required: false }
         },
         examples: [
-          { query: { q: "neural networks", itemKeys: ["ABCD1234"], maxResults: 10, contextLength: 100 }, description: "Search within selected hybrid-search matches" }
+          { query: { q: "Conditions under which the columnar-to-equiaxed transition occurs in this alloy", itemKey: "ABCD1234", keywords: "CET,columnar-to-equiaxed transition,thermal gradient,growth rate" }, description: "Hybrid search inside one English document: probes in that document's language only" },
+          { query: { itemKey: "ABCD1234", chunkIds: "17" }, description: "Pull in the passages neighbouring chunk 17" }
         ]
       },
       {
         name: "get_item_abstract",
-        description: "Get the abstract/summary of a specific item",
+        description: "Get ONE item's abstract. On-demand middle step of the retrieval funnel, not a batch step after hybrid_search: call it only for a candidate you are seriously considering reading in depth, one itemKey at a time. Read it, re-fit domain/expertRole to what that paper actually studies, then call search_fulltext with that itemKey and keywords written in the paper's own language.",
         category: "retrieval",
         parameters: {
           libraryID: { type: "number", description: "Optional target Zotero library ID. Defaults to the user library when omitted.", required: false },

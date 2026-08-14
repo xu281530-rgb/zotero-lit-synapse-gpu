@@ -314,3 +314,28 @@ pref-translation-retries-label = 失败重试
 
 # Unified PDF Markdown pipeline
 pref-mineru-unified-flow = 统一流程：建立语义索引时会先生成或复用 MinerU Markdown，再由同一份 Markdown 建立索引并驱动 PDF 阅读、段落覆盖与翻译；无需再单独解析一次 PDF。
+
+# --- 混合检索 ---
+pref-hybrid-title = 混合检索
+pref-hybrid-desc = 关键词 + 向量语义检索，融合为统一的 0～1 相关度分数；全库找文献和单篇深挖用的是同一套评分。
+pref-hybrid-retrieval-label = 检索上限
+pref-hybrid-max-documents-label = 最多返回高相关文献数
+pref-hybrid-max-documents-hint = 一次全库检索最多返回几篇文献。只是上限，达不到相关度的不会被补进来凑数。
+pref-hybrid-candidate-k-label = 每路检索深度
+pref-hybrid-candidate-k-hint = 关键词检索和语义检索各自考察多少条候选，然后才进入融合与阈值过滤。它决定的是「往库里挖多深」，不是「返回多少条」——调大能找出更多本来就合格的文献，代价是每次检索多花一点时间。候选池被挖满时，结果会明确说明，并把数量标为下界。
+pref-hybrid-max-chunks-label = 单篇最多返回高相关 chunk 数
+pref-hybrid-max-chunks-hint = AI 深挖某篇文献时，这篇最多返回几段正文。同样只是上限。
+pref-hybrid-min-score-label = 最低相关度阈值
+pref-hybrid-min-score-hint = 融合后相关度低于该值的一律舍弃，文献级和段落级都适用。调高更严格、结果更少；调低更宽泛、噪声更多。
+pref-hybrid-neighbor-radius-label = 相邻 Chunk 最大扩展范围
+pref-hybrid-neighbor-radius-hint = 某段缺少上下文时，AI 最多可以向前后各多取几段。设为 0 表示不允许扩展。
+pref-hybrid-advanced-title = 高级选项：分块（需重建索引）
+pref-hybrid-chunk-target-label = Chunk 目标长度
+pref-hybrid-chunk-target-hint = 按 Markdown 自然段累积到多少字符后结束当前片段。
+pref-hybrid-chunk-tolerance-label = 段落追加容忍长度
+pref-hybrid-chunk-tolerance-hint = 片段已达目标长度时，不超过这个长度的下一段仍并入当前片段；更长的另起一个片段。
+pref-hybrid-chunk-rebuild-title = 重要：修改 Chunk 目标长度或段落追加容忍长度后，必须重新构建全库语义索引。
+pref-hybrid-chunk-rebuild-p1 = 这两个参数会改变正文的分块边界。现有索引仍然保存的是旧分块规则生成的 chunk 和向量，不会自动转换为新的分块方式。
+pref-hybrid-chunk-rebuild-p2 = 只有重新构建全库语义索引后，旧有文献才会按新的 Chunk 规则重新切分、重新生成向量，并重新纳入当前索引体系。
+pref-hybrid-chunk-rebuild-p3 = 修改参数本身不会自动触发重建；插件仅提示索引状态不一致，由用户手动执行全库重建。
+pref-hybrid-chunk-stale-warning = 检测到现有语义索引的分块规则与下方设置不一致：索引仍是用旧的 Chunk 参数建立的。请用上方的「重建索引」按钮重新构建全库语义索引，使检索与这里的设置一致。

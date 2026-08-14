@@ -1,15 +1,15 @@
 {
   "name": "zotero-mcp-plugin",
   "type": "module",
-  "version": "1.6.7",
-  "description": "Zotero MCP Plugin with original-PDF-only indexing with direct Doc2X original-note Markdown reuse, MinerU parse reuse, and PDF-change-aware high-precision indexing for Zotero 9.0.x with MCP 2025-06-18 stateless Streamable HTTP compliance",
+  "version": "1.7.0",
+  "description": "Zotero MCP Plugin for Zotero 9.0.x: collection-scoped hybrid retrieval (keyword + semantic fused into one 0-1 relevance score), cursor pagination above a user threshold, on-demand abstracts, single-document full-text search, and MCP 2025-06-18 Streamable HTTP",
   "config": {
     "addonName": "Zotero MCP Plugin",
     "addonID": "zotero-mcp-plugin@autoagent.my",
     "addonRef": "zotero-mcp-plugin",
     "addonInstance": "ZoteroMCP",
     "prefsPrefix": "extensions.zotero.zotero-mcp-plugin",
-    "addonVersion": "1.6.7"
+    "addonVersion": "1.7.0"
   },
   "repository": {
     "type": "git",
@@ -33,6 +33,16 @@
     "release:init": "node scripts/init-release.js",
     "test": "zotero-plugin test",
     "test:hybrid-search": "node --experimental-strip-types scripts/test-hybrid-search.js",
+    "test:chunking": "node --experimental-strip-types scripts/test-chunking.js",
+    "test:collection-scope": "node --experimental-strip-types scripts/test-collection-scope.js",
+    "test:hybrid-candidates": "node --experimental-strip-types scripts/test-hybrid-candidates.js",
+    "test:hybrid-pagination": "node --experimental-strip-types scripts/test-hybrid-pagination.js",
+    "test:vector-topk": "node scripts/test-vector-topk.js",
+    "test:http-framing": "node --experimental-strip-types scripts/test-http-framing.js",
+    "test:http-transport": "node --experimental-strip-types scripts/test-http-transport.js",
+    "check:mcp-framing": "node scripts/check-mcp-framing.mjs",
+    "check:search-stability": "node scripts/check-search-stability.mjs",
+    "test:deep-dive": "node --experimental-strip-types scripts/test-deep-dive.js",
     "test:semantic-autoupdate": "node scripts/test-semantic-autoupdate.js",
     "test:mineru-prefs": "node scripts/test-mineru-pref-persistence.js",
     "test:update": "node scripts/test-update.js",

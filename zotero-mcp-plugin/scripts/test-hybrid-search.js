@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  CHUNK_FIELD_WEIGHTS,
   FALLBACK_NGRAM_WEIGHT,
   FALLBACK_OFFSET_NGRAM_WEIGHT,
   FALLBACK_TOKEN_WEIGHT,
@@ -13,10 +14,15 @@ import {
   PROVIDED_KEYWORD_WEIGHT,
   buildFallbackKeywordEntries,
   buildFallbackKeywords,
+  computeFusedScore,
+  HYBRID_AGREEMENT_BONUS,
   fuseHybridSearchResults,
+  fuseHybridSearchResultsDetailed,
   normalizeKeywords,
+  normalizeLexicalScore,
   rankLexicalCandidates,
   resolveHybridKeywords,
+  resolveKeywordProvenance,
   runHybridSearch,
 } from "../src/modules/hybridSearch.ts";
 import { groupItemKeysByLibrary } from "../src/modules/libraryScope.ts";
@@ -50,10 +56,22 @@ const fused = fuseHybridSearchResults(
   { topK: 4, rrfK: 60, keywordWeight: 1, semanticWeight: 1 },
 );
 
+// Ranking is by the unified 0-1 fused score, not by rank consensus: B and C
+// are found by both branches and lead, then D (semantic 0.70) edges out A,
+// whose lexical score of 9 normalizes to 0.69. RRF survives only as a
+// tie-break, which is why the ordering here differs from a pure-RRF ranking.
 assert.deepEqual(
   fused.map((result) => result.itemKey),
-  ["B", "C", "A", "D"],
-  "items present in both ranked lists should lead the fused results",
+  ["B", "C", "D", "A"],
+  "fused results should be ordered by the normalized 0-1 relevance score",
+);
+assert.ok(
+  fused.every((result) => result.score >= 0 && result.score <= 1),
+  "every fused score must be normalized into 0..1",
+);
+assert.ok(
+  fused[0].score > fused[1].score && fused[1].score > fused[2].score,
+  "fused scores must be strictly ordered",
 );
 assert.equal(fused[0].keywordRank, 2);
 assert.equal(fused[0].semanticRank, 1);
@@ -62,8 +80,313 @@ assert.equal(fused[0].semanticScore, 0.9);
 assert.deepEqual(fused[0].matchedChunks, [
   { chunkId: 1, text: "B", score: 0.9 },
 ]);
-assert.equal(fused[2].semanticRank, undefined);
-assert.equal(fused[3].keywordRank, undefined);
+assert.equal(fused[2].keywordRank, undefined);
+assert.equal(fused[3].semanticRank, undefined);
+
+// ---- absolute normalization and the relevance threshold ----
+
+// The lexical score is unbounded, so it is mapped through a saturating curve
+// rather than "best hit in this result set = 1.0". A relative normalization
+// would hand out a 1.0 for every query, including ones the library cannot
+// answer, and the threshold could then never discard everything.
+assert.equal(normalizeLexicalScore(0), 0);
+assert.equal(normalizeLexicalScore(undefined), 0);
+assert.ok(normalizeLexicalScore(4) === 0.5);
+assert.ok(normalizeLexicalScore(1000) < 1, "normalization must never reach 1");
+assert.ok(
+  normalizeLexicalScore(12) > normalizeLexicalScore(6),
+  "normalization must stay monotone",
+);
+
+// A candidate found by only one branch keeps that branch's strength instead of
+// being averaged against a zero; agreement earns a bounded bonus instead.
+const semanticOnlyScore = computeFusedScore({
+  normalizedSemanticScore: 0.8,
+  keywordWeight: 1,
+  semanticWeight: 1,
+});
+assert.equal(semanticOnlyScore, 0.8);
+const agreedScore = computeFusedScore({
+  normalizedKeywordScore: 0.8,
+  normalizedSemanticScore: 0.8,
+  keywordWeight: 1,
+  semanticWeight: 1,
+});
+assert.ok(
+  agreedScore > semanticOnlyScore && agreedScore <= 1,
+  "agreement between both branches should score above a single-branch hit",
+);
+
+// EVIDENCE MUST NEVER COST A DOCUMENT ITS SCORE.
+//
+// The averaging formula this replaced made extra evidence destructive: a paper
+// the semantic branch scored 0.75 passed a 0.60 threshold alone, and the same
+// paper with one incidental keyword hit averaged down to 0.49 and was filtered
+// out. On the real library one broad keyword ("研究") removed a 0.7153-scoring
+// paper from the entire result set. Fusion must be monotone in both branches.
+for (const strong of [0.62, 0.75, 0.9]) {
+  const alone = computeFusedScore({
+    normalizedSemanticScore: strong,
+    keywordWeight: 1,
+    semanticWeight: 1,
+  });
+  assert.equal(alone, strong);
+  for (const weak of [0, 0.01, 0.05, 0.1, 0.2, 0.3, 0.48, 0.55, strong]) {
+    const withExtra = computeFusedScore({
+      normalizedSemanticScore: strong,
+      normalizedKeywordScore: weak,
+      keywordWeight: 1,
+      semanticWeight: 1,
+    });
+    assert.ok(
+      withExtra >= alone,
+      `keyword evidence ${weak} must not lower a ${strong} semantic match (got ${withExtra})`,
+    );
+    // Symmetric: the branches are interchangeable.
+    assert.equal(
+      computeFusedScore({
+        normalizedKeywordScore: strong,
+        normalizedSemanticScore: weak,
+        keywordWeight: 1,
+        semanticWeight: 1,
+      }),
+      withExtra,
+    );
+  }
+}
+
+// Equal agreement keeps exactly the score it had before the fix: the dilution
+// is removed without inflating the agreement bonus.
+assert.ok(
+  Math.abs(
+    computeFusedScore({
+      normalizedKeywordScore: 0.8,
+      normalizedSemanticScore: 0.8,
+      keywordWeight: 1,
+      semanticWeight: 1,
+    }) - Math.min(1, 0.8 * (1 + HYBRID_AGREEMENT_BONUS)),
+  ) < 1e-12,
+  "equal agreement must score what it always did (bar floating point)",
+);
+
+// A stronger weak branch is still worth more than a weaker one, and the score
+// stays bounded at 1.
+assert.ok(
+  computeFusedScore({ normalizedKeywordScore: 0.5, normalizedSemanticScore: 0.75, keywordWeight: 1, semanticWeight: 1 }) >
+    computeFusedScore({ normalizedKeywordScore: 0.2, normalizedSemanticScore: 0.75, keywordWeight: 1, semanticWeight: 1 }),
+  "more corroboration must score higher than less",
+);
+assert.equal(
+  computeFusedScore({ normalizedKeywordScore: 1, normalizedSemanticScore: 1, keywordWeight: 1, semanticWeight: 1 }),
+  1,
+  "the fused score stays inside 0..1",
+);
+
+// Weights demote a branch instead of reweighting an average: halving the
+// keyword weight may lower that branch's pull, never the dominant branch's.
+assert.equal(
+  computeFusedScore({ normalizedSemanticScore: 0.75, normalizedKeywordScore: 0.4, keywordWeight: 0.5, semanticWeight: 1 }),
+  0.75 + HYBRID_AGREEMENT_BONUS * 0.2,
+);
+assert.equal(
+  computeFusedScore({ normalizedSemanticScore: 0.75, normalizedKeywordScore: 0.9, keywordWeight: 0, semanticWeight: 1 }),
+  0.75,
+  "a zero-weight branch is switched off, not blended in",
+);
+
+// The threshold consequence, stated directly: a document above the floor on one
+// branch stays above it no matter what the other branch says.
+const floor = 0.6;
+for (const weak of [0, 0.05, 0.2, 0.5]) {
+  assert.ok(
+    computeFusedScore({
+      normalizedSemanticScore: 0.7153,
+      normalizedKeywordScore: weak,
+      keywordWeight: 1,
+      semanticWeight: 1,
+    }) >= floor,
+    "a document that clears the threshold alone must not be filtered out by weak corroboration",
+  );
+}
+
+// BRANCH TAILS: the basis for deciding whether a full candidate pool could
+// still be hiding qualifying documents.
+//
+// Branches hand over their candidates in descending score order, so whatever a
+// branch did NOT return scores at most what its last returned item scored. That
+// tail is what lets a saturated pool be reported as exact instead of as a lower
+// bound — without it, a pool full of sub-threshold candidates gets announced as
+// "more relevant work exists beyond the pool", contradicting the same
+// response's "nothing reached the threshold" and sending the caller off to
+// re-search for documents that provably do not exist.
+{
+  const tails = fuseHybridSearchResultsDetailed(
+    [keywordItem("A", 12), keywordItem("B", 6), keywordItem("C", 0.5)],
+    [semanticItem("A", 0.9), semanticItem("D", 0.42)],
+    { topK: 10, rrfK: 60, keywordWeight: 1, semanticWeight: 1, minScore: 0 },
+  );
+  assert.equal(
+    tails.keywordTailScore,
+    normalizeLexicalScore(0.5),
+    "the keyword tail must be the weakest keyword score still returned",
+  );
+  assert.equal(
+    tails.semanticTailScore,
+    0.42,
+    "the semantic tail must be the weakest semantic score still returned",
+  );
+
+  // Nothing beyond a pool with these tails could beat the tails themselves.
+  const ceiling = computeFusedScore({
+    normalizedKeywordScore: tails.keywordTailScore,
+    normalizedSemanticScore: tails.semanticTailScore,
+    keywordWeight: 1,
+    semanticWeight: 1,
+  });
+  for (const row of tails.ranked) {
+    if (row.itemKey === "C" || row.itemKey === "D") continue;
+    assert.ok(
+      row.score >= ceiling,
+      "every document better than the tails must outscore the beyond-pool ceiling",
+    );
+  }
+  // A 0.60 floor sits above that ceiling, so a full pool would be EXACT here.
+  assert.ok(ceiling < 0.6, `beyond-pool ceiling ${ceiling} must be below 0.60`);
+
+  // An empty branch has no tail to reason from.
+  const noKeyword = fuseHybridSearchResultsDetailed(
+    [],
+    [semanticItem("A", 0.8)],
+    { topK: 10, rrfK: 60, keywordWeight: 1, semanticWeight: 1, minScore: 0 },
+  );
+  assert.equal(noKeyword.keywordTailScore, undefined);
+  assert.equal(noKeyword.semanticTailScore, 0.8);
+}
+
+const thresholded = fuseHybridSearchResultsDetailed(
+  [keywordItem("A", 9), keywordItem("B", 7), keywordItem("C", 1)],
+  [semanticItem("B", 0.9), semanticItem("D", 0.3)],
+  { topK: 10, rrfK: 60, keywordWeight: 1, semanticWeight: 1, minScore: 0.6 },
+);
+assert.deepEqual(
+  thresholded.results.map((result) => result.itemKey),
+  ["B", "A"],
+  "candidates below the relevance floor must be discarded, not ranked lower",
+);
+assert.equal(
+  thresholded.discardedBelowThreshold,
+  2,
+  "the count of discarded candidates must be reported",
+);
+assert.equal(thresholded.appliedMinScore, 0.6);
+assert.ok(
+  thresholded.results.every((result) => result.score >= 0.6),
+  "nothing below the floor may survive",
+);
+
+// topK is a ceiling applied after the threshold, never a quota: asking for 10
+// results when only two clear the bar must still return two.
+assert.equal(
+  thresholded.results.length,
+  2,
+  "a weak candidate must never be padded in to reach topK",
+);
+
+// A query the library has nothing on returns nothing at all.
+const nothingRelevant = fuseHybridSearchResultsDetailed(
+  [keywordItem("A", 0.4)],
+  [semanticItem("B", 0.2)],
+  { topK: 5, rrfK: 60, keywordWeight: 1, semanticWeight: 1, minScore: 0.6 },
+);
+assert.equal(nothingRelevant.results.length, 0);
+assert.equal(nothingRelevant.discardedBelowThreshold, 2);
+
+// ---- keyword provenance: only a confirmed expert rewrite counts as "ai" ----
+
+assert.equal(
+  resolveKeywordProvenance({
+    probeSource: "provided",
+    keywordsArgumentPresent: true,
+    domain: "materials science / solidification",
+    expertRole: "solidification specialist",
+  }).keywordSource,
+  "ai",
+  "supplied probes plus a declared domain and expert role is the only 'ai' path",
+);
+
+const undeclared = resolveKeywordProvenance({
+  probeSource: "provided",
+  keywordsArgumentPresent: true,
+  domain: "materials science",
+});
+assert.equal(
+  undeclared.keywordSource,
+  "fallback",
+  "keywords without a declared expert role cannot be confirmed as expert output",
+);
+assert.equal(undeclared.probeOrigin, "provided");
+assert.match(undeclared.reason, /expertRole/);
+
+const mechanical = resolveKeywordProvenance({
+  probeSource: "fallback",
+  keywordsArgumentPresent: false,
+  domain: "materials science",
+  expertRole: "specialist",
+});
+assert.equal(mechanical.keywordSource, "fallback");
+assert.equal(mechanical.probeOrigin, "derived");
+assert.match(mechanical.reason, /tokenization/i);
+
+// A declaration is not a licence to skip the keywords: blank strings are the
+// same as nothing at all.
+assert.equal(
+  resolveKeywordProvenance({
+    probeSource: "provided",
+    keywordsArgumentPresent: true,
+    domain: "   ",
+    expertRole: "specialist",
+  }).keywordSource,
+  "fallback",
+);
+
+// ---- the chunk-level deep dive reuses the same lexical ranker ----
+
+const chunkRanking = rankLexicalCandidates(
+  [
+    {
+      key: "0",
+      libraryID: 1,
+      fields: { chunkText: "unrelated introduction about sample preparation" },
+    },
+    {
+      key: "1",
+      libraryID: 1,
+      fields: {
+        chunkText:
+          "the columnar-to-equiaxed transition occurred once the temperature gradient dropped below the critical value",
+      },
+    },
+    {
+      key: "2",
+      libraryID: 1,
+      fields: { chunkText: "temperature gradient measurements are listed" },
+    },
+  ],
+  [
+    { text: "columnar-to-equiaxed transition", weight: 1, origin: "provided" },
+    { text: "temperature gradient", weight: 1, origin: "provided" },
+  ],
+  { candidateK: 3, fieldWeights: CHUNK_FIELD_WEIGHTS },
+);
+assert.equal(
+  chunkRanking[0].key,
+  "1",
+  "a chunk matching more distinct probes must outrank one matching a common probe",
+);
+assert.ok(
+  chunkRanking.every((chunk) => chunk.relevanceScore > 0),
+  "only chunks with a real match may be returned",
+);
 
 const sameKeyAcrossLibraries = fuseHybridSearchResults(
   [keywordItem("SAME", 9, 1)],
@@ -366,7 +689,16 @@ assert.ok(
     serverSource.indexOf("name: 'get_libraries'"),
   "hybrid_search should be listed before other tools",
 );
-assert.match(serverSource, /required:\s*\[['"]q['"],\s*['"]itemKeys['"]\]/);
+// search_fulltext is now a single-document deep dive: one itemKey, its own
+// query and keywords, and an explicit context-expansion mode.
+assert.match(serverSource, /required:\s*\[['"]itemKey['"]\]/);
+assert.match(serverSource, /runDocumentDeepDive\(/);
+assert.match(serverSource, /expandChunkContext\(/);
+assert.doesNotMatch(
+  serverSource,
+  /contextLength:\s*\{\s*type:\s*'number'/,
+  "the old keyword-context parameters must not survive on search_fulltext",
+);
 // hybrid_search must advertise the bilingual keyword contract to calling AIs.
 assert.match(serverSource, /keywords:\s*\{\s*\n\s*type:\s*'array'/);
 assert.match(serverSource, /resolveHybridKeywords\(args\.query,\s*args\.keywords\)/);

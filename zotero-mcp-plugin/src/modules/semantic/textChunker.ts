@@ -11,6 +11,8 @@
 
 declare let ztoolkit: ZToolkit;
 
+import { getHybridSearchSettings } from '../hybridSearchSettings';
+
 // ============== Interfaces ==============
 
 export interface ChunkerOptions {
@@ -19,6 +21,17 @@ export interface ChunkerOptions {
   overlapSentences: number;  // Number of sentences to overlap
   skipReferences: boolean;   // Skip reference section
   qualityThreshold: number;  // Minimum quality score (0-100)
+  /**
+   * Target size of a chunk built from Markdown paragraphs. Omit to follow the
+   * user's "Chunk target length" preference, which is the normal case.
+   */
+  targetChunkSize?: number;
+  /**
+   * A paragraph no longer than this may still be appended to a chunk that has
+   * already reached the target; a longer one starts the next chunk. Omit to
+   * follow the user's "Paragraph append tolerance" preference.
+   */
+  appendToleranceSize?: number;
 }
 
 export interface TextChunk {
@@ -220,14 +233,50 @@ export class TextChunker {
   }
 
   /**
-   * Main entry: chunk text with preprocessing
+   * Resolve the paragraph-assembly sizes for this run.
+   *
+   * Read per call rather than cached in the constructor: the chunker is a
+   * long-lived singleton, and a user who changes the target length in
+   * Preferences expects the next index build to use it without restarting.
+   */
+  private resolveParagraphSizes(): { target: number; tolerance: number } {
+    if (
+      typeof this.options.targetChunkSize === 'number' &&
+      typeof this.options.appendToleranceSize === 'number'
+    ) {
+      return {
+        target: this.options.targetChunkSize,
+        tolerance: this.options.appendToleranceSize,
+      };
+    }
+    const settings = getHybridSearchSettings();
+    return {
+      target: this.options.targetChunkSize ?? settings.chunkTargetChars,
+      tolerance:
+        this.options.appendToleranceSize ?? settings.chunkAppendToleranceChars,
+    };
+  }
+
+  /**
+   * Main entry: chunk a document into embedding units.
+   *
+   * Chunks follow the Markdown paragraph structure and are emitted in document
+   * order, so a chunk's index is its position in the text and neighbouring
+   * chunk ids really are neighbouring passages — that ordering is what the
+   * document-level deep dive relies on when it expands context around a hit.
+   *
+   * The pipeline never drops body text: no minimum-length filter, no
+   * per-chunk quality filter, and an oversized paragraph is split on complete
+   * sentence boundaries rather than truncated. The only content deliberately
+   * left out is the references list (when skipReferences is on) and the
+   * OCR-garbage lines the preprocessor strips.
    */
   chunk(text: string): string[] {
     const startTime = Date.now();
     ztoolkit.log(`[TextChunker] Starting: input length=${text?.length || 0}`);
 
-    if (!text || text.trim().length < this.options.minChunkSize) {
-      ztoolkit.log(`[TextChunker] Text too short, returning empty`);
+    if (!text || !text.trim()) {
+      ztoolkit.log(`[TextChunker] Empty text, returning empty`);
       return [];
     }
 
@@ -243,29 +292,217 @@ export class TextChunker {
       ztoolkit.log(`[TextChunker] Low quality warning: ${quality.score}, issues: ${quality.issues.join(', ')}`);
     }
 
-    // 2. Detect document structure
+    // 2. Drop the references list, which is citations rather than body text
     const structure = this.detectStructure(cleanText);
-    ztoolkit.log(`[TextChunker] Structure: abstract=${structure.hasAbstract}, sections=${structure.sections.length}, refs=${structure.referencesStart !== null}`);
+    const bodyText =
+      this.options.skipReferences && structure.referencesStart
+        ? cleanText.substring(0, structure.referencesStart)
+        : cleanText;
+    ztoolkit.log(`[TextChunker] Structure: abstract=${structure.hasAbstract}, sections=${structure.sections.length}, refs=${structure.referencesStart !== null}, bodyChars=${bodyText.length}`);
 
-    // 3. Split into semantic units
-    const units = this.splitByStructure(cleanText, structure);
-    ztoolkit.log(`[TextChunker] Semantic units: ${units.length}`);
+    // 3. Markdown paragraphs, in document order
+    const paragraphs = this.splitIntoParagraphs(bodyText);
 
-    // 4. Balance chunk sizes
-    const chunks = this.balanceChunks(units);
-
-    // 5. Extract text only
-    const result = chunks
-      .filter(c => c.quality >= this.options.qualityThreshold)
-      .map(c => c.text);
+    // 4. Assemble paragraphs into target-sized chunks
+    const { target, tolerance } = this.resolveParagraphSizes();
+    const result = this.assembleParagraphChunks(paragraphs, target, tolerance);
 
     const elapsed = Date.now() - startTime;
     const avgSize = result.length > 0
       ? Math.round(result.reduce((a, c) => a + c.length, 0) / result.length)
       : 0;
-    ztoolkit.log(`[TextChunker] Done: ${result.length} chunks, avg size=${avgSize}, time=${elapsed}ms`);
+    ztoolkit.log(`[TextChunker] Done: ${result.length} chunks from ${paragraphs.length} paragraphs, target=${target}, tolerance=${tolerance}, avg size=${avgSize}, time=${elapsed}ms`);
 
     return result;
+  }
+
+  /**
+   * Split text into Markdown natural paragraphs, preserving document order.
+   *
+   * A blank line separates paragraphs; an ATX heading is also a boundary even
+   * when the author did not leave a blank line around it, so a section title
+   * stays attached to the section it introduces instead of to the previous one.
+   */
+  private splitIntoParagraphs(text: string): string[] {
+    const paragraphs: string[] = [];
+    for (const block of text.split(/\n\s*\n+/)) {
+      if (!block.trim()) continue;
+      // A block may still contain headings glued to body lines.
+      let current: string[] = [];
+      const flush = () => {
+        const joined = current.join('\n').trim();
+        if (joined) paragraphs.push(joined);
+        current = [];
+      };
+      for (const line of block.split('\n')) {
+        if (/^\s{0,3}#{1,6}\s+\S/.test(line)) {
+          flush();
+          paragraphs.push(line.trim());
+          continue;
+        }
+        current.push(line);
+      }
+      flush();
+    }
+    return paragraphs;
+  }
+
+  /**
+   * Fill chunks paragraph by paragraph.
+   *
+   * While a chunk is still below the target it keeps taking paragraphs. Once it
+   * reaches the target, exactly one more paragraph may join it if that
+   * paragraph is within the append tolerance — a short closing paragraph is
+   * better kept with its context than stranded alone — and anything longer
+   * starts the next chunk. That bounds a chunk at target + tolerance.
+   */
+  private assembleParagraphChunks(
+    paragraphs: string[],
+    target: number,
+    tolerance: number,
+  ): string[] {
+    const chunks: string[] = [];
+    let buffer = '';
+
+    const flush = () => {
+      const trimmed = buffer.trim();
+      if (trimmed) chunks.push(trimmed);
+      buffer = '';
+    };
+
+    for (const paragraph of paragraphs) {
+      // An oversized paragraph is handled on its own so the sentence splitter
+      // never has to reason about what is already buffered.
+      if (paragraph.length > target + tolerance) {
+        flush();
+        for (const piece of this.splitOversizedParagraph(
+          paragraph,
+          target,
+          tolerance,
+        )) {
+          chunks.push(piece);
+        }
+        continue;
+      }
+
+      if (!buffer) {
+        buffer = paragraph;
+        // A single paragraph that already fills the chunk has nothing to gain
+        // from waiting for the next one.
+        if (buffer.length >= target) flush();
+        continue;
+      }
+
+      if (buffer.length < target) {
+        const combined = buffer.length + 2 + paragraph.length;
+        if (combined <= target) {
+          buffer = `${buffer}\n\n${paragraph}`;
+          continue;
+        }
+        // Crossing the target: take the paragraph only if it is small enough
+        // to count as a tail, otherwise let it open the next chunk.
+        if (paragraph.length <= tolerance) {
+          buffer = `${buffer}\n\n${paragraph}`;
+          flush();
+          continue;
+        }
+        flush();
+        buffer = paragraph;
+        continue;
+      }
+
+      // buffer already at or past the target
+      if (paragraph.length <= tolerance) {
+        buffer = `${buffer}\n\n${paragraph}`;
+        flush();
+        continue;
+      }
+      flush();
+      buffer = paragraph;
+    }
+
+    flush();
+    return chunks;
+  }
+
+  /**
+   * Split a paragraph that is longer than target + tolerance.
+   *
+   * Sentences are kept whole: pieces accumulate until the target is reached and
+   * then close. A single sentence longer than the whole budget is emitted as
+   * one piece rather than cut mid-sentence — unless it carries no sentence
+   * punctuation at all (a table row, a formula dump, an unpunctuated OCR run),
+   * in which case it is broken at the nearest safe boundary. Every branch
+   * concatenates back to the input, so no body text is lost.
+   */
+  private splitOversizedParagraph(
+    paragraph: string,
+    target: number,
+    tolerance: number,
+  ): string[] {
+    const sentences = this.extractSentences(paragraph).filter(s => s.trim());
+    if (sentences.length <= 1) {
+      return this.hardSplit(paragraph, target + tolerance);
+    }
+
+    const pieces: string[] = [];
+    let buffer = '';
+    for (const sentence of sentences) {
+      if (!buffer) {
+        buffer = sentence;
+      } else if (buffer.length + 1 + sentence.length <= target) {
+        buffer = `${buffer} ${sentence}`;
+      } else {
+        pieces.push(buffer);
+        buffer = sentence;
+      }
+      if (buffer.length >= target) {
+        pieces.push(buffer);
+        buffer = '';
+      }
+    }
+    if (buffer.trim()) pieces.push(buffer);
+
+    // A sentence longer than the budget on its own still has to be broken, or
+    // the embedding API would reject the chunk and the passage would vanish.
+    const bounded: string[] = [];
+    for (const piece of pieces) {
+      if (piece.length > target + tolerance) {
+        bounded.push(...this.hardSplit(piece, target + tolerance));
+      } else {
+        bounded.push(piece);
+      }
+    }
+    return bounded;
+  }
+
+  /**
+   * Last-resort split for text with no usable sentence boundaries.
+   * Prefers a punctuation or whitespace boundary near the limit and, unlike the
+   * legacy character splitter, never drops a short remainder.
+   */
+  private hardSplit(text: string, limit: number): string[] {
+    const pieces: string[] = [];
+    const breakChars = [' ', '，', ',', '、', '；', ';', '：', ':', '\n', ')', '）'];
+    let start = 0;
+
+    while (start < text.length) {
+      let end = Math.min(start + limit, text.length);
+      if (end < text.length) {
+        const floor = start + Math.floor(limit * 0.6);
+        for (let i = end - 1; i > floor; i--) {
+          if (breakChars.includes(text[i])) {
+            end = i + 1;
+            break;
+          }
+        }
+      }
+      const piece = text.slice(start, end).trim();
+      if (piece) pieces.push(piece);
+      start = end;
+    }
+
+    return pieces;
   }
 
   /**

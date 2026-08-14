@@ -687,7 +687,7 @@ export async function handleSearchRequest(
 
   if (params.fulltext) {
     throw new Error(
-      "search_library.fulltext is disabled. Use hybrid_search first, then search_fulltext with matched itemKeys",
+      "search_library.fulltext is disabled. Use hybrid_search first, then search_fulltext with one matched itemKey at a time",
     );
   }
 

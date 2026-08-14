@@ -539,6 +539,8 @@ export class VectorStore {
       minScore?: number;
       libraryID?: number;
       deadlineAt?: number;
+      /** Filled in with how many stored vectors this scan actually read. */
+      stats?: { scanned?: number };
     } = {}
   ): Promise<SearchResult[]> {
     await this.ensureInitialized();
@@ -550,6 +552,7 @@ export class VectorStore {
       minScore = 0,
       libraryID = Zotero.Libraries.userLibraryID,
       deadlineAt,
+      stats,
     } = options;
     const startTime = Date.now();
 
@@ -633,8 +636,48 @@ export class VectorStore {
     ztoolkit.log(`[VectorStore] search() query: float32[0:5]=[${Array.from(querySample).map(v => v.toFixed(4))}], int8[0:5]=[${Array.from(queryInt8Sample)}], norm=${queryNorm.toFixed(4)}, scale=${queryMaxAbs > 0 ? (127 / queryMaxAbs).toFixed(4) : 'N/A'}`);
 
 
-    // Min-heap to track top K results efficiently
+    // Min-heap over the running top K, ordered by score.
+    //
+    // It has to be a real heap. The previous version kept the array fully
+    // sorted and re-sorted it on every replacement, which is O(K log K) per
+    // insert instead of O(log K) — tolerable while K was small, but the window
+    // now has to be wide enough to yield topK distinct DOCUMENTS after chunks
+    // are deduplicated by item, and at K in the thousands a full re-sort per
+    // replacement costs tens of millions of comparisons per scan.
     const minHeap: SearchResult[] = [];
+    const siftUp = (start: number) => {
+      let index = start;
+      while (index > 0) {
+        const parent = (index - 1) >> 1;
+        if (minHeap[parent].score <= minHeap[index].score) break;
+        const swap = minHeap[parent];
+        minHeap[parent] = minHeap[index];
+        minHeap[index] = swap;
+        index = parent;
+      }
+    };
+    const siftDown = () => {
+      let index = 0;
+      for (;;) {
+        const left = index * 2 + 1;
+        const right = left + 1;
+        let smallest = index;
+        if (left < minHeap.length && minHeap[left].score < minHeap[smallest].score) {
+          smallest = left;
+        }
+        if (
+          right < minHeap.length &&
+          minHeap[right].score < minHeap[smallest].score
+        ) {
+          smallest = right;
+        }
+        if (smallest === index) break;
+        const swap = minHeap[smallest];
+        minHeap[smallest] = minHeap[index];
+        minHeap[index] = swap;
+        index = smallest;
+      }
+    };
 
     // Track debug info for first few vectors
     let debugSampleCount = 0;
@@ -661,7 +704,16 @@ export class VectorStore {
         ? 'item_key, chunk_id, vector_int8, vector_scale, vector_norm, language, chunk_text, dimensions'
         : 'item_key, chunk_id, language, chunk_text, dimensions';
 
-      const rows = await this.db.queryAsync(`SELECT ${selectCols} FROM embeddings WHERE ${whereClause} LIMIT ? OFFSET ?`, batchParams);
+      // ORDER BY id is not decoration: the scan walks the table in LIMIT/OFFSET
+      // batches, and SQLite guarantees no row order without it. Two runs of the
+      // SAME query could therefore visit rows in different orders, so which of
+      // several equally-scoring chunks survived the top-K cut varied run to run
+      // — observed live as a document at 0.6001 appearing in one search and
+      // vanishing from the next against an unchanged 0.60 threshold. Unordered
+      // OFFSET paging can also skip or repeat rows outright if the order shifts
+      // between batches. `id` is the INTEGER PRIMARY KEY, i.e. the rowid, so
+      // this orders the walk without costing a sort.
+      const rows = await this.db.queryAsync(`SELECT ${selectCols} FROM embeddings WHERE ${whereClause} ORDER BY id LIMIT ? OFFSET ?`, batchParams);
 
       if (!rows || rows.length === 0) {
         ztoolkit.log(`[VectorStore] search() batch ${batchCount} returned no rows at offset ${offset}`);
@@ -779,16 +831,14 @@ export class VectorStore {
               language: row.language
             };
 
-            // Maintain top K using simple array (efficient for small K)
+            // Keep the K best seen so far: fill the heap, then replace its
+            // weakest entry whenever a stronger candidate turns up.
             if (minHeap.length < topK) {
               minHeap.push(result);
-              if (minHeap.length === topK) {
-                minHeap.sort((a, b) => a.score - b.score);
-              }
+              siftUp(minHeap.length - 1);
             } else if (score > minHeap[0].score) {
               minHeap[0] = result;
-              // Re-sort to maintain min-heap property
-              minHeap.sort((a, b) => a.score - b.score);
+              siftDown();
             }
           }
         } catch (e) {
@@ -802,7 +852,9 @@ export class VectorStore {
       ztoolkit.log(`[VectorStore] search() batch ${batchCount}: ${rows.length} vectors, IO=${ioTime}ms, compute=${computeTime}ms, progress=${offset}/${totalCount}`);
     }
 
-    // Final sort (descending by score)
+    if (stats) stats.scanned = totalScanned;
+
+    // Heap order is not sort order: sort once, at the end, for the caller.
     const topResults = minHeap.sort((a, b) => b.score - a.score);
 
     const searchTime = Date.now() - startTime;
@@ -1493,6 +1545,34 @@ export class VectorStore {
     }
 
     return result;
+  }
+
+  /**
+   * All stored chunks of ONE item, in chunk_id order.
+   *
+   * Unlike {@link getItemChunks} this resolves the group-library storage key,
+   * so it works for items outside the user library. Ordered because the
+   * document-level deep dive treats chunk ids as reading order when it expands
+   * context around a hit.
+   */
+  async getChunksForItem(itemKey: string, libraryID?: number): Promise<Array<{
+    chunkId: number;
+    text: string;
+    language: string;
+  }>> {
+    await this.ensureInitialized();
+
+    const storageKey = this.toStorageKey(itemKey, libraryID);
+    // IMPORTANT: Single-line query to avoid Zotero queryAsync bug with multi-line SQL
+    const rows = await this.db.queryAsync(`SELECT chunk_id, chunk_text, language FROM embeddings WHERE item_key = ? ORDER BY chunk_id`, [storageKey]);
+
+    if (!rows || rows.length === 0) return [];
+
+    return rows.map((row: any) => ({
+      chunkId: row.chunk_id,
+      text: row.chunk_text || '',
+      language: row.language,
+    }));
   }
 
   // ============ Utility Methods ============

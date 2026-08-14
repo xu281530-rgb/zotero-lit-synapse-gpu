@@ -13,6 +13,10 @@ import {
 } from "./collectionFormatter";
 import { handleSearchRequest, MCPError } from "./searchEngine";
 import { FulltextService } from "./fulltextService";
+import {
+  expandChunkContext,
+  runDocumentDeepDive,
+} from "./documentDeepDive";
 
 declare let ztoolkit: ZToolkit;
 
@@ -923,22 +927,50 @@ export async function handleSearchFulltext(
     };
   }
 
-  ztoolkit.log(`[MCP ApiHandlers] Searching fulltext for: "${q}"`);
+  ztoolkit.log(`[MCP ApiHandlers] Document-level hybrid search for: "${q}"`);
 
   try {
     const libraryID = resolveLibraryID(query);
-    const fulltextService = new FulltextService();
-    
-    // Parse search options
-    const options = {
-      libraryID,
-      itemKeys: query.get("itemKeys")?.split(",") || null,
-      contextLength: parseInt(query.get("contextLength") || "200", 10),
-      maxResults: Math.min(parseInt(query.get("maxResults") || "50", 10), 200),
-      caseSensitive: query.get("caseSensitive") === "true"
-    };
+    // Same document-level hybrid search the MCP tool uses, so REST and MCP
+    // cannot drift into two different meanings of "search_fulltext".
+    const itemKey =
+      query.get("itemKey") ||
+      (query.get("itemKeys") || "").split(",").map((k) => k.trim()).filter(Boolean)[0];
+    if (!itemKey) {
+      return {
+        status: 400,
+        statusText: "Bad Request",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({
+          error:
+            "itemKey is required: search_fulltext digs into one document located by hybrid_search. Whole-library full-text scanning is disabled.",
+        }),
+      };
+    }
 
-    const searchResult = await fulltextService.searchFulltext(q, options);
+    const chunkIdsParam = query.get("chunkIds");
+    const searchResult = chunkIdsParam
+      ? await expandChunkContext({
+          itemKey,
+          libraryID,
+          chunkIds: chunkIdsParam
+            .split(",")
+            .map((value) => Number(value.trim()))
+            .filter((value) => Number.isInteger(value)),
+          radius: query.get("neighborRadius") ?? undefined,
+        })
+      : await runDocumentDeepDive({
+          itemKey,
+          libraryID,
+          query: q,
+          keywords: query.get("keywords")
+            ? query.get("keywords")!.split(",").map((k) => k.trim()).filter(Boolean)
+            : undefined,
+          domain: query.get("domain") ?? undefined,
+          expertRole: query.get("expertRole") ?? undefined,
+          maxChunks: query.get("maxChunks") ?? undefined,
+          minScore: query.get("minScore") ?? undefined,
+        });
 
     return {
       status: 200,

@@ -8,7 +8,6 @@ import {
   handleGetCollectionDetails,
   handleGetCollectionItems,
   handleGetSubcollections,
-  handleSearchFulltext,
   handleGetItemAbstract,
   handleCreateCollection,
   handleUpdateCollection,
@@ -25,16 +24,44 @@ import {
   DEFAULT_SEMANTIC_TIMEOUT_MS,
   HYBRID_KEYWORD_COVERAGE_BONUS,
   LEXICAL_FIELD_WEIGHTS,
+  computeFusedScore,
   MAX_HYBRID_KEYWORDS,
   MAX_SUPPLIED_KEYWORDS,
   resolveHybridKeywords,
+  resolveKeywordProvenance,
   runHybridSearch,
   runWithTimeout,
   type HybridSearchOptions,
   type KeywordSearchItem,
   type SemanticSearchItem,
 } from './hybridSearch';
+import {
+  getHybridSearchSettings,
+  resolveCandidateDepth,
+  resolveResultCap,
+  resolveScoreFloor,
+} from './hybridSearchSettings';
+import { expandChunkContext, runDocumentDeepDive } from './documentDeepDive';
 import { runLexicalSearch } from './lexicalSearch';
+import {
+  HYBRID_EVIDENCE_CHUNKS,
+  detectDocumentLanguage,
+  projectHybridCandidate,
+  roundScore,
+  truncateEvidence,
+} from './hybridCandidates';
+import {
+  CursorError,
+  HybridSearchPageStore,
+  windowOf,
+} from './hybridSearchPages';
+import { resolveCollectionScope } from './collectionScope';
+import type { CollectionScope } from './collectionScope';
+import type {
+  FingerprintClaim,
+  PageWindow,
+  SearchFingerprint,
+} from './hybridSearchPages';
 import {
   MCP_PROTOCOL_VERSION,
   SUPPORTED_MCP_PROTOCOL_VERSIONS,
@@ -92,6 +119,62 @@ export const MUTATING_TOOL_NAMES = new Set<string>([
   'add_items_to_collection',
   'remove_items_from_collection',
 ]);
+
+
+/**
+ * Trim a fused row to what a cached page can ever need.
+ *
+ * A cached ranking holds every document above the threshold, and each one
+ * arrives carrying up to three full passages. Only the first two, truncated,
+ * are ever shown, so keeping the rest would be holding a slice of the library's
+ * text in memory for the duration of a paging session.
+ */
+function trimCachedEvidence(row: Record<string, any>): Record<string, any> {
+  if (!Array.isArray(row.matchedChunks)) return row;
+  row.matchedChunks = row.matchedChunks
+    .slice(0, HYBRID_EVIDENCE_CHUNKS)
+    .map((chunk: any) => ({
+      chunkId: chunk?.chunkId,
+      score: chunk?.score,
+      text: truncateEvidence(String(chunk?.text || '')),
+    }));
+  return row;
+}
+
+/**
+ * Everything about one hybrid_search that does not change between its pages.
+ *
+ * Held so page 2 can be answered from the stored ranking: re-running the search
+ * would re-rank, and a re-ranked page 2 can duplicate, skip or reorder what page
+ * 1 already showed.
+ */
+/**
+ * A stable identity for what a search was allowed to look at.
+ *
+ * Two searches over different collections are different result sets, so paging
+ * from one into the other would silently splice them together.
+ */
+function describeScope(scope: CollectionScope): string {
+  if (scope.searchScope === 'library') return 'library';
+  return `collections:${scope.collections.map((c) => c.key).sort().join(',')}`;
+}
+
+interface HybridSearchSnapshot {
+  query: string;
+  keywords: string[];
+  keywordSource: string;
+  degraded: boolean;
+  warning: string | null;
+  fallbackReason?: string;
+  retryBudgetNote: string;
+  appliedMinScore: number;
+  libraryID: number;
+  /** True when candidateK, not relevance, decided where the pool stopped. */
+  poolSaturated: boolean;
+  /** True when a retrieval branch failed or timed out during this search. */
+  branchFailed: boolean;
+  metadata: Record<string, any>;
+}
 
 const WRITE_DISABLED_MESSAGE =
   'Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.';
@@ -210,6 +293,15 @@ export class StreamableMCPServer {
     version: config.addonVersion,
   };
   private clientSessions: Map<string, { initTime: Date; lastActivity: Date; clientInfo?: any }> = new Map();
+  /**
+   * Paging state for hybrid_search: one entry per recent search, holding the
+   * complete list of documents that cleared the relevance threshold. Page 2
+   * is a window onto that list, never a second search.
+   */
+  private hybridPages = new HybridSearchPageStore<
+    Record<string, any>,
+    HybridSearchSnapshot
+  >();
 
   constructor() {
     // No initialization needed - using direct function calls
@@ -218,13 +310,24 @@ export class StreamableMCPServer {
   /**
    * Handle incoming MCP requests and return HTTP response
    */
-  async handleMCPRequest(requestBody: string): Promise<{ status: number; statusText: string; headers: any; body: string }> {
+  async handleMCPRequest(
+    requestBody: string,
+    requestId = 0,
+  ): Promise<{ status: number; statusText: string; headers: any; body: string }> {
     let parsedRequest: unknown;
 
     try {
       parsedRequest = JSON.parse(requestBody);
     } catch (error) {
-      ztoolkit.log(`[StreamableMCP] Parse error: ${error}`);
+      // 走到这里说明收到的确实不是合法 JSON。把长度和首尾片段一起记下来，
+      // 才能区分「客户端发了坏数据」和「传输层把请求体截断了」——后者是
+      // 之前 -32700 的真正来源，现在由 httpServer 在分帧阶段就拦下。
+      const head = requestBody.slice(0, 60).replace(/\s+/g, ' ');
+      const tail = requestBody.slice(-30).replace(/\s+/g, ' ');
+      ztoolkit.log(
+        `[StreamableMCP] #${requestId} Parse error: ${error} (body ${requestBody.length} chars, head="${head}", tail="${tail}")`,
+        'error',
+      );
 
       const errorResponse: MCPResponse = {
         jsonrpc: '2.0',
@@ -275,7 +378,9 @@ export class StreamableMCPServer {
         };
       }
 
-      ztoolkit.log(`[StreamableMCP] Received: ${request.method}`);
+      ztoolkit.log(
+        `[StreamableMCP] #${requestId} received method=${request.method} id=${JSON.stringify(request.id ?? null)}`,
+      );
 
       const response = await this.processRequest(request);
 
@@ -289,6 +394,9 @@ export class StreamableMCPServer {
       }
 
       const status = this.getHttpStatusForResponse(response);
+      ztoolkit.log(
+        `[StreamableMCP] #${requestId} responding to ${request.method} id=${JSON.stringify(response.id ?? null)} status=${status}${response.error ? ` error=${response.error.code}` : ''}`,
+      );
       return {
         status,
         statusText: status === 400 ? "Bad Request" : "OK",
@@ -297,8 +405,8 @@ export class StreamableMCPServer {
       };
       
     } catch (error) {
-      ztoolkit.log(`[StreamableMCP] Error handling request: ${error}`);
-      
+      ztoolkit.log(`[StreamableMCP] #${requestId} Error handling request: ${error}`, 'error');
+
       const errorResponse: MCPResponse = {
         jsonrpc: '2.0',
         id: null,
@@ -426,7 +534,32 @@ export class StreamableMCPServer {
         resources: {},
       },
       serverInfo: this.serverInfo,
-      instructions: `Use hybrid_search as the default first step for literature discovery. It fuses metadata keyword and semantic retrieval without scanning full documents. This server never calls an LLM of its own, so YOU are the query-understanding stage: before every hybrid_search call, (1) identify the discipline and the specific sub-field the question belongs to, (2) adopt that field's expert perspective for the rest of the call, (3) work out the real research intent behind the wording - the mechanism, quantity or phenomenon actually being asked about - and only then (4) write the query and keywords. Reason from domain knowledge, not from the surface words of the question: a materials-science question needs the underlying mechanism, the standard technical terms, the field's abbreviations, the governing variables and the accepted synonyms, not a paraphrase of what the user typed. The library holds both Chinese and English literature, so every call must carry a complete natural-language query for the semantic branch plus keywords covering BOTH Chinese and English terms, translations, synonyms and abbreviations, regardless of the language the user asked in; never narrow the search to one language. Keep every keyword defensible as a term a specialist would search: around 5-12 is the recommended amount, any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted, and padding the list with generic words that are only loosely related to the research intent makes the ranking worse, not better. If you omit keywords, or pass an array that is empty once blank entries are trimmed, the server falls back to mechanical tokenization of the query and says so in the response; redo that call ONCE with proper domain keywords, and if you have already retried it, use the results you have instead of calling again - the fallback still returns a real ranking, so it is never a reason to loop. If the user only asks which literature is relevant, return the matched titles and metadata directly. Only when the user requests passages, evidence, or full-text details, call search_fulltext with selected itemKeys from hybrid_search. Never perform unscoped whole-library full-text search.`,
+      instructions: `This server retrieves literature through a funnel and never calls an LLM of its own, so YOU are the query-understanding stage at EVERY step. Each stage looks at fewer documents in more depth: many candidates -> a few abstracts you chose to read -> passages from one paper.
+
+STAGE 0 - decide where to look (get_collections, only when it helps):
+0. When the question is plainly confined to part of the user's library, call get_collections first and read their real folder names, then pass the relevant ones to hybrid_search as collectionKeys. The scope is applied before scoring, so it removes work rather than filtering results. Decide per collection: include what the user named, include what obviously relates to the question, exclude only what obviously does not, and INCLUDE anything whose subject you cannot determine — "待读", "综述", "课题资料", "论文写作" and similar names say nothing about content and frequently hold the most relevant papers. If most names are opaque to you, or the question spans fields, skip this stage entirely and search the whole library. Scanning extra documents costs a little time; missing one costs the user the paper.
+
+STAGE 1 - find candidates (hybrid_search):
+1. Identify which discipline and sub-field the user's question belongs to, and adopt that field's expert role.
+2. From that expert perspective, write ONE natural-language semantic query stating the real research intent, plus professional keywords: terms of art, synonyms, abbreviations and mechanism words, in BOTH Chinese and English regardless of the language the user asked in - the library is bilingual and this stage searches all of it. Declare the field in the domain argument and the perspective in the expertRole argument - without both, the call is reported as keywordSource "fallback" even if your keywords were good.
+3. Call hybrid_search. It runs metadata keyword retrieval and vector semantic retrieval over the whole library and fuses them into one normalized 0-1 relevance score.
+4. Documents below the user's relevance threshold are discarded by the server. What survives is ranked, and the response carries ONE PAGE of that ranking - topK is the page size, a CEILING and never a target. If nothing comes back, say the library has nothing relevant.
+5. The pagination block tells you the whole picture: appliedMinScore (the floor that was applied), totalRelevant (how many documents cleared it), returned, hasMore, nextCursor. Filtering happens before paging, so no page can contain a document below the threshold and a short final page is never padded. When hasMore is true and the bottom of the page still looks relevant - or the user asked for a comprehensive sweep or a literature review - call hybrid_search again with cursor set to nextCursor and every other argument unchanged; that windows the SAME ranking instead of searching again, so pages never duplicate, drop or reorder documents. Changing query, keywords, domain, expertRole or minScore alongside a cursor is rejected: that is a new search, so start one. Never lower minScore to fill a page, and do not page through everything by reflex - stop when the question is answered.
+6. What comes back per document is a LIGHTWEIGHT candidate row: title, creators, year, venue, the language the document is written in, the fused score, which of your keywords and which fields matched, and a short snippet from its best-matching passages. Abstracts are deliberately NOT included - they are still searched server-side, they are just not shipped back, because most candidates never need to be read.
+
+STAGE 2 - triage, and read an abstract only where you need one (get_item_abstract):
+7. Judge each candidate from its stage-1 row alone: title, rank, fused score, which keywords hit which fields, and the evidence snippet. When that is already enough to see a paper is off-topic, discard it and never fetch its abstract.
+8. Only for a candidate you are seriously considering going deeper on, call get_item_abstract with that ONE itemKey. It is an on-demand tool, NOT a batch step that follows hybrid_search: if 3 of 20 candidates are worth pursuing, you fetch 3 abstracts, not 20.
+9. If the user only asked which literature is relevant, answer from the stage-1 rows plus at most a few abstracts, and stop here.
+
+STAGE 3 - dig into one paper (search_fulltext, one document per call):
+10. Having read that paper's abstract, redo the expert judgement FOR THAT PAPER from "user question + this paper's title + its abstract + its stage-1 evidence": identify its study object, material system, experimental method, variables, mechanism, terminology and abbreviations.
+11. Re-fit domain and expertRole to what THIS paper actually is. They may well differ from stage 1 and should: a library-level "materials science / solidification metallurgy" becomes "physical metallurgy / crystal plasticity and deformation mechanisms" once the abstract shows the paper is really about dislocations, stacking faults and micro-twinning. Decide that from the abstract you just read; never carry the stage-1 pair over out of inertia.
+12. Write query and keywords SPECIFIC TO THAT PAPER, and write the keywords in the LANGUAGE THAT PAPER IS WRITTEN IN - one language, not both. This stage searches inside a single document, so probes in the other language match nothing and only dilute the ranking. The candidate row carries a language hint and the abstract confirms it; a Chinese paper takes Chinese terms of art, an English paper takes English ones. Keep the query itself bilingual only if the paper itself mixes languages.
+13. Call search_fulltext with that one itemKey, plus the re-fitted domain and expertRole. It runs keyword matching and semantic retrieval across that paper's passages, fuses them with the same scoring, discards passages below the threshold and returns at most the user's configured number of passages.
+14. Read those passages. If the evidence answers the question, STOP. Only if a passage is missing its cause, its consequence, its experimental conditions or its mechanism context, call search_fulltext again with chunkIds set to that passage's chunkId to pull in its immediate neighbours, within the user's radius limit. Never request neighbouring text by default.
+
+Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accepted, at both stage 1 and stage 3. If you omit keywords the server falls back to mechanical tokenization, returns keywordSource "fallback" with degraded: true, and you should redo that call ONCE with proper terms. Never perform unscoped whole-library full-text search.`,
     });
   }
 
@@ -464,11 +597,26 @@ export class StreamableMCPServer {
 
 
   private handleToolsList(request: MCPRequest): MCPResponse {
+    return this.createResponse(request.id ?? null, { tools: this.getAvailableTools() });
+  }
+
+  /**
+   * The tools this server actually serves right now, after the same pref
+   * filtering tools/list applies.
+   *
+   * getStatus() used to carry a second, hand-written copy of this list. It
+   * drifted — the collection tools were added here and never there, so
+   * /mcp/status under-reported by six — and it was blind to both prefs below,
+   * which is the worse half: with write disabled it still advertised the
+   * write_* tools that tools/list was hiding, i.e. it claimed capabilities the
+   * server would refuse. One source of truth, both callers.
+   */
+  private getAvailableTools(): any[] {
     const tools = [
       {
         name: 'hybrid_search',
         description: [
-          'DEFAULT FIRST STEP for locating literature. Runs Zotero metadata/field keyword retrieval and semantic vector retrieval in parallel, then fuses their rankings with weighted Reciprocal Rank Fusion (RRF). It does not scan full document text.',
+          'DEFAULT FIRST STEP for locating literature. Runs Zotero metadata/field keyword retrieval and semantic vector retrieval in parallel, then fuses them into one normalized 0-1 relevance score: each branch is normalised on its own scale, the stronger branch sets the score, and the weaker branch adds a bounded agreement bonus, so corroboration can only lift a document and never dilute it. Reciprocal Rank Fusion is computed too, but only as the tie-break between candidates whose fused scores are equal — rrfK tunes that tie-break, not the ranking. It does not scan full document text.',
           '',
           'The library is bilingual, so every call must retrieve Chinese AND English literature, no matter which language the user asked in. Do NOT translate the question into a single language and do NOT restrict the search to the language of the question. You (the calling AI) are responsible for the query rewrite: this tool never calls an LLM of its own.',
           '',
@@ -491,7 +639,19 @@ export class StreamableMCPServer {
           '',
           'If you do not pass keywords - or pass an array that is empty after blank entries are trimmed - the server falls back to mechanically tokenizing the query, returns keywordSource "fallback", a keywordFallbackReason naming which of the two happened, and a warning stating the keywords were NOT produced by domain-expert analysis. That path exists only so the call still runs, and it does return a real ranking. Redo the search ONCE with proper keywords; if you have already retried, keep the results rather than calling a third time.',
           '',
-          'Leave language at its "all" default so retrieval stays genuinely cross-lingual; the other language values only narrow recall. Return these literature matches directly when the user only asks which documents are relevant; call search_fulltext with the matched itemKeys only when the user asks for passages, evidence, or full-text details.',
+          'Leave language at its "all" default so retrieval stays genuinely cross-lingual; the other language values only narrow recall.',
+          '',
+          'SCORING: both branches are normalized to 0-1 and fused into one relevance score by taking the stronger branch and adding a bounded share of the weaker one, so a second, weaker hit can never push a document below what it scored on its own. Documents below the user-configured threshold are discarded by the server, and at most the user-configured number of documents is returned. That number is an upper bound, NOT a target: a weakly related paper is never added to make the list longer.',
+          '',
+          'WHAT YOU GET BACK: a LIGHTWEIGHT candidate row per surviving document — itemKey, title, creators, year, venue, the language it is written in, the fused score, which of your keywords matched which fields, and a short snippet from its best-matching passages. That is a shortlist to triage, not a reading pile.',
+          '',
+          'ABSTRACTS ARE NOT RETURNED, on purpose. They are still indexed, still searched by the keyword branch, and still part of what produced this ranking — they are simply not shipped back, because most candidates never need to be read in full. Judge each row from its title, score, matched keywords and snippet. Only for a paper you are seriously considering going deeper on, call get_item_abstract with that one itemKey. Reading every candidate\'s abstract is the exact behaviour this design removes: 20 candidates does not mean 20 abstracts.',
+          '',
+          'SCOPE: by default this searches the entire library. When the user question is clearly confined to part of their collection, call get_collections FIRST, read the real folder names, and pass the relevant ones as collectionKeys — the scope is applied before scoring, so it cuts the work rather than filtering the results afterwards. Judge each collection by what it plainly is: include what the user named, include what obviously relates, exclude only what obviously does not, and INCLUDE anything you cannot classify. Personal folder names carry no subject information — "待读", "综述", "课题资料", "论文写作" — yet often hold exactly the papers that matter, so uncertainty means include, never exclude. When most of the structure is opaque to you, or the question spans several fields, skip collectionKeys and search everything: a scope that misses a paper is a worse outcome than a scan that costs a little more.',
+          '',
+          'PAGING: topK is the size of ONE page, not the depth of the search. The response carries a pagination block: appliedMinScore (the floor these results passed), totalRelevant (how many documents cleared that floor — often more than one page), returned, hasMore and nextCursor. Filtering happens BEFORE paging, so a later page can never contain a document below the threshold, and a short last page is never padded out. To read further, call hybrid_search again with cursor set to nextCursor and everything else unchanged; that returns the next window of the SAME ranking rather than a fresh search. Page on when the bottom of a page is still relevant, or when the user asked for a comprehensive sweep or a literature review — not by reflex. Never lower minScore to make more results appear.',
+          '',
+          'THEN: having read one paper\'s abstract, redo the expert analysis for THAT paper — re-fit domain and expertRole to what it actually studies, write a query and keywords out of its own subject matter, in the language that paper is written in — and call search_fulltext with its single itemKey. Answer from the stage-1 rows alone when the user only asks which literature is relevant.',
         ].join('\n'),
         inputSchema: {
           type: 'object',
@@ -507,17 +667,39 @@ export class StreamableMCPServer {
               maxItems: MAX_SUPPLIED_KEYWORDS,
               description: `Lexical probes for the keyword branch, derived from your domain analysis of the question rather than from its wording: the core concepts and mechanism, precise Chinese AND English terms of art, standard technical translations, accepted synonyms, field abbreviations, and closely coupled concepts with a clear professional link to the research intent. For best results, it is recommended to provide 5-12 relevant Chinese and/or English keywords. Fewer or more keywords are still allowed within the implemented input limit of 1 to ${MAX_HYBRID_KEYWORDS} entries. Always supply both scripts regardless of the language the user asked in. Do not pad with generic or weakly related words — keyword coverage is part of the score, so filler actively hurts ranking. All keywords are matched together in one pass over title, abstract, creator, publicationTitle and tags, and ranked by term specificity, field weight and keyword coverage, so a broad word cannot outrank a discriminative phrase. Omitting this makes the server fall back to mechanically splitting the query: it can only probe the language the user typed in, is scored at a lower weight, and the response is flagged with keywordSource "fallback" plus an explicit warning.`
             },
+            domain: {
+              type: 'string',
+              description: 'The discipline and specific sub-field you classified the question into before writing the query, e.g. "materials science / solidification microstructure". Required, together with expertRole, for the call to be recorded as domain-expert retrieval; without both, the response comes back with keywordSource "fallback" and degraded: true even when your keywords were good.'
+            },
+            expertRole: {
+              type: 'string',
+              description: 'The expert perspective you adopted for this call, e.g. "solidification processing specialist". Required together with domain.'
+            },
             topK: {
               type: 'number',
-              description: 'Number of fused results to return (default: 10)'
+              description: 'PAGE SIZE: how many documents one response carries. The user configures the real maximum; this can only ask for FEWER. It is a ceiling and never a quota to fill — and it no longer decides how far the ranking goes, because anything past it is reachable through cursor rather than lost.'
+            },
+            collectionKeys: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Restrict the search to these Zotero collections (keys from get_collections), their subcollections included. The restriction is applied BEFORE scoring: the keyword branch only reads items inside the scope and the vector scan only computes similarity for their chunks, so this is a real reduction in work rather than a filter over whole-library results. Omit it to search everything. SELECTION RULE — include a collection when the user named it, when its subject plainly relates to the question, AND when you cannot tell what it contains: names like "综述", "待读", "课题资料", "论文写作", "New Folder" carry no subject information but routinely hold the most relevant papers, so they belong IN the scope. Exclude only what is plainly unrelated. If most collections are unreadable to you, or the question spans fields, omit this argument and search the whole library. Missing a paper is a worse failure than scanning extra ones.'
+            },
+            uncertainCollectionKeys: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Of the collectionKeys you passed, which ones you included because you could NOT judge their subject rather than because you judged them relevant. Declaring them changes nothing about the search; it is reported back in metadata so the user can see which parts of the scope were guesses. Leave it out when every choice was a judgement.'
+            },
+            cursor: {
+              type: 'string',
+              description: 'Continue a previous hybrid_search: pass the nextCursor it returned, exactly as given. The cursor names one already-ranked, already-threshold-filtered result set, and returns the next page of THAT set — it does not re-run retrieval, so pages cannot duplicate, drop or reorder documents. Send it with query, keywords, domain, expertRole and minScore either unchanged or omitted; changing any of them is a different search and is rejected. Omit cursor to start a new search.'
             },
             candidateK: {
               type: 'number',
-              description: 'Candidates retrieved from each branch before fusion (default: max(topK * 3, 20))'
+              description: `Retrieval DEPTH per branch: how many candidates keyword and semantic retrieval each consider before fusion and thresholding. Defaults to the user's "Retrieval depth per branch" setting. Unlike topK and minScore this is not capped by the user's preference — it governs how hard the server looks, not how much it may return — so raise it when the response reports the candidate pool as full and you need an exhaustive sweep, and leave it alone otherwise. Bounded to keep the vector scan inside its deadline.`,
             },
             minScore: {
               type: 'number',
-              description: 'Minimum semantic similarity score 0-1 (default: 0.3)'
+              description: 'Relevance floor 0-1 applied to the fused score. May only be STRICTER than the user setting; a lower value is raised back to the user threshold. Documents below it are discarded and are never padded back in.'
             },
             language: {
               type: 'string',
@@ -526,7 +708,7 @@ export class StreamableMCPServer {
             },
             rrfK: {
               type: 'number',
-              description: 'RRF rank constant (default: 60)'
+              description: 'Rank constant for the Reciprocal Rank Fusion TIE-BREAK (default: 60). Ranking is decided by the fused 0-1 relevance score; RRF only orders candidates whose fused scores are equal, so changing this rarely changes anything.'
             },
             keywordWeight: {
               type: 'number',
@@ -1007,7 +1189,22 @@ export class StreamableMCPServer {
       },
       {
         name: 'search_fulltext',
-        description: 'SECOND-STAGE search within full text of specific documents already located by hybrid_search. itemKeys is required; unscoped whole-library full-text scanning is disabled. Use only when the user asks for passages, evidence, or full-text details.',
+        description: [
+          'SECOND-STAGE retrieval: a hybrid search inside the full text of ONE document located by hybrid_search. Same machinery as hybrid_search - keyword matching plus vector semantic retrieval over the same index, fused into the same normalized 0-1 relevance score, filtered by the same user threshold - except the candidates are the passages (chunks) of a single paper instead of the whole library.',
+          '',
+          "Call it once per document, with that document's own itemKey.",
+          '',
+          'BEFORE you write the arguments, redo the expert analysis FOR THIS PAPER. Do not reuse the library-level query and keywords: they were written for the user question in general, and they will retrieve the same generic passages from every paper.',
+          'A. Get this paper\'s abstract first, with get_item_abstract on its itemKey — hybrid_search does not return abstracts. Read it together with the hit evidence hybrid_search gave you for this paper.',
+          "B. Re-judge the field from \"user question + this paper's title + its abstract + its evidence\", and adopt the expert role that THIS paper belongs to. Expect it to be narrower or simply different from the stage-1 pair, and pass the re-fitted values in domain and expertRole.",
+          'C. Identify what is particular to THIS paper: its study object, material or sample system, experimental or computational method, the variables it manipulates and measures, the mechanism it argues for, and its own terminology and abbreviations.',
+          'D. Write query and keywords out of THAT: a natural-language sentence about what you need from this paper, and probes in this paper\'s own vocabulary and terms of art.',
+          'E. Write those keywords in the LANGUAGE THIS PAPER IS WRITTEN IN — one language, not both. Library-wide search is bilingual because the library is; this search is not, because a single document is not. Chinese probes cannot match an English paper\'s passages and vice versa: they match nothing and only dilute keyword coverage. hybrid_search reports each candidate\'s language, and the abstract confirms it. Only a genuinely mixed-language document takes mixed probes.',
+          '',
+          'CONTEXT EXPANSION: read the returned passages first and stop when the evidence is sufficient. Only when a passage is clearly missing its cause, its consequence, its experimental conditions or its mechanism context, call this tool again with chunkIds set to the chunkId(s) of that passage - it then returns those passages plus their immediate neighbours in reading order, within the radius the user allows. Never request neighbours by default and never ask for the whole document.',
+          '',
+          "Result counts are capped by the user's preferences and the relevance threshold is a floor you cannot lower. Passages below it are discarded; the cap is a ceiling, not a quota, so a document with only one good passage returns one passage.",
+        ].join('\n'),
         inputSchema: {
           type: 'object',
           properties: {
@@ -1015,28 +1212,59 @@ export class StreamableMCPServer {
               type: 'number',
               description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
             },
-            q: { type: 'string', description: 'Search query' },
-            itemKeys: { 
-              type: 'array', 
+            itemKey: {
+              type: 'string',
+              description: 'The single item key to dig into, taken from a hybrid_search candidate row whose abstract you have already read with get_item_abstract.'
+            },
+            query: {
+              type: 'string',
+              description: 'Natural-language sentence describing what you need FROM THIS PAPER, written after re-judging the field from the user question plus this paper\'s abstract (fetched with get_item_abstract) and its stage-1 evidence. Embedded as-is for semantic retrieval over this paper\'s passages, so write prose, not tokens, and write it in the language this paper is written in. Required unless chunkIds is used.'
+            },
+            keywords: {
+              type: 'array',
               items: { type: 'string' },
               minItems: 1,
-              description: 'Item keys returned by hybrid_search (required)'
+              maxItems: MAX_SUPPLIED_KEYWORDS,
+              description: `Probes specific to THIS paper: its study object, material system, method, variables, mechanism terms and its own abbreviations. Write them in the LANGUAGE THIS PAPER IS WRITTEN IN - one language, not both: this searches inside a single document, so probes in the other language match nothing and only dilute keyword coverage. hybrid_search reports each candidate's language and the abstract confirms it. Do not copy the library-level bilingual keyword set. 1 to ${MAX_HYBRID_KEYWORDS} entries; around 5-12 is recommended. Omitting them makes the server fall back to mechanically splitting the query and flags the result as keywordSource "fallback".`
             },
-            mode: {
+            domain: {
               type: 'string',
-              enum: ['minimal', 'preview', 'standard', 'complete'],
-              description: 'Processing mode: minimal (100 context), preview (200), standard (adaptive), complete (400+). Uses user default if not specified.'
+              description: 'The discipline and sub-field THIS paper belongs to, as you judged it from the question plus this paper\'s abstract and evidence. Re-fit it to this paper instead of repeating the library-level domain; it is normal for it to come out narrower or simply different. Required, together with expertRole, for the call to count as domain-expert retrieval.'
             },
-            contextLength: { type: 'number', description: 'Context length around matches (overrides mode default)' },
-            maxResults: { type: 'number', description: 'Maximum results to return (overrides mode default)' },
-            caseSensitive: { type: 'boolean', description: 'Case sensitive search (default: false)' },
+            expertRole: {
+              type: 'string',
+              description: 'The specialist perspective you adopted for this paper, e.g. "solidification microstructure specialist". Required, together with domain, for the call to count as domain-expert retrieval.'
+            },
+            chunkIds: {
+              type: 'array',
+              items: { type: 'number' },
+              description: 'CONTEXT EXPANSION mode. The chunkId(s) of passages that lack surrounding context. Returns those passages plus their neighbours within the user-configured radius, in reading order, and performs no ranking. Use only after reading the search results and finding a specific gap.'
+            },
+            neighborRadius: {
+              type: 'number',
+              description: 'How many chunks either side to include in context expansion. Capped by the user setting; ask for less, never more.'
+            },
+            maxChunks: {
+              type: 'number',
+              description: 'Upper bound on returned passages. Capped by the user setting. Only lowers the cap; it can never raise it, and it never pads weak passages in to reach a count.'
+            },
+            minScore: {
+              type: 'number',
+              description: 'Relevance floor 0-1 for the fused score. May only be stricter than the user setting; a lower value is raised back to it.'
+            },
           },
-          required: ['q', 'itemKeys'],
+          required: ['itemKey'],
         },
       },
       {
         name: 'get_item_abstract',
-        description: 'Get the abstract/summary of a specific item. Typically the author\'s own summary from the original publication.',
+        description: [
+          "Get ONE item's abstract - the author's own summary from the original publication.",
+          '',
+          'This is the on-demand middle step of the retrieval funnel, and it is deliberately not part of what hybrid_search returns. Call it for a candidate you are seriously considering going deeper on, one itemKey at a time. Do NOT sweep it across a result set: if 3 of 20 candidates look worth pursuing, you fetch 3 abstracts. When a candidate row already shows a paper is off-topic, decide that from the row and never fetch its abstract at all.',
+          '',
+          'What to do with what comes back: read it together with the user question, the title and the hit evidence hybrid_search gave for this paper, then re-fit domain and expertRole to what THIS paper actually studies, and derive a query and keywords from its own subject matter - in the language the paper is written in - for a search_fulltext call on that single itemKey.',
+        ].join('\n'),
         inputSchema: {
           type: 'object',
           properties: {
@@ -1352,7 +1580,7 @@ export class StreamableMCPServer {
       ? filteredTools
       : filteredTools.filter((t: any) => !MUTATING_TOOL_NAMES.has(t.name));
 
-    return this.createResponse(request.id ?? null, { tools: finalTools });
+    return finalTools;
   }
 
   private async handleToolCall(request: MCPRequest): Promise<MCPResponse> {
@@ -1382,14 +1610,21 @@ export class StreamableMCPServer {
 
         case 'search_library':
           if (args?.fulltext) {
-            throw new Error('search_library.fulltext is disabled. Use hybrid_search first, then search_fulltext with matched itemKeys');
+            throw new Error('search_library.fulltext is disabled. Use hybrid_search first, then search_fulltext with one matched itemKey at a time');
           }
           result = await this.callSearchLibrary(args);
           break;
 
         case 'hybrid_search':
-          if (typeof args?.query !== 'string' || !args.query.trim()) {
-            throw new Error('query is required');
+          // A cursor already names the search it continues, so the query is
+          // required only when starting a new one.
+          if (
+            (typeof args?.cursor !== 'string' || !args.cursor.trim()) &&
+            (typeof args?.query !== 'string' || !args.query.trim())
+          ) {
+            throw new Error(
+              'query is required (or pass cursor to continue a previous hybrid_search)',
+            );
           }
           result = await this.callHybridSearch(args);
           break;
@@ -1520,21 +1755,32 @@ export class StreamableMCPServer {
           break;
         }
 
-        case 'search_fulltext':
-          if (!args?.q) {
-            throw new Error('q (query) is required');
-          }
-          {
-            const fulltextItemKeys = this.coerceStringArray(args?.itemKeys);
-            if (!fulltextItemKeys || fulltextItemKeys.length === 0) {
-              throw new Error('itemKeys from hybrid_search are required; whole-library full-text scanning is disabled');
+        case 'search_fulltext': {
+          // One document per call: the deep dive has to be re-thought for each
+          // paper, and a list of keys is exactly how a caller ends up sending
+          // one generic query to all of them.
+          const deepDiveKey =
+            typeof args?.itemKey === 'string' && args.itemKey.trim()
+              ? args.itemKey.trim()
+              : null;
+          const legacyKeys = this.coerceStringArray(args?.itemKeys);
+          let fulltextArgs = args;
+          if (!deepDiveKey) {
+            if (legacyKeys && legacyKeys.length === 1) {
+              fulltextArgs = { ...args, itemKey: legacyKeys[0] };
+            } else if (legacyKeys && legacyKeys.length > 1) {
+              throw new Error(
+                'search_fulltext digs into ONE document per call. Pass a single itemKey, re-derive query and keywords for that specific paper, then call again for the next one.',
+              );
+            } else {
+              throw new Error(
+                'itemKey from hybrid_search is required; whole-library full-text scanning is disabled',
+              );
             }
-            result = await this.callSearchFulltext({
-              ...args,
-              itemKeys: fulltextItemKeys
-            });
           }
+          result = await this.callSearchFulltext(fulltextArgs);
           break;
+        }
 
         case 'get_item_abstract':
           if (!args?.itemKey) {
@@ -1737,27 +1983,89 @@ export class StreamableMCPServer {
   }
 
   private async callHybridSearch(args: any): Promise<any> {
-    const topK = args.topK ?? 10;
-    const candidateK = args.candidateK ?? Math.max(topK * 3, 20);
-    const minScore = args.minScore ?? 0.3;
+    // The user's preferences are ceilings, not defaults: the caller may ask for
+    // fewer documents or a stricter threshold, never for more or looser.
+    const settings = getHybridSearchSettings();
+    const documentCap = resolveResultCap(args.topK, settings.maxDocuments);
+    const scoreFloor = resolveScoreFloor(args.minScore, settings.minScore);
+    // topK is the PAGE size, not the search depth: it bounds one response,
+    // while the ranking behind it goes as deep as the candidate pool allows.
+    // The two used to be tied together (candidateK = topK * 3), which meant
+    // asking for 20 documents silently decided that rank 61 would never exist.
+    const topK = documentCap.value;
+    const candidateDepth = resolveCandidateDepth(
+      args.candidateK,
+      settings.candidateK,
+    );
+    // A pool smaller than one page cannot fill it, so the page size is a floor
+    // on the depth. Raising it quietly is right: the caller asked for a page of
+    // N and a depth of M, and only one of those can be honoured.
+    const candidateK = Math.max(candidateDepth.value, topK);
+    // Branch-level pre-filter, deliberately looser than the fused threshold:
+    // a chunk at 0.45 semantic similarity can still clear 0.60 once the
+    // keyword branch agrees, and pre-filtering it away would hide that.
+    const semanticPrefilter = Math.min(0.2, scoreFloor.value);
     const language = args.language ?? 'all';
     const libraryID =
       args.libraryID ?? Zotero.Libraries.userLibraryID;
+
+    // CONTINUATION: a cursor names one already-ranked, already-thresholded
+    // result set. Serve the next window of it and return; running the search
+    // again here is exactly what would make page 2 disagree with page 1.
+    const cursor =
+      typeof args.cursor === 'string' && args.cursor.trim()
+        ? args.cursor.trim()
+        : null;
+    if (cursor) {
+      return await this.continueHybridSearch(args, cursor, {
+        // Only an explicit topK re-sizes a page. Omitting it must inherit the
+        // size page 1 used, not silently fall back to the user's maximum: a
+        // caller that asked for 5 and then just followed the cursor was being
+        // handed 20.
+        requestedPageSize: args.topK === undefined ? undefined : topK,
+        scoreFloor: scoreFloor.value,
+        language,
+        libraryID,
+      });
+    }
+
     this.validateSearchParameters({
       query: args.query,
       topK,
       candidateK,
-      minScore,
+      minScore: scoreFloor.value,
       language,
       libraryID,
     });
+
+    // Collection scope is resolved to item keys BEFORE either branch runs, so
+    // both of them narrow their candidates instead of scoring the library and
+    // discarding afterwards.
+    const uncertainCollections = Array.isArray(args.uncertainCollectionKeys)
+      ? args.uncertainCollectionKeys.map((key: unknown) => String(key)).filter(Boolean)
+      : [];
+    const scope = this.resolveHybridScope(args.collectionKeys, libraryID);
+    const scopeItemKeys =
+      scope.searchScope === 'collections'
+        ? new Set<string>(scope.itemKeys)
+        : undefined;
     // The caller supplies bilingual keywords; when it does not we derive probes
     // from the query, which can only cover the language the user typed in.
     const {
       keywords: lexicalKeywords,
       entries: lexicalKeywordEntries,
-      source: keywordSource,
+      source: probeSource,
     } = resolveHybridKeywords(args.query, args.keywords);
+    // 'ai' is only claimed when the caller both supplied its own probes AND
+    // named the field and expert role it reasoned from; everything else is
+    // mechanical fallback and is reported as such.
+    const provenance = resolveKeywordProvenance({
+      probeSource,
+      keywordsArgumentPresent:
+        args.keywords !== undefined && args.keywords !== null,
+      domain: args.domain,
+      expertRole: args.expertRole,
+    });
     const options: HybridSearchOptions = {
       keywords: lexicalKeywords,
       topK,
@@ -1765,6 +2073,7 @@ export class StreamableMCPServer {
       rrfK: args.rrfK ?? 60,
       keywordWeight: args.keywordWeight ?? 1,
       semanticWeight: args.semanticWeight ?? 1,
+      minScore: scoreFloor.value,
       semanticTimeoutMs: args.semanticTimeoutMs,
       totalTimeoutMs: args.totalTimeoutMs,
     };
@@ -1784,6 +2093,9 @@ export class StreamableMCPServer {
     // burning time (and API quota) after the hybrid deadline has passed.
     const semanticAbort =
       typeof AbortController !== 'undefined' ? new AbortController() : null;
+    // Filled in by the vector scan so the response can report how much work
+    // the collection scope actually saved.
+    const semanticScanStats: { chunksScanned?: number; chunksMatched?: number } = {};
     let lexicalCancelled = false;
     let lexicalDiagnostics: Awaited<
       ReturnType<typeof runLexicalSearch>
@@ -1800,6 +2112,7 @@ export class StreamableMCPServer {
             keywords: lexicalKeywordEntries,
             libraryID,
             candidateK: options.candidateK,
+            scopeItemKeys,
             // Stop a little before the hybrid deadline so a partial, ranked
             // candidate set still reaches fusion instead of the branch being
             // killed outright and hybrid silently degrading to semantic-only.
@@ -1823,11 +2136,16 @@ export class StreamableMCPServer {
           const semanticService = getSemanticSearchService();
           return semanticService.search(args.query, {
             topK: options.candidateK,
-            minScore,
+            minScore: semanticPrefilter,
             language,
             libraryID,
+            // Restricting the vector scan itself: the SQL only reads chunks
+            // belonging to these items, so out-of-scope chunks are never
+            // dequantised and never have a similarity computed for them.
+            itemKeys: scope.searchScope === 'collections' ? scope.itemKeys : undefined,
             timeoutMs: semanticTimeoutMs,
             signal: semanticAbort?.signal,
+            stats: semanticScanStats,
           });
         },
         cancelSemanticSearch: () => {
@@ -1843,27 +2161,15 @@ export class StreamableMCPServer {
       | Awaited<ReturnType<typeof runLexicalSearch>>['diagnostics']
       | null;
     ztoolkit.log(
-      `[StreamableMCP][HybridTiming] lexical=${searchResult.timings.keywordMs}ms semantic=${searchResult.timings.semanticMs}ms rrf=${searchResult.timings.rrfMs}ms total=${searchResult.timings.totalMs}ms keywords=${lexicalKeywords.length}(${keywordSource}) lexicalCandidates=${diagnostics?.candidateIDs ?? 0} lexicalScanned=${diagnostics?.scannedItems ?? 0} libraryID=${libraryID}`,
+      `[StreamableMCP][HybridTiming] lexical=${searchResult.timings.keywordMs}ms semantic=${searchResult.timings.semanticMs}ms rrf=${searchResult.timings.rrfMs}ms total=${searchResult.timings.totalMs}ms keywords=${lexicalKeywords.length}(probe=${probeSource},source=${provenance.keywordSource}) lexicalCandidates=${diagnostics?.candidateIDs ?? 0} lexicalScanned=${diagnostics?.scannedItems ?? 0} libraryID=${libraryID}`,
     );
 
-    // 'provided' means the calling AI did the domain analysis; 'fallback' means
-    // nobody did and the probes are mechanical tokens. The distinction has to
-    // reach the caller, not just the log, or a degraded search looks normal.
-    const keywordOrigin: 'ai' | 'fallback' =
-      keywordSource === 'fallback' ? 'fallback' : 'ai';
-    // An array that normalizes away (empty, blank strings, or []) reaches this
-    // point looking exactly like "no keywords at all". Telling a caller that
-    // already passed the argument it "did not do the analysis" is the one way
-    // this warning could send it round the same call again, so name the real
-    // problem instead.
-    const keywordsArgumentPresent =
-      args.keywords !== undefined && args.keywords !== null;
-    const fallbackReason =
-      keywordOrigin !== 'fallback'
-        ? null
-        : keywordsArgumentPresent
-          ? 'The keywords argument was present but empty after trimming blank entries and duplicates, so it could not be used.'
-          : 'No keywords argument was supplied.';
+    // `ai` is claimed only when the caller both supplied its own probes and
+    // declared the field and expert role it reasoned from — the two things the
+    // server can actually observe. Everything else is `fallback`, including a
+    // keyword list that arrived with no declaration behind it.
+    const keywordOrigin = provenance.keywordSource;
+    const fallbackReason = provenance.reason;
     // One retry is enough to fix this: the caller either produces domain
     // keywords on the second attempt or it never will. Cap it explicitly so
     // the instruction cannot be read as "keep retrying until it is clean".
@@ -1871,7 +2177,9 @@ export class StreamableMCPServer {
       'Retry at most once: if you have already retried this search, use these results as they are rather than calling hybrid_search again.';
     const fallbackWarning =
       keywordOrigin === 'fallback'
-        ? `warning: Keywords were generated by mechanical fallback tokenization, not by AI/domain-expert analysis; retrieval quality may be lower. ${fallbackReason} The lexical branch only covers the language the query was written in. Redo this search once with a domain-expert keyword set: identify the sub-field, adopt its expert perspective, and pass bilingual Chinese and English terms of art, translations, synonyms and abbreviations as a non-empty array of trimmed strings. Around 5-12 keywords is the recommended amount, and any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted. ${retryBudgetNote} These results are usable in the meantime: the ranking below is real, only the lexical probes were mechanical.`
+        ? provenance.probeOrigin === 'derived'
+          ? `warning: Keywords were generated by mechanical fallback tokenization, not by AI/domain-expert analysis; retrieval quality may be lower. ${fallbackReason} The lexical branch only covers the language the query was written in. Redo this search once with a domain-expert keyword set: identify the sub-field, adopt its expert perspective, and pass bilingual Chinese and English terms of art, translations, synonyms and abbreviations as a non-empty array of trimmed strings, together with domain and expertRole. Around 5-12 keywords is the recommended amount, and any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted. ${retryBudgetNote} These results are usable in the meantime: the ranking below is real, only the lexical probes were mechanical.`
+          : `warning: ${fallbackReason} The ranking below is real and your keywords were used, but the call cannot be recorded as domain-expert retrieval. Redo it once with domain and expertRole naming the discipline and the specialist perspective you adopted. ${retryBudgetNote}`
         : null;
 
     const hybridWarnings = [...searchResult.warnings];
@@ -1892,27 +2200,130 @@ export class StreamableMCPServer {
           : 'The lexical candidate set was truncated because it hit the candidate cap or the hybrid deadline. Pass fewer, more specific keywords for complete lexical coverage.',
       );
     }
+    if (documentCap.clamped) {
+      hybridWarnings.push(
+        `Requested topK exceeded the user's maximum page size of ${settings.maxDocuments}; capped at ${topK}. Documents past this page are not lost — page on with nextCursor.`,
+      );
+    }
+    if (scoreFloor.clamped) {
+      hybridWarnings.push(
+        `Requested minScore was below the user's relevance threshold; raised to ${scoreFloor.value}.`,
+      );
+    }
+    if (scope.fellBackToLibrary) {
+      hybridWarnings.push(
+        `Collection scope was not applied: ${scope.fallbackReason} Results below cover the whole library, which is wider than requested — never narrower.`,
+      );
+    } else if (scope.missing.length > 0) {
+      hybridWarnings.push(
+        `Ignored ${scope.missing.length} unknown collection key(s): ${scope.missing.join(', ')}. The search used the ${scope.collections.length} collection(s) that do exist; re-check the keys against get_collections if something is missing from the results.`,
+      );
+    }
+    if (candidateDepth.clamped) {
+      hybridWarnings.push(
+        `Requested candidateK was outside the supported range and was adjusted to ${candidateK}. Depth is bounded so the vector scan stays inside its deadline; past the limit the semantic branch fails outright instead of returning less.`,
+      );
+    }
 
-    return {
-      mode: 'hybrid',
+    // degraded means "do not read these results as a clean run": a mechanical
+    // or unverified keyword set, a failed/timed-out branch, a truncated
+    // candidate set or skipped probes all qualify.
+    const degraded =
+      searchResult.degraded ||
+      keywordOrigin === 'fallback' ||
+      Boolean(diagnostics?.truncated) ||
+      Boolean(diagnostics?.failedKeywords.length);
+
+    // The paged-over list is the FULL set of documents that cleared the
+    // threshold — the ordering and the filtering both already happened inside
+    // fusion. Paging can therefore never reach below the threshold, and never
+    // needs to relax it to fill a page.
+    const ranked = searchResult.ranked.map(trimCachedEvidence);
+
+    // totalRelevant counts what cleared the threshold IN THIS CANDIDATE POOL.
+    // When a branch came back exactly full, the pool was cut off by candidateK
+    // rather than by relevance, and documents that would have qualified were
+    // never scored at all — measured on the real library, raising candidateK
+    // from 120 to 480 took totalRelevant from 79 to 116 at the SAME threshold.
+    // That has to be stated, not left for the caller to infer, or a partial
+    // count reads as a complete one.
+    const keywordBranchSaturated =
+      searchResult.keywordResultCount >= options.candidateK;
+    const semanticBranchSaturated =
+      searchResult.semanticResultCount >= options.candidateK;
+    const branchSaturated = keywordBranchSaturated || semanticBranchSaturated;
+
+    // A full pool only hides qualifying documents if the pool's TAIL is still
+    // above the threshold. Branches return their candidates in descending score
+    // order, so a document that was cut off scores at most what the last
+    // included one scored: if even that ceiling falls below the floor, nothing
+    // beyond the pool could have qualified and totalRelevant is exact.
+    // Warning regardless would contradict the response's own "nothing reached
+    // the threshold" message and send the caller off to re-search for
+    // documents that provably do not exist.
+    const beyondPoolCeiling = computeFusedScore({
+      normalizedKeywordScore: keywordBranchSaturated
+        ? searchResult.keywordTailScore
+        : undefined,
+      normalizedSemanticScore: semanticBranchSaturated
+        ? searchResult.semanticTailScore
+        : undefined,
+      keywordWeight: options.keywordWeight,
+      semanticWeight: options.semanticWeight,
+    });
+    const poolSaturated =
+      branchSaturated && beyondPoolCeiling >= searchResult.appliedMinScore;
+    if (poolSaturated) {
+      hybridWarnings.push(
+        `Candidate pool was full: ${[
+          keywordBranchSaturated ? 'keyword' : null,
+          semanticBranchSaturated ? 'semantic' : null,
+        ]
+          .filter(Boolean)
+          .join(' and ')} retrieval returned the maximum ${options.candidateK} candidates, so totalRelevant (${ranked.length}) is a LOWER BOUND on how many documents in the library clear this threshold — more exist beyond the pool. Raise candidateK for a more complete sweep; do NOT lower minScore, which would admit less relevant work rather than find more relevant work.`,
+      );
+    }
+
+    const snapshot: HybridSearchSnapshot = {
       query: args.query,
       keywords: lexicalKeywords,
       keywordSource: keywordOrigin,
-      // Top-level so the caller sees it without reading through metadata.
-      ...(fallbackWarning ? { warning: fallbackWarning } : {}),
-      data: searchResult.results,
+      degraded,
+      warning: fallbackWarning,
+      fallbackReason: fallbackReason ?? undefined,
+      retryBudgetNote,
+      appliedMinScore: searchResult.appliedMinScore,
+      libraryID,
+      poolSaturated,
+      // searchResult.warnings carries branch-level failures ("Semantic search
+      // unavailable: ..."). An empty result set means something completely
+      // different depending on this flag, so it has to travel with the page.
+      branchFailed: searchResult.warnings.length > 0,
       metadata: {
-        extractedAt: new Date().toISOString(),
         searchMode: 'hybrid',
-        fusion: 'weighted_rrf',
+        fusion: 'normalized_weighted_hybrid',
         keywordSource: keywordOrigin,
+        keywordProbeOrigin: provenance.probeOrigin,
         keywordFallbackReason: fallbackReason ?? undefined,
+        declaredDomain: provenance.domain ?? undefined,
+        declaredExpertRole: provenance.expertRole ?? undefined,
         keywordCount: lexicalKeywords.length,
         keywordWeights: lexicalKeywordEntries.map((entry) => ({
           keyword: entry.text,
           weight: entry.weight,
           origin: entry.origin,
         })),
+        // What the search was allowed to look at, and what that cost.
+        searchScope: scope.searchScope,
+        scopeCollections: scope.collections,
+        scopeUncertainCollections: uncertainCollections,
+        scopeItemCount: scope.searchScope === 'collections' ? scope.itemKeys.length : null,
+        scopeMissingCollections: scope.missing,
+        scopeSubcollectionsIncluded: scope.subcollectionsIncluded,
+        scopeFellBackToLibrary: scope.fellBackToLibrary,
+        scopeFallbackReason: scope.fallbackReason ?? undefined,
+        chunksScanned: semanticScanStats.chunksScanned ?? null,
+        lexicalOutOfScope: diagnostics?.outOfScope ?? 0,
         lexicalStrategy: diagnostics?.strategy,
         lexicalCandidateCount: diagnostics?.candidateIDs ?? 0,
         lexicalScannedCount: diagnostics?.scannedItems ?? 0,
@@ -1926,10 +2337,19 @@ export class StreamableMCPServer {
         keywordWeight: options.keywordWeight,
         semanticWeight: options.semanticWeight,
         candidateK: options.candidateK,
-        resultCount: searchResult.results.length,
+        candidatePoolSaturated: poolSaturated,
+        keywordBranchSaturated,
+        semanticBranchSaturated,
+        // What the best document beyond the pool could have scored at most.
+        beyondPoolScoreCeiling: roundScore(beyondPoolCeiling),
+        appliedMinScore: searchResult.appliedMinScore,
+        userMinScore: settings.minScore,
+        appliedPageSize: topK,
+        userMaxDocuments: settings.maxDocuments,
+        discardedBelowThreshold: searchResult.discardedBelowThreshold,
         keywordResultCount: searchResult.keywordResultCount,
         semanticResultCount: searchResult.semanticResultCount,
-        degraded: searchResult.degraded,
+        degraded,
         warnings: hybridWarnings,
         timings: {
           lexicalMs: searchResult.timings.keywordMs,
@@ -1945,12 +2365,340 @@ export class StreamableMCPServer {
             : undefined,
         },
         fulltextScanned: false,
-        nextStep:
-          keywordOrigin === 'fallback'
-            ? `These keywords came from mechanical tokenization. Redo hybrid_search once with domain-expert bilingual keywords, then work from that ranking. ${retryBudgetNote} Call search_fulltext with selected itemKeys only if the user wants passages or evidence.`
-            : 'Return these matches directly unless the user requests passages, evidence, or full-text details; then call search_fulltext with selected itemKeys.',
       },
     };
+
+    const fingerprint: SearchFingerprint = {
+      query: args.query,
+      keywords: lexicalKeywords,
+      domain: args.domain,
+      expertRole: args.expertRole,
+      appliedMinScore: searchResult.appliedMinScore,
+      language,
+      libraryID,
+      candidateK: options.candidateK,
+      rrfK: options.rrfK,
+      keywordWeight: options.keywordWeight,
+      semanticWeight: options.semanticWeight,
+      pageSize: topK,
+      scope: describeScope(scope),
+    };
+    // Only worth remembering when there is a page 2 to remember it for.
+    const searchId =
+      ranked.length > topK
+        ? this.hybridPages.create(fingerprint, ranked, snapshot)
+        : 'single-page';
+
+    const window = windowOf<Record<string, any>>(ranked, 0, topK, searchId);
+    await this.enrichHybridResults(window.rows, libraryID);
+
+    return this.buildHybridSearchResponse(snapshot, window, topK, false);
+  }
+
+  /**
+   * Turn the caller's collection keys into a concrete item scope.
+   *
+   * Reads the collection tree straight out of Zotero and hands the pure
+   * resolver an accessor, so the walking, de-duplication and every
+   * fall-back-to-the-whole-library rule stay testable without Zotero.
+   */
+  private resolveHybridScope(
+    collectionKeys: unknown,
+    libraryID: number,
+  ): CollectionScope {
+    const cache = new Map<string, any>();
+    const load = (key: string): any => {
+      if (cache.has(key)) return cache.get(key);
+      let collection: any = null;
+      try {
+        collection = Zotero.Collections.getByLibraryAndKey(libraryID, key);
+      } catch (error) {
+        ztoolkit.log(
+          `[StreamableMCP] Could not load collection ${key}: ${error}`,
+          'warn',
+        );
+      }
+      cache.set(key, collection || null);
+      return collection || null;
+    };
+
+    const scope = resolveCollectionScope(collectionKeys, {
+      getCollection: (key) => {
+        const collection = load(key);
+        if (!collection) return null;
+        let childCollectionKeys: string[] = [];
+        let itemKeys: string[] = [];
+        try {
+          const childIDs = collection.getChildCollections(true, false) || [];
+          childCollectionKeys = (Zotero.Collections.get(childIDs) as unknown as any[])
+            .map((child: any) => child?.key)
+            .filter(Boolean);
+        } catch {
+          // A collection with no children throws in some Zotero versions;
+          // treat it as a leaf rather than failing the whole search.
+        }
+        try {
+          const itemIDs = collection.getChildItems(true) || [];
+          itemKeys = (Zotero.Items.get(itemIDs) as unknown as any[])
+            .filter((item: any) => item && !item.deleted)
+            .map((item: any) => item.key)
+            .filter(Boolean);
+        } catch (error) {
+          ztoolkit.log(
+            `[StreamableMCP] Could not read items of collection ${key}: ${error}`,
+            'warn',
+          );
+        }
+        return {
+          key: collection.key,
+          name: collection.name || collection.key,
+          childCollectionKeys,
+          itemKeys,
+        };
+      },
+    });
+
+    ztoolkit.log(
+      `[StreamableMCP][Scope] searchScope=${scope.searchScope} collections=${scope.collections.length} items=${scope.itemKeys.length} missing=${scope.missing.length} subcollections=${scope.subcollectionsIncluded} fallback=${scope.fellBackToLibrary}${scope.fallbackReason ? ` (${scope.fallbackReason})` : ''}`,
+    );
+    return scope;
+  }
+
+  /**
+   * Serve the next page of a search that already ran.
+   *
+   * Nothing is retrieved, scored or re-ordered here: the stored list was
+   * ranked and threshold-filtered once, and every page is a window onto that
+   * one list. That is what makes page 2 continuous with page 1 rather than a
+   * second opinion about the same query.
+   */
+  private async continueHybridSearch(
+    args: any,
+    cursor: string,
+    request: {
+      requestedPageSize: number | undefined;
+      scoreFloor: number;
+      language: string;
+      libraryID: number;
+    },
+  ): Promise<any> {
+    // Only arguments the caller actually re-sent are checked. Omitting one
+    // means "unchanged"; re-sending a different one means this is a different
+    // search, and continuing the old cursor would answer the new question with
+    // the old ranking.
+    const claim: FingerprintClaim = {};
+    if (typeof args.query === 'string' && args.query.trim()) {
+      claim.query = args.query;
+    }
+    if (Array.isArray(args.keywords) && args.keywords.length > 0) {
+      claim.keywords = resolveHybridKeywords(
+        typeof args.query === 'string' ? args.query : '',
+        args.keywords,
+      ).keywords;
+    }
+    if (args.domain !== undefined) claim.domain = String(args.domain);
+    if (args.expertRole !== undefined) {
+      claim.expertRole = String(args.expertRole);
+    }
+    if (args.minScore !== undefined) claim.appliedMinScore = request.scoreFloor;
+    if (args.language !== undefined) claim.language = request.language;
+    if (args.libraryID !== undefined) claim.libraryID = request.libraryID;
+    // Retrieval knobs cannot take effect on a stored ranking, so accepting them
+    // silently would be answering a different question than the one asked.
+    if (args.candidateK !== undefined) claim.candidateK = Number(args.candidateK);
+    if (args.rrfK !== undefined) claim.rrfK = Number(args.rrfK);
+    if (args.keywordWeight !== undefined) {
+      claim.keywordWeight = Number(args.keywordWeight);
+    }
+    if (args.semanticWeight !== undefined) {
+      claim.semanticWeight = Number(args.semanticWeight);
+    }
+    if (args.collectionKeys !== undefined) {
+      claim.scope = describeScope(
+        this.resolveHybridScope(args.collectionKeys, request.libraryID),
+      );
+    }
+
+    const { state, window } = this.hybridPages.read(
+      cursor,
+      claim,
+      request.requestedPageSize,
+    );
+    const pageSize = request.requestedPageSize ?? state.fingerprint.pageSize;
+
+    await this.enrichHybridResults(window.rows, state.fingerprint.libraryID);
+
+    ztoolkit.log(
+      `[StreamableMCP][HybridPage] cursor page offset=${window.offset} returned=${window.returned} total=${window.totalRelevant} hasMore=${window.hasMore}`,
+    );
+
+    return this.buildHybridSearchResponse(state.meta, window, pageSize, true);
+  }
+
+  /**
+   * Assemble one page's response.
+   *
+   * Page 1 and page N are built by the same code from the same snapshot, so
+   * the caller sees one search described one way, with only the window moving.
+   */
+  private buildHybridSearchResponse(
+    snapshot: HybridSearchSnapshot,
+    window: PageWindow<Record<string, any>>,
+    pageSize: number,
+    fromCursor: boolean,
+  ): any {
+    const first = window.totalRelevant === 0 ? 0 : window.offset + 1;
+    const last = window.offset + window.returned;
+    const range = window.totalRelevant === 0 ? 'none' : `${first}-${last}`;
+
+    return {
+      mode: 'hybrid',
+      query: snapshot.query,
+      keywords: snapshot.keywords,
+      keywordSource: snapshot.keywordSource,
+      degraded: snapshot.degraded,
+      ...(snapshot.warning ? { warning: snapshot.warning } : {}),
+      pagination: {
+        // The floor these results were filtered by. Paging never moves it.
+        appliedMinScore: snapshot.appliedMinScore,
+        // Documents that cleared that floor in this search — NOT the raw
+        // candidate count, and NOT capped by the page size.
+        totalRelevant: window.totalRelevant,
+        // ...but bounded by how deep retrieval went. When the pool came back
+        // full, or a branch failed, this is a floor rather than a count.
+        totalRelevantIsLowerBound: snapshot.poolSaturated || snapshot.branchFailed,
+        /** A branch failed or timed out: the ranking is incomplete. */
+        degradedRetrieval: snapshot.branchFailed,
+        returned: window.returned,
+        offset: window.offset,
+        range,
+        pageSize,
+        hasMore: window.hasMore,
+        ...(window.nextCursor ? { nextCursor: window.nextCursor } : {}),
+        servedFromCursor: fromCursor,
+      },
+      data: window.rows.map(projectHybridCandidate),
+      metadata: {
+        ...snapshot.metadata,
+        extractedAt: new Date().toISOString(),
+        resultCount: window.returned,
+        totalRelevant: window.totalRelevant,
+        servedFromCursor: fromCursor,
+        nextStep: this.hybridNextStep(snapshot, window, range),
+      },
+    };
+  }
+
+  private hybridNextStep(
+    snapshot: HybridSearchSnapshot,
+    window: PageWindow<Record<string, any>>,
+    range: string,
+  ): string {
+    if (snapshot.keywordSource === 'fallback') {
+      return `This call is not recorded as domain-expert retrieval (${snapshot.fallbackReason}). Redo hybrid_search once with bilingual domain-expert keywords plus domain and expertRole, then work from that ranking. ${snapshot.retryBudgetNote} Triage the rows before fetching anything: get_item_abstract only for a candidate you are seriously considering, then search_fulltext on that one document.`;
+    }
+    if (window.totalRelevant === 0) {
+      // "Nothing matched" and "retrieval broke" look identical from here, and
+      // telling the user their library has nothing on the topic when in fact a
+      // branch timed out is a false negative delivered with full confidence.
+      if (snapshot.branchFailed) {
+        return `NO RESULTS, BUT THIS SEARCH WAS DEGRADED: a retrieval branch failed or timed out (see metadata.warnings), so this is NOT evidence that the library lacks relevant work. Do not tell the user there is nothing on this topic. Retry the search — with a smaller candidateK if the warning mentions a timeout — and only report an empty library if a clean, non-degraded search also comes back empty.`;
+      }
+      return `Nothing in the library reached the relevance threshold of ${snapshot.appliedMinScore}. Say so rather than reporting weak matches; the threshold is the user's setting and is not negotiable from here.`;
+    }
+
+    const funnel =
+      'These are candidates above the relevance threshold, as lightweight rows: title, creators, year, venue, language, fused score, which keywords matched which fields, and a short evidence snippet. Abstracts are NOT included - they were searched, they are just not shipped back. Triage from these rows first. For a paper you are seriously considering going deeper on - and only for those - call get_item_abstract with that one itemKey; a page of 20 candidates does not mean 20 abstracts. After reading an abstract, re-fit domain and expertRole to what THAT paper actually studies, write a query and keywords from its own subject matter in the language it is written in (one language, not both), and call search_fulltext with its single itemKey.';
+
+    const paging = window.hasMore
+      ? ` PAGING: ${window.totalRelevant} documents cleared the threshold and you are seeing ${range}. If the bottom of this page is still relevant, or the user asked for a comprehensive sweep or a literature review, call hybrid_search again with cursor="${window.nextCursor}" and change nothing else - same query, keywords, domain, expertRole and minScore - to get the next page of the SAME ranking. Do not page by reflex: if this page already answers the question, stop here.`
+      : ` PAGING: ${range} of ${window.totalRelevant} - this is the last page of the ranking.`;
+
+    const degradedNote = snapshot.branchFailed
+      ? ` DEGRADED: a retrieval branch failed or timed out during this search (see metadata.warnings), so this ranking is incomplete — treat a thin result list as a retrieval problem, not as a fact about the library.`
+      : '';
+
+    const bound = snapshot.poolSaturated
+      ? ` NOTE: retrieval hit its candidate-pool limit, so ${window.totalRelevant} is a LOWER BOUND - more documents in the library clear this threshold but were never scored. If the user needs an exhaustive sweep, run the search again with a larger candidateK. Never lower minScore to compensate: that admits weaker work instead of finding more relevant work.`
+      : window.hasMore
+        ? ''
+        : ' These are all the documents above the threshold. Do not lower minScore to find more; the threshold is the user\'s setting.';
+
+    return funnel + paging + bound + degradedNote;
+  }
+
+  /**
+   * Fill in the metadata a fused match needs before it can be triaged.
+   *
+   * The lexical branch carries item type, creators, year and DOI already and
+   * the semantic branch carries the matched chunks, but a match found by only
+   * one of the two is missing whatever the other would have supplied.
+   *
+   * The abstract is deliberately NOT attached. It stays part of retrieval -
+   * the lexical branch searches abstractNote and the semantic index is built
+   * from document text - it is simply not shipped back, because shipping 20
+   * abstracts to decide on 3 papers is most of the response for none of the
+   * decision. What is recorded instead is whether an abstract exists and how
+   * long it is, so the caller knows what get_item_abstract would return, plus
+   * the language the document is written in, which is what stage-3 keywords
+   * have to be written in.
+   */
+  private async enrichHybridResults(
+    results: Array<Record<string, any>>,
+    defaultLibraryID: number,
+  ): Promise<void> {
+    for (const result of results) {
+      try {
+        const item = await Zotero.Items.getByLibraryAndKeyAsync(
+          result.libraryID ?? defaultLibraryID,
+          result.itemKey,
+        );
+        if (!item) continue;
+        if (!result.title) {
+          result.title = item.getDisplayTitle?.() || item.getField?.('title') || '';
+        }
+        if (!result.itemType) result.itemType = item.itemType;
+        if (!result.date) {
+          const date = item.getField?.('date') || '';
+          result.date = String(date).match(/\d{4}/)?.[0] || '';
+        }
+        if (!result.creators) {
+          try {
+            result.creators = item
+              .getCreators()
+              .map((creator: any) =>
+                `${creator.firstName || ''} ${creator.lastName || ''}`.trim(),
+              )
+              .filter(Boolean)
+              .join(', ');
+          } catch {
+            // Creator lookup is best-effort; the match itself still stands.
+          }
+        }
+        // Abstract: recorded as availability only, never as content.
+        const abstract = String(item.getField?.('abstractNote') || '');
+        delete result.abstract;
+        result.hasAbstract = abstract.length > 0;
+        result.abstractChars = abstract.length;
+        if (!result.language) {
+          result.language = detectDocumentLanguage(
+            String(item.getField?.('language') || ''),
+            [
+              result.title,
+              abstract,
+              ...(result.matchedChunks || []).map(
+                (chunk: any) => chunk?.text || '',
+              ),
+            ],
+          );
+        }
+      } catch (error) {
+        ztoolkit.log(
+          `[StreamableMCP] Could not enrich hybrid result ${result.itemKey}: ${error}`,
+          'warn',
+        );
+      }
+    }
   }
 
   private validateSearchParameters(params: {
@@ -1975,16 +2723,13 @@ export class StreamableMCPServer {
     ) {
       throw new Error('topK must be an integer between 1 and 100');
     }
-    if (
-      params.candidateK !== undefined &&
-      (!Number.isInteger(params.candidateK) ||
-        Number(params.candidateK) < Number(params.topK) ||
-        Number(params.candidateK) > 500)
-    ) {
-      throw new Error(
-        'candidateK must be an integer between topK and 500',
-      );
-    }
+    // candidateK is deliberately absent here. resolveCandidateDepth already
+    // validated its type and clamped it to the configured bounds, and a second
+    // rule with its own numbers disagreed with the first: this one capped at
+    // 500 while the settings allow 600, so a request that clamped to 600 was
+    // then rejected outright — clamping above 500 was dead code that failed
+    // instead. It also required candidateK >= topK, which made a small
+    // configured depth plus a large page size throw on every search.
     if (
       typeof params.minScore !== 'number' ||
       !Number.isFinite(params.minScore) ||
@@ -2241,42 +2986,57 @@ export class StreamableMCPServer {
     return response.body ? JSON.parse(response.body) : response;
   }
 
+  /**
+   * Document-level hybrid search, plus the neighbour-expansion mode.
+   *
+   * Both delegate to documentDeepDive, which is built on the same hybrid
+   * primitives as hybrid_search: there is no second retrieval stack here, only
+   * a different candidate set (this paper's chunks instead of the library).
+   */
   private async callSearchFulltext(args: any): Promise<any> {
-    // Apply mode-based defaults before creating search params
-    const effectiveMode = args.mode || MCPSettingsService.get('content.mode');
-    const modeConfig = this.getFulltextModeConfiguration(effectiveMode);
-    
-    // Apply mode defaults if not explicitly provided
-    const processedArgs = {
-      ...args,
-      contextLength: args.contextLength || modeConfig.contextLength,
-      maxResults: args.maxResults || modeConfig.maxResults
-    };
-    
-    const searchParams = new URLSearchParams();
-    for (const [key, value] of Object.entries(processedArgs)) {
-      if (value !== undefined && value !== null) {
-        if (key === 'itemKeys' && Array.isArray(value)) {
-          searchParams.append(key, value.join(','));
-        } else if (key !== 'mode') { // Don't pass mode to API
-          searchParams.append(key, String(value));
-        }
+    const semanticEnabled = Zotero.Prefs.get(
+      'extensions.zotero.zotero-mcp-plugin.semantic.enabled',
+      true,
+    );
+    if (semanticEnabled === false) {
+      throw new Error(
+        'search_fulltext needs the semantic index. Enable semantic search in Zotero MCP Plugin preferences and build the index first.',
+      );
+    }
+
+    // Context-expansion mode: no query, no ranking, just neighbours.
+    if (Array.isArray(args?.chunkIds) && args.chunkIds.length > 0) {
+      return expandChunkContext({
+        itemKey: args.itemKey,
+        libraryID: args.libraryID,
+        chunkIds: args.chunkIds,
+        radius: args.neighborRadius,
+      });
+    }
+
+    if (typeof args?.query !== 'string' || !args.query.trim()) {
+      // `q` was the old parameter name; accept it so an existing client still
+      // gets a working call rather than a cryptic failure. Nothing else from
+      // the old keyword-context interface survives.
+      if (typeof args?.q === 'string' && args.q.trim()) {
+        args = { ...args, query: args.q };
+      } else {
+        throw new Error(
+          "query is required: write a natural-language sentence describing what you need from THIS paper, derived from the user question plus this paper's abstract (get_item_abstract) and the evidence you already have, written in the language this paper is written in.",
+        );
       }
     }
-    
-    const response = await handleSearchFulltext(searchParams);
-    let result = response.body ? JSON.parse(response.body) : response;
-    
-    // Add mode information to metadata
-    if (result && typeof result === 'object') {
-      result.metadata = {
-        ...result.metadata,
-        mode: effectiveMode,
-        appliedModeConfig: modeConfig
-      };
-    }
-    
-    return result;
+
+    return runDocumentDeepDive({
+      itemKey: args.itemKey,
+      libraryID: args.libraryID,
+      query: args.query,
+      keywords: args.keywords,
+      domain: args.domain,
+      expertRole: args.expertRole,
+      maxChunks: args.maxChunks,
+      minScore: args.minScore,
+    });
   }
 
   private async callGetItemAbstract(args: any): Promise<any> {
@@ -3388,65 +4148,16 @@ export class StreamableMCPServer {
         'prompts/list',
         'ping'
       ],
-      availableTools: [
-        'hybrid_search',
-        'get_libraries',
-        'search_libraries',
-        'search_library',
-        'search_annotations',
-        'get_item_details',
-        'get_annotations',
-        'get_content',
-        'get_collections',
-        'search_collections',
-        'get_collection_details',
-        'get_collection_items',
-        'search_fulltext',
-        'get_item_abstract',
-        // Semantic Search Tools (read-only)
-        'semantic_search',
-        'find_similar',
-        'semantic_status',
-        // Full-text Database Tool (read-only)
-        'fulltext_database',
-        // Write Tools
-        'write_note',
-        'write_tag',
-        'write_metadata',
-        'write_item'
-      ],
+      // Derived from the same builder tools/list uses, so this can never
+      // drift from what the server actually serves, and it follows the
+      // semantic/write prefs instead of ignoring them.
+      availableTools: this.getAvailableTools().map((t: any) => t.name),
       transport: {
         type: "streamable-http",
         keepAliveSupported: false,
         maxConnections: 100
       }
     };
-  }
-
-  /**
-   * Get fulltext search mode configuration
-   */
-  private getFulltextModeConfiguration(mode: string): any {
-    const modeConfigs = {
-      'minimal': {
-        contextLength: 100,
-        maxResults: 20
-      },
-      'preview': {
-        contextLength: 200,
-        maxResults: 50  
-      },
-      'standard': {
-        contextLength: 250,
-        maxResults: 100
-      },
-      'complete': {
-        contextLength: 400,
-        maxResults: 200
-      }
-    };
-
-    return modeConfigs[mode as keyof typeof modeConfigs] || modeConfigs['standard'];
   }
 
   /**

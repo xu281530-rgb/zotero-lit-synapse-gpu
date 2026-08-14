@@ -17,6 +17,10 @@ import {
   getMinerUService,
   getOriginalPDFAttachmentsForItem,
 } from '../mineru';
+import {
+  getChunkingSignature,
+  setStoredChunkingSignature,
+} from '../hybridSearchSettings';
 
 declare let Zotero: any;
 declare let ztoolkit: ZToolkit;
@@ -24,12 +28,38 @@ declare let ztoolkit: ZToolkit;
 // Preference key for persisting index progress
 const PREF_INDEX_PROGRESS = 'extensions.zotero.zotero-mcp-plugin.semantic.indexProgress';
 
+/**
+ * Body text longer than this is still indexed in full — it just takes a while,
+ * so it is worth saying so in the log when an index run appears to stall.
+ */
+const HUGE_DOCUMENT_WARN_CHARS = 300000;
+
+function warnIfHugeDocument(
+  itemKey: string,
+  length: number,
+  source: string,
+): void {
+  if (length <= HUGE_DOCUMENT_WARN_CHARS) return;
+  ztoolkit.log(
+    `[SemanticSearch] ${itemKey}: ${source} body text is ${length} chars (>${HUGE_DOCUMENT_WARN_CHARS}). Indexing it completely, which will take noticeably longer and use more embedding quota for this item.`,
+    'warn',
+  );
+}
+
 // ============ Interfaces ============
 
 export interface SemanticSearchOptions {
   topK?: number;              // Number of results
   minScore?: number;          // Minimum similarity threshold
   language?: 'zh' | 'en' | 'all' | 'auto';  // Language filter
+  /**
+   * Filled in by the search with how much of the index it actually touched.
+   *
+   * The caller needs it to report what narrowing the search to a set of
+   * collections saved — a claim of "we only scanned the relevant part" is worth
+   * nothing unless the number that proves it comes back with the results.
+   */
+  stats?: { chunksScanned?: number; chunksMatched?: number };
   itemKeys?: string[];        // Limit to specific items
   libraryID?: number;
   timeoutMs?: number;
@@ -40,6 +70,26 @@ export interface SemanticSearchOptions {
    */
   signal?: AbortSignal;
 }
+
+/**
+ * Chunk window sizing for the document-count target.
+ *
+ * The index is scored per chunk but the caller wants documents, so the window
+ * must be wider than the document target — how much wider depends on how many
+ * top-scoring passages the same papers own. Measured on the real library, a 3x
+ * window returned 64 distinct documents against a requested 120: a ratio of
+ * about 5.6 chunks per document.
+ *
+ * The window is therefore sized generously ON THE FIRST AND ONLY TRY. A vector
+ * search is a FULL scan of every stored vector — topK only sizes the result
+ * heap, not the work — so a retry costs a whole second scan. Measured on the
+ * real library that is fatal: one scan for a 240-document target took 3.7s, and
+ * a second scan for a 360-document target pushed the branch past its 8s
+ * deadline, which made semantic retrieval fail outright and returned ZERO
+ * results for a query with hundreds of matches. Widening the heap is nearly
+ * free; scanning twice is not, so a short yield is reported rather than retried.
+ */
+const CHUNK_WINDOW_FACTOR = 12;
 
 export interface SemanticSearchResult {
   itemKey: string;
@@ -241,6 +291,7 @@ export class SemanticSearchService {
       libraryID = Zotero.Libraries.userLibraryID,
       timeoutMs,
       signal,
+      stats,
     } = options;
     const deadlineAt = timeoutMs ? startTime + timeoutMs : undefined;
     // Own an internal controller even when the caller passed none, so the
@@ -291,26 +342,63 @@ export class SemanticSearchService {
         // 2. Vector search. "all" remains unfiltered; "auto" uses query language.
         const searchLanguage =
           language === 'auto' ? queryEmbedding.language : language;
-        ztoolkit.log(`[SemanticSearch] Step 2: Vector search (topK=${topK * 3}, minScore=${minScore}, lang=${searchLanguage})...`);
+        // The caller asks for topK DOCUMENTS, but the index is scored per
+        // chunk, and chunks are aggregated by item afterwards. A fixed
+        // chunk window therefore delivers however many distinct documents
+        // happen to survive dedup: measured on the real library, a window of
+        // topK*3 returned 64 documents against a requested 120, because a few
+        // on-topic papers owned most of the top-scoring passages and crowded
+        // the rest out. So widen the window until it yields enough distinct
+        // documents, the index is exhausted, or a protection cap is reached.
         const vectorStartedAt = Date.now();
         let vectorScanMs = 0;
-        let vectorResults;
+        let vectorResults: Awaited<
+          ReturnType<typeof this.vectorStore.search>
+        > = [];
+        const chunkWindow = Math.max(1, topK) * CHUNK_WINDOW_FACTOR;
+        const scanStats: { scanned?: number } = {};
+        let distinctItems = 0;
+        let exhausted = false;
         try {
-          vectorResults = await this.vectorStore.search(queryEmbedding.embedding, {
-            topK: topK * 3,  // Get more for deduplication
-            language: searchLanguage,
-            itemKeys,
-            minScore,
-            libraryID,
-            deadlineAt,
-          });
+          vectorResults = await this.vectorStore.search(
+            queryEmbedding.embedding,
+            {
+              topK: chunkWindow,
+              language: searchLanguage,
+              itemKeys,
+              minScore,
+              libraryID,
+              deadlineAt,
+              stats: scanStats,
+            },
+          );
+          distinctItems = new Set(
+            vectorResults.map(
+              (result: any) => `${result.libraryID}:${result.itemKey}`,
+            ),
+          ).size;
+          if (stats) {
+            stats.chunksScanned = scanStats.scanned;
+            stats.chunksMatched = vectorResults.length;
+          }
+          // Fewer chunks than asked for means the index had no more to give,
+          // so a short document count is the library's answer, not a shortfall.
+          exhausted = vectorResults.length < chunkWindow;
+          if (distinctItems < topK && !exhausted) {
+            ztoolkit.log(
+              `[SemanticSearch] Chunk window of ${chunkWindow} yielded only ${distinctItems} distinct items for a target of ${topK}: a few documents own most of the top passages. Not re-scanning — a second full scan costs more than the missing candidates are worth.`,
+              'warn',
+            );
+          }
         } finally {
           vectorScanMs = Date.now() - vectorStartedAt;
           ztoolkit.log(
             `[SemanticSearch][Timing] vectorScan=${vectorScanMs}ms libraryID=${libraryID}`,
           );
         }
-        ztoolkit.log(`[SemanticSearch] Vector search returned ${vectorResults.length} results`);
+        ztoolkit.log(
+          `[SemanticSearch] Vector search returned ${vectorResults.length} chunks -> ${distinctItems} distinct items (wanted ${topK}, chunkWindow=${chunkWindow}, exhausted=${exhausted})`,
+        );
 
         // 3. Aggregate by item
         const itemResultsMap = new Map<string, {
@@ -379,6 +467,112 @@ export class SemanticSearchService {
       // Nothing is waiting on this search any more; stop whatever still runs.
       abortSearch();
     }
+  }
+
+  /**
+   * Chunk-level semantic search inside ONE document.
+   *
+   * Deliberately not `search()` with an itemKeys filter: that aggregates back
+   * up to one row per item and keeps only three chunks, which is the opposite
+   * of what a single-document deep dive needs. Everything else — the embedding
+   * service, the vector store, the quantised scan, the language filter — is the
+   * same code path the library-level search uses.
+   */
+  async searchItemChunks(
+    query: string,
+    options: {
+      itemKey: string;
+      libraryID?: number;
+      topK: number;
+      minScore?: number;
+      language?: 'zh' | 'en' | 'all' | 'auto';
+      timeoutMs?: number;
+      signal?: AbortSignal;
+    },
+  ): Promise<Array<{ chunkId: number; text: string; score: number }>> {
+    const startTime = Date.now();
+    const {
+      itemKey,
+      libraryID = Zotero.Libraries.userLibraryID,
+      topK,
+      // The vector-store cut-off stays generous: the fused threshold is what
+      // decides relevance, and pre-filtering on the raw cosine here would drop
+      // chunks that the keyword branch would have rescued.
+      minScore = 0,
+      language = 'all',
+      timeoutMs,
+      signal,
+    } = options;
+    const deadlineAt = timeoutMs ? startTime + timeoutMs : undefined;
+
+    const abortController =
+      typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const abortSearch = () => {
+      try {
+        abortController?.abort();
+      } catch {
+        // Aborting twice is harmless.
+      }
+    };
+    if (signal) {
+      if (signal.aborted) abortSearch();
+      else signal.addEventListener('abort', abortSearch, { once: true });
+    }
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    if (timeoutMs) deadlineTimer = setTimeout(abortSearch, timeoutMs);
+
+    try {
+      await this.initialize();
+      if (deadlineAt && Date.now() >= deadlineAt) {
+        throw new Error(`Semantic search timed out after ${timeoutMs}ms`);
+      }
+
+      const queryEmbedding = await this.embeddingService.embed(
+        query,
+        'auto',
+        true,
+        { signal: abortController?.signal },
+      );
+      if (deadlineAt && Date.now() >= deadlineAt) {
+        throw new Error(`Semantic search timed out after ${timeoutMs}ms`);
+      }
+
+      const searchLanguage =
+        language === 'auto' ? queryEmbedding.language : language;
+      const vectorResults = await this.vectorStore.search(
+        queryEmbedding.embedding,
+        {
+          topK,
+          language: searchLanguage,
+          itemKeys: [itemKey],
+          minScore,
+          libraryID,
+          deadlineAt,
+        },
+      );
+
+      ztoolkit.log(
+        `[SemanticSearch] searchItemChunks(${itemKey}): ${vectorResults.length} chunks in ${Date.now() - startTime}ms`,
+      );
+      return vectorResults.map((result) => ({
+        chunkId: result.chunkId,
+        text: result.chunkText,
+        score: result.score,
+      }));
+    } finally {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      signal?.removeEventListener('abort', abortSearch);
+      abortSearch();
+    }
+  }
+
+  /** Every stored chunk of one document, in reading order. */
+  async getItemChunks(
+    itemKey: string,
+    libraryID?: number,
+  ): Promise<Array<{ chunkId: number; text: string; language: string }>> {
+    await this.initialize();
+    return this.vectorStore.getChunksForItem(itemKey, libraryID);
   }
 
   /**
@@ -762,6 +956,10 @@ export class SemanticSearchService {
       if (this.indexProgress.status !== 'aborted') {
         this.indexProgress.status = 'completed';
         this.clearSavedIndexProgress();  // Clear persisted state on completion
+        // Record the chunk layout this index was built with, so Preferences
+        // can tell the user when a later chunk-size change has left the stored
+        // vectors out of date.
+        setStoredChunkingSignature(getChunkingSignature());
       }
       onProgress?.(this.indexProgress);
 
@@ -1347,16 +1545,13 @@ export class SemanticSearchService {
                     },
                   );
                   if (minerUText) {
-                    const maxFullTextLength = 50000;
-                    const finalContent = minerUText.length > maxFullTextLength
-                      ? minerUText.substring(0, maxFullTextLength)
-                      : minerUText;
-                    if (minerUText.length > maxFullTextLength) {
-                      ztoolkit.log(`[SemanticSearch] extractItemContent() MinerU text truncated to ${maxFullTextLength} chars`);
-                    }
-                    parts.push(finalContent);
+                    // The complete body text is indexed. It used to be cut at
+                    // 50k characters, which silently made everything past
+                    // roughly the middle of a long paper unsearchable.
+                    warnIfHugeDocument(item.key, minerUText.length, 'MinerU');
+                    parts.push(minerUText);
                     fullTextCount++;
-                    ztoolkit.log(`[SemanticSearch] extractItemContent() got MinerU text: ${finalContent.length} chars`);
+                    ztoolkit.log(`[SemanticSearch] extractItemContent() got MinerU text: ${minerUText.length} chars`);
                   } else {
                     // 回退：Zotero 内置 pdfWorker 提取
                     // Use shared processor if provided (much faster for batch processing)
@@ -1365,16 +1560,11 @@ export class SemanticSearchService {
                     try {
                       const textContent = await processor.extractText(filePath);
                       if (textContent && textContent.length > 0) {
-                        const maxFullTextLength = 50000;
-                        const finalContent = textContent.length > maxFullTextLength
-                          ? textContent.substring(0, maxFullTextLength)
-                          : textContent;
-                        if (textContent.length > maxFullTextLength) {
-                          ztoolkit.log(`[SemanticSearch] extractItemContent() truncated to ${maxFullTextLength} chars`);
-                        }
-                        parts.push(finalContent);
+                        // Complete body text, same as the MinerU branch above.
+                        warnIfHugeDocument(item.key, textContent.length, 'pdfWorker');
+                        parts.push(textContent);
                         fullTextCount++;
-                        ztoolkit.log(`[SemanticSearch] extractItemContent() got PDF text: ${finalContent.length} chars`);
+                        ztoolkit.log(`[SemanticSearch] extractItemContent() got PDF text: ${textContent.length} chars`);
                       } else {
                         ztoolkit.log(`[SemanticSearch] extractItemContent() PDF extraction returned empty`);
                       }

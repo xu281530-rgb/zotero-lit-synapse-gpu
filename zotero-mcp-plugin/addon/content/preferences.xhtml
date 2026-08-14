@@ -37,6 +37,15 @@
     <!-- Semantic search settings -->
     <preference id="extensions.zotero.__addonRef__.semantic.enabled" name="extensions.zotero.__addonRef__.semantic.enabled" type="bool" />
     <preference id="extensions.zotero.__addonRef__.semantic.autoUpdate" name="extensions.zotero.__addonRef__.semantic.autoUpdate" type="bool" />
+
+    <!-- Hybrid search settings -->
+    <preference id="extensions.zotero.__addonRef__.hybrid.maxDocuments" name="extensions.zotero.__addonRef__.hybrid.maxDocuments" type="int" />
+    <preference id="extensions.zotero.__addonRef__.hybrid.candidateK" name="extensions.zotero.__addonRef__.hybrid.candidateK" type="int" />
+    <preference id="extensions.zotero.__addonRef__.hybrid.maxChunksPerItem" name="extensions.zotero.__addonRef__.hybrid.maxChunksPerItem" type="int" />
+    <preference id="extensions.zotero.__addonRef__.hybrid.minScore" name="extensions.zotero.__addonRef__.hybrid.minScore" type="string" />
+    <preference id="extensions.zotero.__addonRef__.hybrid.chunkTargetChars" name="extensions.zotero.__addonRef__.hybrid.chunkTargetChars" type="int" />
+    <preference id="extensions.zotero.__addonRef__.hybrid.chunkAppendToleranceChars" name="extensions.zotero.__addonRef__.hybrid.chunkAppendToleranceChars" type="int" />
+    <preference id="extensions.zotero.__addonRef__.hybrid.neighborRadius" name="extensions.zotero.__addonRef__.hybrid.neighborRadius" type="int" />
     <!-- MinerU high-precision PDF parsing -->
     <preference id="extensions.zotero.__addonRef__.mineru.mode" name="extensions.zotero.__addonRef__.mineru.mode" type="string" />
     <preference id="extensions.zotero.__addonRef__.mineru.baseURL" name="extensions.zotero.__addonRef__.mineru.baseURL" type="string" />
@@ -91,6 +100,9 @@
       --blue-soft: #eef4ff;
       --red: #ef4444;
       --green: #10b981;
+      --amber: #b45309;
+      --amber-soft: #fffaf0;
+      --amber-border: #f0c48a;
       --r: 8px;
       --r-lg: 12px;
       --tog-off: #ccd3db;
@@ -145,6 +157,9 @@
         --blue-soft: #1e2a3d;
         --red: #f87171;
         --green: #34d399;
+        --amber: #fbbf24;
+        --amber-soft: #2a2114;
+        --amber-border: #5a4620;
         --tog-off: #4b5058;
         --tog-knob: #f2f4f7;
         --focus-ring: rgba(91,156,246,0.22);
@@ -363,6 +378,57 @@
       font-family: "SF Mono", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
       word-break: break-all;
     }
+    /* Numeric setting row: the same card as a switch row, with a number box
+       where the toggle would be. Keeps every control in one column so the
+       input width no longer disagrees with the width of its description. */
+    .zmp-nrow > :first-child { flex: 1; min-width: 0; }
+    .zmp-nb {
+      flex: none;
+      width: 84px;
+      max-width: 84px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Warning banner for settings that invalidate the stored index */
+    .zmp-warn {
+      display: flex;
+      gap: 9px;
+      align-items: flex-start;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+      background: var(--amber-soft);
+      border: 1px solid var(--amber-border);
+      border-radius: 6px;
+      color: var(--text-2);
+      font-size: 11.5px;
+      line-height: 1.55;
+    }
+    .zmp-warn::before {
+      content: "!";
+      flex: none;
+      width: 15px;
+      height: 15px;
+      margin-top: 1px;
+      border-radius: 50%;
+      background: var(--amber);
+      color: var(--bg);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 15px;
+      text-align: center;
+    }
+    .zmp-warn-title {
+      font-weight: 650;
+      color: var(--text);
+      margin-bottom: 5px;
+    }
+    .zmp-warn-p { margin-top: 6px; }
+    .zmp-warn-p:first-of-type { margin-top: 0; }
+
+    /* The stale-index alert is hidden until the signatures actually disagree */
+    .zmp-warn-alert { display: none; margin: 0 0 14px; }
+
     .zmp-f2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 14px; }
     .zmp-f3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px 14px; }
     .zmp-f2 .zmp-fg, .zmp-f3 .zmp-fg { min-width: 0; }
@@ -1288,6 +1354,58 @@
             <!-- Message area -->
             <html:div id="semantic-index-message" class="zmp-msg"></html:div>
 
+            <!-- Shown only when the stored index no longer matches the chunk
+                 settings below; the panel never rebuilds anything on its own. -->
+            <html:div id="hybrid-chunk-stale-warning" class="zmp-warn zmp-warn-alert"
+              data-l10n-id="pref-hybrid-chunk-stale-warning"></html:div>
+
+            <!-- Advanced: chunking. Lives with the index it defines rather than
+                 with the query-time retrieval settings: these values decide how the
+                 stored vectors were cut up, so changing them invalidates the index
+                 above and means rebuilding it with the buttons above. Collapsed by
+                 default; the banner inside spells out the consequence. -->
+            <html:div class="zmp-ex" id="hybrid-advanced-panel">
+              <html:div class="zmp-ex-h" id="hybrid-advanced-toggle">
+                <html:span class="zmp-ex-a">▶</html:span>
+                <html:span class="zmp-ex-t" data-l10n-id="pref-hybrid-advanced-title"></html:span>
+                <html:span class="zmp-ex-m" id="hybrid-advanced-summary"></html:span>
+              </html:div>
+              <html:div class="zmp-ex-b">
+                <html:div class="zmp-warn">
+                  <html:div>
+                    <html:div class="zmp-warn-title" data-l10n-id="pref-hybrid-chunk-rebuild-title"></html:div>
+                    <html:div class="zmp-warn-p" data-l10n-id="pref-hybrid-chunk-rebuild-p1"></html:div>
+                    <html:div class="zmp-warn-p" data-l10n-id="pref-hybrid-chunk-rebuild-p2"></html:div>
+                    <html:div class="zmp-warn-p" data-l10n-id="pref-hybrid-chunk-rebuild-p3"></html:div>
+                  </html:div>
+                </html:div>
+
+                <html:div class="zmp-sw zmp-nrow">
+                  <html:div>
+                    <html:div class="zmp-sw-text" data-l10n-id="pref-hybrid-chunk-target-label"></html:div>
+                    <html:div class="zmp-sw-sub" data-l10n-id="pref-hybrid-chunk-target-hint"></html:div>
+                  </html:div>
+                  <html:input type="number" class="zmp-fi zmp-nb"
+                    id="zotero-prefpane-__addonRef__-hybrid-chunk-target"
+                    preference="extensions.zotero.__addonRef__.hybrid.chunkTargetChars"
+                    min="200" max="4000" step="100" placeholder="1000"
+                  />
+                </html:div>
+
+                <html:div class="zmp-sw zmp-nrow">
+                  <html:div>
+                    <html:div class="zmp-sw-text" data-l10n-id="pref-hybrid-chunk-tolerance-label"></html:div>
+                    <html:div class="zmp-sw-sub" data-l10n-id="pref-hybrid-chunk-tolerance-hint"></html:div>
+                  </html:div>
+                  <html:input type="number" class="zmp-fi zmp-nb"
+                    id="zotero-prefpane-__addonRef__-hybrid-chunk-tolerance"
+                    preference="extensions.zotero.__addonRef__.hybrid.chunkAppendToleranceChars"
+                    min="0" max="2000" step="50" placeholder="500"
+                  />
+                </html:div>
+              </html:div>
+            </html:div>
+
             <!-- Collapsible: detailed stats + API usage -->
             <html:div class="zmp-ex" style="margin-top:14px" id="detail-stats-panel">
               <html:div class="zmp-ex-h" id="detail-stats-toggle">
@@ -1360,6 +1478,75 @@
             </html:div>
           </html:div>
         </html:div>
+      </html:div>
+
+      <!-- ④-b 混合检索 -->
+      <html:div class="zmp-s" data-icon="semantic">
+        <html:div class="zmp-s-title" data-l10n-id="pref-hybrid-title"></html:div>
+        <html:div class="zmp-s-desc" data-l10n-id="pref-hybrid-desc"></html:div>
+
+        <html:div class="zmp-sl" data-l10n-id="pref-hybrid-retrieval-label"></html:div>
+
+        <html:div class="zmp-sw zmp-nrow">
+          <html:div>
+            <html:div class="zmp-sw-text" data-l10n-id="pref-hybrid-max-documents-label"></html:div>
+            <html:div class="zmp-sw-sub" data-l10n-id="pref-hybrid-max-documents-hint"></html:div>
+          </html:div>
+          <html:input type="number" class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-hybrid-max-documents"
+            preference="extensions.zotero.__addonRef__.hybrid.maxDocuments"
+            min="1" max="100" placeholder="20"
+          />
+        </html:div>
+
+        <html:div class="zmp-sw zmp-nrow">
+          <html:div>
+            <html:div class="zmp-sw-text" data-l10n-id="pref-hybrid-candidate-k-label"></html:div>
+            <html:div class="zmp-sw-sub" data-l10n-id="pref-hybrid-candidate-k-hint"></html:div>
+          </html:div>
+          <html:input type="number" class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-hybrid-candidate-k"
+            preference="extensions.zotero.__addonRef__.hybrid.candidateK"
+            min="20" max="600" step="20" placeholder="240"
+          />
+        </html:div>
+
+        <html:div class="zmp-sw zmp-nrow">
+          <html:div>
+            <html:div class="zmp-sw-text" data-l10n-id="pref-hybrid-max-chunks-label"></html:div>
+            <html:div class="zmp-sw-sub" data-l10n-id="pref-hybrid-max-chunks-hint"></html:div>
+          </html:div>
+          <html:input type="number" class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-hybrid-max-chunks"
+            preference="extensions.zotero.__addonRef__.hybrid.maxChunksPerItem"
+            min="1" max="50" placeholder="5"
+          />
+        </html:div>
+
+        <html:div class="zmp-sw zmp-nrow">
+          <html:div>
+            <html:div class="zmp-sw-text" data-l10n-id="pref-hybrid-min-score-label"></html:div>
+            <html:div class="zmp-sw-sub" data-l10n-id="pref-hybrid-min-score-hint"></html:div>
+          </html:div>
+          <html:input type="number" class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-hybrid-min-score"
+            preference="extensions.zotero.__addonRef__.hybrid.minScore"
+            min="0" max="1" step="0.05" placeholder="0.60"
+          />
+        </html:div>
+
+        <html:div class="zmp-sw zmp-nrow">
+          <html:div>
+            <html:div class="zmp-sw-text" data-l10n-id="pref-hybrid-neighbor-radius-label"></html:div>
+            <html:div class="zmp-sw-sub" data-l10n-id="pref-hybrid-neighbor-radius-hint"></html:div>
+          </html:div>
+          <html:input type="number" class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-hybrid-neighbor-radius"
+            preference="extensions.zotero.__addonRef__.hybrid.neighborRadius"
+            min="0" max="10" placeholder="1"
+          />
+        </html:div>
+
       </html:div>
 
       <!-- ⑤ MinerU 高精度 PDF 解析 -->

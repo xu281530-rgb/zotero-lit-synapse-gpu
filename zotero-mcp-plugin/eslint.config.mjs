@@ -14,7 +14,7 @@ export default zotero({
       },
     },
     {
-      files: ["scripts/**/*.js"],
+      files: ["scripts/**/*.js", "scripts/**/*.mjs"],
       languageOptions: {
         globals: {
           ...globals.node,

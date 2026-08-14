@@ -169,18 +169,27 @@ async function refreshParentSemanticIndex(attachment: any): Promise<void> {
     }
 
     const { getSemanticSearchService } = await import("./semantic");
+    const { enqueueIndexRefresh } = await import("./semantic/indexRefreshQueue");
     const semanticService = getSemanticSearchService();
+    // 服务没就绪 / 正在全库构建时，绝不能丢掉这次刷新：新解析出来的正文如果
+    // 不进索引，检索会一直用旧向量。入队交给持久化重试队列，稍后由同一个
+    // 增量索引入口补跑。
     if (!(await semanticService.isReady())) {
+      enqueueIndexRefresh(
+        parent.libraryID,
+        parent.key,
+        "semantic-service-not-ready",
+      );
       ztoolkit.log(
-        `[PDFTextSource] Semantic service not ready, skipping index update for ${parent.key}`,
+        `[PDFTextSource] Semantic service not ready; queued index refresh for ${parent.key}`,
         "warn",
       );
       return;
     }
-    // 全库构建正在跑时不插队，那轮构建自己会读到同一份 MinerU 缓存。
     if (semanticService.isBuildActive?.()) {
+      enqueueIndexRefresh(parent.libraryID, parent.key, "index-build-active");
       ztoolkit.log(
-        `[PDFTextSource] Index build in progress, skipping incremental update for ${parent.key}`,
+        `[PDFTextSource] Index build in progress; queued index refresh for ${parent.key}`,
       );
       return;
     }
@@ -196,7 +205,24 @@ async function refreshParentSemanticIndex(attachment: any): Promise<void> {
     pendingIndexRefresh.set(refreshKey, task);
     await task;
   } catch (error) {
-    // 索引失败不影响本次内容请求的结果返回。
+    // 索引失败不影响本次内容请求的结果返回，但同样不能就此丢掉：排队重试。
+    try {
+      const parentItemID = attachment?.parentItemID;
+      const parent = parentItemID
+        ? await Zotero.Items.getAsync(parentItemID)
+        : null;
+      if (parent?.isRegularItem?.()) {
+        const { enqueueIndexRefresh } = await import(
+          "./semantic/indexRefreshQueue"
+        );
+        enqueueIndexRefresh(parent.libraryID, parent.key, "refresh-failed");
+      }
+    } catch (queueError) {
+      ztoolkit.log(
+        `[PDFTextSource] Could not queue index refresh: ${queueError}`,
+        "warn",
+      );
+    }
     ztoolkit.log(
       `[PDFTextSource] Incremental index update failed for ${attachment?.key}: ${error}`,
       "warn",

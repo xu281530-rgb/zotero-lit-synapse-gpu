@@ -191,6 +191,24 @@ const DEFAULT_RATE_LIMIT: RateLimitConfig = {
   autoThrottle: true
 };
 
+/**
+ * How long a query vector stays reusable.
+ *
+ * Sized to cover one sitting: an hour is long enough that re-running or
+ * refining a search over the course of a research session keeps returning the
+ * same ranking, which is the whole point — the embedding API is not
+ * bit-reproducible, and a fresh vector shifts every score just enough to move
+ * documents across the relevance threshold.
+ *
+ * It is deliberately not longer. The cache lives in memory only, so it already
+ * ends when Zotero does; stretching it further would trade a guarantee that
+ * cannot survive a restart anyway against the risk of serving a stale vector
+ * after the endpoint quietly changed models behind an unchanged name.
+ */
+const QUERY_CACHE_TTL_MS = 60 * 60 * 1000;
+/** ~4KB per 1024-dim vector, so this is a few hundred KB at worst. */
+const QUERY_CACHE_MAX_ENTRIES = 50;
+
 export class EmbeddingService {
   private config: EmbeddingConfig;
   private initialized = false;
@@ -776,10 +794,68 @@ export class EmbeddingService {
    * @param isQuery - Not used for API-based embedding, kept for interface compatibility
    * @throws {EmbeddingAPIError} When API call fails
    */
+  /**
+   * Recently embedded QUERIES, so an identical search reuses its vector.
+   *
+   * Only queries are cached. Indexing embeds each chunk once, and holding
+   * those would trade a large amount of memory for a hit rate of zero.
+   */
+  private queryCache = new Map<string, { result: EmbeddingResult; at: number }>();
+
+  private queryCacheKey(text: string, language: string): string | null {
+    const model = this.config?.model;
+    const apiBase = this.config?.apiBase;
+    if (!model || !apiBase) return null;
+    // The endpoint and model are part of the identity: the same sentence
+    // embedded by a different model is a different vector, and a stale hit
+    // after switching providers would be silently wrong.
+    return [apiBase, model, this.config?.dimensions ?? '', language, text].join(
+      '\u0000',
+    );
+  }
+
+  private readQueryCache(key: string): EmbeddingResult | null {
+    const entry = this.queryCache.get(key);
+    if (!entry) return null;
+    if (Date.now() - entry.at > QUERY_CACHE_TTL_MS) {
+      this.queryCache.delete(key);
+      return null;
+    }
+    // Hand out a copy: callers own their Float32Array and quantisation
+    // routines are free to work in place.
+    return {
+      embedding: new Float32Array(entry.result.embedding),
+      language: entry.result.language,
+      dimensions: entry.result.dimensions,
+    };
+  }
+
+  private writeQueryCache(key: string, result: EmbeddingResult): void {
+    this.queryCache.set(key, {
+      result: {
+        embedding: new Float32Array(result.embedding),
+        language: result.language,
+        dimensions: result.dimensions,
+      },
+      at: Date.now(),
+    });
+    // Oldest-first eviction; Map preserves insertion order.
+    while (this.queryCache.size > QUERY_CACHE_MAX_ENTRIES) {
+      const oldest = this.queryCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.queryCache.delete(oldest);
+    }
+  }
+
+  /** Drop cached query vectors, e.g. after the model or endpoint changes. */
+  public clearQueryCache(): void {
+    this.queryCache.clear();
+  }
+
   async embed(
     text: string,
     language?: 'zh' | 'en' | 'auto',
-    _isQuery: boolean = false,
+    isQuery: boolean = false,
     options?: { signal?: AbortSignal },
   ): Promise<EmbeddingResult> {
     const startTime = Date.now();
@@ -792,6 +868,27 @@ export class EmbeddingService {
 
     const textPreview = text.substring(0, 50).replace(/\n/g, ' ');
     ztoolkit.log(`[EmbeddingService] embed() start: lang=${detectedLang}, len=${text.length}, text="${textPreview}..."`);
+
+    // A repeated query must return the SAME vector.
+    //
+    // The API is not bit-reproducible: embedding one identical sentence three
+    // times came back with cosine similarities of 0.8016 / 0.8012 / 0.8014 for
+    // the same document. Tiny as that is, it moves every score in the ranking,
+    // so documents sitting on the relevance threshold flipped in and out
+    // between identical searches and near-tied documents swapped places — a
+    // paper cited in one literature review was simply missing from the next.
+    // Reusing the vector makes a repeated search reproducible, and as a side
+    // effect removes an API round trip that dominates search latency.
+    const cacheKey = isQuery ? this.queryCacheKey(text, detectedLang) : null;
+    if (cacheKey) {
+      const hit = this.readQueryCache(cacheKey);
+      if (hit) {
+        ztoolkit.log(
+          `[EmbeddingService] embed() served from query cache: dims=${hit.dimensions}, ${Date.now() - startTime}ms`,
+        );
+        return hit;
+      }
+    }
 
     // Check API configuration
     if (!this.config.apiBase || !this.config.model) {
@@ -812,11 +909,13 @@ export class EmbeddingService {
       const elapsed = Date.now() - startTime;
       ztoolkit.log(`[EmbeddingService] embed() completed: dims=${embedding.length}, time=${elapsed}ms`);
 
-      return {
+      const result: EmbeddingResult = {
         embedding: new Float32Array(embedding),
         language: detectedLang,
         dimensions: embedding.length
       };
+      if (cacheKey) this.writeQueryCache(cacheKey, result);
+      return result;
     } catch (error) {
       // Re-throw if already an EmbeddingAPIError
       if (error instanceof EmbeddingAPIError) {

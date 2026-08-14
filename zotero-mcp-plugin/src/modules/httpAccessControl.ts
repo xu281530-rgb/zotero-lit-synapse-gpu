@@ -28,33 +28,6 @@ const PUBLIC_PATHS = new Set(["/ping"]);
 
 export type RequestHeaders = Map<string, string>;
 
-/**
- * 把原始请求文本的头部解析成小写键的 Map。
- * 重复头按逗号拼接，与 HTTP 语义一致。
- */
-export function parseRequestHeaders(requestText: string): RequestHeaders {
-  const headers: RequestHeaders = new Map();
-  const headerEnd = requestText.indexOf("\r\n\r\n");
-  const headerSection =
-    headerEnd === -1 ? requestText : requestText.substring(0, headerEnd);
-  const lines = headerSection.split("\r\n");
-
-  // 第 0 行是请求行，跳过。
-  for (let index = 1; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (!line) continue;
-    const separator = line.indexOf(":");
-    if (separator <= 0) continue;
-    const name = line.substring(0, separator).trim().toLowerCase();
-    const value = line.substring(separator + 1).trim();
-    if (!name) continue;
-    const existing = headers.get(name);
-    headers.set(name, existing ? `${existing}, ${value}` : value);
-  }
-
-  return headers;
-}
-
 function jsonError(
   status: number,
   statusText: string,

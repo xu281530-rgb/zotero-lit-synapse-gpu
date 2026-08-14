@@ -6,7 +6,7 @@ _This README is also available in: [:gb: English](./README.md) | :cn: 简体中�
 [![zotero target version](https://img.shields.io/badge/Zotero-7-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-1.6.7-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-1.7.0-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -327,10 +327,41 @@ MCP 服务器已集成在插件内，位于 `src/modules/streamableMCPServer.ts`
 
 #### `hybrid_search`
 
-文献定位的默认第一步。该工具并行执行 Zotero 元数据关键词检索和语义向量检索，
-再使用加权 RRF 融合排序，不扫描全库正文。若用户只询问相关文献，直接返回题名和
-元数据；只有用户要求原文段落、证据或全文细节时，才将命中的 `itemKeys` 传给
-`search_fulltext`。
+检索漏斗的第一段。该工具并行执行 Zotero 元数据关键词检索和语义向量检索，
+再融合成一个 0-1 的相关度分数，不扫描全库正文。
+
+**两路如何融合**：两路各自按绝对尺度归一化，然后取**较强的一路**作为基准分，
+较弱的一路以有上限的「一致性加成」形式叠加。因此佐证只会抬高分数，不会稀释
+——一篇仅凭语义证据就超过阈值的文献，再加一个弱关键词命中依然超过阈值。
+RRF（Reciprocal Rank Fusion）也会计算，但**只用于融合分数相同时的并列决胜**；
+`rrfK` 调的是这个决胜，不是排序本身。
+
+返回的是**轻量候选行**：`itemKey`、题名、作者、年份、期刊、该文献的书写语言、
+融合分数 `score`、命中来源 `matchedBy`、`matchedKeywords` / `matchedFields`、
+`hasAbstract`，以及少量最相关段落的证据摘录。
+
+**摘要不再随结果返回**。摘要仍然参与关键词检索、语义检索与排序，只是不再一并
+发回——20 篇候选里通常只有几篇需要细看。需要看摘要时，对那一篇单独调用
+`get_item_abstract`。若用户只问哪些文献相关，直接用这些候选行回答即可。
+
+**分页**。`topK` 是「一页多少篇」，不是「这次检索挖多深」。响应里带一个
+`pagination` 块：`appliedMinScore`（本次生效的阈值）、`totalRelevant`（**通过
+阈值的文献总数**，通常不止一页）、`returned`、`offset`、`range`、`hasMore`、
+`nextCursor`。顺序是 **召回 → 评分排序 → 按 minScore 过滤 → 再分页**，所以后
+面的页永远不会出现低于阈值的文献，最后一页短也绝不会拿低分结果凑数。把
+`nextCursor` 原样作为 `cursor` 传回（其余参数保持不变或省略），就能在**同一份
+已排好序的名单**上继续往下看——它不会重新检索，因此不会重复、遗漏或改变顺序。
+带着 cursor 同时改 `query` / `keywords` / `domain` / `expertRole` / `minScore`
+会被拒绝：那是另一次检索，应该重新发起。分页状态保留 15 分钟、最近 5 次检索；
+cursor 过期会明确报错，而不是悄悄重新搜一遍。
+
+**检索深度**。`candidateK` 决定每一路检索在融合前考察多少条候选——它约束的是
+「往库里挖多深」，不是「返回多少条」。默认取设置面板里的**每路检索深度**（240），
+并且是唯一允许调用方超过用户设置值的混合检索参数：候选池被挖满时，响应本身就会
+要求调用方把它调大。`pagination.totalRelevantIsLowerBound` 与
+`metadata.candidatePoolSaturated` 标识这种情况；且只有当池中最弱的候选**仍然
+高于阈值**时才会置位——若池尾已低于阈值，池外可证明不存在合格文献，此时计数是
+精确值。
 
 #### `search_library`
 
@@ -364,15 +395,25 @@ MCP 服务器已集成在插件内，位于 `src/modules/streamableMCPServer.ts`
 
 #### `search_fulltext`
 
-在所有文档全文中搜索，返回上下文片段和相关性评分。
+检索漏斗的第三段：对 `hybrid_search` 定位到的**单篇**文献做正文级混合检索
+（关键词 + 语义，同一套融合评分与阈值）。全库正文扫描已禁用。
 
-| 参数            | 类型     | 描述                 |
-| --------------- | -------- | -------------------- |
-| `q`             | string   | **必需**，搜索关键词 |
-| `itemKeys`      | string[] | 限定搜索范围         |
-| `mode`          | string   | 处理模式             |
-| `contextLength` | number   | 匹配上下文长度       |
-| `caseSensitive` | boolean  | 区分大小写           |
+调用前应先用 `get_item_abstract` 读该篇摘要，据此把 `domain` 与 `expertRole`
+重新贴合到这篇论文，并根据它自身的研究内容重写 `query` 与 `keywords`——
+**关键词用该文献自身的语言书写，只用一种语言**：单篇文档内部，另一种语言的
+探针匹配不到任何内容，只会稀释关键词覆盖度。
+
+| 参数             | 类型     | 描述                                     |
+| ---------------- | -------- | ---------------------------------------- |
+| `itemKey`        | string   | **必需**，要深入的那一篇                 |
+| `query`          | string   | 针对该篇写的自然语言检索句               |
+| `keywords`       | string[] | 该篇专属探针，使用该文献自身的语言       |
+| `domain`         | string   | 重新贴合该篇的学科/子领域                |
+| `expertRole`     | string   | 针对该篇采用的专家视角                   |
+| `chunkIds`       | number[] | 上下文扩展：拉取指定段落的相邻段落       |
+| `neighborRadius` | number   | 上下文扩展半径，受用户设置上限约束       |
+| `maxChunks`      | number   | 返回段落数上限，受用户设置上限约束       |
+| `minScore`       | number   | 相关度下限，只能比用户设置更严格         |
 
 #### `search_collections`
 
@@ -384,7 +425,9 @@ MCP 服务器已集成在插件内，位于 `src/modules/streamableMCPServer.ts`
 
 #### `get_item_abstract`
 
-获取条目的摘要/简介。参数：`itemKey`（必需）、`format`（json/text）。
+检索漏斗的第二段：按需获取**单篇**摘要。只在你确实考虑深入阅读某篇时才调用，
+一次一个 `itemKey`；它不是 `hybrid_search` 之后的批处理步骤——20 篇候选不等于
+20 次摘要读取。参数：`itemKey`（必需）、`format`（json/text）。
 
 #### `get_content`
 

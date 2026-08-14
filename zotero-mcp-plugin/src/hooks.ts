@@ -774,6 +774,22 @@ async function onStartup() {
   registerItemNotifier();
   ztoolkit.log("[MCP Plugin] [STARTUP] Item notifier registered");
 
+  // Pick up index refreshes that were queued while the semantic service was
+  // unavailable — including ones queued before the last restart.
+  try {
+    const { startIndexRefreshQueue, processIndexRefreshQueue } = await import(
+      "./modules/semantic/indexRefreshQueue"
+    );
+    startIndexRefreshQueue();
+    void processIndexRefreshQueue();
+    ztoolkit.log("[MCP Plugin] [STARTUP] Index refresh queue started");
+  } catch (error) {
+    ztoolkit.log(
+      `[MCP Plugin] [STARTUP] Failed to start index refresh queue: ${error}`,
+      "error",
+    );
+  }
+
   addon.data.initialized = true;
   ztoolkit.log("[MCP Plugin] ======== STARTUP COMPLETE ========");
 }
@@ -816,6 +832,19 @@ function onShutdown(): void {
   ztoolkit.log("[MCP Plugin] [SHUTDOWN 1/7] Clearing pending timeouts...");
   clearAllPendingTimeouts();
   ztoolkit.log("[MCP Plugin] [SHUTDOWN 1/7] Done");
+
+  // 停止索引刷新队列的定时器（队列内容留在 preference 里，下次启动继续）
+  try {
+    const {
+      stopIndexRefreshQueue,
+    } = require("./modules/semantic/indexRefreshQueue");
+    stopIndexRefreshQueue?.();
+  } catch (error) {
+    ztoolkit.log(
+      `[MCP Plugin] [SHUTDOWN] Error stopping index refresh queue: ${error}`,
+      "error",
+    );
+  }
 
   // 取消注册条目变化监听器
   try {

@@ -6,7 +6,7 @@ _This README is also available in: [:cn: 简体中文](./README-zh.md) | :gb: En
 [![zotero target version](https://img.shields.io/badge/Zotero-7-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-1.6.7-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-1.7.0-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -206,16 +206,55 @@ The integrated MCP server provides tools in 5 categories:
 
 #### `hybrid_search`
 
-Default first step for literature discovery. It searches Zotero metadata fields
-and the semantic index in parallel, then fuses both rankings with weighted RRF.
-It does not scan full document text.
+Stage 1 of the retrieval funnel. It searches Zotero metadata fields and the
+semantic index in parallel, then fuses them into a single normalized 0-1
+relevance score. It does not scan full document text.
 
-- `query` (required), `topK`, `candidateK`, `minScore`, `language`,
+**How the two branches combine.** Each branch is normalized on its own absolute
+scale, then the stronger branch sets the score and the weaker one adds a bounded
+agreement bonus. Corroboration can therefore only lift a document, never dilute
+it — a paper that clears the threshold on semantic evidence alone still clears it
+when a weak keyword hit is added. Reciprocal Rank Fusion is computed as well, but
+only to break ties between candidates whose fused scores are equal; `rrfK` tunes
+that tie-break, not the ranking.
+
+- `query` (required unless `cursor` is given), `keywords`, `domain`,
+  `expertRole`, `topK`, `cursor`, `candidateK`, `minScore`, `language`,
   `rrfK`, `keywordWeight`, `semanticWeight`, `libraryID`
-- Return the matched titles and metadata directly when the user only asks which
-  literature is relevant.
-- Call `search_fulltext` only when the user asks for passages, evidence, or
-  full-text details, and pass the selected `itemKeys`.
+- Returns a lightweight candidate row per document: `itemKey`, `title`,
+  `creators`, `year`, `publicationTitle`, `language`, fused `score`,
+  `matchedBy`, `matchedKeywords`, `matchedFields`, `hasAbstract` and a short
+  evidence snippet from the best-matching passages.
+- **Abstracts are not returned.** They are still indexed and still searched by
+  the keyword branch — they are just not shipped back, so a 20-candidate
+  shortlist stays a shortlist. Fetch one with `get_item_abstract` only for a
+  paper worth going deeper on.
+- Answer from these rows directly when the user only asks which literature is
+  relevant.
+
+**Paging.** `topK` is the size of one page, not the depth of the search. The
+response carries a `pagination` block — `appliedMinScore`, `totalRelevant`,
+`returned`, `offset`, `range`, `hasMore`, `nextCursor` — where `totalRelevant`
+is how many documents cleared the relevance threshold, which is usually more
+than one page. The order is **retrieve → rank → apply `minScore` → page**, so a
+later page can never contain a document below the threshold and a short final
+page is never padded out. Pass `nextCursor` back as `cursor` (with every other
+argument unchanged or omitted) to window further down the *same* ranking; it
+does not re-run retrieval, so pages cannot duplicate, drop or reorder
+documents. Changing `query`, `keywords`, `domain`, `expertRole` or `minScore`
+alongside a cursor is rejected — that is a new search. Pagination state lives 15
+minutes and covers the 5 most recent searches; an expired cursor fails with a
+clear message rather than silently restarting.
+
+**Retrieval depth.** `candidateK` decides how many candidates each branch
+considers before fusion — how far down the library is examined, not how much
+comes back. It defaults to the *Retrieval depth per branch* preference (240) and
+is the one hybrid setting a caller may raise above the user's value, because the
+response asks it to do exactly that when the candidate pool came back full.
+`pagination.totalRelevantIsLowerBound` and `metadata.candidatePoolSaturated` say
+when that happened, and they are only set when the pool's weakest candidate
+still cleared the threshold — if it did not, nothing beyond the pool could have
+qualified and the count is exact.
 
 #### `search_library`
 
@@ -232,10 +271,18 @@ Search annotations by query, colors, or tags with intelligent ranking.
 
 #### `search_fulltext`
 
-Second-stage full-text search within documents already located by
-`hybrid_search`. Whole-library full-text scanning is disabled.
+Stage 3 of the retrieval funnel: hybrid keyword + semantic search over the
+passages of ONE document located by `hybrid_search`. Whole-library full-text
+scanning is disabled.
 
-- `q` (required), `itemKeys` (required), `mode`, `contextLength`, `caseSensitive`
+Before calling it, read that paper's abstract with `get_item_abstract`, re-fit
+`domain` and `expertRole` to what the paper actually studies, and write `query`
+and `keywords` from its own subject matter — **in the language that paper is
+written in**, one language rather than both, since probes in the other language
+cannot match a single document's passages.
+
+- `itemKey` (required), `query`, `keywords`, `domain`, `expertRole`,
+  `maxChunks`, `minScore`, `chunkIds`, `neighborRadius`, `libraryID`
 
 #### `search_collections`
 
@@ -247,7 +294,11 @@ Get complete metadata for a single item. Params: `itemKey` (required), `mode`.
 
 #### `get_item_abstract`
 
-Get item abstract/summary. Params: `itemKey` (required), `format` (json/text).
+Stage 2 of the retrieval funnel: one item's abstract, on demand. Call it only
+for a candidate you are seriously considering reading in depth — it is not a
+batch step after `hybrid_search`, so 20 candidates does not mean 20 abstracts.
+
+Params: `itemKey` (required), `format` (json/text).
 
 #### `get_content`
 

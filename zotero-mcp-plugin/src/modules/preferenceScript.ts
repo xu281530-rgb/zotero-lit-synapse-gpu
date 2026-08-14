@@ -3,6 +3,11 @@ import { getString } from "../utils/locale";
 import { ClientConfigGenerator } from "./clientConfigGenerator";
 import { generateSecureIdentifier } from "../utils/security";
 import { trackedSetTimeout } from "../hooks";
+import {
+  getChunkingSignature,
+  getHybridSearchSettings,
+  getStoredChunkingSignature,
+} from "./hybridSearchSettings";
 
 export async function registerPrefsScripts(_window: Window) {
   // This function is called when the prefs window is opened
@@ -334,6 +339,9 @@ function bindPrefEvents() {
   // ============ Semantic Index Stats ============
   bindSemanticStatsSettings(doc);
 
+  // ============ Hybrid Search ============
+  bindHybridSearchSettings(doc);
+
   // ============ MinerU PDF Parsing ============
   bindMinerUSettings(doc);
 
@@ -343,6 +351,107 @@ function bindPrefEvents() {
 
   // ============ Rate Limit Summary ============
   updateRateLimitSummary(doc);
+}
+
+/**
+ * 混合检索设置
+ *
+ * 这些值是检索的硬上限：AI 只能要得更少、更严。这里在写入 preference 前先夹取
+ * 到允许区间，读取侧（hybridSearchSettings）也会再夹一次，两边都不信任脏值。
+ * 分块相关的两项只影响新建的索引，所以顺带对比索引里记录的分块签名，不一致时
+ * 提示用户重建，而不是偷偷替他重建。
+ */
+function bindHybridSearchSettings(doc: Document) {
+  const P = "extensions.zotero.zotero-mcp-plugin.hybrid.";
+  const ref = config.addonRef;
+
+  const bindBoundedNumber = (
+    selector: string,
+    prefKey: string,
+    min: number,
+    max: number,
+    fallback: number,
+    isFloat = false,
+  ) => {
+    const el = doc?.querySelector(selector) as HTMLInputElement;
+    if (!el) return;
+    const stored = Zotero.Prefs.get(prefKey, true);
+    const parsed =
+      typeof stored === "string" ? Number(stored) : (stored as number);
+    const initial =
+      typeof parsed === "number" && Number.isFinite(parsed) ? parsed : fallback;
+    el.value = String(initial);
+    el.addEventListener("change", () => {
+      let value = isFloat ? parseFloat(el.value) : parseInt(el.value, 10);
+      if (!Number.isFinite(value)) value = fallback;
+      value = Math.min(max, Math.max(min, value));
+      el.value = String(value);
+      // The threshold is stored as a string: Firefox preference files have no
+      // float type, so a numeric pref here would not survive the defaults file.
+      Zotero.Prefs.set(prefKey, isFloat ? String(value) : value, true);
+      if (
+        prefKey.endsWith("chunkTargetChars") ||
+        prefKey.endsWith("chunkAppendToleranceChars")
+      ) {
+        // Changing a chunk parameter never triggers a rebuild — it only makes
+        // the stored index out of date, and says so.
+        updateChunkStaleWarning(doc);
+        updateHybridAdvancedSummary(doc);
+      }
+    });
+  };
+
+  bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-max-documents`, P + "maxDocuments", 1, 100, 20);
+  bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-candidate-k`, P + "candidateK", 20, 600, 240);
+  bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-max-chunks`, P + "maxChunksPerItem", 1, 50, 5);
+  bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-min-score`, P + "minScore", 0, 1, 0.6, true);
+  bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-neighbor-radius`, P + "neighborRadius", 0, 10, 1);
+  bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-chunk-target`, P + "chunkTargetChars", 200, 4000, 1000);
+  bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-chunk-tolerance`, P + "chunkAppendToleranceChars", 0, 2000, 500);
+
+  updateChunkStaleWarning(doc);
+  updateHybridAdvancedSummary(doc);
+}
+
+/**
+ * Collapsed-panel summary: the two chunk values, so the user can see what the
+ * index was meant to be built with without opening the panel.
+ */
+function updateHybridAdvancedSummary(doc: Document) {
+  const summary = doc?.querySelector("#hybrid-advanced-summary") as HTMLElement;
+  if (!summary) return;
+  const settings = getHybridSearchSettings();
+  summary.textContent = `${settings.chunkTargetChars} / ${settings.chunkAppendToleranceChars}`;
+}
+
+/**
+ * Show the "rebuild your index" notice when the stored index was built with a
+ * different chunk layout than the current settings would produce.
+ */
+function updateChunkStaleWarning(doc: Document) {
+  const warning = doc?.querySelector("#hybrid-chunk-stale-warning") as HTMLElement;
+  if (!warning) return;
+  try {
+    const stored = getStoredChunkingSignature();
+    // No recorded signature means no index has finished building yet, so there
+    // is nothing to be out of date with.
+    const stale = Boolean(stored) && stored !== getChunkingSignature();
+    // Explicitly "flex", not "": the banner's class carries display:none, so
+    // clearing the inline style would leave it hidden forever.
+    warning.style.display = stale ? "flex" : "none";
+    if (stale) {
+      // Reveal the settings the warning is about; the banner sits outside the
+      // panel so it is visible even while the panel is collapsed.
+      const panel = doc?.querySelector("#hybrid-advanced-panel") as HTMLElement;
+      panel?.classList.add("open");
+    }
+  } catch (error) {
+    ztoolkit.log(
+      `[PreferenceScript] Could not evaluate chunking signature: ${error}`,
+      "warn",
+    );
+    warning.style.display = "none";
+  }
 }
 
 /**
@@ -590,6 +699,7 @@ function bindCollapsiblePanels(doc: Document) {
     { toggle: '#custom-settings-toggle', panel: '#custom-settings-panel' },
     { toggle: '#rate-limit-toggle', panel: '#rate-limit-panel' },
     { toggle: '#detail-stats-toggle', panel: '#detail-stats-panel' },
+    { toggle: '#hybrid-advanced-toggle', panel: '#hybrid-advanced-panel' },
     { toggle: '#mineru-advanced-toggle', panel: '#mineru-advanced-panel' },
     { toggle: '#translation-prompt-toggle', panel: '#translation-prompt-panel' },
     { toggle: '#translation-glossary-toggle', panel: '#translation-glossary-panel' },

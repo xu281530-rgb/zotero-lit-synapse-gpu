@@ -314,3 +314,28 @@ pref-translation-retries-label = Failure retries
 
 # Unified PDF Markdown pipeline
 pref-mineru-unified-flow = Unified flow: semantic indexing first generates or reuses MinerU Markdown, and the same source drives the index, PDF reader overlays, and translation. No second PDF parse is required.
+
+# --- Hybrid search ---
+pref-hybrid-title = Hybrid Search
+pref-hybrid-desc = Keyword + semantic retrieval, fused into one 0-1 relevance score. Used both to find literature across the library and to dig into a single document.
+pref-hybrid-retrieval-label = Retrieval limits
+pref-hybrid-max-documents-label = Max highly relevant documents
+pref-hybrid-max-documents-hint = How many documents one library-wide search may return. An upper bound only - weaker matches are never added to fill it.
+pref-hybrid-candidate-k-label = Retrieval depth per branch
+pref-hybrid-candidate-k-hint = How many candidates keyword and semantic retrieval each consider before they are fused and filtered. This is how far down the library is examined, not how much comes back - raising it finds more of what qualifies, at a little more time per search. When the pool fills up, the result says so and reports its count as a lower bound.
+pref-hybrid-max-chunks-label = Max chunks per document
+pref-hybrid-max-chunks-hint = How many passages one document may return when the AI digs into it. Also an upper bound only.
+pref-hybrid-min-score-label = Minimum relevance
+pref-hybrid-min-score-hint = Anything scoring below this after fusion is discarded, at both levels. Higher = stricter and fewer results, lower = broader and noisier.
+pref-hybrid-neighbor-radius-label = Neighbouring chunk expansion
+pref-hybrid-neighbor-radius-hint = When a passage lacks context, how many passages either side the AI may pull in. 0 disables expansion.
+pref-hybrid-advanced-title = Advanced: chunking (rebuild required)
+pref-hybrid-chunk-target-label = Chunk target length
+pref-hybrid-chunk-target-hint = How many characters of Markdown paragraphs each passage accumulates before it closes.
+pref-hybrid-chunk-tolerance-label = Paragraph append tolerance
+pref-hybrid-chunk-tolerance-hint = Once a passage reaches the target, a next paragraph no longer than this still joins it; a longer one starts the next passage.
+pref-hybrid-chunk-rebuild-title = Important: after changing the chunk target length or the paragraph append tolerance, the whole-library semantic index must be rebuilt.
+pref-hybrid-chunk-rebuild-p1 = These two parameters change where body text is split. The existing index still holds the chunks and vectors produced by the old chunking rules, and they are not converted to the new chunking automatically.
+pref-hybrid-chunk-rebuild-p2 = Only after a whole-library rebuild are existing documents re-split under the new chunk rules, re-embedded, and brought back into the current index.
+pref-hybrid-chunk-rebuild-p3 = Changing a parameter never triggers a rebuild by itself; the plugin only reports that the index is out of sync, and the whole-library rebuild is yours to run.
+pref-hybrid-chunk-stale-warning = The existing semantic index was built with different chunk settings than the ones below. Rebuild the whole-library semantic index with the buttons above so retrieval matches these settings.

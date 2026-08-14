@@ -28,6 +28,13 @@ declare namespace _ZoteroTypes {
       "custom.includeWebpage": boolean;
       "custom.enableCompression": boolean;
       "ui.includeMetadata": boolean;
+      "hybrid.maxDocuments": number;
+      "hybrid.candidateK": number;
+      "hybrid.maxChunksPerItem": number;
+      "hybrid.minScore": string;
+      "hybrid.chunkTargetChars": number;
+      "hybrid.chunkAppendToleranceChars": number;
+      "hybrid.neighborRadius": number;
       "semantic.enabled": boolean;
       "semantic.autoUpdate": boolean;
       "embedding.apiBase": string;

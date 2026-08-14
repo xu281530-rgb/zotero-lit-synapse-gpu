@@ -21,6 +21,18 @@ export interface LexicalSearchOptions {
   libraryID: number;
   candidateK: number;
   maxCandidates?: number;
+  /**
+   * Restrict the search to these Zotero item keys — the collection scope.
+   *
+   * Applied to the candidate set BEFORE anything is read or scored, so an
+   * out-of-scope item is never loaded, never has its fields scanned and never
+   * competes for a candidate slot. Filtering after ranking would leave the
+   * expensive part of the work untouched and, worse, let out-of-scope items
+   * consume the candidate cap and push in-scope ones out.
+   *
+   * Undefined means the whole library.
+   */
+  scopeItemKeys?: Set<string>;
   /** Absolute wall-clock deadline; the scan degrades instead of overrunning. */
   deadlineAt?: number;
   isCancelled?: () => boolean;
@@ -29,6 +41,8 @@ export interface LexicalSearchOptions {
 export interface LexicalSearchDiagnostics {
   strategy: "union" | "per-keyword";
   candidateIDs: number;
+  /** Candidates dropped for being outside the collection scope. */
+  outOfScope: number;
   scannedItems: number;
   truncated: boolean;
   /**
@@ -233,6 +247,7 @@ export async function runLexicalSearch(
     libraryID,
     candidateK,
     maxCandidates = MAX_LEXICAL_CANDIDATES,
+    scopeItemKeys,
     deadlineAt,
     isCancelled,
   } = options;
@@ -243,6 +258,7 @@ export async function runLexicalSearch(
       diagnostics: {
         strategy: "union",
         candidateIDs: 0,
+        outOfScope: 0,
         scannedItems: 0,
         truncated: false,
         prioritized: false,
@@ -265,6 +281,34 @@ export async function runLexicalSearch(
   let truncated = false;
   let prioritized = false;
   let candidateIDs = ids;
+  let outOfScope = 0;
+
+  // Collection scope, applied before the candidate cap and before any item is
+  // read: out-of-scope items must not occupy candidate slots that in-scope
+  // items would otherwise have taken.
+  if (scopeItemKeys) {
+    const before = candidateIDs.length;
+    const inScope: number[] = [];
+    for (
+      let offset = 0;
+      offset < candidateIDs.length;
+      offset += CANDIDATE_CHUNK_SIZE
+    ) {
+      if (isCancelled?.() || isExpired(deadlineAt)) {
+        truncated = true;
+        break;
+      }
+      const chunk = candidateIDs.slice(offset, offset + CANDIDATE_CHUNK_SIZE);
+      const items = await Zotero.Items.getAsync(chunk);
+      for (const item of items as any[]) {
+        const key = item?.key;
+        if (key && scopeItemKeys.has(key)) inScope.push(item.id);
+      }
+    }
+    candidateIDs = inScope;
+    outOfScope = before - candidateIDs.length;
+  }
+
   if (candidateIDs.length > maxCandidates) {
     truncated = true;
     const reduced = await prioritizeCandidateIDs(
@@ -361,6 +405,7 @@ export async function runLexicalSearch(
     diagnostics: {
       strategy,
       candidateIDs: ids.length,
+      outOfScope,
       scannedItems: candidates.length,
       truncated,
       prioritized,

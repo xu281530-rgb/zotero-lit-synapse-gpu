@@ -23,6 +23,11 @@ export interface SemanticSearchItem {
 export interface HybridSearchOptions {
   query?: string;
   /**
+   * Fused-score floor in 0..1. Candidates below it are discarded outright and
+   * are never padded back in to reach topK — topK is a ceiling, not a quota.
+   */
+  minScore?: number;
+  /**
    * Optional caller-supplied lexical keywords. Expected to already mix Chinese
    * and English surface forms so the lexical branch recalls literature written
    * in either language regardless of the language the user asked in.
@@ -40,6 +45,16 @@ export interface HybridSearchOptions {
 export interface HybridSearchResult extends Record<string, unknown> {
   itemKey: string;
   libraryID?: number;
+  /**
+   * The unified fused relevance, normalised to 0..1. This is the value the
+   * threshold is applied to and the value results are ranked by.
+   */
+  score: number;
+  /** Normalised (0..1) view of the lexical branch's own score. */
+  normalizedKeywordScore?: number;
+  /** Normalised (0..1) view of the semantic branch's own score. */
+  normalizedSemanticScore?: number;
+  /** Rank-consensus score, kept as a tie-break and for diagnostics. */
   rrfScore: number;
   keywordRank?: number;
   semanticRank?: number;
@@ -49,11 +64,24 @@ export interface HybridSearchResult extends Record<string, unknown> {
 }
 
 export interface HybridSearchRunResult {
+  /** The first `topK` of {@link ranked}. */
   results: HybridSearchResult[];
+  /**
+   * Every candidate above the relevance threshold, in final order.
+   * Pagination windows this list; it never re-ranks and never re-thresholds.
+   */
+  ranked: HybridSearchResult[];
+  /** Weakest normalised score each branch returned; see HybridFusionOutcome. */
+  keywordTailScore?: number;
+  semanticTailScore?: number;
   degraded: boolean;
   warnings: string[];
   keywordResultCount: number;
   semanticResultCount: number;
+  /** Fused candidates dropped for scoring below the threshold. */
+  discardedBelowThreshold: number;
+  /** The floor actually applied (after the user's setting was enforced). */
+  appliedMinScore: number;
   timings: {
     keywordMs: number;
     semanticMs: number;
@@ -84,6 +112,27 @@ interface FusedCandidate {
   semanticRank?: number;
   rrfScore: number;
 }
+
+/**
+ * Retrieval-depth bounds — the single definition.
+ *
+ * `max` is the engine's own limit and is enforced here; `min` is the floor the
+ * settings and the UI clamp a configured value to, and the engine does not
+ * impose it (a direct caller may legitimately fuse a handful of candidates).
+ *
+ * The engine owns the ceiling because it is a property of the scan, not of a
+ * preference: the semantic branch keeps ~12 chunks per requested document, and
+ * past this the vector scan starts losing its race with its own deadline, which
+ * fails the branch outright instead of returning less.
+ *
+ * They live here so nothing has to restate them. Three separate copies of this
+ * rule once disagreed — the settings clamped a large request to 600, one
+ * validator rejected anything over 500, and a third insisted candidateK be at
+ * least topK — so asking for a deeper sweep failed outright instead of being
+ * clamped, and a small configured depth with a large page size threw on every
+ * search. Anything that needs these numbers imports them.
+ */
+export const CANDIDATE_K_BOUNDS = { min: 20, max: 600 } as const;
 
 export const DEFAULT_SEMANTIC_TIMEOUT_MS = 8000;
 export const DEFAULT_HYBRID_TIMEOUT_MS = 10000;
@@ -592,6 +641,200 @@ export function rankLexicalCandidates(
     .slice(0, options.candidateK);
 }
 
+/**
+ * Field weight for ranking the chunks of ONE document, used by the
+ * document-level deep dive. Deliberately a separate table from
+ * {@link LEXICAL_FIELD_WEIGHTS} — a chunk has one field, not six — but it feeds
+ * the exact same {@link rankLexicalCandidates} ranker, so specificity, coverage
+ * and repeat saturation behave identically at both levels.
+ *
+ * Higher than the title weight for two reasons. A term of art appearing in a
+ * passage of running text is a stronger signal than the same term in a title,
+ * because the passage is where the claim actually lives; and the ranker's
+ * inverse document frequency is computed over the candidate pool, which inside
+ * one paper is a handful of chunks rather than a whole library, so specificity
+ * is compressed towards the middle of its range.
+ *
+ * Calibrated so that a passage matching the full keyword set clears the default
+ * 0.60 threshold on the lexical branch alone — that is what keeps the deep dive
+ * useful when the semantic branch is unavailable — while a passage that only
+ * repeats one common term of the set does not.
+ */
+export const CHUNK_FIELD_WEIGHTS: Record<string, number> = {
+  chunkText: 6,
+};
+
+/**
+ * Saturation constant for mapping the unbounded lexical score into 0..1.
+ *
+ * `raw / (raw + K)`: monotone, never reaches 1, and needs no knowledge of the
+ * other candidates — which is the whole point. A relative "best hit = 1.0"
+ * normalisation would make some document score 1.0 for every query, including
+ * queries the library has nothing on, and the threshold could then never
+ * discard everything.
+ *
+ * Calibration at K=4: one exact keyword in a title scores ≈3.75 → 0.48; two
+ * distinct keywords in a title ≈7.2 → 0.64; a dense multi-field match ≈12 → 0.75.
+ */
+export const LEXICAL_SCORE_SATURATION = 4;
+
+/** Bonus applied when both branches independently retrieved the candidate. */
+export const HYBRID_AGREEMENT_BONUS = 0.15;
+
+export function normalizeLexicalScore(rawScore: number | undefined): number {
+  if (typeof rawScore !== "number" || !Number.isFinite(rawScore)) return 0;
+  if (rawScore <= 0) return 0;
+  return rawScore / (rawScore + LEXICAL_SCORE_SATURATION);
+}
+
+/** Cosine similarity is already 0..1 in practice; clamp defensively. */
+export function normalizeSemanticScore(rawScore: number | undefined): number {
+  if (typeof rawScore !== "number" || !Number.isFinite(rawScore)) return 0;
+  if (rawScore <= 0) return 0;
+  return rawScore > 1 ? 1 : rawScore;
+}
+
+/**
+ * Combine the two normalised branch scores into the single 0..1 relevance the
+ * threshold is applied to.
+ *
+ * The rule is that evidence may never cost a document its score. A candidate
+ * found by one branch keeps that branch's strength, and a candidate both
+ * branches found scores the STRONGER branch plus a bounded share of the weaker
+ * one — so agreement lifts a document and never dilutes it.
+ *
+ * The previous formula averaged the two branches, which inverted that: a paper
+ * the semantic index scored 0.75 passed a 0.60 threshold on its own, and the
+ * same paper with one incidental keyword hit (0.10) averaged down to 0.49 and
+ * was filtered out. Finding MORE evidence for a document deleted it — measured
+ * on the real library, one broad keyword removed a 0.7153-scoring paper from
+ * the result set entirely. Weaker-than-perfect agreement was penalised: a
+ * keyword score below ~0.55 always dragged a 0.75 semantic match down.
+ *
+ * Equal agreement is scored exactly as before (0.75 + 0.15*0.75 == 0.75*1.15),
+ * so this removes the dilution without inflating the agreement bonus.
+ *
+ * Weights scale each branch's contribution relative to the strongest weight, so
+ * the default 1/1 leaves both branches at full strength, and lowering one
+ * weight demotes that branch instead of reweighting an average.
+ */
+export function computeFusedScore(params: {
+  normalizedKeywordScore?: number;
+  normalizedSemanticScore?: number;
+  keywordWeight: number;
+  semanticWeight: number;
+}): number {
+  const keywordActive =
+    params.normalizedKeywordScore !== undefined && params.keywordWeight > 0;
+  const semanticActive =
+    params.normalizedSemanticScore !== undefined && params.semanticWeight > 0;
+
+  if (!keywordActive && !semanticActive) return 0;
+
+  const maxWeight = Math.max(
+    keywordActive ? params.keywordWeight : 0,
+    semanticActive ? params.semanticWeight : 0,
+  );
+  if (maxWeight <= 0) return 0;
+
+  const keywordContribution = keywordActive
+    ? (params.normalizedKeywordScore ?? 0) * (params.keywordWeight / maxWeight)
+    : undefined;
+  const semanticContribution = semanticActive
+    ? (params.normalizedSemanticScore ?? 0) * (params.semanticWeight / maxWeight)
+    : undefined;
+
+  if (keywordContribution === undefined) {
+    return Math.min(1, Math.max(0, semanticContribution ?? 0));
+  }
+  if (semanticContribution === undefined) {
+    return Math.min(1, Math.max(0, keywordContribution));
+  }
+
+  const dominant = Math.max(keywordContribution, semanticContribution);
+  const support = Math.min(keywordContribution, semanticContribution);
+  return Math.min(1, Math.max(0, dominant + HYBRID_AGREEMENT_BONUS * support));
+}
+
+/**
+ * Whether the calling AI can be *confirmed* to have done the domain-expert
+ * query rewrite, which is the only thing that earns the `ai` label.
+ *
+ * The plugin never calls an LLM, so it cannot inspect the reasoning; it can
+ * only check that the caller did the two observable things the protocol asks
+ * for — supply its own probes AND state the field and expert role it adopted.
+ * Anything less is reported as `fallback`, because an unverified claim of
+ * expertise is exactly what this flag exists to distinguish.
+ */
+export interface KeywordProvenance {
+  keywordSource: "ai" | "fallback";
+  /** Whether the probes themselves came from the caller or from tokenisation. */
+  probeOrigin: "provided" | "derived";
+  /** Present whenever keywordSource is "fallback". */
+  reason: string | null;
+  domain: string | null;
+  expertRole: string | null;
+}
+
+const MAX_DECLARATION_LENGTH = 200;
+
+function normalizeDeclaration(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.length > MAX_DECLARATION_LENGTH
+    ? trimmed.slice(0, MAX_DECLARATION_LENGTH)
+    : trimmed;
+}
+
+export function resolveKeywordProvenance(params: {
+  probeSource: "provided" | "fallback";
+  keywordsArgumentPresent: boolean;
+  domain?: unknown;
+  expertRole?: unknown;
+}): KeywordProvenance {
+  const domain = normalizeDeclaration(params.domain);
+  const expertRole = normalizeDeclaration(params.expertRole);
+  const probeOrigin =
+    params.probeSource === "provided" ? "provided" : "derived";
+
+  if (probeOrigin === "derived") {
+    return {
+      keywordSource: "fallback",
+      probeOrigin,
+      reason: params.keywordsArgumentPresent
+        ? "The keywords argument was present but empty after trimming blank entries and duplicates, so the server fell back to mechanical tokenization of the query."
+        : "No keywords argument was supplied, so the server fell back to mechanical tokenization of the query.",
+      domain,
+      expertRole,
+    };
+  }
+
+  if (!domain || !expertRole) {
+    const missing = [
+      !domain ? "domain" : null,
+      !expertRole ? "expertRole" : null,
+    ]
+      .filter(Boolean)
+      .join(" and ");
+    return {
+      keywordSource: "fallback",
+      probeOrigin,
+      reason: `Keywords were supplied but ${missing} was not declared, so domain-expert query rewriting could not be confirmed. The supplied keywords were still used for retrieval.`,
+      domain,
+      expertRole,
+    };
+  }
+
+  return {
+    keywordSource: "ai",
+    probeOrigin,
+    reason: null,
+    domain,
+    expertRole,
+  };
+}
+
 function validateFiniteNumber(
   value: number,
   name: string,
@@ -611,15 +854,24 @@ export function validateHybridSearchOptions(
     throw new Error("query must not be blank");
   }
   validateFiniteNumber(options.topK, "topK", 1);
-  validateFiniteNumber(options.candidateK, "candidateK", options.topK);
+  validateFiniteNumber(options.candidateK, "candidateK", 1);
   validateFiniteNumber(options.rrfK, "rrfK", 1);
   validateFiniteNumber(options.keywordWeight, "keywordWeight", 0);
   validateFiniteNumber(options.semanticWeight, "semanticWeight", 0);
   if (!Number.isInteger(options.topK) || options.topK > 100) {
     throw new Error("topK must be an integer between 1 and 100");
   }
-  if (!Number.isInteger(options.candidateK) || options.candidateK > 500) {
-    throw new Error("candidateK must be an integer between topK and 500");
+  // Only the ceiling is the engine's business: it is the latency guard, and a
+  // depth above it fails the scan rather than shortening it. The floor is a
+  // configuration concern — a caller driving this directly (a test, a narrow
+  // internal search) may legitimately fuse four candidates.
+  if (
+    !Number.isInteger(options.candidateK) ||
+    options.candidateK > CANDIDATE_K_BOUNDS.max
+  ) {
+    throw new Error(
+      `candidateK must be an integer no greater than ${CANDIDATE_K_BOUNDS.max}`,
+    );
   }
   if (options.semanticTimeoutMs !== undefined) {
     validateFiniteNumber(options.semanticTimeoutMs, "semanticTimeoutMs", 1);
@@ -630,10 +882,49 @@ export function validateHybridSearchOptions(
   if (options.keywords !== undefined) {
     normalizeKeywords(options.keywords);
   }
+  if (options.minScore !== undefined) {
+    if (
+      !Number.isFinite(options.minScore) ||
+      options.minScore < 0 ||
+      options.minScore > 1
+    ) {
+      throw new Error("minScore must be a finite number between 0 and 1");
+    }
+  }
 
   if (options.keywordWeight === 0 && options.semanticWeight === 0) {
     throw new Error("keywordWeight and semanticWeight cannot both be zero");
   }
+}
+
+export interface HybridFusionOutcome {
+  /** The first `topK` of {@link ranked} — what a non-paginating caller reads. */
+  results: HybridSearchResult[];
+  /**
+   * EVERY candidate that cleared the relevance threshold, in final order.
+   *
+   * `results` is a window onto this list, not a different ranking: the
+   * threshold has already been applied here, so paging through `ranked` can
+   * never surface a document the threshold rejected, and never has to lower
+   * the threshold to fill a page.
+   */
+  ranked: HybridSearchResult[];
+  /** Candidates that scored below the threshold and were dropped. */
+  discardedBelowThreshold: number;
+  /** Candidates that survived the threshold but did not fit inside topK. */
+  discardedBeyondTopK: number;
+  appliedMinScore: number;
+  /**
+   * The weakest normalised score each branch still handed over.
+   *
+   * Branch results arrive in descending score order, so anything the branch did
+   * NOT return scores at most this much. That makes these two numbers the only
+   * honest way to answer "could a document beyond the candidate pool still have
+   * cleared the threshold?" — without them, a full pool has to be treated as if
+   * it were hiding better matches, even when it provably is not.
+   */
+  keywordTailScore?: number;
+  semanticTailScore?: number;
 }
 
 export function fuseHybridSearchResults(
@@ -641,9 +932,33 @@ export function fuseHybridSearchResults(
   semanticResults: SemanticSearchItem[],
   options: Pick<
     HybridSearchOptions,
-    "topK" | "rrfK" | "keywordWeight" | "semanticWeight"
+    "topK" | "rrfK" | "keywordWeight" | "semanticWeight" | "minScore"
   >,
 ): HybridSearchResult[] {
+  return fuseHybridSearchResultsDetailed(
+    keywordResults,
+    semanticResults,
+    options,
+  ).results;
+}
+
+/**
+ * Fuse the two branches into one 0..1-scored ranking and apply the relevance
+ * floor.
+ *
+ * Ordering is by the fused score, with the rank-consensus RRF score kept only
+ * as a tie-break. `topK` is a ceiling applied AFTER the threshold, so a query
+ * the library cannot answer returns few results — or none — instead of being
+ * padded out with weak matches.
+ */
+export function fuseHybridSearchResultsDetailed(
+  keywordResults: KeywordSearchItem[],
+  semanticResults: SemanticSearchItem[],
+  options: Pick<
+    HybridSearchOptions,
+    "topK" | "rrfK" | "keywordWeight" | "semanticWeight" | "minScore"
+  >,
+): HybridFusionOutcome {
   validateFiniteNumber(options.topK, "topK", 1);
   validateFiniteNumber(options.rrfK, "rrfK", 1);
   validateFiniteNumber(options.keywordWeight, "keywordWeight", 0);
@@ -685,55 +1000,120 @@ export function fuseHybridSearchResults(
     });
   }
 
-  return Array.from(candidates.values())
-    .sort((a, b) => {
-      const scoreDifference = b.rrfScore - a.rrfScore;
-      if (scoreDifference !== 0) return scoreDifference;
+  const minScore =
+    typeof options.minScore === "number" && Number.isFinite(options.minScore)
+      ? Math.min(1, Math.max(0, options.minScore))
+      : 0;
 
-      const aSourceCount =
-        Number(Boolean(a.keywordItem)) + Number(Boolean(a.semanticItem));
-      const bSourceCount =
-        Number(Boolean(b.keywordItem)) + Number(Boolean(b.semanticItem));
-      if (aSourceCount !== bSourceCount) return bSourceCount - aSourceCount;
+  const scored = Array.from(candidates.values()).map((candidate) => {
+    const normalizedKeywordScore = candidate.keywordItem
+      ? normalizeLexicalScore(candidate.keywordItem.relevanceScore)
+      : undefined;
+    const normalizedSemanticScore = candidate.semanticItem
+      ? normalizeSemanticScore(candidate.semanticItem.score)
+      : undefined;
+    return {
+      candidate,
+      normalizedKeywordScore,
+      normalizedSemanticScore,
+      score: computeFusedScore({
+        normalizedKeywordScore,
+        normalizedSemanticScore,
+        keywordWeight: options.keywordWeight,
+        semanticWeight: options.semanticWeight,
+      }),
+    };
+  });
 
-      const aBestRank = Math.min(
-        a.keywordRank ?? Infinity,
-        a.semanticRank ?? Infinity,
-      );
-      const bBestRank = Math.min(
-        b.keywordRank ?? Infinity,
-        b.semanticRank ?? Infinity,
-      );
-      if (aBestRank !== bBestRank) return aBestRank - bBestRank;
+  const surviving = scored.filter((entry) => entry.score >= minScore);
+  const discardedBelowThreshold = scored.length - surviving.length;
 
-      return a.itemKey.localeCompare(b.itemKey);
-    })
-    .slice(0, options.topK)
-    .map((candidate) => {
-      const keywordItem = candidate.keywordItem;
-      const semanticItem = candidate.semanticItem;
-      const base = keywordItem
-        ? { ...keywordItem }
-        : semanticItem
-          ? { ...semanticItem }
-          : {};
+  const ordered = surviving.sort((a, b) => {
+    const fusedDifference = b.score - a.score;
+    if (fusedDifference !== 0) return fusedDifference;
+    const rrfDifference = b.candidate.rrfScore - a.candidate.rrfScore;
+    if (rrfDifference !== 0) return rrfDifference;
+    return compareFusedCandidates(a.candidate, b.candidate);
+  });
 
-      delete (base as Record<string, unknown>).key;
-      delete (base as Record<string, unknown>).score;
+  const ranked = ordered
+    .map(
+      ({
+        candidate,
+        normalizedKeywordScore,
+        normalizedSemanticScore,
+        score,
+      }) => {
+        const keywordItem = candidate.keywordItem;
+        const semanticItem = candidate.semanticItem;
+        const base = keywordItem
+          ? { ...keywordItem }
+          : semanticItem
+            ? { ...semanticItem }
+            : {};
 
-      return {
-        ...base,
-        itemKey: candidate.itemKey,
-        libraryID: candidate.libraryID,
-        title: keywordItem?.title || semanticItem?.title || "",
-        rrfScore: candidate.rrfScore,
-        keywordRank: candidate.keywordRank,
-        semanticRank: candidate.semanticRank,
-        keywordScore: keywordItem?.relevanceScore,
-        semanticScore: semanticItem?.score,
-        matchedChunks: semanticItem?.matchedChunks,
-      };
-    });
+        delete (base as Record<string, unknown>).key;
+        delete (base as Record<string, unknown>).score;
+
+        return {
+          ...base,
+          itemKey: candidate.itemKey,
+          libraryID: candidate.libraryID,
+          title: keywordItem?.title || semanticItem?.title || "",
+          score,
+          normalizedKeywordScore,
+          normalizedSemanticScore,
+          rrfScore: candidate.rrfScore,
+          keywordRank: candidate.keywordRank,
+          semanticRank: candidate.semanticRank,
+          keywordScore: keywordItem?.relevanceScore,
+          semanticScore: semanticItem?.score,
+          matchedChunks: semanticItem?.matchedChunks,
+        };
+      },
+    );
+
+  // The window is taken after scoring, ordering and thresholding, so page 1 is
+  // byte-for-byte what it was before pagination existed.
+  const results = ranked.slice(0, options.topK);
+
+  const lastKeyword = keywordResults[keywordResults.length - 1];
+  const lastSemantic = semanticResults[semanticResults.length - 1];
+
+  return {
+    results,
+    ranked,
+    discardedBelowThreshold,
+    discardedBeyondTopK: Math.max(0, ranked.length - results.length),
+    appliedMinScore: minScore,
+    keywordTailScore: lastKeyword
+      ? normalizeLexicalScore(lastKeyword.relevanceScore)
+      : undefined,
+    semanticTailScore: lastSemantic
+      ? normalizeSemanticScore(lastSemantic.score)
+      : undefined,
+  };
+}
+
+/** Stable ordering for candidates whose fused and RRF scores are identical. */
+function compareFusedCandidates(a: FusedCandidate, b: FusedCandidate): number {
+  const aSourceCount =
+    Number(Boolean(a.keywordItem)) + Number(Boolean(a.semanticItem));
+  const bSourceCount =
+    Number(Boolean(b.keywordItem)) + Number(Boolean(b.semanticItem));
+  if (aSourceCount !== bSourceCount) return bSourceCount - aSourceCount;
+
+  const aBestRank = Math.min(
+    a.keywordRank ?? Infinity,
+    a.semanticRank ?? Infinity,
+  );
+  const bBestRank = Math.min(
+    b.keywordRank ?? Infinity,
+    b.semanticRank ?? Infinity,
+  );
+  if (aBestRank !== bBestRank) return aBestRank - bBestRank;
+
+  return a.itemKey.localeCompare(b.itemKey);
 }
 
 function errorMessage(error: unknown): string {
@@ -860,7 +1240,7 @@ export async function runHybridSearch(
   }
 
   const rrfStartedAt = Date.now();
-  const results = fuseHybridSearchResults(
+  const fusion = fuseHybridSearchResultsDetailed(
     keywordResults,
     semanticResults,
     options,
@@ -868,11 +1248,16 @@ export async function runHybridSearch(
   const rrfMs = Date.now() - rrfStartedAt;
 
   return {
-    results,
+    results: fusion.results,
+    ranked: fusion.ranked,
+    keywordTailScore: fusion.keywordTailScore,
+    semanticTailScore: fusion.semanticTailScore,
     degraded: warnings.length > 0,
     warnings,
     keywordResultCount: keywordResults.length,
     semanticResultCount: semanticResults.length,
+    discardedBelowThreshold: fusion.discardedBelowThreshold,
+    appliedMinScore: fusion.appliedMinScore,
     timings: {
       keywordMs: keywordRun.elapsedMs,
       semanticMs: semanticRun.elapsedMs,
