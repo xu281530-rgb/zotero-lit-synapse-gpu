@@ -38,6 +38,7 @@
     "test:hybrid-search": "node --experimental-strip-types scripts/test-hybrid-search.js",
     "test:chunking": "node --experimental-strip-types scripts/test-chunking.js",
     "test:index-lifecycle": "node --experimental-strip-types scripts/test-index-lifecycle.js",
+    "test:fulltext-on-demand": "node --experimental-strip-types scripts/test-fulltext-on-demand.js",
     "test:index-recovery": "node --experimental-strip-types scripts/test-index-recovery.js",
     "test:collection-scope": "node --experimental-strip-types scripts/test-collection-scope.js",
     "test:hybrid-candidates": "node --experimental-strip-types scripts/test-hybrid-candidates.js",

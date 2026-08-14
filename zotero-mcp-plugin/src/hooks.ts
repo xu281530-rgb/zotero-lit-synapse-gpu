@@ -358,9 +358,8 @@ async function handleItemsDeleted(itemIds: number[], extraData: any) {
 
     for (const { itemKey, libraryID } of itemIdentities) {
       try {
-        // Delete vectors and content cache (item is permanently deleted)
-        await vectorStore.deleteItemVectors(itemKey, true, libraryID);
-        ztoolkit.log(`[MCP Plugin] Deleted index and cache for item: ${itemKey}`);
+        await vectorStore.deleteItemVectors(itemKey, libraryID);
+        ztoolkit.log(`[MCP Plugin] Deleted index for item: ${itemKey}`);
       } catch (e) {
         // Ignore errors for items that weren't indexed
       }
@@ -1432,7 +1431,6 @@ async function handleClearCollectionIndex(win: _ZoteroTypes.MainWindow) {
       try {
         await vectorStore.deleteItemVectors(
           itemKey,
-          false,
           collection.libraryID,
         );
         clearedCount++;
@@ -1528,7 +1526,7 @@ async function handleClearSelectedIndex(win: _ZoteroTypes.MainWindow) {
     for (const [libraryID, keys] of keysByLibrary) {
       for (const itemKey of keys) {
         try {
-          await vectorStore.deleteItemVectors(itemKey, false, libraryID);
+          await vectorStore.deleteItemVectors(itemKey, libraryID);
           clearedCount++;
         } catch (e) {
           // Ignore errors for items that weren't indexed

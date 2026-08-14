@@ -20,6 +20,10 @@ const serviceSource = fs.readFileSync(
   path.join(root, "src/modules/semantic/semanticSearchService.ts"),
   "utf8",
 );
+const vectorStoreSource = fs.readFileSync(
+  path.join(root, "src/modules/semantic/vectorStore.ts"),
+  "utf8",
+);
 
 function mockStore(gpuBackend) {
   const failureRows = new Map();
@@ -253,6 +257,8 @@ function mutationBackend(events) {
       },
     ],
     contentHash: "new-hash",
+    contentLength: 3,
+    sourceKind: "on-demand",
     buildID: "build",
   };
 
@@ -459,8 +465,8 @@ function mutationBackend(events) {
   ]);
 }
 
-// Targeted rebuild deletion is batched, Library-qualified, and leaves both
-// content_cache and every non-target item untouched.
+// Targeted rebuild deletion is batched, Library-qualified, and leaves every
+// non-target item untouched.
 {
   const { store, calls } = mockStore();
   store.vectorCache.set("2:TARGET_A_0", new Float32Array([1]));
@@ -470,7 +476,6 @@ function mutationBackend(events) {
 
   await store.deleteItemsVectors(
     ["TARGET_A", "TARGET_WITH_UNDERSCORE"],
-    false,
     2,
   );
 
@@ -480,7 +485,6 @@ function mutationBackend(events) {
     assert.deepEqual(call.params, ["2:TARGET_A", "2:TARGET_WITH_UNDERSCORE"]);
     assert.match(call.sql, /item_key IN \(\?,\?\)/);
   }
-  assert.ok(deletes.every((call) => !call.sql.includes("content_cache")));
   assert.equal(store.vectorCache.has("2:TARGET_A_0"), false);
   assert.equal(store.vectorCache.has("2:TARGET_WITH_UNDERSCORE_4"), false);
   assert.equal(store.vectorCache.has("2:OTHER_0"), true);
@@ -490,7 +494,7 @@ function mutationBackend(events) {
 // An explicitly empty target list is a no-op, never a full-Library delete.
 {
   const { store, calls } = mockStore();
-  await store.deleteItemsVectors([], false, 2);
+  await store.deleteItemsVectors([], 2);
   assert.equal(calls.length, 0);
 }
 
@@ -504,7 +508,6 @@ function mutationBackend(events) {
     assert.match(call.sql, /WHERE item_key GLOB \?/);
     assert.deepEqual(call.params, ["2:*"]);
   }
-  assert.ok(deletes.every((call) => !call.sql.includes("content_cache")));
 }
 
 // GPU synchronization is emitted only after the SQLite mutation commits, and
@@ -524,8 +527,10 @@ function mutationBackend(events) {
       chunkText: "sync",
     }],
     contentHash: "sync-hash",
+    contentLength: 4,
+    sourceKind: "on-demand",
   });
-  await store.deleteItemsVectors(["SYNC_ITEM"], false, 2);
+  await store.deleteItemsVectors(["SYNC_ITEM"], 2);
   await store.createBuildSession(
     {
       buildID: "sync-build",
@@ -562,6 +567,8 @@ function mutationBackend(events) {
       libraryID: 2,
       records: [],
       contentHash: "rollback",
+      contentLength: 0,
+      sourceKind: "on-demand",
     }),
     /simulated rollback/,
   );
@@ -572,6 +579,22 @@ function mutationBackend(events) {
 assert.match(
   serviceSource,
   /const itemKeysProvided = options\.itemKeys !== undefined;/,
+);
+assert.doesNotMatch(serviceSource, /getCachedContent|setCachedContent/);
+assert.doesNotMatch(
+  vectorStoreSource,
+  /CREATE TABLE IF NOT EXISTS content_cache/,
+);
+assert.match(vectorStoreSource, /DROP TABLE content_cache/);
+assert.ok(
+  serviceSource.indexOf("getIndexTextForAttachment") <
+    serviceSource.indexOf("processor.extractText", serviceSource.indexOf("getIndexTextForAttachment")),
+  "existing Doc2X/MinerU Markdown must be resolved before the PDF fallback",
+);
+assert.match(
+  serviceSource,
+  /const content = await this\.extractItemContent\([\s\S]*?this\.textChunker\.chunk\(content\)/,
+  "resolved item text flows directly into chunking without a SQLite body cache",
 );
 assert.match(
   serviceSource,

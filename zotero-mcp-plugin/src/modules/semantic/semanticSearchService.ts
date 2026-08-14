@@ -1178,39 +1178,6 @@ export class SemanticSearchService {
       ztoolkit.log(`[SemanticSearch] indexItem() force: timestamps unchanged for ${item.key}, re-extracting anyway`);
     }
 
-    // Timestamps changed - try to use cached content first (avoid PDF re-extraction)
-    // A forced run must not answer from the extraction cache either: the whole
-    // point is to run extraction again with the current MinerU settings.
-    const cached = force
-      ? null
-      : await this.vectorStore.getCachedContent(item.key, item.libraryID);
-    if (cached) {
-      // Check if cached content hash matches stored index hash
-      const needsIndex = await this.vectorStore.needsReindex(
-        item.key,
-        cached.hash,
-        item.libraryID,
-      );
-      if (!needsIndex) {
-        // Content unchanged, just update timestamps
-        const status = await this.vectorStore.getIndexStatus(
-          item.key,
-          item.libraryID,
-        );
-        if (status) {
-          await this.vectorStore.updateIndexStatus(
-            item.key, status.chunkCount, cached.hash, itemModified, attachmentModified,
-            item.libraryID,
-          );
-        }
-        this.indexProgress.unchanged = (this.indexProgress.unchanged || 0) + 1;
-        ztoolkit.log(`[SemanticSearch] indexItem() skip: cached content unchanged, updated timestamps`);
-        return { status: 'succeeded' };
-      }
-      // Cache exists but hash indicates content may have changed - re-extract to verify
-      ztoolkit.log(`[SemanticSearch] indexItem() cache hash mismatch, re-extracting content`);
-    }
-
     // Check for pause before content extraction
     if (this._paused || this._aborted) {
       ztoolkit.log(`[SemanticSearch] indexItem() paused/aborted before content extraction: ${item.key}`);
@@ -1225,6 +1192,8 @@ export class SemanticSearchService {
         libraryID: item.libraryID,
         records: [],
         contentHash: 'empty',
+        contentLength: 0,
+        sourceKind: 'zotero-markdown-on-demand',
         itemModified,
         attachmentModified,
         buildID: this._activeBuildID ?? undefined,
@@ -1236,22 +1205,12 @@ export class SemanticSearchService {
 
     // Check for pause after content extraction (before embedding)
     if (this._paused || this._aborted) {
-      // Save cached content but don't continue
-      await this.vectorStore.setCachedContent(
-        item.key, content, this.hashContent(content), item.libraryID,
-      );
       ztoolkit.log(`[SemanticSearch] indexItem() paused/aborted after content extraction: ${item.key}`);
       return { status: 'incomplete' };
     }
 
     // Calculate content hash
     const contentHash = this.hashContent(content);
-
-    // Cache the extracted content for future use
-    await this.vectorStore.setCachedContent(
-      item.key, content, contentHash, item.libraryID,
-    );
-    ztoolkit.log(`[SemanticSearch] indexItem() cached content: ${content.length} chars`);
 
     // Check if content actually changed (compare with stored hash)
     const needsIndex = await this.vectorStore.needsReindex(
@@ -1266,9 +1225,11 @@ export class SemanticSearchService {
         item.libraryID,
       );
       if (status) {
-        await this.vectorStore.updateIndexStatus(
-          item.key, status.chunkCount, contentHash, itemModified, attachmentModified,
-          item.libraryID,
+          await this.vectorStore.updateIndexStatus(
+            item.key, status.chunkCount, contentHash, itemModified, attachmentModified,
+            item.libraryID,
+            content.length,
+            'zotero-markdown-on-demand',
         );
       }
       this.indexProgress.unchanged = (this.indexProgress.unchanged || 0) + 1;
@@ -1323,6 +1284,8 @@ export class SemanticSearchService {
       libraryID: item.libraryID,
       records,
       contentHash,
+      contentLength: content.length,
+      sourceKind: 'zotero-markdown-on-demand',
       itemModified,
       attachmentModified,
       buildID: this._activeBuildID ?? undefined,
@@ -1343,7 +1306,7 @@ export class SemanticSearchService {
    */
   async deleteItemIndex(itemKey: string, libraryID?: number): Promise<void> {
     await this.initialize();
-    await this.vectorStore.deleteItemVectors(itemKey, false, libraryID);
+    await this.vectorStore.deleteItemVectors(itemKey, libraryID);
     ztoolkit.log(`[SemanticSearch] Deleted index for item: ${itemKey} (libraryID=${libraryID ?? 'user'})`);
   }
 

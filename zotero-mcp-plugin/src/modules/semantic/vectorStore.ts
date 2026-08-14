@@ -81,6 +81,8 @@ export interface IndexStatus {
   version: number;
   itemModified?: string;       // Item's dateModified for fast change detection
   attachmentModified?: string; // Latest attachment dateModified
+  contentLength: number;
+  sourceKind: string;
 }
 
 export interface FailedIndexItem {
@@ -128,6 +130,7 @@ export interface VectorStoreStats {
   // Content cache stats
   cachedContentItems: number;
   cachedContentSizeBytes: number;
+  storageMode: 'on-demand';
   // Extended stats for detailed view
   storedDimensions?: number;        // Dimensions of stored vectors
   int8MigrationStatus?: {
@@ -396,7 +399,9 @@ export class VectorStore {
         chunk_count INTEGER NOT NULL,
         content_hash TEXT NOT NULL,
         item_modified TEXT,
-        attachment_modified TEXT
+        attachment_modified TEXT,
+        content_length INTEGER NOT NULL DEFAULT 0,
+        source_kind TEXT NOT NULL DEFAULT 'on-demand'
       )
     `);
 
@@ -457,6 +462,20 @@ export class VectorStore {
     } catch (e) {
       // Column already exists, ignore
     }
+    try {
+      await this.db.queryAsync(
+        `ALTER TABLE index_status ADD COLUMN content_length INTEGER NOT NULL DEFAULT 0`,
+      );
+    } catch {
+      // Column already exists.
+    }
+    try {
+      await this.db.queryAsync(
+        `ALTER TABLE index_status ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'on-demand'`,
+      );
+    } catch {
+      // Column already exists.
+    }
 
     // Migration: Add Int8 quantized vector columns for optimized search
     // vector_int8: Int8 quantized vector data (1 byte per dimension vs 4 bytes)
@@ -481,15 +500,29 @@ export class VectorStore {
       // Column already exists, ignore
     }
 
-    // Content cache table - stores extracted PDF content to avoid re-extraction
-    await this.db.queryAsync(`
-      CREATE TABLE IF NOT EXISTS content_cache (
-        item_key TEXT PRIMARY KEY,
-        full_content TEXT NOT NULL,
-        content_hash TEXT NOT NULL,
-        cached_at INTEGER DEFAULT (strftime('%s', 'now'))
-      )
-    `);
+    const legacyContentCache = Number(
+      await this.db.valueQueryAsync(
+        `SELECT COUNT(*) FROM sqlite_master WHERE type = ? AND name = ?`,
+        ['table', 'content_cache'],
+      ),
+    );
+    if (legacyContentCache > 0) {
+      await this.db.queryAsync(`
+        UPDATE index_status
+        SET content_length = COALESCE(
+              (SELECT LENGTH(full_content)
+               FROM content_cache
+               WHERE content_cache.item_key = index_status.item_key),
+              content_length
+            ),
+            source_kind = 'legacy-source-on-demand'
+        WHERE EXISTS (
+          SELECT 1 FROM content_cache
+          WHERE content_cache.item_key = index_status.item_key
+        )
+      `);
+      await this.db.queryAsync(`DROP TABLE content_cache`);
+    }
 
     // Float32 backup table - stores float32 vectors separately for space efficiency
     // With 3072-dim vectors: int8(4KB) + float32(12KB) = 16.8KB per row in one table
@@ -512,6 +545,15 @@ export class VectorStore {
 
     // Migration: move float32 vectors from embeddings to vectors_f32
     await this.migrateFloat32ToSeparateTable();
+
+    if (legacyContentCache > 0) {
+      await this.db.queryAsync(`PRAGMA wal_checkpoint(TRUNCATE)`);
+      await this.db.queryAsync(`VACUUM`);
+      await this.db.queryAsync(`PRAGMA wal_checkpoint(TRUNCATE)`);
+      ztoolkit.log(
+        '[VectorStore] Removed legacy SQLite body copies and compacted database',
+      );
+    }
 
     ztoolkit.log('[VectorStore] Tables created/verified');
   }
@@ -695,6 +737,8 @@ export class VectorStore {
     libraryID: number;
     records: VectorRecord[];
     contentHash: string;
+    contentLength: number;
+    sourceKind: string;
     itemModified?: string;
     attachmentModified?: string;
     buildID?: string;
@@ -730,13 +774,15 @@ export class VectorStore {
       }
 
       await this.db.queryAsync(
-        `INSERT OR REPLACE INTO index_status (item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified) VALUES (?, strftime('%s', 'now'), 2, ?, ?, ?, ?)`,
+        `INSERT OR REPLACE INTO index_status (item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified, content_length, source_kind) VALUES (?, strftime('%s', 'now'), 2, ?, ?, ?, ?, ?, ?)`,
         [
           storageKey,
           options.records.length,
           options.contentHash,
           options.itemModified || null,
           options.attachmentModified || null,
+          options.contentLength,
+          options.sourceKind,
         ],
       );
       await this.db.queryAsync(
@@ -1797,7 +1843,7 @@ export class VectorStore {
 
     // IMPORTANT: Single-line query to avoid Zotero queryAsync bug with multi-line SQL
     const storageKey = this.toStorageKey(itemKey, libraryID);
-    const rows = await this.db.queryAsync(`SELECT item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified FROM index_status WHERE item_key = ?`, [storageKey]);
+    const rows = await this.db.queryAsync(`SELECT item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified, content_length, source_kind FROM index_status WHERE item_key = ?`, [storageKey]);
 
     // Zotero's queryAsync returns undefined when no rows found
     if (!rows || rows.length === 0) return null;
@@ -1810,7 +1856,9 @@ export class VectorStore {
       contentHash: row.content_hash,
       version: row.version,
       itemModified: row.item_modified,
-      attachmentModified: row.attachment_modified
+      attachmentModified: row.attachment_modified,
+      contentLength: Number(row.content_length || 0),
+      sourceKind: String(row.source_kind || 'on-demand'),
     };
   }
 
@@ -1824,14 +1872,35 @@ export class VectorStore {
     itemModified?: string,
     attachmentModified?: string,
     libraryID?: number,
+    contentLength?: number,
+    sourceKind?: string,
   ): Promise<void> {
     await this.ensureInitialized();
 
     await this.db.queryAsync(`
-      INSERT OR REPLACE INTO index_status
-      (item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified)
-      VALUES (?, strftime('%s', 'now'), 2, ?, ?, ?, ?)
-    `, [this.toStorageKey(itemKey, libraryID), chunkCount, contentHash, itemModified || null, attachmentModified || null]);
+      INSERT INTO index_status
+      (item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified, content_length, source_kind)
+      VALUES (?, strftime('%s', 'now'), 2, ?, ?, ?, ?, COALESCE(?, 0), COALESCE(?, 'on-demand'))
+      ON CONFLICT(item_key) DO UPDATE SET
+        indexed_at = excluded.indexed_at,
+        version = excluded.version,
+        chunk_count = excluded.chunk_count,
+        content_hash = excluded.content_hash,
+        item_modified = excluded.item_modified,
+        attachment_modified = excluded.attachment_modified,
+        content_length = COALESCE(?, index_status.content_length),
+        source_kind = COALESCE(?, index_status.source_kind)
+    `, [
+      this.toStorageKey(itemKey, libraryID),
+      chunkCount,
+      contentHash,
+      itemModified || null,
+      attachmentModified || null,
+      contentLength ?? null,
+      sourceKind ?? null,
+      contentLength ?? null,
+      sourceKind ?? null,
+    ]);
   }
 
   /**
@@ -1872,185 +1941,60 @@ export class VectorStore {
     return status.contentHash !== contentHash;
   }
 
-  // ============ Content Cache Methods ============
-
-  /**
-   * Get cached content for an item
-   * Returns null if not cached or hash doesn't match
-   */
-  async getCachedContent(itemKey: string, libraryID?: number): Promise<{ content: string; hash: string } | null> {
+  async listIndexedContentMetadata(
+    libraryID: number = Zotero.Libraries.userLibraryID,
+    limit = 20,
+  ): Promise<{
+    total: number;
+    items: Array<{
+      itemKey: string;
+      libraryID: number;
+      contentLength: number;
+      hash: string;
+      indexedAt: number;
+      sourceKind: string;
+    }>;
+  }> {
     await this.ensureInitialized();
-
-    // IMPORTANT: Single-line query to avoid Zotero queryAsync bug with multi-line SQL
-    const rows = await this.db.queryAsync(`SELECT full_content, content_hash FROM content_cache WHERE item_key = ?`, [this.toStorageKey(itemKey, libraryID)]);
-
-    if (!rows || rows.length === 0) return null;
-
-    return {
-      content: rows[0].full_content,
-      hash: rows[0].content_hash
-    };
-  }
-
-  /**
-   * Set cached content for an item
-   */
-  async setCachedContent(itemKey: string, content: string, contentHash: string, libraryID?: number): Promise<void> {
-    await this.ensureInitialized();
-
-    await this.db.queryAsync(`
-      INSERT OR REPLACE INTO content_cache (item_key, full_content, content_hash, cached_at)
-      VALUES (?, ?, ?, strftime('%s', 'now'))
-    `, [this.toStorageKey(itemKey, libraryID), content, contentHash]);
-  }
-
-  /**
-   * Delete cached content for an item
-   */
-  async deleteCachedContent(itemKey: string): Promise<void> {
-    await this.ensureInitialized();
-
-    await this.db.queryAsync(`DELETE FROM content_cache WHERE item_key = ?`, [itemKey]);
-  }
-
-  /**
-   * Get all cached content item keys with metadata
-   */
-  async listCachedContent(): Promise<Array<{
-    itemKey: string;
-    contentLength: number;
-    hash: string;
-    cachedAt: number;
-  }>> {
-    await this.ensureInitialized();
-
-    // IMPORTANT: Single-line query to avoid Zotero queryAsync bug with multi-line SQL
-    const rows = await this.db.queryAsync(`SELECT item_key, LENGTH(full_content) as content_length, content_hash, cached_at FROM content_cache ORDER BY cached_at DESC`);
-
-    if (!rows || rows.length === 0) return [];
-
-    return rows.map((row: any) => ({
-      itemKey: row.item_key,
-      contentLength: row.content_length,
-      hash: row.content_hash,
-      cachedAt: row.cached_at
-    }));
-  }
-
-  /**
-   * Full-text search within cached content
-   * Returns items whose content contains the search term
-   */
-  async searchCachedContent(
-    searchTerm: string,
-    options: {
-      limit?: number;
-      caseSensitive?: boolean;
-      itemKeys?: string[];
-    } = {}
-  ): Promise<Array<{
-    itemKey: string;
-    snippet: string;
-    matchCount: number;
-  }>> {
-    await this.ensureInitialized();
-
-    const { limit = 20, caseSensitive = false, itemKeys } = options;
-
-    if (!itemKeys || itemKeys.length === 0) {
-      throw new Error(
-        'itemKeys is required; whole-library full-text scanning is disabled',
-      );
-    }
-
-    // SQLite LIKE is case-insensitive by default for ASCII
-    const searchPattern = `%${searchTerm}%`;
-
-    // IMPORTANT: Single-line query to avoid Zotero queryAsync bug with multi-line SQL
-    const placeholders = itemKeys.map(() => '?').join(',');
+    const where =
+      libraryID === Zotero.Libraries.userLibraryID
+        ? "item_key NOT GLOB '[0-9]*:*'"
+        : 'item_key GLOB ?';
+    const params =
+      libraryID === Zotero.Libraries.userLibraryID
+        ? []
+        : [`${libraryID}:*`];
+    const total = Number(
+      await this.db.valueQueryAsync(
+        `SELECT COUNT(*) FROM index_status WHERE ${where}`,
+        params,
+      ),
+    );
     const rows = await this.db.queryAsync(
-      `SELECT item_key, full_content FROM content_cache WHERE item_key IN (${placeholders}) AND full_content LIKE ? LIMIT ?`,
-      [...itemKeys, searchPattern, limit * 2],
-    ); // Fetch more to account for filtering
-
-    if (!rows || rows.length === 0) return [];
-
-    const results: Array<{ itemKey: string; snippet: string; matchCount: number }> = [];
-
-    for (const row of rows) {
-      const content: string = row.full_content;
-      const searchStr = caseSensitive ? searchTerm : searchTerm.toLowerCase();
-      const contentToSearch = caseSensitive ? content : content.toLowerCase();
-
-      // Count matches
-      let matchCount = 0;
-      let pos = 0;
-      while ((pos = contentToSearch.indexOf(searchStr, pos)) !== -1) {
-        matchCount++;
-        pos += searchStr.length;
-      }
-
-      if (matchCount > 0) {
-        // Extract snippet around first match
-        const firstMatch = contentToSearch.indexOf(searchStr);
-        const snippetStart = Math.max(0, firstMatch - 100);
-        const snippetEnd = Math.min(content.length, firstMatch + searchTerm.length + 100);
-        let snippet = content.substring(snippetStart, snippetEnd);
-        if (snippetStart > 0) snippet = '...' + snippet;
-        if (snippetEnd < content.length) snippet = snippet + '...';
-
-        results.push({
-          itemKey: row.item_key,
-          snippet,
-          matchCount
-        });
-      }
-
-      if (results.length >= limit) break;
-    }
-
-    // Sort by match count descending
-    results.sort((a, b) => b.matchCount - a.matchCount);
-
-    return results;
-  }
-
-  /**
-   * Get full cached content for an item (alias for getCachedContent for clarity)
-   */
-  async getFullContent(itemKey: string): Promise<string | null> {
-    const cached = await this.getCachedContent(itemKey);
-    return cached ? cached.content : null;
-  }
-
-  /**
-   * Get full cached content for multiple items
-   */
-  async getFullContentBatch(itemKeys: string[]): Promise<Map<string, string>> {
-    await this.ensureInitialized();
-
-    const result = new Map<string, string>();
-    if (itemKeys.length === 0) return result;
-
-    const placeholders = itemKeys.map(() => '?').join(',');
-    // IMPORTANT: Single-line query to avoid Zotero queryAsync bug with multi-line SQL
-    const rows = await this.db.queryAsync(`SELECT item_key, full_content FROM content_cache WHERE item_key IN (${placeholders})`, itemKeys);
-
-    if (!rows || rows.length === 0) return result;
-
-    for (const row of rows) {
-      result.set(row.item_key, row.full_content);
-    }
-
-    return result;
+      `SELECT item_key, indexed_at, content_hash, content_length, source_kind FROM index_status WHERE ${where} ORDER BY indexed_at DESC LIMIT ?`,
+      [...params, limit],
+    );
+    return {
+      total,
+      items: (rows || []).map((row: any) => {
+        const identity = this.fromStorageKey(String(row.item_key));
+        return {
+          itemKey: identity.itemKey,
+          libraryID: identity.libraryID,
+          contentLength: Number(row.content_length || 0),
+          hash: String(row.content_hash || ''),
+          indexedAt: Number(row.indexed_at || 0),
+          sourceKind: String(row.source_kind || 'on-demand'),
+        };
+      }),
+    };
   }
 
   /**
    * Delete vectors for an item
    * @param itemKey The item key to delete
-   * @param deleteContentCache If true, also delete content cache (use when item is permanently deleted)
    */
-  async deleteItemVectors(itemKey: string, deleteContentCache: boolean = false, libraryID?: number): Promise<void> {
+  async deleteItemVectors(itemKey: string, libraryID?: number): Promise<void> {
     await this.ensureInitialized();
 
     const storageKey = this.toStorageKey(itemKey, libraryID);
@@ -2067,12 +2011,6 @@ export class VectorStore {
         `DELETE FROM index_status WHERE item_key = ?`,
         [storageKey]
       );
-      if (deleteContentCache) {
-        await this.db.queryAsync(
-          `DELETE FROM content_cache WHERE item_key = ?`,
-          [storageKey]
-        );
-      }
     });
 
     // Clear cache entries
@@ -2082,8 +2020,7 @@ export class VectorStore {
       }
     }
 
-    const cacheMsg = deleteContentCache ? 'including content cache' : 'content cache preserved';
-    ztoolkit.log(`[VectorStore] Deleted vectors for item: ${itemKey} (${cacheMsg})`);
+    ztoolkit.log(`[VectorStore] Deleted vectors for item: ${itemKey}`);
     await this.publishGpuMutation({
       kind: 'itemsDeleted',
       items: [
@@ -2098,7 +2035,6 @@ export class VectorStore {
   /** Delete only the requested items while preserving every other index row. */
   async deleteItemsVectors(
     itemKeys: string[],
-    deleteContentCache: boolean = false,
     libraryID?: number,
   ): Promise<void> {
     await this.ensureInitialized();
@@ -2124,12 +2060,6 @@ export class VectorStore {
           `DELETE FROM index_status WHERE item_key IN (${placeholders})`,
           batch,
         );
-        if (deleteContentCache) {
-          await this.db.queryAsync(
-            `DELETE FROM content_cache WHERE item_key IN (${placeholders})`,
-            batch,
-          );
-        }
       }
     });
 
@@ -2139,7 +2069,7 @@ export class VectorStore {
       }
     }
     ztoolkit.log(
-      `[VectorStore] Deleted vectors for ${storageKeys.length} targeted items (${deleteContentCache ? 'including content cache' : 'content cache preserved'})`,
+      `[VectorStore] Deleted vectors for ${storageKeys.length} targeted items`,
     );
     await this.publishGpuMutation({
       kind: 'itemsDeleted',
@@ -2163,8 +2093,7 @@ export class VectorStore {
   }
 
   /**
-   * Clear vectors and index status (preserves content cache)
-   * Use this for re-indexing while keeping extracted content
+   * Clear vectors and index status.
    *
    * @param libraryID Restrict the wipe to one library. A rebuild of a group
    *   library must not delete My Library's index, and vice versa, so every
@@ -2211,8 +2140,6 @@ export class VectorStore {
     }
 
     this.vectorCache.clear();
-    // Note: content_cache is preserved as full-text database
-
     // VACUUM to reclaim disk space (DELETE only marks pages as free)
     try {
       ztoolkit.log(`[VectorStore] Running VACUUM to reclaim disk space...`);
@@ -2228,31 +2155,25 @@ export class VectorStore {
     );
   }
 
-  /**
-   * Clear everything including content cache
-   * Use this for complete reset
-   */
+  /** Clear all semantic index rows. */
   async clearAll(): Promise<void> {
     await this.ensureInitialized();
 
     // Get counts before deletion for logging
     const beforeEmbeddings = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM embeddings`);
     const beforeIndex = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM index_status`);
-    const beforeCache = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM content_cache`);
-    ztoolkit.log(`[VectorStore] clearAll() starting: embeddings=${beforeEmbeddings}, index_status=${beforeIndex}, content_cache=${beforeCache}`);
+    ztoolkit.log(`[VectorStore] clearAll() starting: embeddings=${beforeEmbeddings}, index_status=${beforeIndex}`);
 
     // Execute DELETE statements directly
     await this.db.queryAsync(`DELETE FROM embeddings`);
     await this.db.queryAsync(`DELETE FROM vectors_f32`);
     await this.db.queryAsync(`DELETE FROM index_status`);
-    await this.db.queryAsync(`DELETE FROM content_cache`);
 
     // Verify deletion
     const afterEmbeddings = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM embeddings`);
     const afterF32 = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM vectors_f32`);
     const afterIndex = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM index_status`);
-    const afterCache = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM content_cache`);
-    ztoolkit.log(`[VectorStore] clearAll() completed: embeddings=${afterEmbeddings}, vectors_f32=${afterF32}, index_status=${afterIndex}, content_cache=${afterCache}`);
+    ztoolkit.log(`[VectorStore] clearAll() completed: embeddings=${afterEmbeddings}, vectors_f32=${afterF32}, index_status=${afterIndex}`);
 
     this.vectorCache.clear();
 
@@ -2286,14 +2207,6 @@ export class VectorStore {
     );
     const en = await this.db.valueQueryAsync(
       `SELECT COUNT(*) FROM embeddings WHERE language = 'en'`
-    );
-
-    // Content cache stats
-    const cachedItems = await this.db.valueQueryAsync(
-      `SELECT COUNT(*) FROM content_cache`
-    );
-    const cachedSize = await this.db.valueQueryAsync(
-      `SELECT COALESCE(SUM(LENGTH(full_content)), 0) FROM content_cache`
     );
 
     // Get stored dimensions (from first vector)
@@ -2349,8 +2262,9 @@ export class VectorStore {
       totalItems: items || 0,
       zhVectors: zh || 0,
       enVectors: en || 0,
-      cachedContentItems: cachedItems || 0,
-      cachedContentSizeBytes: cachedSize || 0,
+      cachedContentItems: 0,
+      cachedContentSizeBytes: 0,
+      storageMode: 'on-demand',
       storedDimensions,
       int8MigrationStatus,
       dbSizeBytes,

@@ -1344,14 +1344,14 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
       // Full-text Database Tool (read-only operations)
       {
         name: 'fulltext_database',
-        description: 'Access the cached full-text database (read-only). The search action is second-stage only and requires itemKeys returned by hybrid_search; unscoped whole-library content scanning is disabled. Actions: list, search, get, stats.',
+        description: 'Read full text on demand. Search is second-stage only and requires itemKeys returned by hybrid_search; unscoped whole-library content scanning is disabled. Actions: list, search, get, stats.',
         inputSchema: {
           type: 'object',
           properties: {
             action: {
               type: 'string',
               enum: ['list', 'search', 'get', 'stats'],
-              description: 'Action: list (show cached items), search (search within content), get (get full content), stats (database statistics)'
+              description: 'Action: list (show indexed metadata), search (search explicit candidate content), get (read explicit item content), stats (database statistics)'
             },
             query: {
               type: 'string',
@@ -1370,6 +1370,10 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
             caseSensitive: {
               type: 'boolean',
               description: 'Case sensitive search (default: false)'
+            },
+            libraryID: {
+              type: 'number',
+              description: 'Optional Zotero library ID (default: user library)'
             }
           },
           required: ['action']
@@ -3092,116 +3096,11 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
 
   private async callFulltextDatabase(args: any): Promise<any> {
     try {
-      const { getVectorStore } = await import('./semantic/vectorStore');
-      const vectorStore = getVectorStore();
-      await vectorStore.initialize();
-
-      const { action, query, itemKeys, limit = 20, caseSensitive = false } = args;
-
-      switch (action) {
-        case 'list': {
-          const cachedItems = await vectorStore.listCachedContent();
-          const limitedItems = cachedItems.slice(0, limit);
-
-          return {
-            action: 'list',
-            data: limitedItems,
-            metadata: {
-              extractedAt: new Date().toISOString(),
-              totalCached: cachedItems.length,
-              returned: limitedItems.length,
-              message: `Found ${cachedItems.length} items in full-text database`
-            }
-          };
-        }
-
-        case 'search': {
-          if (!query) {
-            throw new Error('query is required for search action');
-          }
-
-          if (!itemKeys || itemKeys.length === 0) {
-            throw new Error('itemKeys is required for search action; whole-library full-text scanning is disabled');
-          }
-          const searchResults = await vectorStore.searchCachedContent(query, {
-            limit,
-            caseSensitive,
-            itemKeys,
-          });
-
-          return {
-            action: 'search',
-            query,
-            data: searchResults,
-            metadata: {
-              extractedAt: new Date().toISOString(),
-              resultCount: searchResults.length,
-              caseSensitive,
-              message: `Found ${searchResults.length} items matching "${query}"`
-            }
-          };
-        }
-
-        case 'get': {
-          if (!itemKeys || itemKeys.length === 0) {
-            throw new Error('itemKeys is required for get action');
-          }
-
-          const contentMap = await vectorStore.getFullContentBatch(itemKeys);
-          const results: Array<{ itemKey: string; content: string | null; contentLength: number }> = [];
-
-          for (const key of itemKeys) {
-            const content = contentMap.get(key) || null;
-            results.push({
-              itemKey: key,
-              content,
-              contentLength: content ? content.length : 0
-            });
-          }
-
-          return {
-            action: 'get',
-            data: results,
-            metadata: {
-              extractedAt: new Date().toISOString(),
-              requested: itemKeys.length,
-              found: results.filter(r => r.content !== null).length,
-              message: `Retrieved content for ${results.filter(r => r.content !== null).length}/${itemKeys.length} items`
-            }
-          };
-        }
-
-        case 'stats': {
-          const stats = await vectorStore.getStats();
-
-          // Format size nicely
-          const formatSize = (bytes: number) => {
-            if (bytes < 1024) return `${bytes} B`;
-            if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KB`;
-            return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-          };
-
-          return {
-            action: 'stats',
-            data: {
-              cachedItems: stats.cachedContentItems,
-              cachedContentSize: stats.cachedContentSizeBytes,
-              cachedContentSizeFormatted: formatSize(stats.cachedContentSizeBytes),
-              indexedItems: stats.totalItems,
-              totalVectors: stats.totalVectors,
-              zhVectors: stats.zhVectors,
-              enVectors: stats.enVectors
-            },
-            metadata: {
-              extractedAt: new Date().toISOString(),
-              message: `Full-text database: ${stats.cachedContentItems} items, ${formatSize(stats.cachedContentSizeBytes)}`
-            }
-          };
-        }
-
-        default:
-          throw new Error(`Unknown action: ${action}. Use list, search, get, or stats. Database management is done through Zotero preferences.`);
-      }
+      const { createFulltextDatabaseService } = await import(
+        './fulltextDatabaseService'
+      );
+      const service = await createFulltextDatabaseService();
+      return await service.execute(args);
     } catch (error) {
       ztoolkit.log(`[StreamableMCP] Fulltext database error: ${error}`, 'error');
       return {

@@ -99,6 +99,34 @@ export class FulltextService {
     }
   }
 
+  async getItemFulltextText(
+    itemKey: string,
+    libraryID: number = Zotero.Libraries.userLibraryID,
+  ): Promise<{
+    content: string | null;
+    contentLength: number;
+    sources: string[];
+  }> {
+    const resolved = await this.getItemFulltext(itemKey, libraryID);
+    const parts = [
+      resolved.title,
+      resolved.abstract,
+      ...(resolved.fulltext.attachments || []).map(
+        (attachment: any) => attachment.content,
+      ),
+      ...(resolved.fulltext.notes || []).map((note: any) => note.content),
+      resolved.fulltext.webpage?.content,
+    ].filter((part): part is string =>
+      typeof part === "string" && part.trim().length > 0,
+    );
+    const content = parts.join("\n\n").trim();
+    return {
+      content: content || null,
+      contentLength: content.length,
+      sources: Array.from(new Set(resolved.metadata.sources || [])),
+    };
+  }
+
   /**
    * Get content from a specific attachment
    * @param attachment - Zotero attachment item
