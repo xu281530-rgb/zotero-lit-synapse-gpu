@@ -49,3 +49,7 @@ docs/
 # Zotero plugin specific
 zotero-mcp-plugin/addon/
 zotero-mcp-plugin/build/
+zotero-mcp-plugin/.cuda-downloads/
+zotero-mcp-plugin/.cuda-toolkit/
+zotero-mcp-plugin/native/vector-gpu/build/
+zotero-mcp-plugin/native/vector-gpu/.build/

@@ -318,6 +318,13 @@ pref-mineru-unified-flow = Unified flow: semantic indexing first generates or re
 # --- Hybrid search ---
 pref-hybrid-title = Hybrid Search
 pref-hybrid-desc = Keyword + semantic retrieval, fused into one 0-1 relevance score. Used both to find literature across the library and to dig into a single document.
+pref-hybrid-gpu-label = Enable GPU vector acceleration
+pref-hybrid-gpu-hint = NVIDIA graphics cards only; a compatible NVIDIA driver is required.
+pref-hybrid-gpu-status-disabled = GPU acceleration is off.
+pref-hybrid-gpu-status-preparing = Preparing GPU resources...
+pref-hybrid-gpu-status-loading = Loading vectors into GPU memory ({ $loaded }/{ $total })...
+pref-hybrid-gpu-status-available = GPU ready: { $device }, { $vectors } vectors resident.
+pref-hybrid-gpu-status-fallback = GPU unavailable; using CPU ({ $code }): { $reason }
 pref-hybrid-retrieval-label = Retrieval limits
 pref-hybrid-max-documents-label = Max highly relevant documents
 pref-hybrid-max-documents-hint = How many documents one library-wide search may return. An upper bound only - weaker matches are never added to fill it.

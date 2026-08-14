@@ -12,6 +12,8 @@ declare let ztoolkit: ZToolkit;
 const PREF_PREFIX = "extensions.zotero.zotero-mcp-plugin.";
 
 export interface HybridSearchSettings {
+  /** Use the bundled NVIDIA CUDA worker when it is available. */
+  gpuAccelerationEnabled: boolean;
   /** Upper bound on documents returned by library-level hybrid search. */
   maxDocuments: number;
   /** Upper bound on chunks returned per document by search_fulltext. */
@@ -29,6 +31,7 @@ export interface HybridSearchSettings {
 }
 
 export const HYBRID_SETTING_DEFAULTS: HybridSearchSettings = {
+  gpuAccelerationEnabled: false,
   maxDocuments: 20,
   maxChunksPerItem: 5,
   minScore: 0.6,
@@ -49,6 +52,7 @@ export const HYBRID_SETTING_BOUNDS = {
 } as const;
 
 export const HYBRID_SETTING_PREF_KEYS = {
+  gpuAccelerationEnabled: "hybrid.gpuAccelerationEnabled",
   maxDocuments: "hybrid.maxDocuments",
   maxChunksPerItem: "hybrid.maxChunksPerItem",
   minScore: "hybrid.minScore",
@@ -64,8 +68,13 @@ function clamp(value: number, min: number, max: number): number {
   return value;
 }
 
+type NumericHybridSetting = Exclude<
+  keyof HybridSearchSettings,
+  "gpuAccelerationEnabled"
+>;
+
 function readNumberPref(
-  key: keyof HybridSearchSettings,
+  key: NumericHybridSetting,
   integer: boolean,
 ): number {
   const fallback = HYBRID_SETTING_DEFAULTS[key];
@@ -86,6 +95,19 @@ function readNumberPref(
 
 export function getHybridSearchSettings(): HybridSearchSettings {
   return {
+    gpuAccelerationEnabled:
+      (() => {
+        try {
+          return (
+            Zotero.Prefs.get(
+              PREF_PREFIX + HYBRID_SETTING_PREF_KEYS.gpuAccelerationEnabled,
+              true,
+            ) === true
+          );
+        } catch {
+          return HYBRID_SETTING_DEFAULTS.gpuAccelerationEnabled;
+        }
+      })(),
     maxDocuments: readNumberPref("maxDocuments", true),
     maxChunksPerItem: readNumberPref("maxChunksPerItem", true),
     minScore: readNumberPref("minScore", false),

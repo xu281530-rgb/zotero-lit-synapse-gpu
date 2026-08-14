@@ -14,6 +14,18 @@ import {
   runVectorScanBenchmark,
   type VectorScanBenchmarkResult,
 } from './vectorScanBenchmark';
+import {
+  getGpuVectorService,
+} from './gpuVectorService';
+import type {
+  GpuVectorDataProvider,
+  GpuVectorIdentity,
+  GpuVectorMutation,
+  GpuVectorSearchBackend,
+  GpuVectorSearchRequest,
+  GpuVectorSnapshotInfo,
+  GpuVectorSnapshotRow,
+} from './gpuVectorBackend';
 
 export interface VectorRecord {
   itemKey: string;
@@ -41,6 +53,23 @@ export interface SearchResult {
   language: string;
   /** Internal database identity used for batched text hydration. */
   rowId?: number;
+}
+
+export interface VectorSearchOptions {
+  topK?: number;
+  /** Aggregate chunks by document and optionally cap distinct documents. */
+  groupByItem?: boolean;
+  documentLimit?: number;
+  maxChunksPerItem?: number;
+  includeChunkText?: boolean;
+  language?: 'zh' | 'en' | 'all';
+  itemKeys?: string[];
+  minScore?: number;
+  libraryID?: number;
+  deadlineAt?: number;
+  signal?: AbortSignal;
+  /** Filled in with how many stored vectors this scan actually read. */
+  stats?: { scanned?: number };
 }
 
 export interface IndexStatus {
@@ -123,8 +152,18 @@ export class VectorStore {
 
   // Debug: instance ID for tracking multiple instances
   private instanceId: number;
+  private readonly gpuBackend: GpuVectorSearchBackend;
+  private readonly gpuDataProvider: GpuVectorDataProvider;
 
-  constructor() {
+  constructor(gpuBackend: GpuVectorSearchBackend = getGpuVectorService()) {
+    this.gpuBackend = gpuBackend;
+    this.gpuDataProvider = {
+      getSnapshotInfo: () => this.getGpuSnapshotInfo(),
+      readSnapshotBatch: (afterRowId, limit) =>
+        this.readGpuSnapshotBatch(afterRowId, limit),
+      readItems: (identities) => this.readGpuItems(identities),
+    };
+    this.gpuBackend.registerProvider(this.gpuDataProvider);
     this.instanceId = ++vectorStoreInstanceCounter;
     ztoolkit.log(`[VectorStore] Constructor called, instanceId=${this.instanceId}, total instances=${vectorStoreInstanceCounter}`);
   }
@@ -181,6 +220,11 @@ export class VectorStore {
 
       this.initialized = true;
       ztoolkit.log('[VectorStore] Initialized successfully');
+      if (this.gpuBackend.isEnabled()) {
+        void this.gpuBackend.startIfEnabled().catch(() => {
+          // The backend records its own fallback state and user notification.
+        });
+      }
     } catch (error) {
       ztoolkit.log(`[VectorStore] Initialization failed: ${error}`, 'error');
       throw error;
@@ -472,7 +516,8 @@ export class VectorStore {
 
   private async migrateLegacyFailureMarkers(): Promise<void> {
     const rows = await this.db.queryAsync(
-      `SELECT item_key, content_hash FROM index_status WHERE content_hash LIKE 'failed:%'`,
+      `SELECT item_key, content_hash FROM index_status WHERE content_hash LIKE ?`,
+      ['failed:%'],
     );
     for (const row of rows || []) {
       const identity = this.fromStorageKey(String(row.item_key));
@@ -482,8 +527,8 @@ export class VectorStore {
         [identity.libraryID, identity.itemKey, errorType, 'Legacy indexing failure', Date.now()],
       );
       await this.db.queryAsync(
-        `DELETE FROM index_status WHERE item_key = ? AND content_hash LIKE 'failed:%'`,
-        [row.item_key],
+        `DELETE FROM index_status WHERE item_key = ? AND content_hash LIKE ?`,
+        [row.item_key, 'failed:%'],
       );
     }
   }
@@ -558,28 +603,35 @@ export class VectorStore {
     // Encode Int8 data as base64 string for reliable SQLite storage
     const int8Base64 = this.int8ArrayToBase64(quantized.int8Data);
 
-    // Write int8 + metadata to embeddings (vector column = empty blob placeholder)
-    await this.db.queryAsync(`INSERT OR REPLACE INTO embeddings (item_key, chunk_id, vector, language, chunk_text, dimensions, vector_int8, vector_scale, vector_norm) VALUES (?, ?, x'', ?, ?, ?, ?, ?, ?)`, [
-      storageKey,
-      record.chunkId,
-      record.language,
-      record.chunkText || '',
-      record.vector.length,
-      int8Base64,
-      quantized.scale,
-      quantized.norm
-    ]);
+    await this.db.executeTransaction(async () => {
+      // Write int8 + metadata to embeddings (vector column = empty blob placeholder)
+      await this.db.queryAsync(`INSERT OR REPLACE INTO embeddings (item_key, chunk_id, vector, language, chunk_text, dimensions, vector_int8, vector_scale, vector_norm) VALUES (?, ?, x'', ?, ?, ?, ?, ?, ?)`, [
+        storageKey,
+        record.chunkId,
+        record.language,
+        record.chunkText || '',
+        record.vector.length,
+        int8Base64,
+        quantized.scale,
+        quantized.norm
+      ]);
 
-    // Write float32 vector to separate table
-    await this.db.queryAsync(`INSERT OR REPLACE INTO vectors_f32 (item_key, chunk_id, vector) VALUES (?, ?, ?)`, [
-      storageKey,
-      record.chunkId,
-      vectorBlob
-    ]);
+      // Write float32 vector to separate table
+      await this.db.queryAsync(`INSERT OR REPLACE INTO vectors_f32 (item_key, chunk_id, vector) VALUES (?, ?, ?)`, [
+        storageKey,
+        record.chunkId,
+        vectorBlob
+      ]);
+    });
 
     // Update cache
     const cacheKey = `${storageKey}_${record.chunkId}`;
     this.updateCache(cacheKey, record.vector);
+    await this.publishGpuMutation({
+      kind: 'itemChanged',
+      libraryID: record.libraryID ?? Zotero.Libraries.userLibraryID,
+      itemKey: record.itemKey,
+    });
   }
 
   /**
@@ -623,6 +675,17 @@ export class VectorStore {
     });
 
     ztoolkit.log(`[VectorStore] Inserted ${records.length} vectors with Int8 quantization`);
+    const changedItems = new Map<string, GpuVectorIdentity>();
+    for (const record of records) {
+      const identity = {
+        libraryID: record.libraryID ?? Zotero.Libraries.userLibraryID,
+        itemKey: record.itemKey,
+      };
+      changedItems.set(`${identity.libraryID}:${identity.itemKey}`, identity);
+    }
+    for (const identity of changedItems.values()) {
+      await this.publishGpuMutation({ kind: 'itemChanged', ...identity });
+    }
   }
 
   async replaceItemIndex(options: {
@@ -692,6 +755,11 @@ export class VectorStore {
     for (const record of options.records) {
       this.updateCache(`${storageKey}_${record.chunkId}`, record.vector);
     }
+    await this.publishGpuMutation({
+      kind: 'itemChanged',
+      libraryID: options.libraryID,
+      itemKey: options.itemKey,
+    });
   }
 
   /**
@@ -752,22 +820,58 @@ export class VectorStore {
    */
   async search(
     queryVector: Float32Array,
-    options: {
-      topK?: number;
-      /** Aggregate chunks by document and optionally cap distinct documents. */
-      groupByItem?: boolean;
-      documentLimit?: number;
-      maxChunksPerItem?: number;
-      includeChunkText?: boolean;
-      language?: 'zh' | 'en' | 'all';
-      itemKeys?: string[];
-      minScore?: number;
-      libraryID?: number;
-      deadlineAt?: number;
-      signal?: AbortSignal;
-      /** Filled in with how many stored vectors this scan actually read. */
-      stats?: { scanned?: number };
-    } = {}
+    options: VectorSearchOptions = {},
+  ): Promise<SearchResult[]> {
+    if (!this.gpuBackend.isEnabled()) {
+      return this.searchCpu(queryVector, options);
+    }
+
+    await this.ensureInitialized();
+    this.throwIfVectorScanCancelled(options.signal, options.deadlineAt);
+    if (options.itemKeys !== undefined && options.itemKeys.length === 0) {
+      return [];
+    }
+
+    const quantized = this.quantizeWithNorm(queryVector);
+    if (quantized.norm === 0) return [];
+    const request: GpuVectorSearchRequest = {
+      query: quantized.int8Data,
+      queryNorm: quantized.norm,
+      topK: options.topK ?? 10,
+      groupByItem: options.groupByItem ?? false,
+      documentLimit: options.documentLimit,
+      maxChunksPerItem: options.maxChunksPerItem ?? 3,
+      language: options.language ?? 'all',
+      itemKeys: options.itemKeys,
+      minScore: options.minScore ?? 0,
+      libraryID: options.libraryID ?? Zotero.Libraries.userLibraryID,
+      timeoutMs:
+        options.deadlineAt === undefined
+          ? undefined
+          : Math.max(0, options.deadlineAt - Date.now()),
+      signal: options.signal,
+      stats: options.stats,
+    };
+
+    try {
+      let results = await this.gpuBackend.search(request);
+      this.throwIfVectorScanCancelled(options.signal, options.deadlineAt);
+      if (options.includeChunkText ?? true) {
+        results = await this.hydrateSearchResultTexts(results);
+      }
+      return results;
+    } catch (error) {
+      if (options.signal?.aborted) {
+        throw new Error('Vector scan cancelled');
+      }
+      this.gpuBackend.fallback(error);
+      return this.searchCpu(queryVector, options);
+    }
+  }
+
+  private async searchCpu(
+    queryVector: Float32Array,
+    options: VectorSearchOptions = {},
   ): Promise<SearchResult[]> {
     await this.ensureInitialized();
 
@@ -1171,6 +1275,103 @@ export class VectorStore {
     return vectors;
   }
 
+  private async getGpuSnapshotInfo(): Promise<GpuVectorSnapshotInfo> {
+    await this.ensureInitialized();
+    const rows = await this.db.queryAsync(
+      `SELECT COUNT(*) AS total, MIN(dimensions) AS min_dimensions, MAX(dimensions) AS max_dimensions, SUM(CASE WHEN vector_int8 IS NULL OR vector_norm IS NULL THEN 1 ELSE 0 END) AS missing_int8 FROM embeddings`,
+    );
+    const row = rows?.[0] ?? {};
+    const total = Number(row.total ?? 0);
+    if (total === 0) return { total: 0, dimensions: 0 };
+    if (Number(row.missing_int8 ?? 0) > 0) {
+      throw Object.assign(
+        new Error(
+          'The semantic index contains vectors without Int8 data; rebuild the index before enabling GPU acceleration',
+        ),
+        { code: 'INDEX_UNSUPPORTED' },
+      );
+    }
+    const minDimensions = Number(row.min_dimensions);
+    const maxDimensions = Number(row.max_dimensions);
+    if (
+      !Number.isInteger(minDimensions) ||
+      minDimensions <= 0 ||
+      minDimensions !== maxDimensions
+    ) {
+      throw Object.assign(
+        new Error(
+          'The semantic index contains mixed vector dimensions; rebuild the index before enabling GPU acceleration',
+        ),
+        { code: 'DIMENSION_MISMATCH' },
+      );
+    }
+    return { total, dimensions: minDimensions };
+  }
+
+  private mapGpuSnapshotRow(row: any): GpuVectorSnapshotRow {
+    const identity = this.fromStorageKey(String(row.item_key));
+    const dimensions = Number(row.dimensions);
+    return {
+      rowId: Number(row.id),
+      libraryID: identity.libraryID,
+      itemKey: identity.itemKey,
+      chunkId: Number(row.chunk_id),
+      language: row.language === 'zh' ? 'zh' : 'en',
+      dimensions,
+      norm: Number(row.vector_norm),
+      vector: this.bufferToInt8Array(row.vector_int8, dimensions),
+    };
+  }
+
+  private async readGpuSnapshotBatch(
+    afterRowId: number,
+    limit: number,
+  ): Promise<GpuVectorSnapshotRow[]> {
+    await this.ensureInitialized();
+    const rows = await this.db.queryAsync(
+      `SELECT id, item_key, chunk_id, language, dimensions, vector_int8, vector_norm FROM embeddings WHERE id > ? ORDER BY id LIMIT ?`,
+      [afterRowId, limit],
+    );
+    return (rows || []).map((row: any) => this.mapGpuSnapshotRow(row));
+  }
+
+  private async readGpuItems(
+    identities: GpuVectorIdentity[],
+  ): Promise<GpuVectorSnapshotRow[]> {
+    await this.ensureInitialized();
+    const storageKeys = Array.from(
+      new Set(
+        identities.map((identity) =>
+          this.toStorageKey(identity.itemKey, identity.libraryID),
+        ),
+      ),
+    );
+    const result: GpuVectorSnapshotRow[] = [];
+    for (let offset = 0; offset < storageKeys.length; offset += 400) {
+      const batch = storageKeys.slice(offset, offset + 400);
+      const placeholders = batch.map(() => '?').join(',');
+      const rows = await this.db.queryAsync(
+        `SELECT id, item_key, chunk_id, language, dimensions, vector_int8, vector_norm FROM embeddings WHERE item_key IN (${placeholders}) ORDER BY id`,
+        batch,
+      );
+      result.push(
+        ...(rows || []).map((row: any) => this.mapGpuSnapshotRow(row)),
+      );
+    }
+    return result;
+  }
+
+  private async publishGpuMutation(
+    mutation: GpuVectorMutation,
+  ): Promise<void> {
+    if (!this.gpuBackend.isEnabled()) return;
+    try {
+      await this.gpuBackend.publishMutation(mutation);
+    } catch (error) {
+      this.gpuBackend.fallback(error);
+    }
+  }
+
   private throwIfVectorScanCancelled(
     signal?: AbortSignal,
     deadlineAt?: number,
@@ -1326,7 +1527,10 @@ export class VectorStore {
     await this.ensureInitialized();
 
     // IMPORTANT: Single-line query to avoid Zotero queryAsync bug with multi-line SQL
-    const rows = await this.db.queryAsync(`SELECT item_key FROM index_status WHERE content_hash NOT LIKE 'failed:%'`);
+    const rows = await this.db.queryAsync(
+      `SELECT item_key FROM index_status WHERE content_hash NOT LIKE ?`,
+      ['failed:%'],
+    );
 
     if (!rows || rows.length === 0) {
       return new Set();
@@ -1553,6 +1757,7 @@ export class VectorStore {
       const identity = this.fromStorageKey(key.slice(0, key.lastIndexOf('_')));
       if (identity.libraryID === libraryID) this.vectorCache.delete(key);
     }
+    await this.publishGpuMutation({ kind: 'libraryCleared', libraryID });
   }
 
   /**
@@ -1850,6 +2055,15 @@ export class VectorStore {
 
     const cacheMsg = deleteContentCache ? 'including content cache' : 'content cache preserved';
     ztoolkit.log(`[VectorStore] Deleted vectors for item: ${itemKey} (${cacheMsg})`);
+    await this.publishGpuMutation({
+      kind: 'itemsDeleted',
+      items: [
+        {
+          libraryID: libraryID ?? Zotero.Libraries.userLibraryID,
+          itemKey,
+        },
+      ],
+    });
   }
 
   /** Delete only the requested items while preserving every other index row. */
@@ -1898,6 +2112,10 @@ export class VectorStore {
     ztoolkit.log(
       `[VectorStore] Deleted vectors for ${storageKeys.length} targeted items (${deleteContentCache ? 'including content cache' : 'content cache preserved'})`,
     );
+    await this.publishGpuMutation({
+      kind: 'itemsDeleted',
+      items: storageKeys.map((storageKey) => this.fromStorageKey(storageKey)),
+    });
   }
 
   /**
@@ -1974,6 +2192,11 @@ export class VectorStore {
     } catch (vacuumError) {
       ztoolkit.log(`[VectorStore] VACUUM failed (non-critical): ${vacuumError}`, 'warn');
     }
+    await this.publishGpuMutation(
+      libraryID === undefined
+        ? { kind: 'allCleared' }
+        : { kind: 'libraryCleared', libraryID },
+    );
   }
 
   /**
@@ -2012,6 +2235,7 @@ export class VectorStore {
     } catch (vacuumError) {
       ztoolkit.log(`[VectorStore] VACUUM failed (non-critical): ${vacuumError}`, 'warn');
     }
+    await this.publishGpuMutation({ kind: 'allCleared' });
   }
 
   /**
@@ -2788,6 +3012,7 @@ export class VectorStore {
     this.initialized = false;
     this.initPromise = null;
     this.vectorCache.clear();
+    void this.gpuBackend.shutdown();
 
     // Close database asynchronously (fire and forget)
     if (db) {

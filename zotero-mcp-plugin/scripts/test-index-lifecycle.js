@@ -21,7 +21,7 @@ const serviceSource = fs.readFileSync(
   "utf8",
 );
 
-function mockStore() {
+function mockStore(gpuBackend) {
   const failureRows = new Map();
   const targetRows = new Map();
   const buildRows = new Map();
@@ -113,10 +113,57 @@ function mockStore() {
       return 0;
     },
   };
-  const store = new VectorStore();
+  const store = new VectorStore(gpuBackend);
   store.initialized = true;
   store.db = db;
   return { store, calls };
+}
+
+function mutationBackend(events) {
+  return {
+    isEnabled: () => true,
+    registerProvider: () => {},
+    startIfEnabled: async () => {},
+    search: async () => [],
+    publishMutation: async (event) => events.push(event),
+    fallback: () => {},
+    setEnabled: async () => {},
+    shutdown: async () => {},
+  };
+}
+
+// Zotero 9 rejects LIKE patterns embedded directly in SQL. Keep the legacy
+// failure migration and indexed-item UI query on the same bound-parameter
+// contract as production DBConnection.queryAsync().
+{
+  const calls = [];
+  const db = {
+    queryAsync: async (sql, params = []) => {
+      calls.push({ sql, params });
+      if (/\b(?:NOT\s+)?LIKE\s+'[^']*'/i.test(sql)) {
+        throw new Error("Please enter a LIKE clause with bindings");
+      }
+      if (sql.includes("SELECT item_key, content_hash FROM index_status")) {
+        return [{ item_key: "ITEM", content_hash: "failed:unknown" }];
+      }
+      if (sql.includes("SELECT item_key FROM index_status")) {
+        return [{ item_key: "ITEM" }];
+      }
+      return [];
+    },
+  };
+  const store = new VectorStore();
+  store.initialized = true;
+  store.db = db;
+
+  await store.migrateLegacyFailureMarkers();
+  assert.deepEqual(await store.getSuccessfullyIndexedItems(), new Set(["ITEM"]));
+  const likeCalls = calls.filter((call) => /\bLIKE\b/i.test(call.sql));
+  assert.deepEqual(
+    likeCalls.map((call) => call.params),
+    [["failed:%"], ["ITEM", "failed:%"], ["failed:%"]],
+    "all LIKE patterns are passed as Zotero query bindings",
+  );
 }
 
 // Per-item replacement is atomic: a write failure rolls every deletion back
@@ -458,6 +505,67 @@ function mockStore() {
     assert.deepEqual(call.params, ["2:*"]);
   }
   assert.ok(deletes.every((call) => !call.sql.includes("content_cache")));
+}
+
+// GPU synchronization is emitted only after the SQLite mutation commits, and
+// uses Library-qualified identities for every mutation shape.
+{
+  const events = [];
+  const { store } = mockStore(mutationBackend(events));
+  await store.replaceItemIndex({
+    itemKey: "SYNC_ITEM",
+    libraryID: 2,
+    records: [{
+      itemKey: "SYNC_ITEM",
+      libraryID: 2,
+      chunkId: 0,
+      vector: new Float32Array([1, 0]),
+      language: "en",
+      chunkText: "sync",
+    }],
+    contentHash: "sync-hash",
+  });
+  await store.deleteItemsVectors(["SYNC_ITEM"], false, 2);
+  await store.createBuildSession(
+    {
+      buildID: "sync-build",
+      libraryID: 2,
+      scope: "full-library",
+      status: "indexing",
+      createdAt: 1,
+    },
+    [],
+  );
+  await store.clearLibraryForBuild("sync-build", 2);
+  await store.clearAll();
+  assert.deepEqual(events, [
+    { kind: "itemChanged", libraryID: 2, itemKey: "SYNC_ITEM" },
+    {
+      kind: "itemsDeleted",
+      items: [{ libraryID: 2, itemKey: "SYNC_ITEM" }],
+    },
+    { kind: "libraryCleared", libraryID: 2 },
+    { kind: "allCleared" },
+  ]);
+}
+
+{
+  const events = [];
+  const { store } = mockStore(mutationBackend(events));
+  store.db.executeTransaction = async (operation) => {
+    await operation();
+    throw new Error("simulated rollback");
+  };
+  await assert.rejects(
+    store.replaceItemIndex({
+      itemKey: "ROLLBACK",
+      libraryID: 2,
+      records: [],
+      contentHash: "rollback",
+    }),
+    /simulated rollback/,
+  );
+  assert.deepEqual(events, [], "failed transactions must not publish GPU events");
 }
 
 // buildIndex classifies by presence, not item count: [] is still targeted.

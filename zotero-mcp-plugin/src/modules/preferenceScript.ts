@@ -368,6 +368,67 @@ function bindHybridSearchSettings(doc: Document) {
   const P = "extensions.zotero.zotero-mcp-plugin.hybrid.";
   const ref = config.addonRef;
 
+  const gpuToggle = doc?.querySelector(
+    `#zotero-prefpane-${ref}-hybrid-gpu-enabled`,
+  ) as HTMLInputElement;
+  const gpuStatus = doc?.querySelector("#hybrid-gpu-status") as HTMLElement;
+  if (gpuToggle && gpuStatus) {
+    const { getGpuVectorService } = require("./semantic/gpuVectorService");
+    const { getVectorStore } = require("./semantic/vectorStore");
+    const gpuService = getGpuVectorService();
+    gpuToggle.checked = Zotero.Prefs.get(P + "gpuAccelerationEnabled", true) === true;
+    const renderGpuStatus = (status: any) => {
+      gpuStatus.style.color = "";
+      if (status.phase === "preparing") {
+        gpuStatus.textContent = getString(
+          "pref-hybrid-gpu-status-preparing" as any,
+        );
+      } else if (status.phase === "loading") {
+        gpuStatus.textContent = getString(
+          "pref-hybrid-gpu-status-loading" as any,
+          { args: { loaded: status.loaded, total: status.total } },
+        );
+      } else if (status.phase === "available") {
+        gpuStatus.textContent = getString(
+          "pref-hybrid-gpu-status-available" as any,
+          { args: { device: status.device, vectors: status.vectors } },
+        );
+        gpuStatus.style.color = "var(--color-ok)";
+      } else if (status.phase === "fallback") {
+        gpuStatus.textContent = getString(
+          "pref-hybrid-gpu-status-fallback" as any,
+          { args: { code: status.code, reason: status.reason } },
+        );
+        gpuStatus.style.color = "var(--msg-error-text)";
+      } else {
+        gpuStatus.textContent = getString(
+          "pref-hybrid-gpu-status-disabled" as any,
+        );
+      }
+    };
+    const unsubscribe = gpuService.subscribe(renderGpuStatus);
+    doc.defaultView?.addEventListener("unload", unsubscribe, { once: true });
+
+    gpuToggle.addEventListener("change", async () => {
+      gpuToggle.disabled = true;
+      try {
+        if (gpuToggle.checked) getVectorStore();
+        await gpuService.setEnabled(gpuToggle.checked);
+      } catch {
+        // The service has already switched to an explicit fallback status.
+      } finally {
+        gpuToggle.disabled = false;
+      }
+    });
+
+    if (gpuToggle.checked) {
+      getVectorStore();
+      void gpuService.startIfEnabled().catch(() => {
+        // The status subscription renders the fallback reason.
+      });
+    }
+  }
+
   const bindBoundedNumber = (
     selector: string,
     prefKey: string,

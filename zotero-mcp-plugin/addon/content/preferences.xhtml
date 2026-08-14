@@ -45,6 +45,7 @@
     <preference id="extensions.zotero.__addonRef__.hybrid.chunkTargetChars" name="extensions.zotero.__addonRef__.hybrid.chunkTargetChars" type="int" />
     <preference id="extensions.zotero.__addonRef__.hybrid.chunkAppendToleranceChars" name="extensions.zotero.__addonRef__.hybrid.chunkAppendToleranceChars" type="int" />
     <preference id="extensions.zotero.__addonRef__.hybrid.neighborRadius" name="extensions.zotero.__addonRef__.hybrid.neighborRadius" type="int" />
+    <preference id="extensions.zotero.__addonRef__.hybrid.gpuAccelerationEnabled" name="extensions.zotero.__addonRef__.hybrid.gpuAccelerationEnabled" type="bool" />
     <!-- MinerU high-precision PDF parsing -->
     <preference id="extensions.zotero.__addonRef__.mineru.mode" name="extensions.zotero.__addonRef__.mineru.mode" type="string" />
     <preference id="extensions.zotero.__addonRef__.mineru.baseURL" name="extensions.zotero.__addonRef__.mineru.baseURL" type="string" />
@@ -1483,6 +1484,21 @@
       <html:div class="zmp-s" data-icon="semantic">
         <html:div class="zmp-s-title" data-l10n-id="pref-hybrid-title"></html:div>
         <html:div class="zmp-s-desc" data-l10n-id="pref-hybrid-desc"></html:div>
+
+        <html:div class="zmp-sw" style="margin-bottom:10px">
+          <html:div>
+            <html:div class="zmp-sw-text" data-l10n-id="pref-hybrid-gpu-label"></html:div>
+            <html:strong class="zmp-sw-sub" data-l10n-id="pref-hybrid-gpu-hint"></html:strong>
+          </html:div>
+          <html:label class="zmp-tog">
+            <html:input type="checkbox"
+              id="zotero-prefpane-__addonRef__-hybrid-gpu-enabled"
+              preference="extensions.zotero.__addonRef__.hybrid.gpuAccelerationEnabled"
+            />
+            <html:span class="zmp-tog-track"></html:span>
+          </html:label>
+        </html:div>
+        <html:div class="zmp-res" id="hybrid-gpu-status" aria-live="polite"></html:div>
 
         <html:div class="zmp-sl" data-l10n-id="pref-hybrid-retrieval-label"></html:div>
 

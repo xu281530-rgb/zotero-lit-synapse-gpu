@@ -271,6 +271,13 @@ pref-expose-paths-sub = Absolute paths are hidden by default to reduce local inf
 # --- Hybrid search ---
 pref-hybrid-title = Hybrid Search
 pref-hybrid-desc = Keyword + semantic retrieval, fused into one 0-1 relevance score. Used both to find literature across the library and to dig into a single document.
+pref-hybrid-gpu-label = Activar aceleración vectorial por GPU
+pref-hybrid-gpu-hint = Solo tarjetas gráficas NVIDIA; se requiere un controlador NVIDIA compatible.
+pref-hybrid-gpu-status-disabled = La aceleración por GPU está desactivada.
+pref-hybrid-gpu-status-preparing = Preparando recursos de GPU...
+pref-hybrid-gpu-status-loading = Cargando vectores en la memoria de la GPU ({ $loaded }/{ $total })...
+pref-hybrid-gpu-status-available = GPU lista: { $device }, { $vectors } vectores residentes.
+pref-hybrid-gpu-status-fallback = GPU no disponible; se usa la CPU ({ $code }): { $reason }
 pref-hybrid-retrieval-label = Retrieval limits
 pref-hybrid-max-documents-label = Max highly relevant documents
 pref-hybrid-max-documents-hint = How many documents one library-wide search may return. An upper bound only - weaker matches are never added to fill it.
