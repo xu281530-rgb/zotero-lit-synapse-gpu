@@ -1126,7 +1126,7 @@ assert.doesNotMatch(
 );
 assert.match(hooksSource, /groupQueueKeysByLibrary\(/);
 assert.match(hooksSource, /runBuildsPerLibrary\(/);
-assert.match(hooksSource, /deleteItemVectors\(itemKey, false, libraryID\)/);
+assert.match(hooksSource, /deleteItemVectors\(itemKey, libraryID\)/);
 assert.match(hooksSource, /libraryID: selectedLibraryID/);
 assert.match(hooksSource, /libraryID: Zotero\.Libraries\.userLibraryID,\n\s+rebuild: false/);
 assert.doesNotMatch(

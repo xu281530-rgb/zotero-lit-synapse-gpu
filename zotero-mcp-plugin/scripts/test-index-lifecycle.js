@@ -12,6 +12,9 @@ globalThis.Zotero = { Libraries: { userLibraryID: 1 } };
 globalThis.ztoolkit = { log: () => {} };
 
 const { VectorStore } = await import("../src/modules/semantic/vectorStore.ts");
+const { clearSemanticDatabase } = await import(
+  "../src/modules/semantic/semanticDatabaseReset.ts"
+);
 const { groupFailedIndexItems } = await import(
   "../src/modules/semantic/failedIndexRetry.ts"
 );
@@ -132,8 +135,73 @@ function mutationBackend(events) {
     publishMutation: async (event) => events.push(event),
     fallback: () => {},
     setEnabled: async () => {},
-    shutdown: async () => {},
+    shutdown: async () => events.push({ kind: "shutdown" }),
   };
+}
+
+const semanticBusinessTables = [
+  "embeddings",
+  "vectors_f32",
+  "index_status",
+  "index_failures",
+  "index_build_targets",
+  "index_builds",
+];
+
+{
+  const events = [];
+  const report = {
+    before: Object.fromEntries(semanticBusinessTables.map((table) => [table, 1])),
+    after: Object.fromEntries(semanticBusinessTables.map((table) => [table, 0])),
+    database: {
+      path: "semantic.sqlite",
+      pageCountBefore: 10,
+      pageCountAfter: 7,
+      freelistBefore: 0,
+      freelistAfter: 0,
+    },
+  };
+  const result = await clearSemanticDatabase({
+    semanticService: {
+      beginDatabaseReset: async () => events.push("begin-reset"),
+      resetAfterDatabaseClear: () => events.push("runtime"),
+      endDatabaseReset: () => events.push("end-reset"),
+    },
+    vectorStore: {
+      initialize: async () => events.push("initialize"),
+      clearAll: async () => {
+        events.push("database");
+        return report;
+      },
+    },
+    suspendRefreshQueue: async () => events.push("suspend-refresh"),
+    resumeRefreshQueue: () => events.push("resume-refresh"),
+    suspendPDFRefreshes: async () => events.push("suspend-pdf-refresh"),
+    resumePDFRefreshes: () => events.push("resume-pdf-refresh"),
+    clearRefreshQueue: () => events.push("clear-refresh"),
+    suspendAutoUpdates: () => events.push("suspend-auto"),
+    resumeAutoUpdates: () => events.push("resume-auto"),
+    clearChunkingSignatures: () => events.push("chunk-signatures"),
+    clearPaginationState: () => events.push("pagination"),
+  });
+  assert.equal(result, report);
+  assert.deepEqual(events, [
+    "suspend-auto",
+    "suspend-refresh",
+    "suspend-pdf-refresh",
+    "clear-refresh",
+    "begin-reset",
+    "initialize",
+    "database",
+    "clear-refresh",
+    "chunk-signatures",
+    "runtime",
+    "pagination",
+    "end-reset",
+    "resume-auto",
+    "resume-pdf-refresh",
+    "resume-refresh",
+  ]);
 }
 
 // Zotero 9 rejects LIKE patterns embedded directly in SQL. Keep the legacy
@@ -542,7 +610,12 @@ function mutationBackend(events) {
     [],
   );
   await store.clearLibraryForBuild("sync-build", 2);
-  await store.clearAll();
+  const clearReport = await store.clearAll();
+  assert.deepEqual(Object.keys(clearReport.after), semanticBusinessTables);
+  assert.ok(
+    Object.values(clearReport.after).every((count) => count === 0),
+    "every semantic business table must be empty before reset succeeds",
+  );
   assert.deepEqual(events, [
     { kind: "itemChanged", libraryID: 2, itemKey: "SYNC_ITEM" },
     {
@@ -550,8 +623,47 @@ function mutationBackend(events) {
       items: [{ libraryID: 2, itemKey: "SYNC_ITEM" }],
     },
     { kind: "libraryCleared", libraryID: 2 },
-    { kind: "allCleared" },
+    { kind: "shutdown" },
   ]);
+}
+
+// Complete reset uses an explicit business-table allowlist, preserves schema
+// management rows, and physically compacts only after all data is gone.
+{
+  const { store, calls } = mockStore();
+  await store.clearAll();
+  const sql = calls.map((call) => call.sql.trim());
+  const deletedTables = sql
+    .map((statement) => /^DELETE FROM ([a-z0-9_]+)/i.exec(statement)?.[1])
+    .filter(Boolean);
+  assert.deepEqual(deletedTables.slice(0, semanticBusinessTables.length), semanticBusinessTables);
+  assert.ok(!sql.some((statement) => /DELETE FROM schema_migrations/i.test(statement)));
+  assert.ok(
+    sql.some(
+      (statement) =>
+        /^DELETE FROM sqlite_sequence WHERE name IN \(/i.test(statement) &&
+        !/^DELETE FROM sqlite_sequence\s*$/i.test(statement),
+    ),
+    "only business-table sequences may be reset",
+  );
+  const firstCheckpoint = sql.indexOf("PRAGMA wal_checkpoint(TRUNCATE)");
+  const vacuum = sql.indexOf("VACUUM");
+  const lastCheckpoint = sql.lastIndexOf("PRAGMA wal_checkpoint(TRUNCATE)");
+  assert.ok(firstCheckpoint >= 0 && firstCheckpoint < vacuum && vacuum < lastCheckpoint);
+}
+
+{
+  const { store } = mockStore();
+  const queryAsync = store.db.queryAsync;
+  store.db.queryAsync = async (sql, params = []) => {
+    if (sql.trim() === "VACUUM") throw new Error("simulated VACUUM failure");
+    return queryAsync(sql, params);
+  };
+  await assert.rejects(
+    store.clearAll(),
+    /simulated VACUUM failure/,
+    "physical compaction failures must reach the settings UI",
+  );
 }
 
 {
@@ -581,6 +693,11 @@ assert.match(
   /const itemKeysProvided = options\.itemKeys !== undefined;/,
 );
 assert.doesNotMatch(serviceSource, /getCachedContent|setCachedContent/);
+assert.match(
+  serviceSource,
+  /resetAfterDatabaseClear\(\)[\s\S]*?clearQueryCache\(\)/,
+  "complete reset clears cached query vectors",
+);
 assert.doesNotMatch(
   vectorStoreSource,
   /CREATE TABLE IF NOT EXISTS content_cache/,

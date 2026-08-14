@@ -295,6 +295,9 @@ async function searchGpu(client, precision, query) {
 function assertEquivalent(cpu, gpu, label) {
   const cpuIdentities = cpu.map((row) => [row.itemKey, row.chunkId]);
   const gpuIdentities = gpu.map((row) => [row.itemKey, row.chunkId]);
+  const identity = (row) => `${row.itemKey}:${row.chunkId}`;
+  const cpuByIdentity = new Map(cpu.map((row) => [identity(row), row]));
+  const gpuByIdentity = new Map(gpu.map((row) => [identity(row), row]));
   if (JSON.stringify(cpuIdentities) !== JSON.stringify(gpuIdentities)) {
     const cpuSet = new Set(cpuIdentities.map((value) => value.join(":")));
     const gpuSet = new Set(gpuIdentities.map((value) => value.join(":")));
@@ -303,12 +306,23 @@ function assertEquivalent(cpu, gpu, label) {
       cpuSet,
       `${label} TopK differs outside a tied score boundary`,
     );
+    for (let index = 0; index < cpu.length; index++) {
+      if (identity(cpu[index]) === identity(gpu[index])) continue;
+      const cpuScoreForGpuRow = cpuByIdentity.get(identity(gpu[index])).score;
+      const gpuScoreForCpuRow = gpuByIdentity.get(identity(cpu[index])).score;
+      assert.ok(
+        Math.abs(cpu[index].score - cpuScoreForGpuRow) <= scoreTolerance ||
+          Math.abs(gpu[index].score - gpuScoreForCpuRow) <= scoreTolerance,
+        `${label} rank ${index + 1} changed outside a tied score boundary`,
+      );
+    }
   }
   let maxScoreError = 0;
-  for (let index = 0; index < cpu.length; index++) {
+  for (const cpuRow of cpu) {
+    const gpuRow = gpuByIdentity.get(identity(cpuRow));
     maxScoreError = Math.max(
       maxScoreError,
-      Math.abs(cpu[index].score - gpu[index].score),
+      Math.abs(cpuRow.score - gpuRow.score),
     );
   }
   assert.ok(

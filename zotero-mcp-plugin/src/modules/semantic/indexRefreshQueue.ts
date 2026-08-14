@@ -36,6 +36,7 @@ export interface PendingIndexRefresh {
 
 let drainTimer: ReturnType<typeof setInterval> | null = null;
 let draining = false;
+let suspended = false;
 
 function readQueue(): PendingIndexRefresh[] {
   try {
@@ -82,7 +83,7 @@ export function enqueueIndexRefresh(
   itemKey: string,
   reason: string,
 ): void {
-  if (!itemKey) return;
+  if (!itemKey || suspended) return;
   const entries = readQueue();
   const key = identity(libraryID, itemKey);
   const existingIndex = entries.findIndex(
@@ -108,7 +109,11 @@ export function getPendingIndexRefreshCount(): number {
 }
 
 export function clearIndexRefreshQueue(): void {
-  writeQueue([]);
+  Zotero.Prefs.clear(QUEUE_PREF, true);
+  const remaining = Zotero.Prefs.get(QUEUE_PREF, true);
+  if (typeof remaining === "string" && remaining.trim()) {
+    throw new Error("Persisted semantic refresh queue could not be cleared");
+  }
 }
 
 export type DrainOutcome =
@@ -137,6 +142,14 @@ export async function processIndexRefreshQueue(): Promise<{
     return { outcome: "empty", processed: 0, failed: 0, remaining: 0 };
   }
   if (draining) {
+    return {
+      outcome: "busy",
+      processed: 0,
+      failed: 0,
+      remaining: entries.length,
+    };
+  }
+  if (suspended) {
     return {
       outcome: "busy",
       processed: 0,
@@ -271,4 +284,17 @@ export function stopIndexRefreshQueue(): void {
   if (drainTimer === null) return;
   clearInterval(drainTimer);
   drainTimer = null;
+}
+
+export async function suspendIndexRefreshQueue(): Promise<void> {
+  suspended = true;
+  stopIndexRefreshQueue();
+  while (draining) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+export function resumeIndexRefreshQueue(): void {
+  suspended = false;
+  startIndexRefreshQueue();
 }

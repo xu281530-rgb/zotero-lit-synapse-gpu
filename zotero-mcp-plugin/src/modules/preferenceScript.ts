@@ -2,15 +2,31 @@ import { config } from "../../package.json";
 import { getString } from "../utils/locale";
 import { ClientConfigGenerator } from "./clientConfigGenerator";
 import { generateSecureIdentifier } from "../utils/security";
-import { trackedSetTimeout } from "../hooks";
+import {
+  resumeSemanticAutoUpdates,
+  suspendSemanticAutoUpdates,
+  trackedSetTimeout,
+} from "../hooks";
 import {
   getChunkingSignature,
   getHybridSearchSettings,
   getStoredChunkingSignature,
   hasIncompleteFullLibraryRebuild,
   hasUntrustedLegacyChunkingSignature,
+  clearStoredChunkingSignatures,
+  shouldShowChunkingWarning,
   setSearchTimeoutMs,
 } from "./hybridSearchSettings";
+import {
+  clearIndexRefreshQueue,
+  resumeIndexRefreshQueue,
+  suspendIndexRefreshQueue,
+} from "./semantic/indexRefreshQueue";
+import { clearSemanticDatabase } from "./semantic/semanticDatabaseReset";
+import {
+  resumePDFSemanticIndexRefreshes,
+  suspendPDFSemanticIndexRefreshes,
+} from "./pdfTextSource";
 
 export async function registerPrefsScripts(_window: Window) {
   // This function is called when the prefs window is opened
@@ -597,18 +613,24 @@ function updateHybridAdvancedSummary(doc: Document) {
  * Show the "rebuild your index" notice when the stored index was built with a
  * different chunk layout than the current settings would produce.
  */
-function updateChunkStaleWarning(doc: Document) {
+async function updateChunkStaleWarning(doc: Document): Promise<void> {
   const warning = doc?.querySelector("#hybrid-chunk-stale-warning") as HTMLElement;
   if (!warning) return;
+  warning.style.display = "none";
   try {
     const libraryID = Zotero.Libraries.userLibraryID;
+    const { getVectorStore } = require("./semantic/vectorStore");
+    const vectorStore = getVectorStore();
+    await vectorStore.initialize();
+    const counts = await vectorStore.getLibraryDataCounts(libraryID);
     const stored = getStoredChunkingSignature(libraryID);
-    // A legacy global signature is deliberately untrusted for every Library;
-    // a genuinely fresh profile has neither a signature nor a warning.
-    const stale =
-      hasIncompleteFullLibraryRebuild(libraryID) ||
-      hasUntrustedLegacyChunkingSignature(libraryID) ||
-      (Boolean(stored) && stored !== getChunkingSignature());
+    const stale = shouldShowChunkingWarning({
+      ...counts,
+      storedSignature: stored,
+      currentSignature: getChunkingSignature(),
+      incomplete: hasIncompleteFullLibraryRebuild(libraryID),
+      legacyUntrusted: hasUntrustedLegacyChunkingSignature(libraryID),
+    });
     // Explicitly "flex", not "": the banner's class carries display:none, so
     // clearing the inline style would leave it hidden forever.
     warning.style.display = stale ? "flex" : "none";
@@ -1885,25 +1907,55 @@ function bindSemanticStatsSettings(doc: Document) {
 
   // Clear index button
   clearButton?.addEventListener("click", async () => {
-    const confirmMsg = getString("pref-semantic-index-confirm-clear" as any) || "This will clear all index data (content cache will be preserved). Are you sure?";
+    const confirmMsg = getString("pref-semantic-index-confirm-clear" as any) || "This permanently deletes all plugin semantic database data. Zotero items, PDFs, and Markdown attachments are not deleted. Continue?";
     if (!addon.data.prefs!.window.confirm(confirmMsg)) {
       return;
     }
 
+    clearButton.disabled = true;
+    isIndexing = true;
+    stopProgressUpdates();
+    updateControlButtons('indexing');
     try {
+      const { getSemanticSearchService } = require("./semantic");
       const { getVectorStore } = require("./semantic/vectorStore");
+      const semanticService = getSemanticSearchService();
       const vectorStore = getVectorStore();
-      await vectorStore.initialize();
-      await vectorStore.clear();
+      const report = await clearSemanticDatabase({
+        semanticService,
+        vectorStore,
+        suspendRefreshQueue: suspendIndexRefreshQueue,
+        resumeRefreshQueue: resumeIndexRefreshQueue,
+        suspendPDFRefreshes: suspendPDFSemanticIndexRefreshes,
+        resumePDFRefreshes: resumePDFSemanticIndexRefreshes,
+        clearRefreshQueue: clearIndexRefreshQueue,
+        suspendAutoUpdates: suspendSemanticAutoUpdates,
+        resumeAutoUpdates: resumeSemanticAutoUpdates,
+        clearChunkingSignatures: clearStoredChunkingSignatures,
+        clearPaginationState: () =>
+          addon.data.httpServer?.clearSemanticState(),
+      });
 
-      showMessage(getString("pref-semantic-index-cleared" as any) || "Index cleared", "success");
-      ztoolkit.log("[PreferenceScript] Index cleared successfully");
+      if (progressContainer) progressContainer.style.display = "none";
+      if (progressText) progressText.textContent = "0/0";
+      if (progressPercent) progressPercent.textContent = "0%";
+      if (progressBar) progressBar.style.width = "0%";
+      if (currentItemEl) currentItemEl.textContent = "-";
+      if (etaEl) etaEl.textContent = "-";
+      await updateChunkStaleWarning(doc);
+      await loadSemanticStats();
 
-      // Reload stats to show updated state
-      loadSemanticStats();
+      showMessage(getString("pref-semantic-index-cleared" as any) || "All semantic database data deleted", "success");
+      ztoolkit.log(
+        `[PreferenceScript] Semantic database reset verified: ${JSON.stringify(report)}`,
+      );
     } catch (error) {
       showMessage(getString("pref-semantic-index-error" as any) + `: ${error}`, "error");
-      ztoolkit.log(`[PreferenceScript] Failed to clear index: ${error}`, "error");
+      ztoolkit.log(`[PreferenceScript] Failed to reset semantic database: ${error}`, "error");
+    } finally {
+      isIndexing = false;
+      clearButton.disabled = false;
+      updateControlButtons('idle');
     }
   });
 

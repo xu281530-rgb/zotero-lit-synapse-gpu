@@ -53,6 +53,7 @@ const AUTO_UPDATE_MAX_RETRIES = 8;
 
 // Flag to prevent recursive auto-update during indexing
 let isAutoIndexing = false;
+let semanticAutoUpdatesSuspended = false;
 
 // Auto index check interval (10 minutes)
 const AUTO_INDEX_CHECK_INTERVAL_MS = 10 * 60 * 1000;
@@ -98,7 +99,7 @@ function clearAllPendingTimeouts(): void {
  * batch is only ever dropped from the queue after it has actually been indexed.
  */
 function requeueAutoUpdates(batch: Map<string, boolean>, reason: string): void {
-  if (isShuttingDown) return;
+  if (isShuttingDown || semanticAutoUpdatesSuspended) return;
 
   for (const [key, force] of batch) {
     pendingAutoUpdateKeys.set(key, (pendingAutoUpdateKeys.get(key) ?? false) || force);
@@ -140,7 +141,7 @@ function requeueAutoUpdates(batch: Map<string, boolean>, reason: string): void {
  * discarded every queued item and nothing ever re-indexed them.
  */
 async function processPendingAutoUpdates() {
-  if (isShuttingDown) return;
+  if (isShuttingDown || semanticAutoUpdatesSuspended) return;
   if (pendingAutoUpdateKeys.size === 0) return;
 
   // Check if semantic search is enabled
@@ -257,6 +258,7 @@ async function processPendingAutoUpdates() {
  *   modifications, which must stay cheap.
  */
 function scheduleAutoUpdate(itemKey: string, libraryID: number, force: boolean) {
+  if (semanticAutoUpdatesSuspended) return;
   const queueKey = toLibraryQueueKey(itemKey, libraryID);
   pendingAutoUpdateKeys.set(
     queueKey,
@@ -276,6 +278,30 @@ function scheduleAutoUpdate(itemKey: string, libraryID: number, force: boolean) 
     autoUpdateDebounceTimer = null;
     processPendingAutoUpdates();
   }, AUTO_UPDATE_DEBOUNCE_MS);
+}
+
+export function clearPendingSemanticAutoUpdates(): void {
+  if (autoUpdateDebounceTimer) {
+    clearTimeout(autoUpdateDebounceTimer);
+    autoUpdateDebounceTimer = null;
+  }
+  if (autoUpdateRetryTimer) {
+    clearTimeout(autoUpdateRetryTimer);
+    pendingTimeouts.delete(autoUpdateRetryTimer);
+    autoUpdateRetryTimer = null;
+  }
+  autoUpdateRetryCount = 0;
+  pendingAutoUpdateKeys.clear();
+}
+
+export function suspendSemanticAutoUpdates(): void {
+  semanticAutoUpdatesSuspended = true;
+  clearPendingSemanticAutoUpdates();
+}
+
+export function resumeSemanticAutoUpdates(): void {
+  clearPendingSemanticAutoUpdates();
+  semanticAutoUpdatesSuspended = false;
 }
 
 /**
@@ -502,7 +528,7 @@ function stopAutoIndexCheck() {
  */
 async function triggerAutoIndexBuild() {
   // Don't start new operations during shutdown
-  if (isShuttingDown) return;
+  if (isShuttingDown || semanticAutoUpdatesSuspended) return;
 
   // Don't start if already indexing
   if (isAutoIndexing) {
@@ -608,17 +634,7 @@ function unregisterItemNotifier() {
   // Stop auto-index check timer
   stopAutoIndexCheck();
 
-  // Clear any pending timer
-  if (autoUpdateDebounceTimer) {
-    clearTimeout(autoUpdateDebounceTimer);
-    autoUpdateDebounceTimer = null;
-  }
-  if (autoUpdateRetryTimer) {
-    clearTimeout(autoUpdateRetryTimer);
-    autoUpdateRetryTimer = null;
-  }
-  autoUpdateRetryCount = 0;
-  pendingAutoUpdateKeys.clear();
+  clearPendingSemanticAutoUpdates();
 }
 
 /** 触发服务器重新对齐的偏好全名集合。 */

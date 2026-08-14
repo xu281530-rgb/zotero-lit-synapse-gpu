@@ -66,6 +66,10 @@ export class HttpServer {
     return this.isRunning ? this.boundPort : null;
   }
 
+  public clearSemanticState(): void {
+    this.mcpServer?.clearSemanticState();
+  }
+
   /** 当前是否仅绑定回环地址；未运行时为 null。 */
   public isBoundLoopbackOnly(): boolean | null {
     return this.isRunning ? this.boundLoopbackOnly : null;

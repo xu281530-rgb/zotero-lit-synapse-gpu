@@ -164,6 +164,7 @@ export class SemanticSearchService {
   private _forceRun = false;
   private _activeBuildID: string | null = null;
   private _activeFullLibraryRebuild = false;
+  private _databaseResetActive = false;
 
   // Error handling
   private _onErrorCallback?: (error: EmbeddingAPIError) => void;
@@ -709,6 +710,14 @@ export class SemanticSearchService {
   } = {}): Promise<IndexProgress> {
     await this.initialize();
 
+    if (this._databaseResetActive) {
+      ztoolkit.log(
+        '[SemanticSearch] buildIndex rejected while semantic database reset is active',
+        'warn',
+      );
+      return { ...this.indexProgress, status: 'busy' };
+    }
+
     const itemKeysProvided = options.itemKeys !== undefined;
     const {
       itemKeys,
@@ -1142,6 +1151,9 @@ export class SemanticSearchService {
     sharedProcessor: PDFProcessor | null,
     force: boolean = this._forceRun,
   ): Promise<IndexWorkOutcome> {
+    if (this._databaseResetActive) {
+      throw new Error('Semantic database reset is active');
+    }
     const startTime = Date.now();
     const itemTitle = item.getDisplayTitle?.() || item.key;
     ztoolkit.log(`[SemanticSearch] indexItem() start: ${item.key} "${itemTitle.substring(0, 30)}..."`);
@@ -1503,6 +1515,51 @@ export class SemanticSearchService {
     return this._buildActive;
   }
 
+  async beginDatabaseReset(): Promise<void> {
+    if (this._databaseResetActive) {
+      throw new Error('A semantic database reset is already active');
+    }
+    this._databaseResetActive = true;
+    if (this._buildActive) {
+      this._aborted = true;
+      this._paused = false;
+      this.indexProgress.status = 'aborted';
+      if (this._pauseResolve) {
+        this._pauseResolve();
+        this._pauseResolve = null;
+      }
+    }
+    while (this._buildActive) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  resetAfterDatabaseClear(): void {
+    Zotero.Prefs.clear(PREF_INDEX_PROGRESS, true);
+    const savedProgress = Zotero.Prefs.get(PREF_INDEX_PROGRESS, true);
+    if (typeof savedProgress === 'string' && savedProgress.trim()) {
+      throw new Error('Persisted semantic index progress could not be cleared');
+    }
+    this.embeddingService.clearQueryCache();
+    this._failedItems.clear();
+    this.indexProgress = {
+      total: 0,
+      processed: 0,
+      status: 'idle',
+      failedCount: 0,
+    };
+    this._paused = false;
+    this._aborted = false;
+    this._pauseResolve = null;
+    this._forceRun = false;
+    this._activeBuildID = null;
+    this._activeFullLibraryRebuild = false;
+  }
+
+  endDatabaseReset(): void {
+    this._databaseResetActive = false;
+  }
+
   /**
    * Set callback for indexing errors
    * Called when an error occurs during indexing (auto-pauses)
@@ -1577,7 +1634,7 @@ export class SemanticSearchService {
     // Check BEFORE clearing failure markers: if another build is running,
     // buildIndex would reject the nested call after the bookkeeping was
     // already wiped, losing the failure records without retrying anything
-    if (this._buildActive) {
+    if (this._buildActive || this._databaseResetActive) {
       ztoolkit.log('[SemanticSearch] retryFailedItems: a build is already running', 'warn');
       return { ...this.indexProgress, status: 'busy' };
     }

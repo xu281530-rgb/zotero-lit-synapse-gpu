@@ -201,6 +201,15 @@ assert.ok(
   assert.equal(result[0].chunkText, "");
   assert.equal(stats.scanned, 1);
 
+  service.queuedMutations.push({
+    kind: "itemChanged",
+    libraryID: 1,
+    itemKey: "STALE",
+  });
+  await service.shutdown();
+  assert.equal(service.queuedMutations.length, 0);
+  assert.equal(stopped, 1, "shutdown waits for the worker to release GPU memory");
+
   await service.setEnabled(false);
   assert.equal(stopped, 1);
   assert.equal(service.getStatus().phase, "disabled");

@@ -304,6 +304,13 @@ export class StreamableMCPServer {
     // No initialization needed - using direct function calls
   }
 
+  clearSemanticState(): void {
+    this.hybridPages.clear();
+    if (this.hybridPages.size !== 0) {
+      throw new Error('Semantic pagination state could not be cleared');
+    }
+  }
+
   /**
    * Handle incoming MCP requests and return HTTP response
    */

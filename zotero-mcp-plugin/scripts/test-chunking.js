@@ -26,6 +26,7 @@ globalThis.Zotero = {
   Prefs: {
     get: (key) => prefs.get(key),
     set: (key, value) => prefs.set(key, value),
+    clear: (key) => prefs.delete(key),
   },
   Libraries: { userLibraryID: 1 },
 };
@@ -51,6 +52,8 @@ const {
   hasUntrustedLegacyChunkingSignature,
   invalidateStoredChunkingSignature,
   setStoredChunkingSignature,
+  clearStoredChunkingSignatures,
+  shouldShowChunkingWarning,
   shouldRecordFullLibraryChunkingSignature,
 } = await import("../src/modules/hybridSearchSettings.ts");
 
@@ -174,6 +177,34 @@ assert.equal(hasIncompleteFullLibraryRebuild(1), false);
 assert.equal(hasIncompleteFullLibraryRebuild(2), true);
 setStoredChunkingSignature(2, "sig-library-2-new");
 assert.equal(hasIncompleteFullLibraryRebuild(2), false);
+
+assert.equal(
+  shouldShowChunkingWarning({
+    chunkCount: 0,
+    float32VectorCount: 0,
+    indexedItemCount: 0,
+    storedSignature: null,
+    currentSignature: signature,
+    incomplete: true,
+    legacyUntrusted: true,
+  }),
+  false,
+  "an empty Library must never inherit a stale chunk warning",
+);
+assert.equal(
+  shouldShowChunkingWarning({
+    chunkCount: 1,
+    float32VectorCount: 1,
+    indexedItemCount: 1,
+    storedSignature: null,
+    currentSignature: signature,
+    incomplete: false,
+    legacyUntrusted: true,
+  }),
+  true,
+);
+clearStoredChunkingSignatures();
+assert.equal(prefs.has(INDEX_CHUNK_SIGNATURE_PREF), false);
 
 const workingSetPreference = Zotero.Prefs.set;
 Zotero.Prefs.set = () => {

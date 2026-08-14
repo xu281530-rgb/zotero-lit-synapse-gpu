@@ -349,6 +349,46 @@ export function hasIncompleteFullLibraryRebuild(libraryID: number): boolean {
   );
 }
 
+export function clearStoredChunkingSignatures(): void {
+  try {
+    Zotero.Prefs.clear(INDEX_CHUNK_SIGNATURE_PREF, true);
+    const remaining = Zotero.Prefs.get(INDEX_CHUNK_SIGNATURE_PREF, true);
+    if (typeof remaining === "string" && remaining.trim()) {
+      throw new Error("chunking signature preference still contains data");
+    }
+  } catch (error) {
+    ztoolkit.log(
+      `[HybridSettings] Failed to clear chunking signatures: ${error}`,
+      "warn",
+    );
+    throw error;
+  }
+}
+
+export function shouldShowChunkingWarning(params: {
+  chunkCount: number;
+  float32VectorCount: number;
+  indexedItemCount: number;
+  storedSignature: string | null;
+  currentSignature: string;
+  incomplete: boolean;
+  legacyUntrusted: boolean;
+}): boolean {
+  if (
+    params.chunkCount === 0 &&
+    params.float32VectorCount === 0 &&
+    params.indexedItemCount === 0
+  ) {
+    return false;
+  }
+  return (
+    params.incomplete ||
+    params.legacyUntrusted ||
+    (Boolean(params.storedSignature) &&
+      params.storedSignature !== params.currentSignature)
+  );
+}
+
 export function shouldRecordFullLibraryChunkingSignature(params: {
   rebuild: boolean;
   itemKeysProvided: boolean;

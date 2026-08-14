@@ -644,6 +644,8 @@ export class GpuVectorService implements GpuVectorSearchBackend {
   }
 
   async shutdown(): Promise<void> {
+    await this.syncQueue.catch(() => undefined);
+    this.queuedMutations = [];
     await this.stopProcess();
     this.status.set({
       phase: "disabled",

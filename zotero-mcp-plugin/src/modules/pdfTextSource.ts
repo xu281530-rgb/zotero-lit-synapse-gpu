@@ -47,6 +47,19 @@ export interface PDFTextSourceResult {
  * of the same item parsed in one request do not queue two rebuilds.
  */
 const pendingIndexRefresh = new Map<string, Promise<void>>();
+let semanticIndexRefreshSuspended = false;
+let activeSemanticIndexRefreshes = 0;
+
+export async function suspendPDFSemanticIndexRefreshes(): Promise<void> {
+  semanticIndexRefreshSuspended = true;
+  while (activeSemanticIndexRefreshes > 0) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+export function resumePDFSemanticIndexRefreshes(): void {
+  semanticIndexRefreshSuspended = false;
+}
 
 /**
  * Resolve PDF body text through Doc2X / MinerU Markdown.
@@ -144,6 +157,16 @@ export async function getPDFTextFromMarkdown(
  * 再次命中刚写好的 MinerU 缓存，不会二次调用 MinerU。
  */
 async function refreshParentSemanticIndex(attachment: any): Promise<void> {
+  if (semanticIndexRefreshSuspended) return;
+  activeSemanticIndexRefreshes += 1;
+  try {
+    await refreshParentSemanticIndexImpl(attachment);
+  } finally {
+    activeSemanticIndexRefreshes -= 1;
+  }
+}
+
+async function refreshParentSemanticIndexImpl(attachment: any): Promise<void> {
   const parentItemID = attachment?.parentItemID;
   if (!parentItemID) return;
 

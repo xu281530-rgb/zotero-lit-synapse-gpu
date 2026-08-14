@@ -141,6 +141,42 @@ export interface VectorStoreStats {
   dbPath?: string;                  // Path to database file
 }
 
+export const SEMANTIC_BUSINESS_TABLES = [
+  'embeddings',
+  'vectors_f32',
+  'index_status',
+  'index_failures',
+  'index_build_targets',
+  'index_builds',
+] as const;
+
+type SemanticBusinessTable = (typeof SEMANTIC_BUSINESS_TABLES)[number];
+type SemanticBusinessCounts = Record<SemanticBusinessTable, number>;
+
+export interface SemanticDatabaseClearReport {
+  before: SemanticBusinessCounts;
+  after: SemanticBusinessCounts;
+  database: {
+    path: string;
+    beforeBytes?: number;
+    afterBytes?: number;
+    walBeforeBytes?: number;
+    walAfterBytes?: number;
+    shmBeforeBytes?: number;
+    shmAfterBytes?: number;
+    pageCountBefore: number;
+    pageCountAfter: number;
+    freelistBefore: number;
+    freelistAfter: number;
+  };
+}
+
+export interface SemanticLibraryDataCounts {
+  chunkCount: number;
+  float32VectorCount: number;
+  indexedItemCount: number;
+}
+
 // Global instance counter for debugging
 let vectorStoreInstanceCounter = 0;
 
@@ -2092,6 +2128,33 @@ export class VectorStore {
       : { clause: 'item_key GLOB ?', params: [`${libraryID}:*`] };
   }
 
+  async getLibraryDataCounts(
+    libraryID: number,
+  ): Promise<SemanticLibraryDataCounts> {
+    await this.ensureInitialized();
+    const scope = this.libraryScopeClause(libraryID);
+    const [chunkCount, float32VectorCount, indexedItemCount] =
+      await Promise.all([
+        this.db.valueQueryAsync(
+          `SELECT COUNT(*) FROM embeddings WHERE ${scope.clause}`,
+          scope.params,
+        ),
+        this.db.valueQueryAsync(
+          `SELECT COUNT(*) FROM vectors_f32 WHERE ${scope.clause}`,
+          scope.params,
+        ),
+        this.db.valueQueryAsync(
+          `SELECT COUNT(*) FROM index_status WHERE ${scope.clause}`,
+          scope.params,
+        ),
+      ]);
+    return {
+      chunkCount: Number(chunkCount || 0),
+      float32VectorCount: Number(float32VectorCount || 0),
+      indexedItemCount: Number(indexedItemCount || 0),
+    };
+  }
+
   /**
    * Clear vectors and index status.
    *
@@ -2155,37 +2218,130 @@ export class VectorStore {
     );
   }
 
-  /** Clear all semantic index rows. */
-  async clearAll(): Promise<void> {
+  private async countSemanticBusinessRows(): Promise<SemanticBusinessCounts> {
+    const counts = {} as SemanticBusinessCounts;
+    for (const table of SEMANTIC_BUSINESS_TABLES) {
+      counts[table] = Number(
+        await this.db.valueQueryAsync(`SELECT COUNT(*) FROM ${table}`),
+      );
+    }
+    return counts;
+  }
+
+  private readDatabaseFileSize(path: string): number | undefined {
+    try {
+      const file = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
+      file.initWithPath(path);
+      return file.exists() ? Number(file.fileSize) : 0;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Remove every semantic business row while preserving schema and migration
+   * metadata. Success means the logical and physical postconditions were both
+   * verified; callers must surface any rejection instead of claiming success.
+   */
+  async clearAll(): Promise<SemanticDatabaseClearReport> {
     await this.ensureInitialized();
 
-    // Get counts before deletion for logging
-    const beforeEmbeddings = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM embeddings`);
-    const beforeIndex = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM index_status`);
-    ztoolkit.log(`[VectorStore] clearAll() starting: embeddings=${beforeEmbeddings}, index_status=${beforeIndex}`);
+    const before = await this.countSemanticBusinessRows();
+    const beforeBytes = this.readDatabaseFileSize(this.dbPath);
+    const walBeforeBytes = this.readDatabaseFileSize(`${this.dbPath}-wal`);
+    const shmBeforeBytes = this.readDatabaseFileSize(`${this.dbPath}-shm`);
+    const pageCountBefore = Number(
+      await this.db.valueQueryAsync(`PRAGMA page_count`),
+    );
+    const freelistBefore = Number(
+      await this.db.valueQueryAsync(`PRAGMA freelist_count`),
+    );
+    ztoolkit.log(
+      `[VectorStore] clearAll() starting: ${SEMANTIC_BUSINESS_TABLES.map((table) => `${table}=${before[table]}`).join(', ')}`,
+    );
 
-    // Execute DELETE statements directly
-    await this.db.queryAsync(`DELETE FROM embeddings`);
-    await this.db.queryAsync(`DELETE FROM vectors_f32`);
-    await this.db.queryAsync(`DELETE FROM index_status`);
-
-    // Verify deletion
-    const afterEmbeddings = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM embeddings`);
-    const afterF32 = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM vectors_f32`);
-    const afterIndex = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM index_status`);
-    ztoolkit.log(`[VectorStore] clearAll() completed: embeddings=${afterEmbeddings}, vectors_f32=${afterF32}, index_status=${afterIndex}`);
+    await this.db.executeTransaction(async () => {
+      for (const table of SEMANTIC_BUSINESS_TABLES) {
+        await this.db.queryAsync(`DELETE FROM ${table}`);
+      }
+      await this.db.queryAsync(
+        `DELETE FROM sqlite_sequence WHERE name IN (?, ?)`,
+        ['embeddings', 'vectors_f32'],
+      );
+    });
 
     this.vectorCache.clear();
+    await this.gpuBackend.shutdown();
 
-    // VACUUM to reclaim disk space (DELETE only marks pages as free)
-    try {
-      ztoolkit.log(`[VectorStore] Running VACUUM to reclaim disk space...`);
-      await this.db.queryAsync(`VACUUM`);
-      ztoolkit.log(`[VectorStore] VACUUM completed`);
-    } catch (vacuumError) {
-      ztoolkit.log(`[VectorStore] VACUUM failed (non-critical): ${vacuumError}`, 'warn');
+    await this.db.queryAsync(`PRAGMA wal_checkpoint(TRUNCATE)`);
+    await this.db.queryAsync(`VACUUM`);
+    await this.db.queryAsync(`PRAGMA wal_checkpoint(TRUNCATE)`);
+
+    const after = await this.countSemanticBusinessRows();
+    const pageCountAfter = Number(
+      await this.db.valueQueryAsync(`PRAGMA page_count`),
+    );
+    const freelistAfter = Number(
+      await this.db.valueQueryAsync(`PRAGMA freelist_count`),
+    );
+    const afterBytes = this.readDatabaseFileSize(this.dbPath);
+    const walAfterBytes = this.readDatabaseFileSize(`${this.dbPath}-wal`);
+    const shmAfterBytes = this.readDatabaseFileSize(`${this.dbPath}-shm`);
+
+    const remaining = SEMANTIC_BUSINESS_TABLES.filter(
+      (table) => after[table] !== 0,
+    );
+    if (remaining.length > 0) {
+      throw new Error(
+        `Semantic database reset left business rows: ${remaining.map((table) => `${table}=${after[table]}`).join(', ')}`,
+      );
     }
-    await this.publishGpuMutation({ kind: 'allCleared' });
+    if (freelistAfter !== 0) {
+      throw new Error(
+        `Semantic database VACUUM left ${freelistAfter} free pages`,
+      );
+    }
+    if (walAfterBytes !== undefined && walAfterBytes !== 0) {
+      throw new Error(
+        `Semantic database WAL was not truncated (${walAfterBytes} bytes remain)`,
+      );
+    }
+    const rowsBefore = SEMANTIC_BUSINESS_TABLES.reduce(
+      (sum, table) => sum + before[table],
+      0,
+    );
+    if (
+      rowsBefore > 0 &&
+      beforeBytes !== undefined &&
+      afterBytes !== undefined &&
+      afterBytes >= beforeBytes
+    ) {
+      throw new Error(
+        `Semantic database did not physically shrink (${beforeBytes} -> ${afterBytes} bytes)`,
+      );
+    }
+
+    const report: SemanticDatabaseClearReport = {
+      before,
+      after,
+      database: {
+        path: this.dbPath,
+        beforeBytes,
+        afterBytes,
+        walBeforeBytes,
+        walAfterBytes,
+        shmBeforeBytes,
+        shmAfterBytes,
+        pageCountBefore,
+        pageCountAfter,
+        freelistBefore,
+        freelistAfter,
+      },
+    };
+    ztoolkit.log(
+      `[VectorStore] clearAll() verified: db=${beforeBytes ?? 'unknown'} -> ${afterBytes ?? 'unknown'} bytes, pages=${pageCountBefore} -> ${pageCountAfter}`,
+    );
+    return report;
   }
 
   /**
