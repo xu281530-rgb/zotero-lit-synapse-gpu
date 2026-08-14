@@ -199,6 +199,11 @@ async function refreshParentSemanticIndex(attachment: any): Promise<void> {
     );
     const task = semanticService
       .indexItemWithProcessor(parent, null, true)
+      .then((outcome) => {
+        if (outcome.status === "incomplete") {
+          throw new Error("Incremental index update was interrupted");
+        }
+      })
       .finally(() => {
         pendingIndexRefresh.delete(refreshKey);
       });

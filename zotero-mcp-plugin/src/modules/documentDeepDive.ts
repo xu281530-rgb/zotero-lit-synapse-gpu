@@ -141,7 +141,7 @@ function rankChunksLexically(
   chunks: Array<{ chunkId: number; text: string }>,
   keywordEntries: Parameters<typeof rankLexicalCandidates>[1],
   libraryID: number,
-  candidateK: number,
+  candidateLimit: number,
 ): KeywordSearchItem[] {
   const candidates: LexicalCandidate[] = chunks.map((chunk) => ({
     key: String(chunk.chunkId),
@@ -150,7 +150,7 @@ function rankChunksLexically(
     fields: { chunkText: chunk.text },
   }));
   return rankLexicalCandidates(candidates, keywordEntries, {
-    candidateK,
+    limit: candidateLimit,
     fieldWeights: CHUNK_FIELD_WEIGHTS,
   });
 }
@@ -204,7 +204,7 @@ export async function runDocumentDeepDive(
     expertRole: request.expertRole,
   });
 
-  const candidateK = Math.min(
+  const candidateLimit = Math.min(
     MAX_CHUNK_CANDIDATES,
     Math.max(cap.value, storedChunks.length),
   );
@@ -223,7 +223,6 @@ export async function runDocumentDeepDive(
       query: request.query,
       keywords: lexicalKeywords,
       topK: cap.value,
-      candidateK,
       rrfK: request.rrfK ?? 60,
       keywordWeight: request.keywordWeight ?? 1,
       semanticWeight: request.semanticWeight ?? 1,
@@ -237,13 +236,13 @@ export async function runDocumentDeepDive(
           storedChunks,
           lexicalKeywordEntries,
           libraryID,
-          candidateK,
+          candidateLimit,
         ),
       semanticSearch: async (): Promise<SemanticSearchItem[]> => {
         const results = await semanticService.searchItemChunks(request.query, {
           itemKey: request.itemKey,
           libraryID,
-          topK: candidateK,
+          topK: candidateLimit,
           timeoutMs: semanticTimeoutMs,
           signal: semanticAbort?.signal,
         });
@@ -346,7 +345,7 @@ export async function runDocumentDeepDive(
       userMaxChunks: settings.maxChunksPerItem,
       neighborRadiusLimit: settings.neighborRadius,
       totalChunks: storedChunks.length,
-      candidateK,
+      candidateLimit,
       candidatePoolTruncated,
       keywordResultCount: searchResult.keywordResultCount,
       semanticResultCount: searchResult.semanticResultCount,

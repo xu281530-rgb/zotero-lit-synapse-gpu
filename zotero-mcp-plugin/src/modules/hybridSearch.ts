@@ -34,10 +34,11 @@ export interface HybridSearchOptions {
    */
   keywords?: string[];
   topK: number;
-  candidateK: number;
   rrfK: number;
   keywordWeight: number;
   semanticWeight: number;
+  /** Disable branch deadlines for exhaustive library-level retrieval. */
+  exhaustive?: boolean;
   semanticTimeoutMs?: number;
   totalTimeoutMs?: number;
 }
@@ -71,9 +72,6 @@ export interface HybridSearchRunResult {
    * Pagination windows this list; it never re-ranks and never re-thresholds.
    */
   ranked: HybridSearchResult[];
-  /** Weakest normalised score each branch returned; see HybridFusionOutcome. */
-  keywordTailScore?: number;
-  semanticTailScore?: number;
   degraded: boolean;
   warnings: string[];
   keywordResultCount: number;
@@ -112,27 +110,6 @@ interface FusedCandidate {
   semanticRank?: number;
   rrfScore: number;
 }
-
-/**
- * Retrieval-depth bounds — the single definition.
- *
- * `max` is the engine's own limit and is enforced here; `min` is the floor the
- * settings and the UI clamp a configured value to, and the engine does not
- * impose it (a direct caller may legitimately fuse a handful of candidates).
- *
- * The engine owns the ceiling because it is a property of the scan, not of a
- * preference: the semantic branch keeps ~12 chunks per requested document, and
- * past this the vector scan starts losing its race with its own deadline, which
- * fails the branch outright instead of returning less.
- *
- * They live here so nothing has to restate them. Three separate copies of this
- * rule once disagreed — the settings clamped a large request to 600, one
- * validator rejected anything over 500, and a third insisted candidateK be at
- * least topK — so asking for a deeper sweep failed outright instead of being
- * clamped, and a small configured depth with a large page size threw on every
- * search. Anything that needs these numbers imports them.
- */
-export const CANDIDATE_K_BOUNDS = { min: 20, max: 600 } as const;
 
 export const DEFAULT_SEMANTIC_TIMEOUT_MS = 8000;
 export const DEFAULT_HYBRID_TIMEOUT_MS = 10000;
@@ -475,7 +452,8 @@ export interface LexicalCandidate {
 }
 
 export interface LexicalRankingOptions {
-  candidateK: number;
+  /** Optional result cap used only by bounded single-document searches. */
+  limit?: number;
   fieldWeights?: Record<string, number>;
 }
 
@@ -538,7 +516,9 @@ export function rankLexicalCandidates(
   keywords: LexicalKeyword[],
   options: LexicalRankingOptions,
 ): KeywordSearchItem[] {
-  validateFiniteNumber(options.candidateK, "candidateK", 1);
+  if (options.limit !== undefined) {
+    validateFiniteNumber(options.limit, "limit", 1);
+  }
   if (candidates.length === 0 || keywords.length === 0) return [];
 
   const fieldWeights = options.fieldWeights ?? LEXICAL_FIELD_WEIGHTS;
@@ -629,16 +609,17 @@ export function rankLexicalCandidates(
     } as KeywordSearchItem;
   });
 
-  return ranked
-    .sort((a, b) => {
+  const ordered = ranked.sort((a, b) => {
       const scoreDifference = (b.relevanceScore || 0) - (a.relevanceScore || 0);
       if (scoreDifference !== 0) return scoreDifference;
       const coverageDifference =
         (b.matchedKeywords?.length || 0) - (a.matchedKeywords?.length || 0);
       if (coverageDifference !== 0) return coverageDifference;
       return a.key.localeCompare(b.key);
-    })
-    .slice(0, options.candidateK);
+    });
+  return options.limit === undefined
+    ? ordered
+    : ordered.slice(0, options.limit);
 }
 
 /**
@@ -854,25 +835,16 @@ export function validateHybridSearchOptions(
     throw new Error("query must not be blank");
   }
   validateFiniteNumber(options.topK, "topK", 1);
-  validateFiniteNumber(options.candidateK, "candidateK", 1);
   validateFiniteNumber(options.rrfK, "rrfK", 1);
   validateFiniteNumber(options.keywordWeight, "keywordWeight", 0);
   validateFiniteNumber(options.semanticWeight, "semanticWeight", 0);
-  if (!Number.isInteger(options.topK) || options.topK > 100) {
-    throw new Error("topK must be an integer between 1 and 100");
+  if (!Number.isInteger(options.topK) || options.topK > 20) {
+    throw new Error("topK must be an integer between 1 and 20");
   }
   // Only the ceiling is the engine's business: it is the latency guard, and a
   // depth above it fails the scan rather than shortening it. The floor is a
   // configuration concern — a caller driving this directly (a test, a narrow
   // internal search) may legitimately fuse four candidates.
-  if (
-    !Number.isInteger(options.candidateK) ||
-    options.candidateK > CANDIDATE_K_BOUNDS.max
-  ) {
-    throw new Error(
-      `candidateK must be an integer no greater than ${CANDIDATE_K_BOUNDS.max}`,
-    );
-  }
   if (options.semanticTimeoutMs !== undefined) {
     validateFiniteNumber(options.semanticTimeoutMs, "semanticTimeoutMs", 1);
   }
@@ -914,17 +886,6 @@ export interface HybridFusionOutcome {
   /** Candidates that survived the threshold but did not fit inside topK. */
   discardedBeyondTopK: number;
   appliedMinScore: number;
-  /**
-   * The weakest normalised score each branch still handed over.
-   *
-   * Branch results arrive in descending score order, so anything the branch did
-   * NOT return scores at most this much. That makes these two numbers the only
-   * honest way to answer "could a document beyond the candidate pool still have
-   * cleared the threshold?" — without them, a full pool has to be treated as if
-   * it were hiding better matches, even when it provably is not.
-   */
-  keywordTailScore?: number;
-  semanticTailScore?: number;
 }
 
 export function fuseHybridSearchResults(
@@ -968,10 +929,10 @@ export function fuseHybridSearchResultsDetailed(
 
   if (options.keywordWeight > 0) {
     keywordResults.forEach((item, index) => {
-      const candidateKey = `${item.libraryID ?? "unknown"}:${item.key}`;
-      if (!item.key || candidates.get(candidateKey)?.keywordItem) return;
+      const identityKey = `${item.libraryID ?? "unknown"}:${item.key}`;
+      if (!item.key || candidates.get(identityKey)?.keywordItem) return;
       const rank = index + 1;
-      const existing = candidates.get(candidateKey) || {
+      const existing = candidates.get(identityKey) || {
         itemKey: item.key,
         libraryID: item.libraryID,
         rrfScore: 0,
@@ -979,16 +940,16 @@ export function fuseHybridSearchResultsDetailed(
       existing.keywordItem = item;
       existing.keywordRank = rank;
       existing.rrfScore += options.keywordWeight / (options.rrfK + rank);
-      candidates.set(candidateKey, existing);
+      candidates.set(identityKey, existing);
     });
   }
 
   if (options.semanticWeight > 0) {
     semanticResults.forEach((item, index) => {
-      const candidateKey = `${item.libraryID ?? "unknown"}:${item.itemKey}`;
-      if (!item.itemKey || candidates.get(candidateKey)?.semanticItem) return;
+      const identityKey = `${item.libraryID ?? "unknown"}:${item.itemKey}`;
+      if (!item.itemKey || candidates.get(identityKey)?.semanticItem) return;
       const rank = index + 1;
-      const existing = candidates.get(candidateKey) || {
+      const existing = candidates.get(identityKey) || {
         itemKey: item.itemKey,
         libraryID: item.libraryID,
         rrfScore: 0,
@@ -996,7 +957,7 @@ export function fuseHybridSearchResultsDetailed(
       existing.semanticItem = item;
       existing.semanticRank = rank;
       existing.rrfScore += options.semanticWeight / (options.rrfK + rank);
-      candidates.set(candidateKey, existing);
+      candidates.set(identityKey, existing);
     });
   }
 
@@ -1077,21 +1038,12 @@ export function fuseHybridSearchResultsDetailed(
   // byte-for-byte what it was before pagination existed.
   const results = ranked.slice(0, options.topK);
 
-  const lastKeyword = keywordResults[keywordResults.length - 1];
-  const lastSemantic = semanticResults[semanticResults.length - 1];
-
   return {
     results,
     ranked,
     discardedBelowThreshold,
     discardedBeyondTopK: Math.max(0, ranked.length - results.length),
     appliedMinScore: minScore,
-    keywordTailScore: lastKeyword
-      ? normalizeLexicalScore(lastKeyword.relevanceScore)
-      : undefined,
-    semanticTailScore: lastSemantic
-      ? normalizeSemanticScore(lastSemantic.score)
-      : undefined,
   };
 }
 
@@ -1169,6 +1121,23 @@ async function settleWithTimeout<T>(
   }
 }
 
+async function settleOperation<T>(
+  operation: () => Promise<T>,
+): Promise<{ outcome: PromiseSettledResult<T>; elapsedMs: number }> {
+  const startedAt = Date.now();
+  try {
+    return {
+      outcome: { status: "fulfilled", value: await operation() },
+      elapsedMs: Date.now() - startedAt,
+    };
+  } catch (reason) {
+    return {
+      outcome: { status: "rejected", reason },
+      elapsedMs: Date.now() - startedAt,
+    };
+  }
+}
+
 export async function runHybridSearch(
   options: HybridSearchOptions & { query: string },
   dependencies: HybridSearchDependencies,
@@ -1180,9 +1149,18 @@ export async function runHybridSearch(
     options.semanticTimeoutMs ?? DEFAULT_SEMANTIC_TIMEOUT_MS,
     totalTimeoutMs,
   );
+  const runBranch = <T>(
+    operation: () => Promise<T>,
+    timeoutMs: number,
+    label: string,
+    onTimeout?: () => void,
+  ) =>
+    options.exhaustive
+      ? settleOperation(operation)
+      : settleWithTimeout(operation, timeoutMs, label, onTimeout);
   const [keywordRun, semanticRun] = await Promise.all([
     options.keywordWeight > 0
-      ? settleWithTimeout(
+      ? runBranch(
           dependencies.keywordSearch,
           totalTimeoutMs,
           "Keyword search",
@@ -1196,7 +1174,7 @@ export async function runHybridSearch(
           elapsedMs: 0,
         }),
     options.semanticWeight > 0
-      ? settleWithTimeout(
+      ? runBranch(
           dependencies.semanticSearch,
           semanticTimeoutMs,
           "Semantic search",
@@ -1250,8 +1228,6 @@ export async function runHybridSearch(
   return {
     results: fusion.results,
     ranked: fusion.ranked,
-    keywordTailScore: fusion.keywordTailScore,
-    semanticTailScore: fusion.semanticTailScore,
     degraded: warnings.length > 0,
     warnings,
     keywordResultCount: keywordResults.length,

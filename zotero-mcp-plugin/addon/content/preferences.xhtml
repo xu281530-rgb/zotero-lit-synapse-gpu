@@ -40,7 +40,6 @@
 
     <!-- Hybrid search settings -->
     <preference id="extensions.zotero.__addonRef__.hybrid.maxDocuments" name="extensions.zotero.__addonRef__.hybrid.maxDocuments" type="int" />
-    <preference id="extensions.zotero.__addonRef__.hybrid.candidateK" name="extensions.zotero.__addonRef__.hybrid.candidateK" type="int" />
     <preference id="extensions.zotero.__addonRef__.hybrid.maxChunksPerItem" name="extensions.zotero.__addonRef__.hybrid.maxChunksPerItem" type="int" />
     <preference id="extensions.zotero.__addonRef__.hybrid.minScore" name="extensions.zotero.__addonRef__.hybrid.minScore" type="string" />
     <preference id="extensions.zotero.__addonRef__.hybrid.chunkTargetChars" name="extensions.zotero.__addonRef__.hybrid.chunkTargetChars" type="int" />
@@ -1495,19 +1494,7 @@
           <html:input type="number" class="zmp-fi zmp-nb"
             id="zotero-prefpane-__addonRef__-hybrid-max-documents"
             preference="extensions.zotero.__addonRef__.hybrid.maxDocuments"
-            min="1" max="100" placeholder="20"
-          />
-        </html:div>
-
-        <html:div class="zmp-sw zmp-nrow">
-          <html:div>
-            <html:div class="zmp-sw-text" data-l10n-id="pref-hybrid-candidate-k-label"></html:div>
-            <html:div class="zmp-sw-sub" data-l10n-id="pref-hybrid-candidate-k-hint"></html:div>
-          </html:div>
-          <html:input type="number" class="zmp-fi zmp-nb"
-            id="zotero-prefpane-__addonRef__-hybrid-candidate-k"
-            preference="extensions.zotero.__addonRef__.hybrid.candidateK"
-            min="20" max="600" step="20" placeholder="240"
+            min="1" max="20" placeholder="20"
           />
         </html:div>
 
@@ -1546,6 +1533,23 @@
             min="0" max="10" placeholder="1"
           />
         </html:div>
+
+        <html:div class="zmp-sw zmp-nrow">
+          <html:div>
+            <html:div class="zmp-sw-text" data-l10n-id="pref-hybrid-search-timeout-label"></html:div>
+            <html:div class="zmp-sw-sub" data-l10n-id="pref-hybrid-search-timeout-hint"></html:div>
+          </html:div>
+          <html:div class="zmp-bg" style="margin-top:0">
+            <html:input type="number" class="zmp-fi zmp-nb"
+              id="zotero-prefpane-__addonRef__-hybrid-search-timeout"
+              preference="extensions.zotero.__addonRef__.hybrid.searchTimeoutMs"
+              min="1" max="3600000" step="1" placeholder="8000"
+            />
+            <html:button class="zmp-b" id="hybrid-scan-benchmark-button"
+              data-l10n-id="pref-hybrid-scan-benchmark-button"></html:button>
+          </html:div>
+        </html:div>
+        <html:div class="zmp-res" id="hybrid-scan-benchmark-result"></html:div>
 
       </html:div>
 

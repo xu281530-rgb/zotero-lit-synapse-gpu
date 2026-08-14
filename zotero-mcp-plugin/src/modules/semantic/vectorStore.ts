@@ -10,6 +10,11 @@ declare let ztoolkit: ZToolkit;
 declare let PathUtils: any;
 declare let IOUtils: any;
 
+import {
+  runVectorScanBenchmark,
+  type VectorScanBenchmarkResult,
+} from './vectorScanBenchmark';
+
 export interface VectorRecord {
   itemKey: string;
   libraryID?: number;
@@ -34,6 +39,8 @@ export interface SearchResult {
   score: number;
   chunkText: string;
   language: string;
+  /** Internal database identity used for batched text hydration. */
+  rowId?: number;
 }
 
 export interface IndexStatus {
@@ -44,6 +51,42 @@ export interface IndexStatus {
   version: number;
   itemModified?: string;       // Item's dateModified for fast change detection
   attachmentModified?: string; // Latest attachment dateModified
+}
+
+export interface FailedIndexItem {
+  libraryID: number;
+  itemKey: string;
+  errorType: string;
+  error: string;
+  timestamp: number;
+  buildID?: string;
+}
+
+export type IndexBuildTargetState = 'pending' | 'succeeded' | 'failed';
+
+export interface IndexBuildTarget {
+  libraryID: number;
+  itemKey: string;
+  state: IndexBuildTargetState;
+}
+
+export interface IndexBuildSession {
+  buildID: string;
+  libraryID: number;
+  scope: 'full-library' | 'targeted' | 'incremental';
+  status: 'indexing' | 'paused' | 'failed' | 'aborted' | 'completed';
+  chunkSignature?: string;
+  chunkTargetChars?: number;
+  chunkAppendToleranceChars?: number;
+  createdAt: number;
+  resetCompleted?: boolean;
+}
+
+export interface IndexBuildTargetSummary {
+  total: number;
+  pending: number;
+  succeeded: number;
+  failed: number;
 }
 
 export interface VectorStoreStats {
@@ -311,6 +354,52 @@ export class VectorStore {
       )
     `);
 
+    await this.db.queryAsync(`
+      CREATE TABLE IF NOT EXISTS index_failures (
+        library_id INTEGER NOT NULL,
+        item_key TEXT NOT NULL,
+        error_type TEXT NOT NULL,
+        error_message TEXT NOT NULL,
+        failed_at INTEGER NOT NULL,
+        build_id TEXT,
+        PRIMARY KEY (library_id, item_key)
+      )
+    `);
+
+    await this.db.queryAsync(`
+      CREATE TABLE IF NOT EXISTS index_builds (
+        build_id TEXT PRIMARY KEY,
+        library_id INTEGER NOT NULL,
+        scope TEXT NOT NULL,
+        status TEXT NOT NULL,
+        chunk_signature TEXT,
+        chunk_target_chars INTEGER,
+        chunk_append_tolerance_chars INTEGER,
+        created_at INTEGER NOT NULL,
+        reset_completed INTEGER NOT NULL DEFAULT 0
+      )
+    `);
+
+    try {
+      await this.db.queryAsync(
+        `ALTER TABLE index_builds ADD COLUMN reset_completed INTEGER NOT NULL DEFAULT 0`,
+      );
+    } catch {
+      // Column already exists.
+    }
+
+    await this.db.queryAsync(`
+      CREATE TABLE IF NOT EXISTS index_build_targets (
+        build_id TEXT NOT NULL,
+        library_id INTEGER NOT NULL,
+        item_key TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending',
+        PRIMARY KEY (build_id, library_id, item_key)
+      )
+    `);
+
+    await this.migrateLegacyFailureMarkers();
+
     // Migrate existing tables - add new columns if they don't exist
     try {
       await this.db.queryAsync(`ALTER TABLE index_status ADD COLUMN item_modified TEXT`);
@@ -379,6 +468,24 @@ export class VectorStore {
     await this.migrateFloat32ToSeparateTable();
 
     ztoolkit.log('[VectorStore] Tables created/verified');
+  }
+
+  private async migrateLegacyFailureMarkers(): Promise<void> {
+    const rows = await this.db.queryAsync(
+      `SELECT item_key, content_hash FROM index_status WHERE content_hash LIKE 'failed:%'`,
+    );
+    for (const row of rows || []) {
+      const identity = this.fromStorageKey(String(row.item_key));
+      const errorType = String(row.content_hash).slice('failed:'.length) || 'unknown';
+      await this.db.queryAsync(
+        `INSERT OR IGNORE INTO index_failures (library_id, item_key, error_type, error_message, failed_at) VALUES (?, ?, ?, ?, ?)`,
+        [identity.libraryID, identity.itemKey, errorType, 'Legacy indexing failure', Date.now()],
+      );
+      await this.db.queryAsync(
+        `DELETE FROM index_status WHERE item_key = ? AND content_hash LIKE 'failed:%'`,
+        [row.item_key],
+      );
+    }
   }
 
   /**
@@ -518,6 +625,119 @@ export class VectorStore {
     ztoolkit.log(`[VectorStore] Inserted ${records.length} vectors with Int8 quantization`);
   }
 
+  async replaceItemIndex(options: {
+    itemKey: string;
+    libraryID: number;
+    records: VectorRecord[];
+    contentHash: string;
+    itemModified?: string;
+    attachmentModified?: string;
+    buildID?: string;
+  }): Promise<void> {
+    await this.ensureInitialized();
+    const storageKey = this.toStorageKey(options.itemKey, options.libraryID);
+
+    await this.db.executeTransaction(async () => {
+      await this.db.queryAsync(`DELETE FROM embeddings WHERE item_key = ?`, [storageKey]);
+      await this.db.queryAsync(`DELETE FROM vectors_f32 WHERE item_key = ?`, [storageKey]);
+
+      for (const record of options.records) {
+        const vectorBlob = this.float32ArrayToBuffer(record.vector);
+        const quantized = this.quantizeWithNorm(record.vector);
+        const int8Base64 = this.int8ArrayToBase64(quantized.int8Data);
+        await this.db.queryAsync(
+          `INSERT OR REPLACE INTO embeddings (item_key, chunk_id, vector, language, chunk_text, dimensions, vector_int8, vector_scale, vector_norm) VALUES (?, ?, x'', ?, ?, ?, ?, ?, ?)`,
+          [
+            storageKey,
+            record.chunkId,
+            record.language,
+            record.chunkText || '',
+            record.vector.length,
+            int8Base64,
+            quantized.scale,
+            quantized.norm,
+          ],
+        );
+        await this.db.queryAsync(
+          `INSERT OR REPLACE INTO vectors_f32 (item_key, chunk_id, vector) VALUES (?, ?, ?)`,
+          [storageKey, record.chunkId, vectorBlob],
+        );
+      }
+
+      await this.db.queryAsync(
+        `INSERT OR REPLACE INTO index_status (item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified) VALUES (?, strftime('%s', 'now'), 2, ?, ?, ?, ?)`,
+        [
+          storageKey,
+          options.records.length,
+          options.contentHash,
+          options.itemModified || null,
+          options.attachmentModified || null,
+        ],
+      );
+      await this.db.queryAsync(
+        `DELETE FROM index_failures WHERE library_id = ? AND item_key = ?`,
+        [options.libraryID, options.itemKey],
+      );
+      if (options.buildID) {
+        await this.db.queryAsync(
+          `UPDATE index_build_targets SET state = 'succeeded' WHERE build_id = ? AND library_id = ? AND item_key = ?`,
+          [options.buildID, options.libraryID, options.itemKey],
+        );
+      }
+    });
+
+    for (const key of this.vectorCache.keys()) {
+      if (key.startsWith(`${storageKey}_`)) this.vectorCache.delete(key);
+    }
+    for (const record of options.records) {
+      this.updateCache(`${storageKey}_${record.chunkId}`, record.vector);
+    }
+  }
+
+  /**
+   * Benchmark the same read-only full-Library scan used by hybrid retrieval.
+   * One stored Float32 vector is the query seed, avoiding an embedding API
+   * request and any need to read source document text.
+   */
+  async benchmarkLibraryScan(
+    libraryID: number = Zotero.Libraries.userLibraryID,
+    signal?: AbortSignal,
+  ): Promise<VectorScanBenchmarkResult> {
+    await this.ensureInitialized();
+    const scope =
+      libraryID === Zotero.Libraries.userLibraryID
+        ? { clause: "e.item_key NOT GLOB '[0-9]*:*'", params: [] }
+        : { clause: 'e.item_key GLOB ?', params: [`${libraryID}:*`] };
+    const seedRows = await this.queryRowsCancellable(
+      `SELECT e.dimensions, f.vector FROM embeddings e JOIN vectors_f32 f ON f.item_key = e.item_key AND f.chunk_id = e.chunk_id WHERE ${scope.clause} ORDER BY e.id LIMIT 1`,
+      scope.params,
+      signal,
+      undefined,
+      (row: any) => ({ dimensions: row.dimensions, vector: row.vector }),
+    );
+    if (!seedRows.length || !seedRows[0].vector) {
+      throw new Error('No vectors are indexed in My Library');
+    }
+    const seed = this.bufferToFloat32Array(
+      seedRows[0].vector,
+      Number(seedRows[0].dimensions),
+    );
+
+    return runVectorScanBenchmark(() =>
+      this.search(seed, {
+        groupByItem: true,
+        documentLimit: undefined,
+        maxChunksPerItem: 3,
+        includeChunkText: false,
+        language: 'all',
+        itemKeys: undefined,
+        minScore: -1,
+        libraryID,
+        signal,
+      }),
+    );
+  }
+
   /**
    * Search for similar vectors using optimized Int8 chunked streaming
    *
@@ -534,11 +754,17 @@ export class VectorStore {
     queryVector: Float32Array,
     options: {
       topK?: number;
+      /** Aggregate chunks by document and optionally cap distinct documents. */
+      groupByItem?: boolean;
+      documentLimit?: number;
+      maxChunksPerItem?: number;
+      includeChunkText?: boolean;
       language?: 'zh' | 'en' | 'all';
       itemKeys?: string[];
       minScore?: number;
       libraryID?: number;
       deadlineAt?: number;
+      signal?: AbortSignal;
       /** Filled in with how many stored vectors this scan actually read. */
       stats?: { scanned?: number };
     } = {}
@@ -547,14 +773,24 @@ export class VectorStore {
 
     const {
       topK = 10,
+      groupByItem = false,
+      documentLimit,
+      maxChunksPerItem = 3,
+      includeChunkText = true,
       language = 'all',
       itemKeys,
       minScore = 0,
       libraryID = Zotero.Libraries.userLibraryID,
       deadlineAt,
+      signal,
       stats,
     } = options;
     const startTime = Date.now();
+
+    // An explicitly empty scope means "search no documents". Treating it as
+    // an omitted filter would turn an empty Collection into a full-library
+    // scan.
+    if (itemKeys !== undefined && itemKeys.length === 0) return [];
 
     ztoolkit.log(`[VectorStore] search() start: instanceId=${this.instanceId}, topK=${topK}, lang=${language}, minScore=${minScore}, queryDims=${queryVector.length}`);
 
@@ -567,7 +803,7 @@ export class VectorStore {
       params.push(language);
     }
 
-    if (itemKeys && itemKeys.length > 0) {
+    if (itemKeys !== undefined) {
       const storageKeys = itemKeys.map((key) =>
         this.toStorageKey(key, libraryID),
       );
@@ -581,6 +817,8 @@ export class VectorStore {
       params.push(`${libraryID}:*`);
     }
 
+    this.throwIfVectorScanCancelled(signal, deadlineAt);
+
     // Optimized batch size: 50,000 vectors per chunk
     // Memory: 50k × 2560 dims × 1 byte = ~128MB for Int8 data
     const BATCH_SIZE = 50000;
@@ -588,32 +826,36 @@ export class VectorStore {
     let totalScanned = 0;
     let batchCount = 0;
 
-    // Get total count first
     const whereClause = conditions.join(' AND ');
-    const totalCount = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM embeddings WHERE ${whereClause}`, params);
-    ztoolkit.log(`[VectorStore] search() total vectors: ${totalCount}, batch size: ${BATCH_SIZE}`);
-
-    if (!totalCount || totalCount === 0) {
+    const metadataRows = await this.queryRowsCancellable(
+      `SELECT dimensions, vector_int8 IS NOT NULL AS has_int8 FROM embeddings WHERE ${whereClause} ORDER BY id LIMIT 1`,
+      params,
+      signal,
+      deadlineAt,
+      (row: any) => ({
+        dimensions: row.dimensions,
+        has_int8: row.has_int8,
+      }),
+    );
+    if (metadataRows.length === 0) {
       ztoolkit.log(`[VectorStore] search() no vectors found`);
       return [];
     }
 
     // Check stored vector dimensions - if they don't match query dimensions, search will fail
-    const storedDimsRow = await this.db.queryAsync(`SELECT dimensions FROM embeddings WHERE ${whereClause} LIMIT 1`, params);
-    if (storedDimsRow && storedDimsRow.length > 0) {
-      const storedDims = storedDimsRow[0].dimensions;
-      if (storedDims !== queryVector.length) {
-        ztoolkit.log(`[VectorStore] CRITICAL: Dimension mismatch! Query=${queryVector.length}, Stored=${storedDims}. You need to re-index with the current embedding model.`, 'error');
-        // Return empty results with a clear error - vectors of different dimensions cannot be compared
-        return [];
-      }
+    const storedDims = metadataRows[0].dimensions;
+    if (storedDims !== queryVector.length) {
+      ztoolkit.log(`[VectorStore] CRITICAL: Dimension mismatch! Query=${queryVector.length}, Stored=${storedDims}. You need to re-index with the current embedding model.`, 'error');
+      // Return empty results with a clear error - vectors of different dimensions cannot be compared
+      return [];
     }
 
-    // Check if Int8 data is available (for backward compatibility)
-    const hasInt8 = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM embeddings WHERE vector_int8 IS NOT NULL AND ${whereClause}`, params);
-    const useInt8 = hasInt8 > 0 && hasInt8 >= totalCount * 0.9; // Use Int8 if >90% have it
+    // New databases have Int8 data for every row. If the first row is from a
+    // legacy database, scan through the Float32 table instead; mixed Int8
+    // batches retain a batched Float32 fallback for individual missing rows.
+    const useInt8 = Boolean(Number(metadataRows[0].has_int8));
 
-    ztoolkit.log(`[VectorStore] search() using ${useInt8 ? 'Int8 optimized' : 'Float32 fallback'} search (${hasInt8}/${totalCount} have Int8)`);
+    ztoolkit.log(`[VectorStore] search() using ${useInt8 ? 'Int8 optimized' : 'Float32 fallback'} search`);
 
     // Pre-compute query vector data
     const queryQuantized = this.quantizeWithNorm(queryVector);
@@ -636,15 +878,11 @@ export class VectorStore {
     ztoolkit.log(`[VectorStore] search() query: float32[0:5]=[${Array.from(querySample).map(v => v.toFixed(4))}], int8[0:5]=[${Array.from(queryInt8Sample)}], norm=${queryNorm.toFixed(4)}, scale=${queryMaxAbs > 0 ? (127 / queryMaxAbs).toFixed(4) : 'N/A'}`);
 
 
-    // Min-heap over the running top K, ordered by score.
-    //
-    // It has to be a real heap. The previous version kept the array fully
-    // sorted and re-sorted it on every replacement, which is O(K log K) per
-    // insert instead of O(log K) — tolerable while K was small, but the window
-    // now has to be wide enough to yield topK distinct DOCUMENTS after chunks
-    // are deduplicated by item, and at K in the thousands a full re-sort per
-    // replacement costs tens of millions of comparisons per scan.
+    // Min-heap for bounded chunk-level searches. Library-level retrieval uses
+    // the document map below and therefore cannot let one document's many
+    // chunks crowd other documents out.
     const minHeap: SearchResult[] = [];
+    const documentChunks = new Map<string, SearchResult[]>();
     const siftUp = (start: number) => {
       let index = start;
       while (index > 0) {
@@ -679,9 +917,6 @@ export class VectorStore {
       }
     };
 
-    // Track debug info for first few vectors
-    let debugSampleCount = 0;
-    const MAX_DEBUG_SAMPLES = 3;
     // Track score statistics for debugging
     let scoreSum = 0;
     let scoreCount = 0;
@@ -690,10 +925,8 @@ export class VectorStore {
     let nanCount = 0;
 
     // Process in large batches (chunked streaming)
-    while (offset < totalCount) {
-      if (deadlineAt && Date.now() >= deadlineAt) {
-        throw new Error('Vector scan timed out');
-      }
+    for (;;) {
+      this.throwIfVectorScanCancelled(signal, deadlineAt);
       batchCount++;
       const batchStartTime = Date.now();
       const batchParams = [...params, BATCH_SIZE, offset];
@@ -701,8 +934,8 @@ export class VectorStore {
       // Select appropriate columns based on availability
       // Float32 vectors are in vectors_f32 table — only load when needed (fallback path)
       const selectCols = useInt8
-        ? 'item_key, chunk_id, vector_int8, vector_scale, vector_norm, language, chunk_text, dimensions'
-        : 'item_key, chunk_id, language, chunk_text, dimensions';
+        ? 'id, item_key, chunk_id, vector_int8, vector_scale, vector_norm, language, dimensions'
+        : 'e.id, e.item_key, e.chunk_id, e.language, e.dimensions, f.vector AS vector_f32';
 
       // ORDER BY id is not decoration: the scan walks the table in LIMIT/OFFSET
       // batches, and SQLite guarantees no row order without it. Two runs of the
@@ -713,7 +946,32 @@ export class VectorStore {
       // OFFSET paging can also skip or repeat rows outright if the order shifts
       // between batches. `id` is the INTEGER PRIMARY KEY, i.e. the rowid, so
       // this orders the walk without costing a sort.
-      const rows = await this.db.queryAsync(`SELECT ${selectCols} FROM embeddings WHERE ${whereClause} ORDER BY id LIMIT ? OFFSET ?`, batchParams);
+      const mapScanRow = (row: any) => ({
+        id: row.id,
+        item_key: row.item_key,
+        chunk_id: row.chunk_id,
+        vector_int8: row.vector_int8,
+        vector_scale: row.vector_scale,
+        vector_norm: row.vector_norm,
+        language: row.language,
+        dimensions: row.dimensions,
+        vector_f32: row.vector_f32,
+      });
+      const rows = useInt8
+        ? await this.queryRowsCancellable(
+            `SELECT ${selectCols} FROM embeddings WHERE ${whereClause} ORDER BY id LIMIT ? OFFSET ?`,
+            batchParams,
+            signal,
+            deadlineAt,
+            mapScanRow,
+          )
+        : await this.queryRowsCancellable(
+            `SELECT ${selectCols} FROM (SELECT id, item_key, chunk_id, language, dimensions FROM embeddings WHERE ${whereClause} ORDER BY id LIMIT ? OFFSET ?) e LEFT JOIN vectors_f32 f ON f.item_key = e.item_key AND f.chunk_id = e.chunk_id ORDER BY e.id`,
+            batchParams,
+            signal,
+            deadlineAt,
+            mapScanRow,
+          );
 
       if (!rows || rows.length === 0) {
         ztoolkit.log(`[VectorStore] search() batch ${batchCount} returned no rows at offset ${offset}`);
@@ -723,14 +981,43 @@ export class VectorStore {
       const ioTime = Date.now() - batchStartTime;
       const computeStartTime = Date.now();
 
+      const decodedInt8 = new Map<number, Int8Array>();
+      const fallbackRowIDs: number[] = [];
+      if (useInt8) {
+        for (const row of rows) {
+          if (
+            row.vector_int8 &&
+            row.vector_norm &&
+            row.dimensions === queryVector.length
+          ) {
+            try {
+              const decoded = this.bufferToInt8Array(
+                row.vector_int8,
+                row.dimensions,
+              );
+              if (decoded.length === queryQuantized.int8Data.length) {
+                decodedInt8.set(row.id, decoded);
+                continue;
+              }
+            } catch {
+              // Invalid Int8 data uses the batched Float32 fallback below.
+            }
+          }
+          fallbackRowIDs.push(row.id);
+        }
+      }
+      const float32Fallbacks = useInt8
+        ? await this.getFloat32VectorsByEmbeddingIDs(
+            fallbackRowIDs,
+            signal,
+            deadlineAt,
+          )
+        : new Map<number, any>();
+
       // Process this batch
       for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
-        if (
-          deadlineAt &&
-          rowIndex % 256 === 0 &&
-          Date.now() >= deadlineAt
-        ) {
-          throw new Error('Vector scan timed out');
+        if (rowIndex % 256 === 0) {
+          this.throwIfVectorScanCancelled(signal, deadlineAt);
         }
         const row = rows[rowIndex];
         try {
@@ -740,72 +1027,27 @@ export class VectorStore {
           const queryDims = queryVector.length;
           const storedDims = row.dimensions;
 
-          if (useInt8 && row.vector_int8 && row.vector_norm && queryDims === storedDims) {
-            // Optimized Int8 path with pre-computed norm
-            const storedInt8 = this.bufferToInt8Array(row.vector_int8, row.dimensions);
-
-            // Verify decoded array length matches expected dimensions
-            if (storedInt8.length !== queryQuantized.int8Data.length) {
-              // Length mismatch - fall back to Float32 from vectors_f32 table
-              const f32Row = await this.db.queryAsync(`SELECT vector FROM vectors_f32 WHERE item_key = ? AND chunk_id = ?`, [row.item_key, row.chunk_id]);
-              if (f32Row && f32Row.length > 0) {
-                const storedVector = this.bufferToFloat32Array(f32Row[0].vector, row.dimensions);
-                score = this.cosineSimilarityWithNormalizedQuery(normalizedQuery, storedVector);
-              } else {
-                continue; // Skip this vector — no fallback available
-              }
-              if (debugSampleCount === 0) {
-                ztoolkit.log(`[VectorStore] WARNING: Int8 length mismatch: query=${queryQuantized.int8Data.length}, stored=${storedInt8.length}, using Float32 fallback from vectors_f32`);
-              }
-            } else {
-              score = this.cosineSimilarityInt8WithNorm(
-                queryQuantized.int8Data,
-                queryQuantized.norm,
-                storedInt8,
-                row.vector_norm
-              );
-
-              // Debug: log first few vectors to diagnose issues
-              if (debugSampleCount < MAX_DEBUG_SAMPLES) {
-                const sampleQuery = queryQuantized.int8Data.slice(0, 5);
-                const sampleStored = storedInt8.slice(0, 5);
-                // Check if stored Int8 is all zeros (corrupted)
-                let nonZeroCount = 0;
-                for (let j = 0; j < Math.min(100, storedInt8.length); j++) {
-                  if (storedInt8[j] !== 0) nonZeroCount++;
-                }
-
-                // Also compute Float32 similarity for comparison (load from vectors_f32)
-                let float32Score = NaN;
-                let sampleFloat32: Float32Array = new Float32Array(0);
-                const debugF32Row = await this.db.queryAsync(`SELECT vector FROM vectors_f32 WHERE item_key = ? AND chunk_id = ?`, [row.item_key, row.chunk_id]);
-                if (debugF32Row && debugF32Row.length > 0) {
-                  const storedFloat32 = this.bufferToFloat32Array(debugF32Row[0].vector, row.dimensions);
-                  float32Score = this.cosineSimilarityWithNormalizedQuery(normalizedQuery, storedFloat32);
-                  sampleFloat32 = storedFloat32.slice(0, 5);
-                }
-
-                ztoolkit.log(`[VectorStore] DEBUG sample ${debugSampleCount}:`);
-                ztoolkit.log(`  Int8 score=${score.toFixed(4)}, Float32 score=${isNaN(float32Score) ? 'N/A' : float32Score.toFixed(4)}, diff=${isNaN(float32Score) ? 'N/A' : Math.abs(score - float32Score).toFixed(4)}`);
-                ztoolkit.log(`  queryInt8[0:5]=[${Array.from(sampleQuery)}]`);
-                ztoolkit.log(`  storedInt8[0:5]=[${Array.from(sampleStored)}], nonZero=${nonZeroCount}/100`);
-                ztoolkit.log(`  storedFloat32[0:5]=[${Array.from(sampleFloat32).map(v => v.toFixed(4))}]`);
-                ztoolkit.log(`  base64Len=${typeof row.vector_int8 === 'string' ? row.vector_int8.length : 'N/A'}, int8ArrayLen=${storedInt8.length}`);
-                debugSampleCount++;
-              }
-            }
+          const storedInt8 = decodedInt8.get(row.id);
+          if (storedInt8) {
+            score = this.cosineSimilarityInt8WithNorm(
+              queryQuantized.int8Data,
+              queryQuantized.norm,
+              storedInt8,
+              row.vector_norm,
+            );
           } else {
-            // Fallback to Float32 from vectors_f32 table (dimension mismatch or no Int8 data)
-            if (queryDims !== storedDims) {
-              ztoolkit.log(`[VectorStore] Dimension mismatch: query=${queryDims}, stored=${storedDims}, falling back to Float32`);
-            }
-            const f32Row = await this.db.queryAsync(`SELECT vector FROM vectors_f32 WHERE item_key = ? AND chunk_id = ?`, [row.item_key, row.chunk_id]);
-            if (f32Row && f32Row.length > 0) {
-              const storedVector = this.bufferToFloat32Array(f32Row[0].vector, row.dimensions);
-              score = this.cosineSimilarityWithNormalizedQuery(normalizedQuery, storedVector);
-            } else {
-              continue; // Skip — no float32 vector available
-            }
+            const vectorBlob = useInt8
+              ? float32Fallbacks.get(row.id)
+              : row.vector_f32;
+            if (!vectorBlob || queryDims !== storedDims) continue;
+            const storedVector = this.bufferToFloat32Array(
+              vectorBlob,
+              row.dimensions,
+            );
+            score = this.cosineSimilarityWithNormalizedQuery(
+              normalizedQuery,
+              storedVector,
+            );
           }
 
           totalScanned++;
@@ -827,18 +1069,27 @@ export class VectorStore {
               libraryID: identity.libraryID,
               chunkId: row.chunk_id,
               score,
-              chunkText: row.chunk_text,
-              language: row.language
+              chunkText: '',
+              language: row.language,
+              rowId: row.id,
             };
 
-            // Keep the K best seen so far: fill the heap, then replace its
-            // weakest entry whenever a stronger candidate turns up.
-            if (minHeap.length < topK) {
-              minHeap.push(result);
-              siftUp(minHeap.length - 1);
-            } else if (score > minHeap[0].score) {
-              minHeap[0] = result;
-              siftDown();
+            if (groupByItem) {
+              const documentKey = `${result.libraryID}:${result.itemKey}`;
+              const chunks = documentChunks.get(documentKey) ?? [];
+              chunks.push(result);
+              chunks.sort((a, b) => b.score - a.score);
+              if (chunks.length > maxChunksPerItem) chunks.length = maxChunksPerItem;
+              documentChunks.set(documentKey, chunks);
+            } else {
+              // Keep the K best chunks for a bounded single-document search.
+              if (minHeap.length < topK) {
+                minHeap.push(result);
+                siftUp(minHeap.length - 1);
+              } else if (score > minHeap[0].score) {
+                minHeap[0] = result;
+                siftDown();
+              }
             }
           }
         } catch (e) {
@@ -849,13 +1100,30 @@ export class VectorStore {
       const computeTime = Date.now() - computeStartTime;
       offset += rows.length;
 
-      ztoolkit.log(`[VectorStore] search() batch ${batchCount}: ${rows.length} vectors, IO=${ioTime}ms, compute=${computeTime}ms, progress=${offset}/${totalCount}`);
+      ztoolkit.log(`[VectorStore] search() batch ${batchCount}: ${rows.length} vectors, IO=${ioTime}ms, compute=${computeTime}ms, scanned=${offset}`);
+      if (rows.length < BATCH_SIZE) break;
     }
 
     if (stats) stats.scanned = totalScanned;
 
-    // Heap order is not sort order: sort once, at the end, for the caller.
-    const topResults = minHeap.sort((a, b) => b.score - a.score);
+    // Rank documents by their best chunk. Keep the best three chunk references
+    // per document so evidence can be hydrated only for a returned page.
+    const rankedDocuments = Array.from(documentChunks.entries()).sort((a, b) => {
+      const scoreDifference = b[1][0].score - a[1][0].score;
+      return scoreDifference !== 0 ? scoreDifference : a[0].localeCompare(b[0]);
+    });
+    const selectedDocuments =
+      documentLimit === undefined
+        ? rankedDocuments
+        : rankedDocuments.slice(0, documentLimit);
+    let topResults = groupByItem
+      ? selectedDocuments.flatMap(([, chunks]) => chunks)
+      : minHeap.sort((a, b) => b.score - a.score);
+
+    if (includeChunkText) {
+      this.throwIfVectorScanCancelled(signal, deadlineAt);
+      topResults = await this.hydrateSearchResultTexts(topResults);
+    }
 
     const searchTime = Date.now() - startTime;
     const topScores = topResults.slice(0, 5).map(r => r.score.toFixed(3)).join(', ');
@@ -874,6 +1142,135 @@ export class VectorStore {
     }
 
     return topResults;
+  }
+
+  private async getFloat32VectorsByEmbeddingIDs(
+    rowIDs: number[],
+    signal?: AbortSignal,
+    deadlineAt?: number,
+  ): Promise<Map<number, any>> {
+    const vectors = new Map<number, any>();
+    const unique = Array.from(new Set(rowIDs));
+    for (let offset = 0; offset < unique.length; offset += 500) {
+      const batch = unique.slice(offset, offset + 500);
+      const placeholders = batch.map(() => '?').join(',');
+      const rows = await this.queryRowsCancellable(
+        `SELECT e.id AS embedding_id, f.vector FROM embeddings e JOIN vectors_f32 f ON f.item_key = e.item_key AND f.chunk_id = e.chunk_id WHERE e.id IN (${placeholders})`,
+        batch,
+        signal,
+        deadlineAt,
+        (row: any) => ({
+          embedding_id: row.embedding_id,
+          vector: row.vector,
+        }),
+      );
+      for (const row of rows || []) {
+        vectors.set(row.embedding_id, row.vector);
+      }
+    }
+    return vectors;
+  }
+
+  private throwIfVectorScanCancelled(
+    signal?: AbortSignal,
+    deadlineAt?: number,
+  ): void {
+    if (signal?.aborted) throw new Error('Vector scan cancelled');
+    if (deadlineAt !== undefined && Date.now() >= deadlineAt) {
+      throw new Error('Vector scan timed out');
+    }
+  }
+
+  private async queryRowsCancellable<T>(
+    sql: string,
+    params: any[],
+    signal: AbortSignal | undefined,
+    deadlineAt: number | undefined,
+    mapRow: (row: any) => T,
+  ): Promise<T[]> {
+    this.throwIfVectorScanCancelled(signal, deadlineAt);
+    const streamedRows: T[] = [];
+    let cancelQuery: (() => void) | null = null;
+    let cancelled = false;
+    const cancel = () => {
+      cancelled = true;
+      try {
+        cancelQuery?.();
+      } catch {
+        // The query may already have completed.
+      }
+    };
+    signal?.addEventListener('abort', cancel, { once: true });
+    const remaining =
+      deadlineAt === undefined ? undefined : Math.max(0, deadlineAt - Date.now());
+    const deadlineTimer =
+      remaining === undefined ? undefined : setTimeout(cancel, remaining);
+    try {
+      const returnedRows = await this.db.queryAsync(sql, params, {
+        onRow: (row: any, sqliteCancel: any) => {
+          cancelQuery = () => {
+            if (typeof sqliteCancel === 'function') sqliteCancel();
+            else sqliteCancel?.cancel?.();
+          };
+          if (
+            cancelled ||
+            signal?.aborted ||
+            (deadlineAt !== undefined && Date.now() >= deadlineAt)
+          ) {
+            cancel();
+            return;
+          }
+          streamedRows.push(mapRow(row));
+        },
+      });
+      this.throwIfVectorScanCancelled(signal, deadlineAt);
+      if (cancelled) throw new Error('Vector scan cancelled');
+      return streamedRows.length > 0
+        ? streamedRows
+        : (returnedRows || []).map(mapRow);
+    } catch (error) {
+      if (signal?.aborted || cancelled) {
+        this.throwIfVectorScanCancelled(signal, deadlineAt);
+        throw new Error('Vector scan cancelled');
+      }
+      throw error;
+    } finally {
+      signal?.removeEventListener('abort', cancel);
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+    }
+  }
+
+  async getChunkTextsByRowIDs(rowIDs: number[]): Promise<Map<number, string>> {
+    await this.ensureInitialized();
+    const texts = new Map<number, string>();
+    const unique = Array.from(new Set(rowIDs));
+    for (let offset = 0; offset < unique.length; offset += 500) {
+      const batch = unique.slice(offset, offset + 500);
+      const placeholders = batch.map(() => '?').join(',');
+      const rows = await this.db.queryAsync(
+        `SELECT id, chunk_text FROM embeddings WHERE id IN (${placeholders})`,
+        batch,
+      );
+      for (const row of rows || []) {
+        texts.set(row.id, String(row.chunk_text || ''));
+      }
+    }
+    return texts;
+  }
+
+  private async hydrateSearchResultTexts(
+    results: SearchResult[],
+  ): Promise<SearchResult[]> {
+    const texts = await this.getChunkTextsByRowIDs(
+      results
+        .map((result) => result.rowId)
+        .filter((rowID): rowID is number => typeof rowID === 'number'),
+    );
+    return results.map((result) => ({
+      ...result,
+      chunkText:
+        result.rowId === undefined ? result.chunkText : texts.get(result.rowId) ?? '',
+    }));
   }
 
   /**
@@ -938,30 +1335,223 @@ export class VectorStore {
     return new Set(rows.map((r: any) => r.item_key));
   }
 
-  /**
-   * Get item keys previously marked as failed (content_hash = 'failed:<type>')
-   */
-  async getFailedItemKeys(): Promise<string[]> {
+  async recordFailedItem(item: FailedIndexItem): Promise<void> {
     await this.ensureInitialized();
-
-    // IMPORTANT: Single-line query to avoid Zotero queryAsync bug with multi-line SQL
-    const rows = await this.db.queryAsync(`SELECT item_key FROM index_status WHERE content_hash LIKE 'failed:%'`);
-
-    return rows && rows.length > 0 ? rows.map((r: any) => r.item_key) : [];
+    await this.db.executeTransaction(async () => {
+      await this.db.queryAsync(
+        `INSERT OR REPLACE INTO index_failures (library_id, item_key, error_type, error_message, failed_at, build_id) VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          item.libraryID,
+          item.itemKey,
+          item.errorType,
+          item.error,
+          item.timestamp,
+          item.buildID ?? null,
+        ],
+      );
+      if (item.buildID) {
+        await this.db.queryAsync(
+          `UPDATE index_build_targets SET state = 'failed' WHERE build_id = ? AND library_id = ? AND item_key = ?`,
+          [item.buildID, item.libraryID, item.itemKey],
+        );
+      }
+    });
   }
 
-  /**
-   * Remove failure markers so the items become indexable again
-   */
-  async clearFailedMarkers(keys?: string[]): Promise<void> {
+  async getFailedItems(): Promise<FailedIndexItem[]> {
     await this.ensureInitialized();
+    const rows = await this.db.queryAsync(
+      `SELECT library_id, item_key, error_type, error_message, failed_at, build_id FROM index_failures ORDER BY failed_at, library_id, item_key`,
+    );
+    return (rows || []).map((row: any) => ({
+      libraryID: Number(row.library_id),
+      itemKey: String(row.item_key),
+      errorType: String(row.error_type),
+      error: String(row.error_message),
+      timestamp: Number(row.failed_at),
+      buildID: row.build_id ? String(row.build_id) : undefined,
+    }));
+  }
 
-    if (keys && keys.length > 0) {
-      for (const key of keys) {
-        await this.db.queryAsync(`DELETE FROM index_status WHERE item_key = ? AND content_hash LIKE 'failed:%'`, [key]);
-      }
-    } else {
-      await this.db.queryAsync(`DELETE FROM index_status WHERE content_hash LIKE 'failed:%'`);
+  async clearFailedItems(
+    identities?: Array<{ libraryID: number; itemKey: string }>,
+  ): Promise<void> {
+    await this.ensureInitialized();
+    if (!identities) {
+      await this.db.queryAsync(`DELETE FROM index_failures`);
+      return;
+    }
+    for (const identity of identities) {
+      await this.db.queryAsync(
+        `DELETE FROM index_failures WHERE library_id = ? AND item_key = ?`,
+        [identity.libraryID, identity.itemKey],
+      );
+    }
+  }
+
+  async createBuildSession(
+    session: IndexBuildSession,
+    targets: Array<{ libraryID: number; itemKey: string }>,
+  ): Promise<void> {
+    await this.ensureInitialized();
+    await this.db.executeTransaction(async () => {
+      await this.db.queryAsync(
+        `INSERT OR REPLACE INTO index_builds (build_id, library_id, scope, status, chunk_signature, chunk_target_chars, chunk_append_tolerance_chars, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          session.buildID,
+          session.libraryID,
+          session.scope,
+          session.status,
+          session.chunkSignature ?? null,
+          session.chunkTargetChars ?? null,
+          session.chunkAppendToleranceChars ?? null,
+          session.createdAt,
+        ],
+      );
+      await this.addBuildTargets(session.buildID, targets, false);
+    });
+  }
+
+  async addBuildTargets(
+    buildID: string,
+    targets: Array<{ libraryID: number; itemKey: string }>,
+    ensureInitialized: boolean = true,
+  ): Promise<void> {
+    if (ensureInitialized) await this.ensureInitialized();
+    for (const target of targets) {
+      await this.db.queryAsync(
+        `INSERT OR REPLACE INTO index_build_targets (build_id, library_id, item_key, state) VALUES (?, ?, ?, ?)`,
+        [buildID, target.libraryID, target.itemKey, 'pending'],
+      );
+    }
+  }
+
+  async getBuildTargets(buildID: string): Promise<IndexBuildTarget[]> {
+    await this.ensureInitialized();
+    const rows = await this.db.queryAsync(
+      `SELECT library_id, item_key, state FROM index_build_targets WHERE build_id = ? ORDER BY library_id, item_key`,
+      [buildID],
+    );
+    return (rows || []).map((row: any) => ({
+      libraryID: Number(row.library_id),
+      itemKey: String(row.item_key),
+      state: row.state as IndexBuildTargetState,
+    }));
+  }
+
+  async getBuildTargetSummary(
+    buildID: string,
+  ): Promise<IndexBuildTargetSummary> {
+    const targets = await this.getBuildTargets(buildID);
+    const summary: IndexBuildTargetSummary = {
+      total: targets.length,
+      pending: 0,
+      succeeded: 0,
+      failed: 0,
+    };
+    for (const target of targets) summary[target.state] += 1;
+    return summary;
+  }
+
+  async updateBuildTarget(
+    buildID: string,
+    identity: { libraryID: number; itemKey: string },
+    state: IndexBuildTargetState,
+  ): Promise<void> {
+    await this.ensureInitialized();
+    await this.db.queryAsync(
+      `UPDATE index_build_targets SET state = ? WHERE build_id = ? AND library_id = ? AND item_key = ?`,
+      [state, buildID, identity.libraryID, identity.itemKey],
+    );
+  }
+
+  async updateBuildSessionStatus(
+    buildID: string,
+    status: IndexBuildSession['status'],
+  ): Promise<void> {
+    await this.ensureInitialized();
+    await this.db.queryAsync(
+      `UPDATE index_builds SET status = ? WHERE build_id = ?`,
+      [status, buildID],
+    );
+  }
+
+  async getResumableBuildSession(): Promise<IndexBuildSession | null> {
+    await this.ensureInitialized();
+    const rows = await this.db.queryAsync(
+      `SELECT build_id, library_id, scope, status, chunk_signature, chunk_target_chars, chunk_append_tolerance_chars, created_at, reset_completed FROM index_builds WHERE status IN ('indexing', 'paused', 'failed') ORDER BY created_at DESC LIMIT 1`,
+    );
+    if (!rows?.length) return null;
+    const row = rows[0];
+    return {
+      buildID: String(row.build_id),
+      libraryID: Number(row.library_id),
+      scope: row.scope,
+      status: row.status,
+      chunkSignature: row.chunk_signature || undefined,
+      chunkTargetChars: row.chunk_target_chars ?? undefined,
+      chunkAppendToleranceChars:
+        row.chunk_append_tolerance_chars ?? undefined,
+      createdAt: Number(row.created_at),
+      resetCompleted: Boolean(row.reset_completed),
+    };
+  }
+
+  async getBuildSession(buildID: string): Promise<IndexBuildSession | null> {
+    await this.ensureInitialized();
+    const rows = await this.db.queryAsync(
+      `SELECT build_id, library_id, scope, status, chunk_signature, chunk_target_chars, chunk_append_tolerance_chars, created_at, reset_completed FROM index_builds WHERE build_id = ?`,
+      [buildID],
+    );
+    if (!rows?.length) return null;
+    const row = rows[0];
+    return {
+      buildID: String(row.build_id),
+      libraryID: Number(row.library_id),
+      scope: row.scope,
+      status: row.status,
+      chunkSignature: row.chunk_signature || undefined,
+      chunkTargetChars: row.chunk_target_chars ?? undefined,
+      chunkAppendToleranceChars:
+        row.chunk_append_tolerance_chars ?? undefined,
+      createdAt: Number(row.created_at),
+      resetCompleted: Boolean(row.reset_completed),
+    };
+  }
+
+  /** Atomically clear one Library and record that this rebuild reset committed. */
+  async clearLibraryForBuild(
+    buildID: string,
+    libraryID: number,
+  ): Promise<void> {
+    await this.ensureInitialized();
+    const scope = this.libraryScopeClause(libraryID);
+    await this.db.executeTransaction(async () => {
+      await this.db.queryAsync(
+        `DELETE FROM embeddings WHERE ${scope.clause}`,
+        scope.params,
+      );
+      await this.db.queryAsync(
+        `DELETE FROM vectors_f32 WHERE ${scope.clause}`,
+        scope.params,
+      );
+      await this.db.queryAsync(
+        `DELETE FROM index_status WHERE ${scope.clause}`,
+        scope.params,
+      );
+      await this.db.queryAsync(
+        `DELETE FROM index_failures WHERE library_id = ?`,
+        [libraryID],
+      );
+      await this.db.queryAsync(
+        `UPDATE index_builds SET reset_completed = 1 WHERE build_id = ?`,
+        [buildID],
+      );
+    });
+
+    for (const key of this.vectorCache.keys()) {
+      const identity = this.fromStorageKey(key.slice(0, key.lastIndexOf('_')));
+      if (identity.libraryID === libraryID) this.vectorCache.delete(key);
     }
   }
 
@@ -1260,6 +1850,54 @@ export class VectorStore {
 
     const cacheMsg = deleteContentCache ? 'including content cache' : 'content cache preserved';
     ztoolkit.log(`[VectorStore] Deleted vectors for item: ${itemKey} (${cacheMsg})`);
+  }
+
+  /** Delete only the requested items while preserving every other index row. */
+  async deleteItemsVectors(
+    itemKeys: string[],
+    deleteContentCache: boolean = false,
+    libraryID?: number,
+  ): Promise<void> {
+    await this.ensureInitialized();
+    const storageKeys = Array.from(
+      new Set(itemKeys.map((key) => this.toStorageKey(key, libraryID))),
+    );
+    if (storageKeys.length === 0) return;
+
+    const batchSize = 500;
+    await this.db.executeTransaction(async () => {
+      for (let offset = 0; offset < storageKeys.length; offset += batchSize) {
+        const batch = storageKeys.slice(offset, offset + batchSize);
+        const placeholders = batch.map(() => '?').join(',');
+        await this.db.queryAsync(
+          `DELETE FROM embeddings WHERE item_key IN (${placeholders})`,
+          batch,
+        );
+        await this.db.queryAsync(
+          `DELETE FROM vectors_f32 WHERE item_key IN (${placeholders})`,
+          batch,
+        );
+        await this.db.queryAsync(
+          `DELETE FROM index_status WHERE item_key IN (${placeholders})`,
+          batch,
+        );
+        if (deleteContentCache) {
+          await this.db.queryAsync(
+            `DELETE FROM content_cache WHERE item_key IN (${placeholders})`,
+            batch,
+          );
+        }
+      }
+    });
+
+    for (const key of this.vectorCache.keys()) {
+      if (storageKeys.some((storageKey) => key.startsWith(`${storageKey}_`))) {
+        this.vectorCache.delete(key);
+      }
+    }
+    ztoolkit.log(
+      `[VectorStore] Deleted vectors for ${storageKeys.length} targeted items (${deleteContentCache ? 'including content cache' : 'content cache preserved'})`,
+    );
   }
 
   /**

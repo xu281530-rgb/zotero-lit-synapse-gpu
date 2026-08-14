@@ -2172,7 +2172,10 @@ function describeIndexResult(result: any, prefix?: string): NoticeOptions {
   let type: NoticeType = "success";
   let title: string;
 
-  if (total === 0 && skipped > 0) {
+  if (result?.status === "failed") {
+    type = "error";
+    title = `${scope}${getString("menu-semantic-index-error" as any) || "Indexing failed"}: ${processed}/${total}`;
+  } else if (total === 0 && skipped > 0) {
     type = "info";
     title = `${scope}${getString("notice-index-nothing-new" as any) || "Nothing new to index"}`;
     lines.push(`${getString("notice-index-skipped" as any) || "Already indexed, skipped"}: ${skipped}`);

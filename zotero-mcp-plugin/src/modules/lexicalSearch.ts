@@ -7,28 +7,19 @@ import {
 
 declare let ztoolkit: ZToolkit;
 
-/**
- * Hard cap on candidate items pulled into memory for one lexical pass. A
- * bilingual keyword set can select a large slice of a big library, and loading
- * every hit is what used to blow the hybrid deadline.
- */
-export const MAX_LEXICAL_CANDIDATES = 4000;
 /** Items loaded per chunk before yielding to the main thread. */
 const CANDIDATE_CHUNK_SIZE = 200;
 
 export interface LexicalSearchOptions {
   keywords: LexicalKeyword[];
   libraryID: number;
-  candidateK: number;
-  maxCandidates?: number;
   /**
    * Restrict the search to these Zotero item keys — the collection scope.
    *
    * Applied to the candidate set BEFORE anything is read or scored, so an
    * out-of-scope item is never loaded, never has its fields scanned and never
-   * competes for a candidate slot. Filtering after ranking would leave the
-   * expensive part of the work untouched and, worse, let out-of-scope items
-   * consume the candidate cap and push in-scope ones out.
+   * reaches the ranker. Filtering after ranking would leave the expensive part
+   * of the work untouched.
    *
    * Undefined means the whole library.
    */
@@ -45,11 +36,6 @@ export interface LexicalSearchDiagnostics {
   outOfScope: number;
   scannedItems: number;
   truncated: boolean;
-  /**
-   * Whether the over-cap candidate set was reduced by keyword coverage rather
-   * than by taking whatever the database returned first.
-   */
-  prioritized: boolean;
   searchMs: number;
   scanMs: number;
   rankMs: number;
@@ -147,89 +133,6 @@ async function findCandidateIDs(
 }
 
 /**
- * Reduce an over-sized candidate set by how many keywords each item matches.
- *
- * Blindly slicing the union result keeps whatever order the database happened
- * to return — effectively item insertion order — so a paper matching ten of the
- * twelve keywords is dropped simply for being added to the library late, and it
- * never reaches the scorer at all. Here every keyword gets one ID-only probe
- * (no item loads, no field reads), items are ordered by summed keyword weight,
- * and only then is the cap applied. Items matching more of the query survive.
- *
- * This only runs when the cap is actually exceeded, so the normal path costs
- * nothing extra, and it never widens the candidate pool beyond `ids`.
- */
-async function prioritizeCandidateIDs(
-  ids: number[],
-  keywords: LexicalKeyword[],
-  libraryID: number,
-  maxCandidates: number,
-  deadlineAt?: number,
-  isCancelled?: () => boolean,
-): Promise<{ ids: number[]; prioritized: boolean }> {
-  if (ids.length <= maxCandidates) {
-    return { ids, prioritized: false };
-  }
-  if (isCancelled?.() || isExpired(deadlineAt)) {
-    return { ids: ids.slice(0, maxCandidates), prioritized: false };
-  }
-
-  const allowed = new Set(ids);
-  const scores = new Map<number, number>();
-  let anyProbeSucceeded = false;
-
-  // Same condition shape as the union query, so every union member is
-  // reachable by at least one probe and no item is scored 0 by construction.
-  const probes = await Promise.all(
-    keywords.map(async (keyword) => {
-      try {
-        const search = new Zotero.Search();
-        (search as any).libraryID = libraryID;
-        search.addCondition("joinMode", "any");
-        search.addCondition("field", "contains", keyword.text, false);
-        search.addCondition("creator", "contains", keyword.text, false);
-        search.addCondition("tag", "contains", keyword.text, false);
-        return { keyword, ids: (await search.search()) || [], failed: false };
-      } catch (error) {
-        ztoolkit.log(
-          `[LexicalSearch] coverage probe failed for "${keyword.text}": ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-          "warn",
-        );
-        return { keyword, ids: [] as number[], failed: true };
-      }
-    }),
-  );
-
-  for (const probe of probes) {
-    if (probe.failed) continue;
-    anyProbeSucceeded = true;
-    for (const id of probe.ids) {
-      if (!allowed.has(id)) continue;
-      scores.set(id, (scores.get(id) || 0) + probe.keyword.weight);
-    }
-  }
-
-  if (!anyProbeSucceeded) {
-    // No usable coverage signal; fall back to the previous behaviour rather
-    // than pretending the truncation was informed.
-    return { ids: ids.slice(0, maxCandidates), prioritized: false };
-  }
-
-  // Stable: equal coverage keeps the original database order.
-  const order = new Map<number, number>();
-  ids.forEach((id, index) => order.set(id, index));
-  const ranked = [...ids].sort((a, b) => {
-    const scoreDifference = (scores.get(b) || 0) - (scores.get(a) || 0);
-    if (scoreDifference !== 0) return scoreDifference;
-    return (order.get(a) || 0) - (order.get(b) || 0);
-  });
-
-  return { ids: ranked.slice(0, maxCandidates), prioritized: true };
-}
-
-/**
  * Rank a library against every keyword in one traversal.
  *
  * The previous implementation issued one full `search_library` call per
@@ -245,8 +148,6 @@ export async function runLexicalSearch(
   const {
     keywords,
     libraryID,
-    candidateK,
-    maxCandidates = MAX_LEXICAL_CANDIDATES,
     scopeItemKeys,
     deadlineAt,
     isCancelled,
@@ -261,7 +162,6 @@ export async function runLexicalSearch(
         outOfScope: 0,
         scannedItems: 0,
         truncated: false,
-        prioritized: false,
         searchMs: 0,
         scanMs: 0,
         rankMs: 0,
@@ -279,13 +179,10 @@ export async function runLexicalSearch(
   const searchMs = Date.now() - searchStartedAt;
 
   let truncated = false;
-  let prioritized = false;
   let candidateIDs = ids;
   let outOfScope = 0;
 
-  // Collection scope, applied before the candidate cap and before any item is
-  // read: out-of-scope items must not occupy candidate slots that in-scope
-  // items would otherwise have taken.
+  // Collection scope is applied before any item is scored.
   if (scopeItemKeys) {
     const before = candidateIDs.length;
     const inScope: number[] = [];
@@ -307,20 +204,6 @@ export async function runLexicalSearch(
     }
     candidateIDs = inScope;
     outOfScope = before - candidateIDs.length;
-  }
-
-  if (candidateIDs.length > maxCandidates) {
-    truncated = true;
-    const reduced = await prioritizeCandidateIDs(
-      candidateIDs,
-      keywords,
-      libraryID,
-      maxCandidates,
-      deadlineAt,
-      isCancelled,
-    );
-    candidateIDs = reduced.ids;
-    prioritized = reduced.prioritized;
   }
 
   const scanStartedAt = Date.now();
@@ -397,7 +280,7 @@ export async function runLexicalSearch(
   const scanMs = Date.now() - scanStartedAt;
 
   const rankStartedAt = Date.now();
-  const items = rankLexicalCandidates(candidates, keywords, { candidateK });
+  const items = rankLexicalCandidates(candidates, keywords, {});
   const rankMs = Date.now() - rankStartedAt;
 
   return {
@@ -408,7 +291,6 @@ export async function runLexicalSearch(
       outOfScope,
       scannedItems: candidates.length,
       truncated,
-      prioritized,
       searchMs,
       scanMs,
       rankMs,

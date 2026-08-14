@@ -9,7 +9,11 @@
  */
 
 import { getEmbeddingService, EmbeddingService, EmbeddingAPIError, EmbeddingErrorType } from './embeddingService';
-import { getVectorStore, VectorStore } from './vectorStore';
+import {
+  getVectorStore,
+  VectorStore,
+  type FailedIndexItem,
+} from './vectorStore';
 import { getTextChunker, TextChunker } from './textChunker';
 import { TextFormatter } from '../textFormatter';
 import { PDFProcessor } from '../pdfProcessor';
@@ -19,8 +23,13 @@ import {
 } from '../mineru';
 import {
   getChunkingSignature,
+  getHybridSearchSettings,
+  invalidateStoredChunkingSignature,
   setStoredChunkingSignature,
+  shouldRecordFullLibraryChunkingSignature,
 } from '../hybridSearchSettings';
+import { runIndexWorkQueue, type IndexWorkOutcome } from './indexBuildQueue';
+import { groupFailedIndexItems } from './failedIndexRetry';
 
 declare let Zotero: any;
 declare let ztoolkit: ZToolkit;
@@ -50,6 +59,8 @@ function warnIfHugeDocument(
 
 export interface SemanticSearchOptions {
   topK?: number;              // Number of results
+  exhaustive?: boolean;       // Return every distinct document
+  includeChunkText?: boolean; // Hydrate text and metadata for returned rows
   minScore?: number;          // Minimum similarity threshold
   language?: 'zh' | 'en' | 'all' | 'auto';  // Language filter
   /**
@@ -63,6 +74,8 @@ export interface SemanticSearchOptions {
   itemKeys?: string[];        // Limit to specific items
   libraryID?: number;
   timeoutMs?: number;
+  /** Deadline for vector scanning only; query embedding has its own timeout. */
+  vectorScanTimeoutMs?: number;
   /**
    * Caller-owned cancellation. A timeout alone only stops the caller waiting;
    * the signal is what actually aborts the in-flight embedding request so
@@ -70,26 +83,6 @@ export interface SemanticSearchOptions {
    */
   signal?: AbortSignal;
 }
-
-/**
- * Chunk window sizing for the document-count target.
- *
- * The index is scored per chunk but the caller wants documents, so the window
- * must be wider than the document target — how much wider depends on how many
- * top-scoring passages the same papers own. Measured on the real library, a 3x
- * window returned 64 distinct documents against a requested 120: a ratio of
- * about 5.6 chunks per document.
- *
- * The window is therefore sized generously ON THE FIRST AND ONLY TRY. A vector
- * search is a FULL scan of every stored vector — topK only sizes the result
- * heap, not the work — so a retry costs a whole second scan. Measured on the
- * real library that is fatal: one scan for a 240-document target took 3.7s, and
- * a second scan for a 360-document target pushed the branch past its 8s
- * deadline, which made semantic retrieval fail outright and returned ZERO
- * results for a query with hundreds of matches. Widening the heap is nearly
- * free; scanning twice is not, so a short yield is reported rather than retried.
- */
-const CHUNK_WINDOW_FACTOR = 12;
 
 export interface SemanticSearchResult {
   itemKey: string;
@@ -104,6 +97,7 @@ export interface SemanticSearchResult {
     chunkId: number;
     text: string;
     score: number;
+    rowId?: number;
   }>;
 }
 
@@ -111,7 +105,7 @@ export interface IndexProgress {
   total: number;
   processed: number;
   currentItem?: string;
-  status: 'idle' | 'indexing' | 'paused' | 'completed' | 'error' | 'aborted' | 'busy';
+  status: 'idle' | 'indexing' | 'paused' | 'completed' | 'failed' | 'error' | 'aborted' | 'busy';
   error?: string;
   errorType?: EmbeddingErrorType;  // Type of error for UI display
   errorRetryable?: boolean;        // Whether the error can be retried
@@ -168,10 +162,12 @@ export class SemanticSearchService {
   private _buildActive = false;
   /** Set for the duration of a forced build; read by extractItemContent */
   private _forceRun = false;
+  private _activeBuildID: string | null = null;
+  private _activeFullLibraryRebuild = false;
 
   // Error handling
   private _onErrorCallback?: (error: EmbeddingAPIError) => void;
-  private _failedItems: Map<string, { error: string; errorType: EmbeddingErrorType; timestamp: number }> = new Map();
+  private _failedItems: Map<string, FailedIndexItem> = new Map();
 
   constructor() {
     ztoolkit.log(`[SemanticSearch] Constructor called`);
@@ -202,6 +198,12 @@ export class SemanticSearchService {
 
       // Initialize vector store first (faster)
       await this.vectorStore.initialize();
+      for (const failure of await this.vectorStore.getFailedItems()) {
+        this._failedItems.set(
+          `${failure.libraryID}:${failure.itemKey}`,
+          failure,
+        );
+      }
 
       // Initialize embedding service (may take longer due to model loading)
       await this.embeddingService.initialize();
@@ -225,15 +227,24 @@ export class SemanticSearchService {
       if (progressJson) {
         const saved = JSON.parse(String(progressJson));
         // Only restore if it was paused or indexing (not completed/idle)
-        if (saved.status === 'paused' || saved.status === 'indexing') {
+        if (
+          saved.status === 'paused' ||
+          saved.status === 'indexing' ||
+          saved.status === 'failed' ||
+          saved.status === 'error'
+        ) {
           this.indexProgress = {
             total: saved.total || 0,
             processed: saved.processed || 0,
             status: 'paused',  // Always show as paused after restart
             currentItem: saved.currentItem,
             startTime: saved.startTime,
-            estimatedRemaining: saved.estimatedRemaining
+            estimatedRemaining: saved.estimatedRemaining,
+            failedCount: saved.failedCount || 0,
           };
+          this._activeBuildID = saved.buildID || null;
+          this._activeFullLibraryRebuild =
+            saved.fullLibraryRebuild === true;
           this._paused = true;  // Mark as paused so it can be resumed
           ztoolkit.log(`[SemanticSearch] Restored paused index progress: ${this.indexProgress.processed}/${this.indexProgress.total}`);
         }
@@ -254,7 +265,10 @@ export class SemanticSearchService {
         status: this.indexProgress.status,
         currentItem: this.indexProgress.currentItem,
         startTime: this.indexProgress.startTime,
-        estimatedRemaining: this.indexProgress.estimatedRemaining
+        estimatedRemaining: this.indexProgress.estimatedRemaining,
+        failedCount: this.indexProgress.failedCount ?? 0,
+        buildID: this._activeBuildID,
+        fullLibraryRebuild: this._activeFullLibraryRebuild,
       };
       Zotero.Prefs.set(PREF_INDEX_PROGRESS, JSON.stringify(toSave), true);
     } catch (e) {
@@ -285,11 +299,14 @@ export class SemanticSearchService {
     const startTime = Date.now();
     const {
       topK = 10,
+      exhaustive = false,
+      includeChunkText = true,
       minScore = 0.3,
       language = 'all',
       itemKeys,
       libraryID = Zotero.Libraries.userLibraryID,
       timeoutMs,
+      vectorScanTimeoutMs,
       signal,
       stats,
     } = options;
@@ -342,33 +359,37 @@ export class SemanticSearchService {
         // 2. Vector search. "all" remains unfiltered; "auto" uses query language.
         const searchLanguage =
           language === 'auto' ? queryEmbedding.language : language;
-        // The caller asks for topK DOCUMENTS, but the index is scored per
-        // chunk, and chunks are aggregated by item afterwards. A fixed
-        // chunk window therefore delivers however many distinct documents
-        // happen to survive dedup: measured on the real library, a window of
-        // topK*3 returned 64 documents against a requested 120, because a few
-        // on-topic papers owned most of the top-scoring passages and crowded
-        // the rest out. So widen the window until it yields enough distinct
-        // documents, the index is exhausted, or a protection cap is reached.
+        // Score chunks once, aggregate by document during the scan, and retain
+        // lightweight references to each document's best evidence.
         const vectorStartedAt = Date.now();
+        const vectorDeadlineAt =
+          vectorScanTimeoutMs !== undefined
+            ? Date.now() + vectorScanTimeoutMs
+            : deadlineAt;
+        const effectiveVectorDeadlineAt =
+          deadlineAt !== undefined && vectorDeadlineAt !== undefined
+            ? Math.min(deadlineAt, vectorDeadlineAt)
+            : vectorDeadlineAt;
         let vectorScanMs = 0;
         let vectorResults: Awaited<
           ReturnType<typeof this.vectorStore.search>
         > = [];
-        const chunkWindow = Math.max(1, topK) * CHUNK_WINDOW_FACTOR;
         const scanStats: { scanned?: number } = {};
         let distinctItems = 0;
-        let exhausted = false;
         try {
           vectorResults = await this.vectorStore.search(
             queryEmbedding.embedding,
             {
-              topK: chunkWindow,
+              groupByItem: true,
+              documentLimit: exhaustive ? undefined : topK,
+              maxChunksPerItem: 3,
+              includeChunkText,
               language: searchLanguage,
               itemKeys,
               minScore,
               libraryID,
-              deadlineAt,
+              deadlineAt: effectiveVectorDeadlineAt,
+              signal: abortController?.signal,
               stats: scanStats,
             },
           );
@@ -381,15 +402,6 @@ export class SemanticSearchService {
             stats.chunksScanned = scanStats.scanned;
             stats.chunksMatched = vectorResults.length;
           }
-          // Fewer chunks than asked for means the index had no more to give,
-          // so a short document count is the library's answer, not a shortfall.
-          exhausted = vectorResults.length < chunkWindow;
-          if (distinctItems < topK && !exhausted) {
-            ztoolkit.log(
-              `[SemanticSearch] Chunk window of ${chunkWindow} yielded only ${distinctItems} distinct items for a target of ${topK}: a few documents own most of the top passages. Not re-scanning — a second full scan costs more than the missing candidates are worth.`,
-              'warn',
-            );
-          }
         } finally {
           vectorScanMs = Date.now() - vectorStartedAt;
           ztoolkit.log(
@@ -397,14 +409,14 @@ export class SemanticSearchService {
           );
         }
         ztoolkit.log(
-          `[SemanticSearch] Vector search returned ${vectorResults.length} chunks -> ${distinctItems} distinct items (wanted ${topK}, chunkWindow=${chunkWindow}, exhausted=${exhausted})`,
+          `[SemanticSearch] Vector search returned ${vectorResults.length} chunk references -> ${distinctItems} distinct items`,
         );
 
         // 3. Aggregate by item
         const itemResultsMap = new Map<string, {
           itemKey: string;
           libraryID: number;
-          chunks: Array<{ chunkId: number; text: string; score: number }>;
+          chunks: Array<{ chunkId: number; text: string; score: number; rowId?: number }>;
           maxScore: number;
         }>();
 
@@ -415,7 +427,8 @@ export class SemanticSearchService {
             existing.chunks.push({
               chunkId: result.chunkId,
               text: result.chunkText,
-              score: result.score
+              score: result.score,
+              rowId: result.rowId,
             });
             existing.maxScore = Math.max(existing.maxScore, result.score);
           } else {
@@ -425,7 +438,8 @@ export class SemanticSearchService {
               chunks: [{
                 chunkId: result.chunkId,
                 text: result.chunkText,
-                score: result.score
+                score: result.score,
+                rowId: result.rowId,
               }],
               maxScore: result.score
             });
@@ -435,9 +449,8 @@ export class SemanticSearchService {
         // 4. Pure semantic search (no hybrid)
         ztoolkit.log(`[SemanticSearch] Step 3: Aggregated into ${itemResultsMap.size} unique items`);
 
-        const finalResults: SemanticSearchResult[] = Array.from(itemResultsMap.values())
+        let finalResults: SemanticSearchResult[] = Array.from(itemResultsMap.values())
           .sort((a, b) => b.maxScore - a.maxScore)
-          .slice(0, topK)
           .map(r => ({
             itemKey: r.itemKey,
             libraryID: r.libraryID,
@@ -445,9 +458,9 @@ export class SemanticSearchService {
             score: r.maxScore,
             matchedChunks: r.chunks.sort((a, b) => b.score - a.score).slice(0, 3)
           }));
+        if (!exhaustive) finalResults = finalResults.slice(0, topK);
 
-        // 5. Fill in item metadata
-        await this.fillItemMetadata(finalResults);
+        if (includeChunkText) await this.fillItemMetadata(finalResults);
 
         const searchTime = Date.now() - startTime;
         ztoolkit.log(`[SemanticSearch] Found ${finalResults.length} results in ${searchTime}ms`);
@@ -455,7 +468,7 @@ export class SemanticSearchService {
           `[SemanticSearch][Timing] embedding=${embeddingMs}ms vectorScan=${vectorScanMs}ms total=${searchTime}ms libraryID=${libraryID}`,
         );
 
-        return finalResults.slice(0, topK);
+        return finalResults;
 
       } catch (error) {
         ztoolkit.log(`[SemanticSearch] Search error: ${error}`, 'error');
@@ -575,6 +588,26 @@ export class SemanticSearchService {
     return this.vectorStore.getChunksForItem(itemKey, libraryID);
   }
 
+  /** Hydrate only the chunk references carried by the page being returned. */
+  async hydrateMatchedChunkTexts(
+    results: Array<{ matchedChunks?: Array<{ rowId?: number; text?: string }> }>,
+  ): Promise<void> {
+    await this.initialize();
+    const rowIDs = results.flatMap((result) =>
+      (result.matchedChunks ?? [])
+        .map((chunk) => chunk.rowId)
+        .filter((rowID): rowID is number => typeof rowID === 'number'),
+    );
+    const texts = await this.vectorStore.getChunkTextsByRowIDs(rowIDs);
+    for (const result of results) {
+      for (const chunk of result.matchedChunks ?? []) {
+        if (chunk.rowId !== undefined) {
+          chunk.text = texts.get(chunk.rowId) ?? '';
+        }
+      }
+    }
+  }
+
   /**
    * Find similar items
    */
@@ -666,15 +699,26 @@ export class SemanticSearchService {
      */
     force?: boolean;
     onProgress?: (progress: IndexProgress) => void;
+    resumeBuildID?: string;
+    resumeFullLibraryRebuild?: boolean;
+    frozenChunkSettings?: {
+      target: number;
+      tolerance: number;
+      signature: string;
+    };
   } = {}): Promise<IndexProgress> {
     await this.initialize();
 
+    const itemKeysProvided = options.itemKeys !== undefined;
     const {
       itemKeys,
       libraryID = Zotero.Libraries.userLibraryID,
       rebuild = false,
       force = false,
       onProgress,
+      resumeBuildID,
+      resumeFullLibraryRebuild = false,
+      frozenChunkSettings,
     } = options;
 
     if (this._buildActive) {
@@ -701,12 +745,28 @@ export class SemanticSearchService {
         processed: 0,
         indexed: 0,
         unchanged: 0,
+        failedCount: 0,
         status: 'indexing',
         startTime: Date.now()
       };
 
-      // Check for dimension mismatch before indexing (unless rebuild)
-      if (!rebuild) {
+      const fullLibraryRebuild = rebuild && !itemKeysProvided;
+      const targetedRebuild = rebuild && itemKeysProvided;
+      const fullLibraryBuild =
+        fullLibraryRebuild || resumeFullLibraryRebuild;
+      const hybridSettings = getHybridSearchSettings();
+      const chunkSettings = frozenChunkSettings ?? {
+        target: hybridSettings.chunkTargetChars,
+        tolerance: hybridSettings.chunkAppendToleranceChars,
+        signature: getChunkingSignature(hybridSettings),
+      };
+      this.textChunker = new TextChunker({
+        targetChunkSize: chunkSettings.target,
+        appendToleranceSize: chunkSettings.tolerance,
+      });
+
+      // Only a true full-library rebuild may replace incompatible dimensions.
+      if (!fullLibraryBuild) {
         const dimensionCheck = await this.checkDimensionCompatibility();
         if (!dimensionCheck.compatible) {
           ztoolkit.log(`[SemanticSearch] Dimension mismatch detected: stored=${dimensionCheck.storedDimensions}, current=${dimensionCheck.currentDimensions}`, 'warn');
@@ -721,8 +781,12 @@ export class SemanticSearchService {
 
       // Get items to index
       let items: any[];
-      if (itemKeys && itemKeys.length > 0) {
-        items = await this.getItemsByKeys(itemKeys, libraryID);
+      if (itemKeysProvided) {
+        items = [];
+        for (const key of itemKeys ?? []) {
+          const item = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, key);
+          items.push(item ?? { key, libraryID, __missing: true });
+        }
       } else {
         items = await this.getItemsWithContent(libraryID);
       }
@@ -730,9 +794,76 @@ export class SemanticSearchService {
       const totalLibraryItems = items.length;
       ztoolkit.log(`[SemanticSearch] Library items fetched: ${totalLibraryItems}`);
 
+      const buildID =
+        resumeBuildID ??
+        `${Date.now()}-${libraryID}-${Math.random().toString(36).slice(2, 10)}`;
+      this._activeBuildID = buildID;
+      this._activeFullLibraryRebuild = fullLibraryBuild;
+      const createNewBuildSession = async () => {
+        await this.vectorStore.createBuildSession(
+          {
+            buildID,
+            libraryID,
+            scope: fullLibraryRebuild
+              ? 'full-library'
+              : itemKeysProvided
+                ? targetedRebuild
+                  ? 'targeted'
+                  : 'incremental'
+                : 'incremental',
+            status: 'indexing',
+            chunkSignature: fullLibraryRebuild
+              ? chunkSettings.signature
+              : undefined,
+            chunkTargetChars: fullLibraryRebuild
+              ? chunkSettings.target
+              : undefined,
+            chunkAppendToleranceChars: fullLibraryRebuild
+              ? chunkSettings.tolerance
+              : undefined,
+            createdAt: Date.now(),
+          },
+          items.map((item) => ({
+            libraryID: item.libraryID ?? libraryID,
+            itemKey: item.key,
+          })),
+        );
+      };
+      if (!resumeBuildID && fullLibraryRebuild) {
+        await createNewBuildSession();
+      }
+
+      if (this._activeFullLibraryRebuild) {
+        const existingSession = resumeBuildID
+          ? await this.vectorStore.getBuildSession(buildID)
+          : null;
+        if (!existingSession?.resetCompleted) {
+          // The target snapshot is durable before invalidation. The SQLite
+          // clear and reset flag commit together, so recovery either performs
+          // this once or sees that it has already committed.
+          this.indexProgress.total = items.length;
+          this.saveIndexProgress();
+          invalidateStoredChunkingSignature(libraryID);
+          await this.vectorStore.clearLibraryForBuild(buildID, libraryID);
+          for (const [identity, failure] of this._failedItems) {
+            if (failure.libraryID === libraryID) {
+              this._failedItems.delete(identity);
+            }
+          }
+          ztoolkit.log(
+            `[SemanticSearch] Existing index data cleared for libraryID=${libraryID}`,
+          );
+        }
+      }
+
       // Filter already indexed items (unless rebuild or an explicit force)
-      if (!rebuild && !force) {
-        if (itemKeys && itemKeys.length > 0) {
+      if (targetedRebuild) {
+        this.indexProgress.skipped = 0;
+        ztoolkit.log(
+          `[SemanticSearch] Targeted rebuild: ${itemKeys?.length ?? 0} items in libraryID=${libraryID} will be replaced atomically`,
+        );
+      } else if (!rebuild && !force) {
+        if (itemKeysProvided) {
           // The caller named these items, so "already in index_status" is not a
           // reason to skip them — that filter is what made
           // needsReindexByTimestamp dead code for every indexed item: the item
@@ -750,30 +881,15 @@ export class SemanticSearchService {
           this.indexProgress.skipped = totalLibraryItems - items.length;
           ztoolkit.log(`[SemanticSearch] Items: library=${totalLibraryItems}, indexed=${indexedCount}, toIndex=${items.length}, skipped=${this.indexProgress.skipped}`);
         }
-      } else if (force) {
+      } else if (force && !fullLibraryRebuild) {
         this.indexProgress.skipped = 0;
         ztoolkit.log(`[SemanticSearch] Force mode: re-indexing all ${items.length} requested items, ignoring index_status`);
-      } else {
-        // For rebuild: clear this library's existing index data first.
-        // Scoped on purpose: rebuilding a group library must not wipe My
-        // Library's index (or any other group's) as a side effect.
-        ztoolkit.log(`[SemanticSearch] Rebuild mode: clearing existing index data for libraryID=${libraryID}...`);
+      } else if (fullLibraryRebuild) {
+        this.indexProgress.skipped = 0;
+      }
 
-        // Get stats before clear for verification
-        const statsBefore = await this.vectorStore.getStats();
-        ztoolkit.log(`[SemanticSearch] Before clear: ${statsBefore.totalVectors} vectors, ${statsBefore.totalItems} items`);
-
-        await this.vectorStore.clear(libraryID);
-
-        // Verify clear worked
-        const statsAfter = await this.vectorStore.getStats();
-        ztoolkit.log(`[SemanticSearch] After clear: ${statsAfter.totalVectors} vectors, ${statsAfter.totalItems} items`);
-
-        if (statsAfter.totalVectors > 0) {
-          ztoolkit.log(`[SemanticSearch] WARNING: clear() did not remove all vectors!`, 'warn');
-        }
-
-        ztoolkit.log(`[SemanticSearch] Existing index data cleared`);
+      if (!resumeBuildID && !fullLibraryRebuild) {
+        await createNewBuildSession();
       }
 
       this.indexProgress.total = items.length;
@@ -782,7 +898,36 @@ export class SemanticSearchService {
       if (items.length === 0) {
         this.indexProgress.minerUFailures = 0;
         this.indexProgress.minerUAttachments = 0;
-        this.indexProgress.status = 'completed';
+        await this.reconcileFullLibraryBuildTargets(buildID, libraryID);
+        const journal = await this.vectorStore.getBuildTargetSummary(buildID);
+        if (this._activeFullLibraryRebuild) {
+          this.indexProgress.total = journal.total;
+          this.indexProgress.processed = journal.succeeded + journal.failed;
+        }
+        this.indexProgress.status =
+          journal.succeeded === journal.total ? 'completed' : 'failed';
+        this.indexProgress.failedCount = journal.failed;
+        if (
+          shouldRecordFullLibraryChunkingSignature({
+            rebuild: this._activeFullLibraryRebuild,
+            itemKeysProvided: false,
+            status: this.indexProgress.status,
+            processed: journal.succeeded,
+            total: journal.total,
+            failedCount: journal.failed,
+          })
+        ) {
+          setStoredChunkingSignature(libraryID, chunkSettings.signature);
+        }
+        await this.vectorStore.updateBuildSessionStatus(
+          buildID,
+          this.indexProgress.status,
+        );
+        if (this.indexProgress.status === 'completed') {
+          this.clearSavedIndexProgress();
+        } else {
+          this.saveIndexProgress();
+        }
         return this.indexProgress;
       }
 
@@ -797,148 +942,92 @@ export class SemanticSearchService {
       ztoolkit.log(`[SemanticSearch] Created ${concurrency} PDFProcessor workers for parallel processing`);
 
       try {
-        // Process in parallel batches for better throughput
-        for (let i = 0; i < items.length; i += concurrency) {
-          // Check for abort
-          if (this._aborted) {
-            this.indexProgress.status = 'aborted';
-            ztoolkit.log(`[SemanticSearch] Indexing aborted at ${this.indexProgress.processed}/${this.indexProgress.total}`);
-            break;
-          }
-
-          // Check for pause - wait until resumed
-          if (this._paused) {
-            ztoolkit.log(`[SemanticSearch] Indexing paused at ${this.indexProgress.processed}/${this.indexProgress.total}`);
+        const queueResult = await runIndexWorkQueue({
+          items,
+          concurrency,
+          isPaused: () => this._paused,
+          isAborted: () => this._aborted,
+          waitWhilePaused: async () => {
             onProgress?.(this.indexProgress);
             await this.waitWhilePaused();
-            // After resume, check if aborted while paused
-            if (this._aborted) {
-              this.indexProgress.status = 'aborted';
-              ztoolkit.log(`[SemanticSearch] Indexing aborted after pause`);
-              break;
+            if (!this._aborted) {
+              this.indexProgress.status = 'indexing';
+              this.indexProgress.error = undefined;
+              this.indexProgress.errorType = undefined;
+              this.indexProgress.errorRetryable = undefined;
             }
-            this.indexProgress.status = 'indexing';
-            ztoolkit.log(`[SemanticSearch] Indexing resumed`);
-          }
-
-          const batch = items.slice(i, i + concurrency);
-
-          // Process batch items in parallel, each with its own processor
-          const results = await Promise.allSettled(
-            batch.map(async (item, batchIndex) => {
-              this.indexProgress.currentItem = item.key;
-              // Each item gets its own processor from the pool
-              const processor = processorPool[batchIndex % processorPool.length];
-              await this.indexItemWithProcessor(item, processor, force);
-              return item.key; // Return item key for tracking
-            })
-          );
-
-          // Count processed items and handle errors
-          let hasAPIError = false;
-          let apiError: EmbeddingAPIError | null = null;
-
-          for (let j = 0; j < results.length; j++) {
-            const result = results[j];
-            const item = batch[j];
-
-            if (result.status === 'fulfilled') {
-              this.indexProgress.processed++;
-            } else {
-              // Check if this is an EmbeddingAPIError
-              const error = result.reason;
+          },
+          processItem: async (item, workerIndex): Promise<IndexWorkOutcome> => {
+            this.indexProgress.currentItem = item.key;
+            if (item.__missing) {
+              const error = new Error(
+                `Item ${item.key} was not found in libraryID=${libraryID}`,
+              );
+              await this.recordFailedItem(item, error, 'unknown');
+              return { status: 'failed', error };
+            }
+            try {
+              return await this.indexItemWithProcessor(
+                item,
+                processorPool[workerIndex % processorPool.length],
+                force || targetedRebuild,
+              );
+            } catch (error) {
               if (error instanceof EmbeddingAPIError) {
-                // Special handling for pause - don't record as failed
                 if (error.type === 'paused') {
-                  ztoolkit.log(`[SemanticSearch] Item ${item.key} interrupted by pause`);
-                  // Don't increment processed - will retry after resume
-                  continue;
+                  return { status: 'incomplete' };
                 }
-
-                // Global errors affect every item identically: pause so the
-                // user can fix config/network before continuing. 'server'
-                // (5xx) is global too — a provider outage mid-build must not
-                // burn through the queue persisting failure markers for
-                // every remaining item
-                const isGlobalError = error.type === 'auth' || error.type === 'config' ||
-                                      error.type === 'network' || error.type === 'rate_limit' ||
-                                      error.type === 'server';
+                const isGlobalError =
+                  error.type === 'auth' ||
+                  error.type === 'config' ||
+                  error.type === 'network' ||
+                  error.type === 'rate_limit' ||
+                  error.type === 'server';
                 if (isGlobalError) {
-                  hasAPIError = true;
-                  apiError = error;
-                  ztoolkit.log(`[SemanticSearch] Global API error for item ${item.key}: ${error.type} - ${error.message}`, 'error');
-                } else {
-                  // Item-local errors (invalid_request/400, payload_too_large/413,
-                  // server/5xx after retries, unknown): skip this item, record it, continue
-                  await this.recordFailedItem(item, error);
-                  this.indexProgress.processed++;
-                  ztoolkit.log(`[SemanticSearch] Skipped item ${item.key} after ${error.type} error: ${error.message}`, 'warn');
+                  this.indexProgress.error = error.getUserMessage();
+                  this.indexProgress.errorType = error.type;
+                  this.indexProgress.errorRetryable = error.retryable;
+                  this._paused = true;
+                  this.indexProgress.status = 'paused';
+                  await this.vectorStore.updateBuildSessionStatus(buildID, 'paused');
+                  this.saveIndexProgress();
+                  this._onErrorCallback?.(error);
+                  onProgress?.(this.indexProgress);
+                  return { status: 'incomplete' };
                 }
-              } else {
-                // Other errors (PDF extraction, etc.) - just log and continue
-                this.indexProgress.processed++;
-                ztoolkit.log(`[SemanticSearch] Failed to index item ${item.key}: ${error}`, 'warn');
+                await this.recordFailedItem(item, error, error.type);
+                return { status: 'failed', error };
               }
+              await this.recordFailedItem(item, error, 'unknown');
+              return { status: 'failed', error };
             }
-          }
-
-          // If there was an API error, auto-pause and notify
-          if (hasAPIError && apiError) {
-            ztoolkit.log(`[SemanticSearch] API error detected, auto-pausing indexing...`, 'warn');
-
-            // Set error info in progress
-            this.indexProgress.error = apiError.getUserMessage();
-            this.indexProgress.errorType = apiError.type;
-            this.indexProgress.errorRetryable = apiError.retryable;
-
-            // Auto-pause
-            this._paused = true;
-            this.indexProgress.status = 'paused';
+          },
+          onSettled: async (item, outcome) => {
+            if (outcome.status !== 'succeeded') return;
+            const identity = {
+              libraryID: item.libraryID ?? libraryID,
+              itemKey: item.key,
+            };
+            await this.vectorStore.updateBuildTarget(buildID, identity, 'succeeded');
+            await this.vectorStore.clearFailedItems([identity]);
+            this._failedItems.delete(`${identity.libraryID}:${identity.itemKey}`);
+          },
+          onProgress: (progress) => {
+            this.indexProgress.processed = progress.processed;
+            this.indexProgress.failedCount = progress.failedCount;
+            const elapsed = Date.now() - (this.indexProgress.startTime || 0);
+            if (progress.processed > 0) {
+              this.indexProgress.estimatedRemaining =
+                (elapsed / progress.processed) *
+                (this.indexProgress.total - progress.processed);
+            }
             this.saveIndexProgress();
-
-            // Notify via callback
-            if (this._onErrorCallback) {
-              this._onErrorCallback(apiError);
-            }
-
             onProgress?.(this.indexProgress);
-
-            // Wait for user to resume or abort
-            await this.waitWhilePaused();
-
-            // After resume, check if aborted
-            if (this._aborted) {
-              this.indexProgress.status = 'aborted';
-              ztoolkit.log(`[SemanticSearch] Indexing aborted after API error`);
-              break;
-            }
-
-            // Clear error state and continue
-            this.indexProgress.error = undefined;
-            this.indexProgress.errorType = undefined;
-            this.indexProgress.errorRetryable = undefined;
-            this.indexProgress.status = 'indexing';
-            ztoolkit.log(`[SemanticSearch] Indexing resumed after API error`);
-          }
-
-          // Update estimated remaining time
-          const elapsed = Date.now() - (this.indexProgress.startTime || 0);
-          const avgTime = elapsed / this.indexProgress.processed;
-          this.indexProgress.estimatedRemaining =
-            avgTime * (this.indexProgress.total - this.indexProgress.processed);
-
-          onProgress?.(this.indexProgress);
-
-          // Save progress periodically (every 5 batches) for resume after restart
-          if (Math.floor(i / concurrency) % 5 === 0) {
-            this.saveIndexProgress();
-          }
-
-          // Yield to UI periodically
-          if (i % 10 === 0) {
-            await new Promise(resolve => setTimeout(resolve, 10));
-          }
-        }
+          },
+        });
+        this.indexProgress.processed = queueResult.processed;
+        this.indexProgress.failedCount = queueResult.failedCount;
+        this.indexProgress.status = queueResult.status;
       } finally {
         // Clean up all processors in the pool
         for (const processor of processorPool) {
@@ -952,14 +1041,50 @@ export class SemanticSearchService {
       this.indexProgress.minerULastError = minerUStats.lastError;
       this.indexProgress.minerUAttachments = minerUStats.attachments;
 
-      // Only set completed if not aborted
-      if (this.indexProgress.status !== 'aborted') {
-        this.indexProgress.status = 'completed';
-        this.clearSavedIndexProgress();  // Clear persisted state on completion
-        // Record the chunk layout this index was built with, so Preferences
-        // can tell the user when a later chunk-size change has left the stored
-        // vectors out of date.
-        setStoredChunkingSignature(getChunkingSignature());
+      await this.reconcileFullLibraryBuildTargets(buildID, libraryID);
+      const journal = await this.vectorStore.getBuildTargetSummary(buildID);
+      if (this._activeFullLibraryRebuild) {
+        this.indexProgress.total = journal.total;
+        this.indexProgress.processed = Math.max(
+          this.indexProgress.processed,
+          journal.succeeded + journal.failed,
+        );
+        this.indexProgress.failedCount = Math.max(
+          this.indexProgress.failedCount ?? 0,
+          journal.failed,
+        );
+      }
+      if (
+        this.indexProgress.status === 'completed' &&
+        journal.succeeded !== journal.total
+      ) {
+        this.indexProgress.status = 'failed';
+        this.indexProgress.failedCount = Math.max(
+          this.indexProgress.failedCount ?? 0,
+          journal.failed,
+        );
+      }
+
+      if (this.indexProgress.status === 'completed') {
+        if (
+          shouldRecordFullLibraryChunkingSignature({
+            rebuild: this._activeFullLibraryRebuild,
+            itemKeysProvided: false,
+            status: this.indexProgress.status,
+            processed: journal.succeeded,
+            total: journal.total,
+            failedCount: journal.failed,
+          })
+        ) {
+          setStoredChunkingSignature(libraryID, chunkSettings.signature);
+        }
+        await this.vectorStore.updateBuildSessionStatus(buildID, 'completed');
+        this.clearSavedIndexProgress();
+      } else if (this.indexProgress.status === 'failed') {
+        await this.vectorStore.updateBuildSessionStatus(buildID, 'failed');
+        this.saveIndexProgress();
+      } else if (this.indexProgress.status === 'aborted') {
+        await this.vectorStore.updateBuildSessionStatus(buildID, 'aborted');
       }
       onProgress?.(this.indexProgress);
 
@@ -969,11 +1094,27 @@ export class SemanticSearchService {
     } catch (error) {
       this.indexProgress.status = 'error';
       this.indexProgress.error = String(error);
+      if (this._activeBuildID) {
+        try {
+          await this.vectorStore.updateBuildSessionStatus(
+            this._activeBuildID,
+            'failed',
+          );
+        } catch (journalError) {
+          ztoolkit.log(
+            `[SemanticSearch] Could not mark build journal failed: ${journalError}`,
+            'warn',
+          );
+        }
+        this.saveIndexProgress();
+      }
       ztoolkit.log(`[SemanticSearch] Indexing failed: ${error}`, 'error');
       throw error;
     } finally {
       this._buildActive = false;
       this._forceRun = false;
+      this._activeBuildID = null;
+      this._activeFullLibraryRebuild = false;
     }
   }
 
@@ -981,7 +1122,7 @@ export class SemanticSearchService {
    * Index a single item (creates its own PDFProcessor)
    */
   async indexItem(item: any): Promise<void> {
-    return this.indexItemWithProcessor(item, null);
+    await this.indexItemWithProcessor(item, null);
   }
 
   /**
@@ -1000,7 +1141,7 @@ export class SemanticSearchService {
     item: any,
     sharedProcessor: PDFProcessor | null,
     force: boolean = this._forceRun,
-  ): Promise<void> {
+  ): Promise<IndexWorkOutcome> {
     const startTime = Date.now();
     const itemTitle = item.getDisplayTitle?.() || item.key;
     ztoolkit.log(`[SemanticSearch] indexItem() start: ${item.key} "${itemTitle.substring(0, 30)}..."`);
@@ -1031,7 +1172,7 @@ export class SemanticSearchService {
     if (!needsCheckByTimestamp && !force) {
       this.indexProgress.unchanged = (this.indexProgress.unchanged || 0) + 1;
       ztoolkit.log(`[SemanticSearch] indexItem() skip: timestamps unchanged for ${item.key}`);
-      return;
+      return { status: 'succeeded' };
     }
     if (!needsCheckByTimestamp && force) {
       ztoolkit.log(`[SemanticSearch] indexItem() force: timestamps unchanged for ${item.key}, re-extracting anyway`);
@@ -1064,7 +1205,7 @@ export class SemanticSearchService {
         }
         this.indexProgress.unchanged = (this.indexProgress.unchanged || 0) + 1;
         ztoolkit.log(`[SemanticSearch] indexItem() skip: cached content unchanged, updated timestamps`);
-        return;
+        return { status: 'succeeded' };
       }
       // Cache exists but hash indicates content may have changed - re-extract to verify
       ztoolkit.log(`[SemanticSearch] indexItem() cache hash mismatch, re-extracting content`);
@@ -1073,18 +1214,23 @@ export class SemanticSearchService {
     // Check for pause before content extraction
     if (this._paused || this._aborted) {
       ztoolkit.log(`[SemanticSearch] indexItem() paused/aborted before content extraction: ${item.key}`);
-      return;
+      return { status: 'incomplete' };
     }
 
     // Extract content (PDF extraction happens here)
     const content = await this.extractItemContent(item, sharedProcessor);
     if (!content.trim()) {
-      // Mark item in index_status even with no content, to prevent repeated rebuild attempts
-      await this.vectorStore.updateIndexStatus(
-        item.key, 0, 'empty', itemModified, attachmentModified, item.libraryID,
-      );
+      await this.vectorStore.replaceItemIndex({
+        itemKey: item.key,
+        libraryID: item.libraryID,
+        records: [],
+        contentHash: 'empty',
+        itemModified,
+        attachmentModified,
+        buildID: this._activeBuildID ?? undefined,
+      });
       ztoolkit.log(`[SemanticSearch] indexItem() skip: no content for ${item.key}, marked in index_status to avoid retry loop`);
-      return;
+      return { status: 'succeeded' };
     }
     ztoolkit.log(`[SemanticSearch] indexItem() extracted content: ${content.length} chars`);
 
@@ -1095,7 +1241,7 @@ export class SemanticSearchService {
         item.key, content, this.hashContent(content), item.libraryID,
       );
       ztoolkit.log(`[SemanticSearch] indexItem() paused/aborted after content extraction: ${item.key}`);
-      return;
+      return { status: 'incomplete' };
     }
 
     // Calculate content hash
@@ -1127,17 +1273,13 @@ export class SemanticSearchService {
       }
       this.indexProgress.unchanged = (this.indexProgress.unchanged || 0) + 1;
       ztoolkit.log(`[SemanticSearch] indexItem() skip: content unchanged, updated timestamps`);
-      return;
+      return { status: 'succeeded' };
     }
-
-    // Delete existing vectors
-    await this.vectorStore.deleteItemVectors(item.key, false, item.libraryID);
 
     // Chunk the content
     const chunks = this.textChunker.chunk(content);
     if (chunks.length === 0) {
-      ztoolkit.log(`[SemanticSearch] indexItem() skip: no chunks generated`);
-      return;
+      throw new Error(`No chunks generated for ${item.key}`);
     }
     ztoolkit.log(`[SemanticSearch] indexItem() chunked into ${chunks.length} chunks`);
 
@@ -1151,6 +1293,15 @@ export class SemanticSearchService {
       onPauseCheck: () => this._paused || this._aborted
     });
     ztoolkit.log(`[SemanticSearch] indexItem() generated ${embeddings.size} embeddings`);
+
+    if (this._paused || this._aborted) {
+      return { status: 'incomplete' };
+    }
+    if (embeddings.size !== chunks.length) {
+      throw new Error(
+        `Incomplete embeddings for ${item.key}: ${embeddings.size}/${chunks.length}`,
+      );
+    }
 
     // Store vectors
     const records = chunks.map((chunk, idx) => {
@@ -1167,13 +1318,15 @@ export class SemanticSearchService {
       };
     }).filter(r => r !== null) as any[];
 
-    await this.vectorStore.insertVectorsBatch(records);
-    // Record the count of chunks actually embedded (embedBatch may have
-    // skipped oversized chunks), not the total chunk count
-    await this.vectorStore.updateIndexStatus(
-      item.key, records.length, contentHash, itemModified, attachmentModified,
-      item.libraryID,
-    );
+    await this.vectorStore.replaceItemIndex({
+      itemKey: item.key,
+      libraryID: item.libraryID,
+      records,
+      contentHash,
+      itemModified,
+      attachmentModified,
+      buildID: this._activeBuildID ?? undefined,
+    });
 
     this.indexProgress.indexed = (this.indexProgress.indexed || 0) + 1;
 
@@ -1182,6 +1335,7 @@ export class SemanticSearchService {
       ztoolkit.log(`[SemanticSearch] indexItem() ${item.key}: ${chunks.length - records.length}/${chunks.length} chunks skipped (oversized)`, 'warn');
     }
     ztoolkit.log(`[SemanticSearch] indexItem() completed: ${item.key} (${records.length} vectors) in ${elapsed}ms`);
+    return { status: 'succeeded' };
   }
 
   /**
@@ -1240,6 +1394,79 @@ export class SemanticSearchService {
     return { ...this.indexProgress };
   }
 
+  async resumeInterruptedBuild(
+    onProgress?: (progress: IndexProgress) => void,
+  ): Promise<IndexProgress> {
+    await this.initialize();
+    if (this._buildActive) {
+      this.resumeIndex();
+      return { ...this.indexProgress, status: 'busy' };
+    }
+    const session = await this.vectorStore.getResumableBuildSession();
+    if (!session) {
+      return {
+        ...this.indexProgress,
+        total: 0,
+        processed: 0,
+        failedCount: 0,
+        status: 'completed',
+      };
+    }
+    const targets = (await this.vectorStore.getBuildTargets(session.buildID))
+      .filter((target) => target.state !== 'succeeded');
+    this._paused = false;
+    this.indexProgress.status = 'indexing';
+    return this.buildIndex({
+      itemKeys: targets.map((target) => target.itemKey),
+      libraryID: session.libraryID,
+      rebuild: false,
+      force: session.scope === 'targeted',
+      resumeBuildID: session.buildID,
+      resumeFullLibraryRebuild: session.scope === 'full-library',
+      frozenChunkSettings:
+        session.chunkSignature &&
+        session.chunkTargetChars !== undefined &&
+        session.chunkAppendToleranceChars !== undefined
+          ? {
+              target: session.chunkTargetChars,
+              tolerance: session.chunkAppendToleranceChars,
+              signature: session.chunkSignature,
+            }
+          : undefined,
+      onProgress,
+    });
+  }
+
+  private async reconcileFullLibraryBuildTargets(
+    buildID: string,
+    libraryID: number,
+  ): Promise<void> {
+    if (!this._activeFullLibraryRebuild) return;
+    const [currentItems, targets] = await Promise.all([
+      this.getItemsWithContent(libraryID),
+      this.vectorStore.getBuildTargets(buildID),
+    ]);
+    const known = new Set(
+      targets.map((target) => `${target.libraryID}:${target.itemKey}`),
+    );
+    const missing = currentItems
+      .map((item) => ({
+        libraryID: item.libraryID ?? libraryID,
+        itemKey: item.key,
+      }))
+      .filter(
+        (identity) =>
+          !known.has(`${identity.libraryID}:${identity.itemKey}`),
+      );
+    if (missing.length > 0) {
+      await this.vectorStore.addBuildTargets(buildID, missing);
+      ztoolkit.log(
+        `[SemanticSearch] Full-Library reconciliation added ${missing.length} new pending targets`,
+        'warn',
+      );
+    }
+  }
+
   /**
    * Pause the indexing process
    */
@@ -1248,6 +1475,12 @@ export class SemanticSearchService {
       this._paused = true;
       this.indexProgress.status = 'paused';
       this.saveIndexProgress();  // Persist paused state
+      if (this._activeBuildID) {
+        void this.vectorStore.updateBuildSessionStatus(
+          this._activeBuildID,
+          'paused',
+        );
+      }
       ztoolkit.log('[SemanticSearch] Index paused');
     }
   }
@@ -1277,6 +1510,12 @@ export class SemanticSearchService {
       this._paused = false;
       this.indexProgress.status = 'aborted';
       this.clearSavedIndexProgress();  // Clear persisted state on abort
+      if (this._activeBuildID) {
+        void this.vectorStore.updateBuildSessionStatus(
+          this._activeBuildID,
+          'aborted',
+        );
+      }
       // Release pause lock if paused
       if (this._pauseResolve) {
         this._pauseResolve();
@@ -1312,10 +1551,17 @@ export class SemanticSearchService {
   /**
    * Get failed items list
    */
-  getFailedItems(): Array<{ itemKey: string; error: string; errorType: EmbeddingErrorType; timestamp: number }> {
-    return Array.from(this._failedItems.entries()).map(([itemKey, info]) => ({
-      itemKey,
-      ...info
+  getFailedItems(): Array<{
+    libraryID: number;
+    itemKey: string;
+    error: string;
+    errorType: EmbeddingErrorType;
+    timestamp: number;
+    buildID?: string;
+  }> {
+    return Array.from(this._failedItems.values()).map((item) => ({
+      ...item,
+      errorType: item.errorType as EmbeddingErrorType,
     }));
   }
 
@@ -1327,24 +1573,32 @@ export class SemanticSearchService {
     this.indexProgress.failedCount = 0;
   }
 
-  /**
-   * Record a failed item: in-memory for the UI, and persisted into
-   * index_status with a 'failed:<type>' content_hash sentinel (same pattern
-   * as the 'empty' marker) so subsequent buildIndex runs skip it instead of
-   * re-hitting the same failure on every resume/restart.
-   */
-  private async recordFailedItem(item: any, error: EmbeddingAPIError): Promise<void> {
-    this._failedItems.set(item.key, {
-      error: error.getUserMessage(),
-      errorType: error.type,
-      timestamp: Date.now()
-    });
+  /** Record a Library-qualified failure in memory and in index_failures. */
+  private async recordFailedItem(
+    item: any,
+    error: unknown,
+    errorType: EmbeddingErrorType,
+  ): Promise<void> {
+    const failure: FailedIndexItem = {
+      libraryID: item.libraryID ?? Zotero.Libraries.userLibraryID,
+      itemKey: item.key,
+      error:
+        error instanceof EmbeddingAPIError
+          ? error.getUserMessage()
+          : error instanceof Error
+            ? error.message
+            : String(error),
+      errorType,
+      timestamp: Date.now(),
+      buildID: this._activeBuildID ?? undefined,
+    };
+    this._failedItems.set(
+      `${failure.libraryID}:${failure.itemKey}`,
+      failure,
+    );
     this.indexProgress.failedCount = this._failedItems.size;
     try {
-      await this.vectorStore.updateIndexStatus(
-        item.key, 0, `failed:${error.type}`,
-        item.dateModified || '', ''
-      );
+      await this.vectorStore.recordFailedItem(failure);
     } catch (e) {
       ztoolkit.log(`[SemanticSearch] Could not persist failure marker for ${item.key}: ${e}`, 'warn');
     }
@@ -1365,26 +1619,62 @@ export class SemanticSearchService {
       return { ...this.indexProgress, status: 'busy' };
     }
 
-    const persisted = await this.vectorStore.getFailedItemKeys();
-    const failedItemKeys = Array.from(new Set([...persisted, ...this._failedItems.keys()]));
-    if (failedItemKeys.length === 0) {
+    const failures = new Map<string, FailedIndexItem>();
+    for (const failure of await this.vectorStore.getFailedItems()) {
+      failures.set(`${failure.libraryID}:${failure.itemKey}`, failure);
+    }
+    for (const failure of this._failedItems.values()) {
+      failures.set(`${failure.libraryID}:${failure.itemKey}`, failure);
+    }
+    if (failures.size === 0) {
       ztoolkit.log('[SemanticSearch] No failed items to retry');
       return { ...this.indexProgress, total: 0, processed: 0, failedCount: 0, status: 'completed' };
     }
 
-    ztoolkit.log(`[SemanticSearch] Retrying ${failedItemKeys.length} failed items`);
+    ztoolkit.log(`[SemanticSearch] Retrying ${failures.size} failed items`);
 
-    // Clear failure markers so the buildIndex filter does not skip these items
-    await this.vectorStore.clearFailedMarkers(failedItemKeys);
-    this._failedItems.clear();
-    this.indexProgress.failedCount = 0;
-
-    // Build index for failed items only
-    return this.buildIndex({
-      itemKeys: failedItemKeys,
-      rebuild: false,
-      onProgress
-    });
+    const merged: IndexProgress = {
+      total: 0,
+      processed: 0,
+      failedCount: 0,
+      indexed: 0,
+      unchanged: 0,
+      status: 'completed',
+    };
+    for (const group of groupFailedIndexItems(failures.values())) {
+      const first = group[0];
+      const session = first.buildID
+        ? await this.vectorStore.getBuildSession(first.buildID)
+        : null;
+      const result = await this.buildIndex({
+        itemKeys: group.map((failure) => failure.itemKey),
+        libraryID: first.libraryID,
+        rebuild: false,
+        force: true,
+        resumeBuildID: session?.buildID,
+        resumeFullLibraryRebuild: session?.scope === 'full-library',
+        frozenChunkSettings:
+          session?.chunkSignature &&
+          session.chunkTargetChars !== undefined &&
+          session.chunkAppendToleranceChars !== undefined
+            ? {
+                target: session.chunkTargetChars,
+                tolerance: session.chunkAppendToleranceChars,
+                signature: session.chunkSignature,
+              }
+            : undefined,
+        onProgress,
+      });
+      merged.total += result.total;
+      merged.processed += result.processed;
+      merged.failedCount =
+        (merged.failedCount ?? 0) + (result.failedCount ?? 0);
+      merged.indexed = (merged.indexed ?? 0) + (result.indexed ?? 0);
+      merged.unchanged =
+        (merged.unchanged ?? 0) + (result.unchanged ?? 0);
+      if (result.status !== 'completed') merged.status = result.status;
+    }
+    return merged;
   }
 
   /**

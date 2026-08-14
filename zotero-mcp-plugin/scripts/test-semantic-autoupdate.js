@@ -50,16 +50,19 @@ assert.match(
 // buildIndex must let explicitly requested keys past the already-indexed filter,
 // otherwise needsReindexByTimestamp is dead code for every indexed item.
 const filterStart = serviceSource.indexOf("// Filter already indexed items");
-const filterEnd = serviceSource.indexOf("} else if (force) {", filterStart);
+const filterEnd = serviceSource.indexOf(
+  "} else if (force && !fullLibraryRebuild) {",
+  filterStart,
+);
 assert.ok(filterStart !== -1 && filterEnd > filterStart, "buildIndex filter block not found");
 const filterBlock = serviceSource.slice(filterStart, filterEnd);
 assert.match(
   filterBlock,
-  /if \(itemKeys && itemKeys\.length > 0\)/,
+  /if \(itemKeysProvided\)/,
   "targeted itemKeys must bypass the getItemsToSkip filter",
 );
 const skipCallIndex = filterBlock.indexOf("getItemsToSkip");
-const targetedIndex = filterBlock.indexOf("itemKeys && itemKeys.length > 0");
+const targetedIndex = filterBlock.indexOf("if (itemKeysProvided)");
 assert.ok(
   targetedIndex !== -1 && targetedIndex < skipCallIndex,
   "the targeted branch must be checked before getItemsToSkip runs",

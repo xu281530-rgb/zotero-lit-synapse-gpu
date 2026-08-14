@@ -20,11 +20,9 @@ import { SmartAnnotationExtractor } from './smartAnnotationExtractor';
 import { MCPSettingsService } from './mcpSettingsService';
 import { getSemanticSearchService, SemanticSearchService } from './semantic';
 import {
-  DEFAULT_HYBRID_TIMEOUT_MS,
   DEFAULT_SEMANTIC_TIMEOUT_MS,
   HYBRID_KEYWORD_COVERAGE_BONUS,
   LEXICAL_FIELD_WEIGHTS,
-  computeFusedScore,
   MAX_HYBRID_KEYWORDS,
   MAX_SUPPLIED_KEYWORDS,
   resolveHybridKeywords,
@@ -37,7 +35,6 @@ import {
 } from './hybridSearch';
 import {
   getHybridSearchSettings,
-  resolveCandidateDepth,
   resolveResultCap,
   resolveScoreFloor,
 } from './hybridSearchSettings';
@@ -52,6 +49,7 @@ import {
 } from './hybridCandidates';
 import {
   CursorError,
+  detachPageWindow,
   HybridSearchPageStore,
   windowOf,
 } from './hybridSearchPages';
@@ -135,6 +133,7 @@ function trimCachedEvidence(row: Record<string, any>): Record<string, any> {
     .slice(0, HYBRID_EVIDENCE_CHUNKS)
     .map((chunk: any) => ({
       chunkId: chunk?.chunkId,
+      rowId: chunk?.rowId,
       score: chunk?.score,
       text: truncateEvidence(String(chunk?.text || '')),
     }));
@@ -169,8 +168,6 @@ interface HybridSearchSnapshot {
   retryBudgetNote: string;
   appliedMinScore: number;
   libraryID: number;
-  /** True when candidateK, not relevance, decided where the pool stopped. */
-  poolSaturated: boolean;
   /** True when a retrieval branch failed or timed out during this search. */
   branchFailed: boolean;
   metadata: Record<string, any>;
@@ -693,10 +690,6 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
               type: 'string',
               description: 'Continue a previous hybrid_search: pass the nextCursor it returned, exactly as given. The cursor names one already-ranked, already-threshold-filtered result set, and returns the next page of THAT set — it does not re-run retrieval, so pages cannot duplicate, drop or reorder documents. Send it with query, keywords, domain, expertRole and minScore either unchanged or omitted; changing any of them is a different search and is rejected. Omit cursor to start a new search.'
             },
-            candidateK: {
-              type: 'number',
-              description: `Retrieval DEPTH per branch: how many candidates keyword and semantic retrieval each consider before fusion and thresholding. Defaults to the user's "Retrieval depth per branch" setting. Unlike topK and minScore this is not capped by the user's preference — it governs how hard the server looks, not how much it may return — so raise it when the response reports the candidate pool as full and you need an exhaustive sweep, and leave it alone otherwise. Bounded to keep the vector scan inside its deadline.`,
-            },
             minScore: {
               type: 'number',
               description: 'Relevance floor 0-1 applied to the fused score. May only be STRICTER than the user setting; a lower value is raised back to the user threshold. Documents below it are discarded and are never padded back in.'
@@ -722,16 +715,6 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
               type: 'number',
               description: 'Zotero library ID used by both keyword and semantic retrieval'
             },
-            semanticTimeoutMs: {
-              type: 'number',
-              minimum: 1,
-              description: 'Semantic branch deadline in milliseconds (default: 8000)'
-            },
-            totalTimeoutMs: {
-              type: 'number',
-              minimum: 1,
-              description: 'Overall hybrid retrieval deadline in milliseconds (default: 10000)'
-            }
           },
           required: ['query']
         }
@@ -1988,23 +1971,8 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
     const settings = getHybridSearchSettings();
     const documentCap = resolveResultCap(args.topK, settings.maxDocuments);
     const scoreFloor = resolveScoreFloor(args.minScore, settings.minScore);
-    // topK is the PAGE size, not the search depth: it bounds one response,
-    // while the ranking behind it goes as deep as the candidate pool allows.
-    // The two used to be tied together (candidateK = topK * 3), which meant
-    // asking for 20 documents silently decided that rank 61 would never exist.
+    // topK is only the page size; retrieval enumerates every available match.
     const topK = documentCap.value;
-    const candidateDepth = resolveCandidateDepth(
-      args.candidateK,
-      settings.candidateK,
-    );
-    // A pool smaller than one page cannot fill it, so the page size is a floor
-    // on the depth. Raising it quietly is right: the caller asked for a page of
-    // N and a depth of M, and only one of those can be honoured.
-    const candidateK = Math.max(candidateDepth.value, topK);
-    // Branch-level pre-filter, deliberately looser than the fused threshold:
-    // a chunk at 0.45 semantic similarity can still clear 0.60 once the
-    // keyword branch agrees, and pre-filtering it away would hide that.
-    const semanticPrefilter = Math.min(0.2, scoreFloor.value);
     const language = args.language ?? 'all';
     const libraryID =
       args.libraryID ?? Zotero.Libraries.userLibraryID;
@@ -2032,7 +2000,6 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
     this.validateSearchParameters({
       query: args.query,
       topK,
-      candidateK,
       minScore: scoreFloor.value,
       language,
       libraryID,
@@ -2069,20 +2036,12 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
     const options: HybridSearchOptions = {
       keywords: lexicalKeywords,
       topK,
-      candidateK,
       rrfK: args.rrfK ?? 60,
       keywordWeight: args.keywordWeight ?? 1,
       semanticWeight: args.semanticWeight ?? 1,
       minScore: scoreFloor.value,
-      semanticTimeoutMs: args.semanticTimeoutMs,
-      totalTimeoutMs: args.totalTimeoutMs,
+      exhaustive: true,
     };
-    const totalTimeoutMs = args.totalTimeoutMs ?? DEFAULT_HYBRID_TIMEOUT_MS;
-    const semanticTimeoutMs = Math.min(
-      args.semanticTimeoutMs ?? DEFAULT_SEMANTIC_TIMEOUT_MS,
-      totalTimeoutMs,
-    );
-    const hybridStartedAt = Date.now();
     const semanticEnabled = Zotero.Prefs.get(
       'extensions.zotero.zotero-mcp-plugin.semantic.enabled',
       true,
@@ -2111,18 +2070,12 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
           const outcome = await runLexicalSearch({
             keywords: lexicalKeywordEntries,
             libraryID,
-            candidateK: options.candidateK,
             scopeItemKeys,
-            // Stop a little before the hybrid deadline so a partial, ranked
-            // candidate set still reaches fusion instead of the branch being
-            // killed outright and hybrid silently degrading to semantic-only.
-            deadlineAt:
-              hybridStartedAt + Math.max(1000, Math.floor(totalTimeoutMs * 0.85)),
             isCancelled: () => lexicalCancelled,
           });
           lexicalDiagnostics = outcome.diagnostics;
           ztoolkit.log(
-            `[StreamableMCP][Lexical] strategy=${outcome.diagnostics.strategy} candidates=${outcome.diagnostics.candidateIDs} scanned=${outcome.diagnostics.scannedItems} truncated=${outcome.diagnostics.truncated} prioritized=${outcome.diagnostics.prioritized} search=${outcome.diagnostics.searchMs}ms scan=${outcome.diagnostics.scanMs}ms rank=${outcome.diagnostics.rankMs}ms total=${outcome.diagnostics.totalMs}ms keywords=${lexicalKeywordEntries.length}`,
+            `[StreamableMCP][Lexical] strategy=${outcome.diagnostics.strategy} candidates=${outcome.diagnostics.candidateIDs} scanned=${outcome.diagnostics.scannedItems} truncated=${outcome.diagnostics.truncated} search=${outcome.diagnostics.searchMs}ms scan=${outcome.diagnostics.scanMs}ms rank=${outcome.diagnostics.rankMs}ms total=${outcome.diagnostics.totalMs}ms keywords=${lexicalKeywordEntries.length}`,
           );
           return outcome.items;
         },
@@ -2135,15 +2088,17 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
           }
           const semanticService = getSemanticSearchService();
           return semanticService.search(args.query, {
-            topK: options.candidateK,
-            minScore: semanticPrefilter,
+            exhaustive: true,
+            includeChunkText: false,
+            // The fused threshold is the only Library-level relevance filter.
+            minScore: -1,
             language,
             libraryID,
             // Restricting the vector scan itself: the SQL only reads chunks
             // belonging to these items, so out-of-scope chunks are never
             // dequantised and never have a similarity computed for them.
             itemKeys: scope.searchScope === 'collections' ? scope.itemKeys : undefined,
-            timeoutMs: semanticTimeoutMs,
+            vectorScanTimeoutMs: settings.searchTimeoutMs,
             signal: semanticAbort?.signal,
             stats: semanticScanStats,
           });
@@ -2195,9 +2150,7 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
     }
     if (diagnostics?.truncated) {
       hybridWarnings.push(
-        diagnostics.prioritized
-          ? 'The lexical candidate set exceeded the candidate cap and was reduced to the items matching the most keywords. Pass fewer, more specific keywords for complete lexical coverage.'
-          : 'The lexical candidate set was truncated because it hit the candidate cap or the hybrid deadline. Pass fewer, more specific keywords for complete lexical coverage.',
+        'The lexical scan was cancelled before every matching item could be scored, so this ranking is incomplete.',
       );
     }
     if (documentCap.clamped) {
@@ -2219,11 +2172,6 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
         `Ignored ${scope.missing.length} unknown collection key(s): ${scope.missing.join(', ')}. The search used the ${scope.collections.length} collection(s) that do exist; re-check the keys against get_collections if something is missing from the results.`,
       );
     }
-    if (candidateDepth.clamped) {
-      hybridWarnings.push(
-        `Requested candidateK was outside the supported range and was adjusted to ${candidateK}. Depth is bounded so the vector scan stays inside its deadline; past the limit the semantic branch fails outright instead of returning less.`,
-      );
-    }
 
     // degraded means "do not read these results as a clean run": a mechanical
     // or unverified keyword set, a failed/timed-out branch, a truncated
@@ -2240,50 +2188,6 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
     // needs to relax it to fill a page.
     const ranked = searchResult.ranked.map(trimCachedEvidence);
 
-    // totalRelevant counts what cleared the threshold IN THIS CANDIDATE POOL.
-    // When a branch came back exactly full, the pool was cut off by candidateK
-    // rather than by relevance, and documents that would have qualified were
-    // never scored at all — measured on the real library, raising candidateK
-    // from 120 to 480 took totalRelevant from 79 to 116 at the SAME threshold.
-    // That has to be stated, not left for the caller to infer, or a partial
-    // count reads as a complete one.
-    const keywordBranchSaturated =
-      searchResult.keywordResultCount >= options.candidateK;
-    const semanticBranchSaturated =
-      searchResult.semanticResultCount >= options.candidateK;
-    const branchSaturated = keywordBranchSaturated || semanticBranchSaturated;
-
-    // A full pool only hides qualifying documents if the pool's TAIL is still
-    // above the threshold. Branches return their candidates in descending score
-    // order, so a document that was cut off scores at most what the last
-    // included one scored: if even that ceiling falls below the floor, nothing
-    // beyond the pool could have qualified and totalRelevant is exact.
-    // Warning regardless would contradict the response's own "nothing reached
-    // the threshold" message and send the caller off to re-search for
-    // documents that provably do not exist.
-    const beyondPoolCeiling = computeFusedScore({
-      normalizedKeywordScore: keywordBranchSaturated
-        ? searchResult.keywordTailScore
-        : undefined,
-      normalizedSemanticScore: semanticBranchSaturated
-        ? searchResult.semanticTailScore
-        : undefined,
-      keywordWeight: options.keywordWeight,
-      semanticWeight: options.semanticWeight,
-    });
-    const poolSaturated =
-      branchSaturated && beyondPoolCeiling >= searchResult.appliedMinScore;
-    if (poolSaturated) {
-      hybridWarnings.push(
-        `Candidate pool was full: ${[
-          keywordBranchSaturated ? 'keyword' : null,
-          semanticBranchSaturated ? 'semantic' : null,
-        ]
-          .filter(Boolean)
-          .join(' and ')} retrieval returned the maximum ${options.candidateK} candidates, so totalRelevant (${ranked.length}) is a LOWER BOUND on how many documents in the library clear this threshold — more exist beyond the pool. Raise candidateK for a more complete sweep; do NOT lower minScore, which would admit less relevant work rather than find more relevant work.`,
-      );
-    }
-
     const snapshot: HybridSearchSnapshot = {
       query: args.query,
       keywords: lexicalKeywords,
@@ -2294,7 +2198,6 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
       retryBudgetNote,
       appliedMinScore: searchResult.appliedMinScore,
       libraryID,
-      poolSaturated,
       // searchResult.warnings carries branch-level failures ("Semantic search
       // unavailable: ..."). An empty result set means something completely
       // different depending on this flag, so it has to travel with the page.
@@ -2328,7 +2231,6 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
         lexicalCandidateCount: diagnostics?.candidateIDs ?? 0,
         lexicalScannedCount: diagnostics?.scannedItems ?? 0,
         lexicalTruncated: diagnostics?.truncated ?? false,
-        lexicalPrioritized: diagnostics?.prioritized ?? false,
         failedKeywords: diagnostics?.failedKeywords ?? [],
         keywordCoverageBonus: HYBRID_KEYWORD_COVERAGE_BONUS,
         lexicalFieldWeights: LEXICAL_FIELD_WEIGHTS,
@@ -2336,12 +2238,6 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
         rrfK: options.rrfK,
         keywordWeight: options.keywordWeight,
         semanticWeight: options.semanticWeight,
-        candidateK: options.candidateK,
-        candidatePoolSaturated: poolSaturated,
-        keywordBranchSaturated,
-        semanticBranchSaturated,
-        // What the best document beyond the pool could have scored at most.
-        beyondPoolScoreCeiling: roundScore(beyondPoolCeiling),
         appliedMinScore: searchResult.appliedMinScore,
         userMinScore: settings.minScore,
         appliedPageSize: topK,
@@ -2376,7 +2272,6 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
       appliedMinScore: searchResult.appliedMinScore,
       language,
       libraryID,
-      candidateK: options.candidateK,
       rrfK: options.rrfK,
       keywordWeight: options.keywordWeight,
       semanticWeight: options.semanticWeight,
@@ -2389,7 +2284,9 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
         ? this.hybridPages.create(fingerprint, ranked, snapshot)
         : 'single-page';
 
-    const window = windowOf<Record<string, any>>(ranked, 0, topK, searchId);
+    const window = detachPageWindow(
+      windowOf<Record<string, any>>(ranked, 0, topK, searchId),
+    );
     await this.enrichHybridResults(window.rows, libraryID);
 
     return this.buildHybridSearchResponse(snapshot, window, topK, false);
@@ -2505,7 +2402,6 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
     if (args.libraryID !== undefined) claim.libraryID = request.libraryID;
     // Retrieval knobs cannot take effect on a stored ranking, so accepting them
     // silently would be answering a different question than the one asked.
-    if (args.candidateK !== undefined) claim.candidateK = Number(args.candidateK);
     if (args.rrfK !== undefined) claim.rrfK = Number(args.rrfK);
     if (args.keywordWeight !== undefined) {
       claim.keywordWeight = Number(args.keywordWeight);
@@ -2519,11 +2415,12 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
       );
     }
 
-    const { state, window } = this.hybridPages.read(
+    const { state, window: cachedWindow } = this.hybridPages.read(
       cursor,
       claim,
       request.requestedPageSize,
     );
+    const window = detachPageWindow(cachedWindow);
     const pageSize = request.requestedPageSize ?? state.fingerprint.pageSize;
 
     await this.enrichHybridResults(window.rows, state.fingerprint.libraryID);
@@ -2564,9 +2461,9 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
         // Documents that cleared that floor in this search — NOT the raw
         // candidate count, and NOT capped by the page size.
         totalRelevant: window.totalRelevant,
-        // ...but bounded by how deep retrieval went. When the pool came back
-        // full, or a branch failed, this is a floor rather than a count.
-        totalRelevantIsLowerBound: snapshot.poolSaturated || snapshot.branchFailed,
+        // A failed branch makes this a lower bound; clean exhaustive retrieval
+        // makes it exact.
+        totalRelevantIsLowerBound: snapshot.branchFailed,
         /** A branch failed or timed out: the ranking is incomplete. */
         degradedRetrieval: snapshot.branchFailed,
         returned: window.returned,
@@ -2602,7 +2499,7 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
       // telling the user their library has nothing on the topic when in fact a
       // branch timed out is a false negative delivered with full confidence.
       if (snapshot.branchFailed) {
-        return `NO RESULTS, BUT THIS SEARCH WAS DEGRADED: a retrieval branch failed or timed out (see metadata.warnings), so this is NOT evidence that the library lacks relevant work. Do not tell the user there is nothing on this topic. Retry the search — with a smaller candidateK if the warning mentions a timeout — and only report an empty library if a clean, non-degraded search also comes back empty.`;
+        return `NO RESULTS, BUT THIS SEARCH WAS DEGRADED: a retrieval branch failed or was cancelled (see metadata.warnings), so this is NOT evidence that the library lacks relevant work. Retry the search and only report an empty library if a clean, non-degraded search also comes back empty.`;
       }
       return `Nothing in the library reached the relevance threshold of ${snapshot.appliedMinScore}. Say so rather than reporting weak matches; the threshold is the user's setting and is not negotiable from here.`;
     }
@@ -2618,11 +2515,9 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
       ? ` DEGRADED: a retrieval branch failed or timed out during this search (see metadata.warnings), so this ranking is incomplete — treat a thin result list as a retrieval problem, not as a fact about the library.`
       : '';
 
-    const bound = snapshot.poolSaturated
-      ? ` NOTE: retrieval hit its candidate-pool limit, so ${window.totalRelevant} is a LOWER BOUND - more documents in the library clear this threshold but were never scored. If the user needs an exhaustive sweep, run the search again with a larger candidateK. Never lower minScore to compensate: that admits weaker work instead of finding more relevant work.`
-      : window.hasMore
-        ? ''
-        : ' These are all the documents above the threshold. Do not lower minScore to find more; the threshold is the user\'s setting.';
+    const bound = window.hasMore
+      ? ''
+      : ' These are all the documents above the threshold. Do not lower minScore to find more; the threshold is the user\'s setting.';
 
     return funnel + paging + bound + degradedNote;
   }
@@ -2647,6 +2542,7 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
     results: Array<Record<string, any>>,
     defaultLibraryID: number,
   ): Promise<void> {
+    await getSemanticSearchService().hydrateMatchedChunkTexts(results);
     for (const result of results) {
       try {
         const item = await Zotero.Items.getByLibraryAndKeyAsync(
@@ -2704,7 +2600,6 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
   private validateSearchParameters(params: {
     query?: unknown;
     topK: unknown;
-    candidateK?: unknown;
     minScore: unknown;
     language?: unknown;
     libraryID: unknown;
@@ -2719,17 +2614,10 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
     if (
       !Number.isInteger(params.topK) ||
       Number(params.topK) < 1 ||
-      Number(params.topK) > 100
+      Number(params.topK) > 20
     ) {
-      throw new Error('topK must be an integer between 1 and 100');
+      throw new Error('topK must be an integer between 1 and 20');
     }
-    // candidateK is deliberately absent here. resolveCandidateDepth already
-    // validated its type and clamped it to the configured bounds, and a second
-    // rule with its own numbers disagreed with the first: this one capped at
-    // 500 while the settings allow 600, so a request that clamped to 600 was
-    // then rejected outright — clamping above 500 was dead code that failed
-    // instead. It also required candidateK >= topK, which made a small
-    // configured depth plus a large page size throw on every search.
     if (
       typeof params.minScore !== 'number' ||
       !Number.isFinite(params.minScore) ||

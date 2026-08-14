@@ -179,7 +179,7 @@ assert.equal(undeclared.keywordSource, "fallback");
 assert.equal(undeclared.degraded, true);
 assert.match(
   undeclared.warning,
-  /Do not simply reuse the library-level search terms/,
+  /Do not simply reuse the library-level (?:bilingual )?search terms/,
 );
 assert.ok(
   undeclared.chunks.length > 0,

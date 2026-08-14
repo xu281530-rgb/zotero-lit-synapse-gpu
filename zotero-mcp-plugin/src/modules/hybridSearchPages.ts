@@ -44,10 +44,9 @@ export interface SearchFingerprint {
   /**
    * 会改变排名的检索旋钮。
    *
-   * 它们必须在指纹里：带着 cursor 改 candidateK / rrfK / 分支权重，调用方以为
+   * 它们必须在指纹里：带着 cursor 改 rrfK / 分支权重，调用方以为
    * 自己换了一套排序，服务端却照旧回放旧名单——沉默地答非所问，比直接报错糟糕。
    */
-  candidateK: number;
   rrfK: number;
   keywordWeight: number;
   semanticWeight: number;
@@ -165,7 +164,6 @@ export function fingerprintsMatch(
     return { match: false, changed: "collectionKeys" };
   }
   for (const knob of [
-    "candidateK",
     "rrfK",
     "keywordWeight",
     "semanticWeight",
@@ -327,7 +325,7 @@ export function windowOf<TRow>(
   pageSize: number,
   searchId: string,
 ): PageWindow<TRow> {
-  const size = Math.max(1, Math.floor(pageSize));
+  const size = Math.min(20, Math.max(1, Math.floor(pageSize)));
   const start = Math.min(Math.max(0, Math.floor(offset)), ranked.length);
   const rows = ranked.slice(start, start + size);
   const nextOffset = start + rows.length;
@@ -340,5 +338,23 @@ export function windowOf<TRow>(
     totalRelevant: ranked.length,
     hasMore,
     ...(hasMore ? { nextCursor: encodeCursor(searchId, nextOffset) } : {}),
+  };
+}
+
+/**
+ * Clone one page before its chunk text and Zotero metadata are hydrated.
+ * The stored ranking remains a lightweight list of IDs and scores.
+ */
+export function detachPageWindow(
+  window: PageWindow<Record<string, any>>,
+): PageWindow<Record<string, any>> {
+  return {
+    ...window,
+    rows: window.rows.map((row) => ({
+      ...row,
+      matchedChunks: Array.isArray(row.matchedChunks)
+        ? row.matchedChunks.map((chunk: Record<string, any>) => ({ ...chunk }))
+        : row.matchedChunks,
+    })),
   };
 }

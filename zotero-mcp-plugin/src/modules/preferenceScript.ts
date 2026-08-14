@@ -7,6 +7,9 @@ import {
   getChunkingSignature,
   getHybridSearchSettings,
   getStoredChunkingSignature,
+  hasIncompleteFullLibraryRebuild,
+  hasUntrustedLegacyChunkingSignature,
+  setSearchTimeoutMs,
 } from "./hybridSearchSettings";
 
 export async function registerPrefsScripts(_window: Window) {
@@ -401,13 +404,60 @@ function bindHybridSearchSettings(doc: Document) {
     });
   };
 
-  bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-max-documents`, P + "maxDocuments", 1, 100, 20);
-  bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-candidate-k`, P + "candidateK", 20, 600, 240);
+  bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-max-documents`, P + "maxDocuments", 1, 20, 20);
   bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-max-chunks`, P + "maxChunksPerItem", 1, 50, 5);
   bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-min-score`, P + "minScore", 0, 1, 0.6, true);
   bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-neighbor-radius`, P + "neighborRadius", 0, 10, 1);
+  bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-search-timeout`, P + "searchTimeoutMs", 1, 3600000, 8000);
   bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-chunk-target`, P + "chunkTargetChars", 200, 4000, 1000);
   bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-chunk-tolerance`, P + "chunkAppendToleranceChars", 0, 2000, 500);
+
+  const timeoutInput = doc?.querySelector(
+    `#zotero-prefpane-${ref}-hybrid-search-timeout`,
+  ) as HTMLInputElement;
+  const benchmarkButton = doc?.querySelector(
+    "#hybrid-scan-benchmark-button",
+  ) as HTMLButtonElement;
+  const benchmarkResult = doc?.querySelector(
+    "#hybrid-scan-benchmark-result",
+  ) as HTMLElement;
+  benchmarkButton?.addEventListener("click", async () => {
+    benchmarkButton.disabled = true;
+    if (benchmarkResult) {
+      benchmarkResult.textContent =
+        getString("pref-hybrid-scan-benchmark-running" as any) || "Testing...";
+    }
+    try {
+      const { getVectorStore } = require("./semantic/vectorStore");
+      const vectorStore = getVectorStore();
+      const result = await vectorStore.benchmarkLibraryScan(
+        Zotero.Libraries.userLibraryID,
+      );
+      const timeout = setSearchTimeoutMs(result.maxMs);
+      if (timeoutInput) timeoutInput.value = String(timeout);
+      if (benchmarkResult) {
+        benchmarkResult.textContent = getString(
+          "pref-hybrid-scan-benchmark-result" as any,
+          {
+            args: {
+              min: result.minMs.toFixed(1),
+              average: result.averageMs.toFixed(1),
+              max: result.maxMs.toFixed(1),
+            },
+          },
+        );
+      }
+    } catch (error) {
+      if (benchmarkResult) {
+        benchmarkResult.textContent = getString(
+          "pref-hybrid-scan-benchmark-error" as any,
+          { args: { message: String((error as any)?.message || error) } },
+        );
+      }
+    } finally {
+      benchmarkButton.disabled = false;
+    }
+  });
 
   updateChunkStaleWarning(doc);
   updateHybridAdvancedSummary(doc);
@@ -432,10 +482,14 @@ function updateChunkStaleWarning(doc: Document) {
   const warning = doc?.querySelector("#hybrid-chunk-stale-warning") as HTMLElement;
   if (!warning) return;
   try {
-    const stored = getStoredChunkingSignature();
-    // No recorded signature means no index has finished building yet, so there
-    // is nothing to be out of date with.
-    const stale = Boolean(stored) && stored !== getChunkingSignature();
+    const libraryID = Zotero.Libraries.userLibraryID;
+    const stored = getStoredChunkingSignature(libraryID);
+    // A legacy global signature is deliberately untrusted for every Library;
+    // a genuinely fresh profile has neither a signature nor a warning.
+    const stale =
+      hasIncompleteFullLibraryRebuild(libraryID) ||
+      hasUntrustedLegacyChunkingSignature(libraryID) ||
+      (Boolean(stored) && stored !== getChunkingSignature());
     // Explicitly "flex", not "": the banner's class carries display:none, so
     // clearing the inline style would leave it hidden forever.
     warning.style.display = stale ? "flex" : "none";
@@ -1562,8 +1616,8 @@ function bindSemanticStatsSettings(doc: Document) {
         showMessage(getString("pref-semantic-index-no-failed-items" as any) || "No failed items to retry", "info");
       } else if ((result.failedCount || 0) > 0) {
         showMessage(
-          `${getString("pref-semantic-index-completed" as any) || "Indexing completed"} (${result.processed}/${result.total}, ${result.failedCount} ${getString("pref-semantic-index-failed-items" as any) || "items failed"})`,
-          "warning"
+          `${getString("pref-semantic-index-error" as any) || "Indexing failed"} (${result.processed}/${result.total}, ${result.failedCount} ${getString("pref-semantic-index-failed-items" as any) || "items failed"})`,
+          "error"
         );
       } else {
         showMessage(getString("pref-semantic-index-completed" as any) + ` (${result.processed}/${result.total})`, "success");
@@ -1639,8 +1693,6 @@ function bindSemanticStatsSettings(doc: Document) {
         ztoolkit.log(`[PreferenceScript] Resuming index after ${progress.status} - starting new build process`);
         isIndexing = true;
 
-        // Reset the paused/error state
-        semanticService.resumeIndex();
         updateControlButtons('indexing');
         showMessage(getString("pref-semantic-index-started" as any) || "Indexing resumed...", "info");
 
@@ -1650,33 +1702,29 @@ function bindSemanticStatsSettings(doc: Document) {
         // Start progress updates
         startProgressUpdates();
 
-        // Start a new build (not rebuild) to continue from where we left off
-        const resumeResult = await semanticService.buildIndex({
-          rebuild: false,  // Don't rebuild, just continue with unindexed items
-          onProgress: (p: any) => {
+        const resumeResult = await semanticService.resumeInterruptedBuild(
+          (p: any) => {
             updateProgress(p);
-            if (p.status === 'completed' || p.status === 'aborted') {
+            if (p.status === 'completed' || p.status === 'failed' || p.status === 'aborted') {
               stopProgressUpdates();
               updateControlButtons('idle');
               isIndexing = false;
               loadSemanticStats();
 
               if (p.status === 'completed') {
-                // Check if there are any failed items
-                const failedItems = semanticService.getFailedItems();
-                if (failedItems.length > 0) {
-                  showMessage(
-                    `${getString("pref-semantic-index-completed" as any) || "Indexing completed"} (${failedItems.length} ${getString("pref-semantic-index-failed-items" as any) || "items failed"})`,
-                    "warning"
-                  );
-                } else {
-                  showMessage(getString("pref-semantic-index-completed" as any) || "Indexing completed!", "success");
-                }
+                showMessage(getString("pref-semantic-index-completed" as any) || "Indexing completed!", "success");
+              } else if (p.status === 'failed') {
+                showMessage(
+                  `${getString("pref-semantic-index-error" as any) || "Indexing failed"} (${p.processed}/${p.total}, ${p.failedCount || 0} ${getString("pref-semantic-index-failed-items" as any) || "items failed"})`,
+                  "error",
+                );
+              } else if (p.status === 'aborted') {
+                showMessage(getString("pref-semantic-index-aborted" as any) || "Indexing aborted", "warning");
               }
             }
             // Note: error state is handled by the error callback, not here
-          }
-        });
+          },
+        );
         if (resumeResult.status === 'busy') {
           // The original build promise (from before the pane was reopened) is
           // still alive and was unparked by resumeIndex() above; our duplicate
@@ -1778,17 +1826,15 @@ function bindSemanticStatsSettings(doc: Document) {
         if (result.total === 0) {
           showMessage(getString("pref-semantic-index-no-items" as any) || "No items need indexing", "info");
         } else {
-          // Check for failed items
-          const failedItems = semanticService.getFailedItems();
-          if (failedItems.length > 0) {
-            showMessage(
-              `${getString("pref-semantic-index-completed" as any) || "Indexing completed"} (${result.processed}/${result.total}, ${failedItems.length} ${getString("pref-semantic-index-failed-items" as any) || "items failed"})`,
-              "warning"
-            );
-          } else {
-            showMessage(getString("pref-semantic-index-completed" as any) + ` (${result.processed}/${result.total})`, "success");
-          }
+          showMessage(getString("pref-semantic-index-completed" as any) + ` (${result.processed}/${result.total})`, "success");
         }
+        if (rebuild) updateChunkStaleWarning(doc);
+      } else if (result.status === 'failed') {
+        showMessage(
+          `${getString("pref-semantic-index-error" as any) || "Indexing failed"} (${result.processed}/${result.total}, ${result.failedCount || 0} ${getString("pref-semantic-index-failed-items" as any) || "items failed"})`,
+          "error",
+        );
+        if (rebuild) updateChunkStaleWarning(doc);
       } else if (result.status === 'aborted') {
         showMessage(getString("pref-semantic-index-aborted" as any) || "Indexing aborted", "warning");
       } else if (result.status === 'error') {
@@ -2096,6 +2142,7 @@ function bindSemanticStatsSettings(doc: Document) {
       'indexing': getString("pref-semantic-stats-status-indexing" as any) || 'Indexing',
       'paused': getString("pref-semantic-stats-status-paused" as any) || 'Paused',
       'completed': getString("pref-semantic-stats-status-completed" as any) || 'Completed',
+      'failed': getString("pref-semantic-index-error" as any) || 'Failed',
       'error': getString("pref-semantic-stats-status-error" as any) || 'Error',
       'aborted': 'Aborted'
     };

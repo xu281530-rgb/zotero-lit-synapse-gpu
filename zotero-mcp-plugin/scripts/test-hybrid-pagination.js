@@ -21,6 +21,7 @@ register("./ts-ext-hooks.mjs", import.meta.url);
 
 const {
   CursorError,
+  detachPageWindow,
   HybridSearchPageStore,
   decodeCursor,
   encodeCursor,
@@ -40,13 +41,26 @@ const FINGERPRINT = {
   appliedMinScore: 0.7,
   language: "all",
   libraryID: 1,
-  candidateK: 120,
   rrfK: 60,
   keywordWeight: 1,
   semanticWeight: 1,
   pageSize: 20,
   scope: "library",
 };
+
+// Hydrating one returned page must not put text into the cached ranking.
+{
+  const cached = [{
+    itemKey: "LIGHT",
+    matchedChunks: [{ rowId: 1, chunkId: 0, score: 0.9, text: "" }],
+  }];
+  const detached = detachPageWindow(windowOf(cached, 0, 100, "sid"));
+  assert.equal(detached.returned, 1);
+  detached.rows[0].matchedChunks[0].text = "hydrated current page";
+  assert.equal(cached[0].matchedChunks[0].text, "");
+  assert.notEqual(detached.rows[0], cached[0]);
+  assert.notEqual(detached.rows[0].matchedChunks[0], cached[0].matchedChunks[0]);
+}
 
 // ---------------------------------------------------------------------------
 // 1. THE CORE RULE: the threshold decides the population, paging only windows
@@ -143,12 +157,12 @@ const FINGERPRINT = {
   );
   assert.equal(page2Again.offset, page2.offset);
 
-  // A different page size windows the same list rather than re-ranking it.
-  const wide = store.read(page1.nextCursor, {}, 30).window;
-  assert.equal(wide.returned, 27);
+  // A smaller page size windows the same list rather than re-ranking it.
+  const narrow = store.read(page1.nextCursor, {}, 10).window;
+  assert.equal(narrow.returned, 10);
   assert.deepEqual(
-    wide.rows.slice(0, 20).map((r) => r.itemKey),
-    page2.rows.map((r) => r.itemKey),
+    narrow.rows.map((r) => r.itemKey),
+    page2.rows.slice(0, 10).map((r) => r.itemKey),
   );
 }
 
@@ -182,7 +196,6 @@ const FINGERPRINT = {
     ["libraryID", { libraryID: 2 }],
     // Retrieval knobs change the ranking, so they cannot be applied to a
     // stored one. Accepting them silently would answer a different question.
-    ["candidateK", { candidateK: 400 }],
     ["rrfK", { rrfK: 5 }],
     ["keywordWeight", { keywordWeight: 9 }],
     ["semanticWeight", { semanticWeight: 0 }],
@@ -282,7 +295,7 @@ const FINGERPRINT = {
 // ---------------------------------------------------------------------------
 {
   const ranked = Array.from({ length: 47 }, (_, i) => ({ itemKey: `K${i}` }));
-  for (const pageSize of [5, 20, 50]) {
+  for (const pageSize of [5, 20]) {
     const w = windowOf(ranked, 0, pageSize, "sid");
     assert.equal(w.totalRelevant, 47, "totalRelevant never depends on page size");
     assert.equal(w.returned, Math.min(pageSize, 47));
@@ -300,14 +313,11 @@ const FINGERPRINT = {
 }
 
 // ---------------------------------------------------------------------------
-// 8. Ranking itself is untouched: page 1 is what the old topK-only call
-//    returned, and a deeper candidate pool does not move any score.
+// 8. Ranking itself is untouched when more branch results are present.
 // ---------------------------------------------------------------------------
 {
-  // Both branches rank the same documents in the same order, so slicing
-  // deeper only appends documents that were not in the shallow pool at all —
-  // which is what raising candidateK actually does, since each branch scores
-  // and sorts its whole candidate set and merely hands over a longer prefix.
+  // Both branches rank the same documents in the same order, so adding branch
+  // results only appends documents that were not in the shallow fixture.
   const semantic = Array.from({ length: 60 }, (_, i) => ({
     itemKey: `S${i}`,
     libraryID: 1,
@@ -362,6 +372,40 @@ const FINGERPRINT = {
     deep.results.map((r) => r.itemKey),
     shallow.results.map((r) => r.itemKey),
   );
+}
+
+// ---------------------------------------------------------------------------
+// 9. A complete 275-document ranking is 14 stable pages: 13x20 + 15.
+// ---------------------------------------------------------------------------
+{
+  const ranked = Array.from({ length: 275 }, (_, index) => ({
+    itemKey: `DOC${String(index).padStart(3, "0")}`,
+    score: 1 - index / 1000,
+  }));
+  const store = new HybridSearchPageStore();
+  const searchId = store.create(FINGERPRINT, ranked, {});
+  let page = windowOf(ranked, 0, 20, searchId);
+  const seen = [];
+  let pages = 0;
+
+  for (;;) {
+    pages += 1;
+    assert.ok(page.returned <= 20);
+    assert.equal(page.offset, seen.length);
+    seen.push(...page.rows.map((row) => row.itemKey));
+    if (!page.hasMore) {
+      assert.equal(page.nextCursor, undefined);
+      break;
+    }
+    assert.ok(page.nextCursor);
+    page = store.read(page.nextCursor, {}, 20).window;
+  }
+
+  assert.equal(pages, 14);
+  assert.equal(page.returned, 15);
+  assert.equal(page.offset, 260);
+  assert.equal(new Set(seen).size, 275);
+  assert.deepEqual(seen, ranked.map((row) => row.itemKey));
 }
 
 console.log("Hybrid search pagination regression tests passed");

@@ -34,17 +34,24 @@ globalThis.ztoolkit = { log: () => {} };
 const PREFIX = "extensions.zotero.zotero-mcp-plugin.";
 
 const { TextChunker } = await import("../src/modules/semantic/textChunker.ts");
-const { validateHybridSearchOptions, CANDIDATE_K_BOUNDS } = await import(
+const { validateHybridSearchOptions } = await import(
   "../src/modules/hybridSearch.ts"
 );
 const {
   getHybridSearchSettings,
+  setSearchTimeoutMs,
   resolveResultCap,
   resolveScoreFloor,
   resolveNeighborRadius,
-  resolveCandidateDepth,
   getChunkingSignature,
   HYBRID_SETTING_BOUNDS,
+  INDEX_CHUNK_SIGNATURE_PREF,
+  getStoredChunkingSignature,
+  hasIncompleteFullLibraryRebuild,
+  hasUntrustedLegacyChunkingSignature,
+  invalidateStoredChunkingSignature,
+  setStoredChunkingSignature,
+  shouldRecordFullLibraryChunkingSignature,
 } = await import("../src/modules/hybridSearchSettings.ts");
 
 // ---- settings: defaults, clamping, and "the user's value is a ceiling" ----
@@ -52,8 +59,9 @@ const {
 prefs.clear();
 const defaults = getHybridSearchSettings();
 assert.equal(defaults.maxDocuments, 20);
-assert.equal(defaults.candidateK, 240);
+assert.equal("candidateK" in defaults, false);
 assert.equal(defaults.maxChunksPerItem, 5);
+assert.equal(defaults.searchTimeoutMs, 8000);
 assert.equal(defaults.minScore, 0.6);
 assert.equal(defaults.chunkTargetChars, 1000);
 assert.equal(defaults.chunkAppendToleranceChars, 500);
@@ -72,9 +80,18 @@ assert.equal(
 prefs.set(PREFIX + "hybrid.maxDocuments", 100000);
 assert.equal(
   getHybridSearchSettings().maxDocuments,
-  100,
+  20,
   "out-of-range preferences must be clamped on read",
 );
+prefs.clear();
+
+assert.equal(setSearchTimeoutMs(1234.01), 1235);
+assert.equal(
+  getHybridSearchSettings().searchTimeoutMs,
+  1235,
+  "the benchmark recommendation must persist across a fresh settings read",
+);
+assert.equal(setSearchTimeoutMs(9_000_000), 3_600_000);
 prefs.clear();
 
 // A caller may ask for less, never for more.
@@ -91,122 +108,91 @@ assert.equal(resolveNeighborRadius(undefined, 1).value, 1);
 assert.equal(resolveNeighborRadius(0, 1).value, 0);
 assert.deepEqual(resolveNeighborRadius(9, 1), { value: 1, clamped: true });
 
-// RETRIEVAL DEPTH is the one setting that is a default rather than a ceiling.
-//
-// The others exist to stop an AI returning more or filtering less than the user
-// allows. This one only decides how far down the library is examined, and the
-// response explicitly tells the caller to raise it when the candidate pool came
-// back full — an instruction that would be impossible to follow if the caller's
-// value were clamped to the user's.
-prefs.clear();
-prefs.set(PREFIX + "hybrid.candidateK", 200);
-assert.equal(getHybridSearchSettings().candidateK, 200);
-assert.equal(
-  resolveCandidateDepth(undefined, 200).value,
-  200,
-  "no request means the user's configured depth",
+assert.deepEqual(HYBRID_SETTING_BOUNDS.maxDocuments, { min: 1, max: 20 });
+assert.doesNotThrow(() =>
+  validateHybridSearchOptions({
+    query: "a question",
+    topK: 20,
+    candidateK: 999999,
+    rrfK: 60,
+    keywordWeight: 1,
+    semanticWeight: 1,
+    minScore: 0.6,
+  }),
+  "legacy clients may still send candidateK; it is ignored",
 );
-assert.deepEqual(
-  resolveCandidateDepth(480, 200),
-  { value: 480, clamped: false },
-  "a caller may dig DEEPER than the user's default - this one is not a cap",
-);
-assert.deepEqual(
-  resolveCandidateDepth(50, 200),
-  { value: 50, clamped: false },
-  "and may dig shallower for a quick look",
+assert.throws(
+  () => validateHybridSearchOptions({
+    query: "a question",
+    topK: 21,
+    rrfK: 60,
+    keywordWeight: 1,
+    semanticWeight: 1,
+  }),
+  /between 1 and 20/,
 );
 
-// The hard bounds are a latency guard, and they are reported when they bite.
-const depthBounds = HYBRID_SETTING_BOUNDS.candidateK;
-assert.deepEqual(resolveCandidateDepth(99999, 240), {
-  value: depthBounds.max,
-  clamped: true,
-});
-assert.deepEqual(resolveCandidateDepth(1, 240), {
-  value: depthBounds.min,
-  clamped: true,
-});
-assert.throws(() => resolveCandidateDepth(0, 240), /positive integer/);
-assert.throws(() => resolveCandidateDepth(-5, 240), /positive integer/);
-assert.throws(() => resolveCandidateDepth("deep", 240), /positive integer/);
-
-// A corrupt or out-of-range stored preference must not disable retrieval.
-prefs.set(PREFIX + "hybrid.candidateK", 100000);
-assert.equal(getHybridSearchSettings().candidateK, depthBounds.max);
-prefs.set(PREFIX + "hybrid.candidateK", "not a number");
-assert.equal(getHybridSearchSettings().candidateK, 240);
-prefs.clear();
-
-// EVERY value the resolver can produce must be accepted by the SEARCH ENGINE.
-//
-// This is the check that was missing while three places each carried their own
-// copy of these bounds: the settings clamped a large request to 600, one
-// validator rejected anything above 500, and a third required candidateK to be
-// at least topK. Asking for a deeper sweep therefore failed outright instead of
-// being clamped, and a small configured depth with a large page size threw on
-// every search. Testing the resolver on its own could never see any of it —
-// only running its output through the real validator can.
-{
-  const pageSizes = [1, 5, 20, 100];
-  const requests = [
-    undefined,
-    1,
-    20,
-    depthBounds.min,
-    100,
-    240,
-    depthBounds.max,
-    depthBounds.max + 1,
-    99999,
-  ];
-  for (const pageSize of pageSizes) {
-    for (const requested of requests) {
-      const { value } = resolveCandidateDepth(requested, 240);
-      assert.ok(
-        Number.isInteger(value),
-        `depth must be an integer (page ${pageSize}, request ${requested})`,
-      );
-      assert.ok(
-        value >= depthBounds.min && value <= depthBounds.max,
-        `depth ${value} must stay inside the configured bounds`,
-      );
-      // Exactly what callHybridSearch builds: a pool smaller than a page is
-      // raised to the page size rather than rejected.
-      const effective = Math.max(value, pageSize);
-      assert.doesNotThrow(
-        () =>
-          validateHybridSearchOptions({
-            query: "a question",
-            topK: pageSize,
-            candidateK: effective,
-            rrfK: 60,
-            keywordWeight: 1,
-            semanticWeight: 1,
-            minScore: 0.6,
-          }),
-        `the engine must accept depth ${effective} with page size ${pageSize} (requested ${requested})`,
-      );
-    }
-  }
-
-  // And the bounds really are one definition, not two that happen to agree.
-  assert.equal(depthBounds, CANDIDATE_K_BOUNDS);
-}
-
-// The signature only tracks chunk layout: query-time caps — including the new
-// retrieval depth — must not invalidate an index that is otherwise current.
+// The signature only tracks chunk layout, not query-time controls.
 const signature = getChunkingSignature({
   ...defaults,
   maxDocuments: 3,
   minScore: 0.9,
-  candidateK: 600,
 });
 assert.equal(signature, getChunkingSignature(defaults));
 assert.notEqual(
   getChunkingSignature({ ...defaults, chunkTargetChars: 800 }),
   signature,
 );
+
+// Chunk signatures are per Library. A legacy global value proves completion
+// for none of them and remains untrusted until each Library is rebuilt.
+prefs.clear();
+prefs.set(INDEX_CHUNK_SIGNATURE_PREF, "paragraph-v2:1000:500");
+assert.equal(getStoredChunkingSignature(1), null);
+assert.equal(getStoredChunkingSignature(2), null);
+assert.equal(hasUntrustedLegacyChunkingSignature(1), true);
+assert.equal(hasUntrustedLegacyChunkingSignature(2), true);
+setStoredChunkingSignature(1, "sig-library-1");
+assert.equal(getStoredChunkingSignature(1), "sig-library-1");
+assert.equal(getStoredChunkingSignature(2), null);
+assert.equal(hasUntrustedLegacyChunkingSignature(1), false);
+assert.equal(hasUntrustedLegacyChunkingSignature(2), true);
+setStoredChunkingSignature(2, "sig-library-2");
+assert.equal(getStoredChunkingSignature(1), "sig-library-1");
+assert.equal(getStoredChunkingSignature(2), "sig-library-2");
+
+invalidateStoredChunkingSignature(2);
+assert.equal(getStoredChunkingSignature(1), "sig-library-1");
+assert.equal(getStoredChunkingSignature(2), null);
+assert.equal(hasIncompleteFullLibraryRebuild(1), false);
+assert.equal(hasIncompleteFullLibraryRebuild(2), true);
+setStoredChunkingSignature(2, "sig-library-2-new");
+assert.equal(hasIncompleteFullLibraryRebuild(2), false);
+
+const workingSetPreference = Zotero.Prefs.set;
+Zotero.Prefs.set = () => {
+  throw new Error("preference storage unavailable");
+};
+assert.throws(
+  () => invalidateStoredChunkingSignature(2),
+  /preference storage unavailable/,
+  "a rebuild must not proceed to clearing if signature invalidation failed",
+);
+Zotero.Prefs.set = workingSetPreference;
+
+const completeRebuild = {
+  rebuild: true,
+  itemKeysProvided: false,
+  status: "completed",
+  processed: 10,
+  total: 10,
+  failedCount: 0,
+};
+assert.equal(shouldRecordFullLibraryChunkingSignature(completeRebuild), true);
+assert.equal(shouldRecordFullLibraryChunkingSignature({ ...completeRebuild, itemKeysProvided: true }), false);
+assert.equal(shouldRecordFullLibraryChunkingSignature({ ...completeRebuild, processed: 9 }), false);
+assert.equal(shouldRecordFullLibraryChunkingSignature({ ...completeRebuild, failedCount: 1 }), false);
+assert.equal(shouldRecordFullLibraryChunkingSignature({ ...completeRebuild, status: "aborted" }), false);
 
 // ---- chunking ----
 

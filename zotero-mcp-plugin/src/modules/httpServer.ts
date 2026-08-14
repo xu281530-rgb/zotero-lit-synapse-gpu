@@ -766,17 +766,14 @@ private getCapabilities() {
         parameters: {
           query: { type: "string", description: "Complete natural-language sentence describing the information need, embedded as-is for cross-lingual semantic search. Include an English and a Chinese phrasing separated by ' / '.", required: true },
           keywords: { type: "array", items: { type: "string" }, description: "Precise Chinese AND English domain terms, translations, synonyms and abbreviations. For best results, it is recommended to provide 5-12 relevant Chinese and/or English keywords; fewer or more are still allowed, from 1 up to " + MAX_HYBRID_KEYWORDS + " entries. Each is searched separately over title, abstract, creator, publicationTitle and tags, then aggregated, deduplicated and scored with a coverage bonus. Omitting this falls back to splitting the query, which only probes the language the user typed in.", required: false },
-          topK: { type: "number", description: "Page size: how many documents one response carries (capped by the user setting). Anything past it is reachable with cursor, not lost.", required: false },
+          topK: { type: "number", description: "Page size: 1-20 documents per response (also capped by the user setting). Anything past it is reachable with cursor, not lost.", required: false },
           cursor: { type: "string", description: "Continue a previous hybrid_search by passing the nextCursor it returned. Returns the next page of the SAME ranked, threshold-filtered result set without re-running retrieval. Send the other search arguments unchanged or omitted; changing them is a new search.", required: false },
-          candidateK: { type: "number", description: "Candidates per retrieval branch before fusion", required: false },
-          minScore: { type: "number", description: "Minimum semantic similarity score", required: false },
+          minScore: { type: "number", description: "Minimum fused relevance score (0-1)", required: false },
           language: { type: "string", enum: ["zh", "en", "all", "auto"], description: "Semantic branch language filter. Keep the 'all' default for cross-lingual recall; zh/en/auto drop literature written in the other language", required: false },
           rrfK: { type: "number", description: "Rank constant for the Reciprocal Rank Fusion TIE-BREAK (default: 60). Ranking is decided by the fused 0-1 relevance score; RRF only separates candidates whose fused scores are equal.", required: false },
           keywordWeight: { type: "number", description: "Keyword branch weight (default: 1)", required: false },
           semanticWeight: { type: "number", description: "Semantic branch weight (default: 1)", required: false },
           libraryID: { type: "number", description: "Library used by keyword and semantic retrieval", required: false },
-          semanticTimeoutMs: { type: "number", description: "Semantic branch deadline in milliseconds (default: 8000)", required: false },
-          totalTimeoutMs: { type: "number", description: "Overall hybrid deadline in milliseconds (default: 10000)", required: false }
         },
         examples: [
           {

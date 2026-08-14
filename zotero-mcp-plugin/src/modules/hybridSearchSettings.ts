@@ -2,18 +2,9 @@
  * Hybrid search settings — the single source of truth for the retrieval caps
  * the user controls in Preferences → Hybrid Search.
  *
- * 除 candidateK 之外，这些值都是「硬上限」而不是默认值：调用方（AI）可以要得
- * 更少、更严，但不能要得比用户设置的更多、也不能把阈值调得比用户设置的更低。
- *
- * candidateK 是唯一的例外，它是「默认检索深度」：它约束的是服务端往下挖多深，
- * 而不是允许返回多少。候选池被挖满时响应会明确告知调用方「这只是下界，要更
- * 完整就把 candidateK 调大」——如果把它也钳死在用户值上，这条指令就永远无法
- * 执行。真正保护用户的两道闸（返回条数、相关度阈值）仍然施加在结果上。
- *
- * 所有读取都在这里做夹取（clamp），避免各处重复写边界判断。
+ * These values are user-facing caps or thresholds. Candidate enumeration is
+ * exhaustive and is therefore not configurable here.
  */
-
-import { CANDIDATE_K_BOUNDS } from "./hybridSearch";
 
 declare const Zotero: any;
 declare let ztoolkit: ZToolkit;
@@ -23,17 +14,6 @@ const PREF_PREFIX = "extensions.zotero.zotero-mcp-plugin.";
 export interface HybridSearchSettings {
   /** Upper bound on documents returned by library-level hybrid search. */
   maxDocuments: number;
-  /**
-   * How many candidates each retrieval branch contributes before fusion.
-   *
-   * Unlike every other value here this one is a DEFAULT, not a cap. The others
-   * protect the user from an AI that wants more results or a looser threshold;
-   * this one only decides how deep retrieval digs, and the response tells the
-   * caller when the pool filled up and asks it to dig deeper for an exhaustive
-   * sweep. Clamping it to the user's number would make that instruction
-   * impossible to follow.
-   */
-  candidateK: number;
   /** Upper bound on chunks returned per document by search_fulltext. */
   maxChunksPerItem: number;
   /** Fused relevance below this (0..1) is discarded, never padded back in. */
@@ -44,42 +24,38 @@ export interface HybridSearchSettings {
   chunkAppendToleranceChars: number;
   /** How many chunks either side may be pulled in for context. */
   neighborRadius: number;
+  /** Maximum time spent in the full-library vector scan itself. */
+  searchTimeoutMs: number;
 }
 
 export const HYBRID_SETTING_DEFAULTS: HybridSearchSettings = {
   maxDocuments: 20,
-  // 240 rather than a page-sized number: measured on a 900-item library, a
-  // depth of 120 reported 120 qualifying documents for a broad query when 298
-  // actually qualified, while 240 costs the same ~3.7s as 120 because the
-  // vector scan visits every stored vector either way.
-  candidateK: 240,
   maxChunksPerItem: 5,
   minScore: 0.6,
   chunkTargetChars: 1000,
   chunkAppendToleranceChars: 500,
   neighborRadius: 1,
+  searchTimeoutMs: 8000,
 };
 
 export const HYBRID_SETTING_BOUNDS = {
-  maxDocuments: { min: 1, max: 100 },
-  // Imported, never restated: the engine that runs the scan owns this limit,
-  // and a second copy here would be free to drift out of agreement with it.
-  candidateK: CANDIDATE_K_BOUNDS,
+  maxDocuments: { min: 1, max: 20 },
   maxChunksPerItem: { min: 1, max: 50 },
   minScore: { min: 0, max: 1 },
   chunkTargetChars: { min: 200, max: 4000 },
   chunkAppendToleranceChars: { min: 0, max: 2000 },
   neighborRadius: { min: 0, max: 10 },
+  searchTimeoutMs: { min: 1, max: 3600000 },
 } as const;
 
 export const HYBRID_SETTING_PREF_KEYS = {
   maxDocuments: "hybrid.maxDocuments",
-  candidateK: "hybrid.candidateK",
   maxChunksPerItem: "hybrid.maxChunksPerItem",
   minScore: "hybrid.minScore",
   chunkTargetChars: "hybrid.chunkTargetChars",
   chunkAppendToleranceChars: "hybrid.chunkAppendToleranceChars",
   neighborRadius: "hybrid.neighborRadius",
+  searchTimeoutMs: "hybrid.searchTimeoutMs",
 } as const;
 
 function clamp(value: number, min: number, max: number): number {
@@ -111,7 +87,6 @@ function readNumberPref(
 export function getHybridSearchSettings(): HybridSearchSettings {
   return {
     maxDocuments: readNumberPref("maxDocuments", true),
-    candidateK: readNumberPref("candidateK", true),
     maxChunksPerItem: readNumberPref("maxChunksPerItem", true),
     minScore: readNumberPref("minScore", false),
     chunkTargetChars: readNumberPref("chunkTargetChars", true),
@@ -120,7 +95,23 @@ export function getHybridSearchSettings(): HybridSearchSettings {
       true,
     ),
     neighborRadius: readNumberPref("neighborRadius", true),
+    searchTimeoutMs: readNumberPref("searchTimeoutMs", true),
   };
+}
+
+/** Persist an integer vector-scan timeout, rounding benchmark maxima upward. */
+export function setSearchTimeoutMs(value: number): number {
+  const bounds = HYBRID_SETTING_BOUNDS.searchTimeoutMs;
+  const finite = Number.isFinite(value)
+    ? value
+    : HYBRID_SETTING_DEFAULTS.searchTimeoutMs;
+  const stored = Math.ceil(clamp(finite, bounds.min, bounds.max));
+  Zotero.Prefs.set(
+    PREF_PREFIX + HYBRID_SETTING_PREF_KEYS.searchTimeoutMs,
+    stored,
+    true,
+  );
+  return stored;
 }
 
 /**
@@ -143,34 +134,6 @@ export function resolveResultCap(
   const rounded = Math.floor(parsed);
   if (rounded > userCap) return { value: userCap, clamped: true };
   return { value: rounded, clamped: false };
-}
-
-/**
- * Resolve the retrieval depth for one search.
- *
- * The user's setting is the default depth, and a caller that explicitly asks
- * for a different one gets it — deeper for an exhaustive sweep, shallower for a
- * quick look — bounded only by the hard limits that keep the scan inside its
- * deadline. This is the one hybrid setting the caller may exceed, because it
- * governs how hard the server looks rather than how much it is allowed to
- * return; the caps that protect the user (result count, relevance floor) still
- * apply on top of whatever this finds.
- */
-export function resolveCandidateDepth(
-  requested: unknown,
-  userDefault: number,
-): { value: number; clamped: boolean } {
-  const bounds = HYBRID_SETTING_BOUNDS.candidateK;
-  if (requested === undefined || requested === null) {
-    return { value: clamp(userDefault, bounds.min, bounds.max), clamped: false };
-  }
-  const parsed = typeof requested === "string" ? Number(requested) : requested;
-  if (typeof parsed !== "number" || !Number.isFinite(parsed) || parsed < 1) {
-    throw new Error("candidateK must be a positive integer");
-  }
-  const rounded = Math.floor(parsed);
-  const bounded = clamp(rounded, bounds.min, bounds.max);
-  return { value: bounded, clamped: bounded !== rounded };
 }
 
 /**
@@ -233,22 +196,126 @@ export function getChunkingSignature(
 
 export const INDEX_CHUNK_SIGNATURE_PREF = `${PREF_PREFIX}semantic.indexChunkSignature`;
 
-export function getStoredChunkingSignature(): string | null {
+interface StoredChunkingSignatures {
+  version: 1;
+  /** A legacy global string cannot prove completion for any one library. */
+  legacyUntrusted: boolean;
+  libraries: Record<string, string>;
+  incompleteLibraries?: Record<string, true>;
+}
+
+function readStoredChunkingSignatures(): StoredChunkingSignatures {
   try {
     const value = Zotero.Prefs.get(INDEX_CHUNK_SIGNATURE_PREF, true);
-    return typeof value === "string" && value ? value : null;
+    if (typeof value !== "string" || !value.trim()) {
+      return { version: 1, legacyUntrusted: false, libraries: {}, incompleteLibraries: {} };
+    }
+    try {
+      const parsed = JSON.parse(value) as Partial<StoredChunkingSignatures>;
+      if (
+        parsed.version === 1 &&
+        parsed.libraries &&
+        typeof parsed.libraries === "object"
+      ) {
+        return {
+          version: 1,
+          legacyUntrusted: parsed.legacyUntrusted === true,
+          libraries: Object.fromEntries(
+            Object.entries(parsed.libraries).filter(
+              ([, signature]) =>
+                typeof signature === "string" && signature.length > 0,
+            ),
+          ),
+          incompleteLibraries:
+            parsed.incompleteLibraries &&
+            typeof parsed.incompleteLibraries === "object"
+              ? Object.fromEntries(
+                  Object.keys(parsed.incompleteLibraries).map((key) => [key, true]),
+                )
+              : {},
+        };
+      }
+    } catch {
+      // The old format stored the signature itself instead of JSON.
+    }
+    return { version: 1, legacyUntrusted: true, libraries: {}, incompleteLibraries: {} };
   } catch {
-    return null;
+    return { version: 1, legacyUntrusted: false, libraries: {}, incompleteLibraries: {} };
   }
 }
 
-export function setStoredChunkingSignature(signature: string): void {
+export function getStoredChunkingSignature(libraryID: number): string | null {
+  return readStoredChunkingSignatures().libraries[String(libraryID)] ?? null;
+}
+
+export function hasUntrustedLegacyChunkingSignature(
+  libraryID: number,
+): boolean {
+  const state = readStoredChunkingSignatures();
+  return state.legacyUntrusted && !state.libraries[String(libraryID)];
+}
+
+export function setStoredChunkingSignature(
+  libraryID: number,
+  signature: string,
+): void {
   try {
-    Zotero.Prefs.set(INDEX_CHUNK_SIGNATURE_PREF, signature, true);
+    const state = readStoredChunkingSignatures();
+    state.libraries[String(libraryID)] = signature;
+    delete state.incompleteLibraries?.[String(libraryID)];
+    Zotero.Prefs.set(
+      INDEX_CHUNK_SIGNATURE_PREF,
+      JSON.stringify(state),
+      true,
+    );
   } catch (error) {
     ztoolkit.log(
       `[HybridSettings] Failed to store chunking signature: ${error}`,
       "warn",
     );
+    throw error;
   }
+}
+
+export function invalidateStoredChunkingSignature(libraryID: number): void {
+  try {
+    const state = readStoredChunkingSignatures();
+    delete state.libraries[String(libraryID)];
+    state.incompleteLibraries ??= {};
+    state.incompleteLibraries[String(libraryID)] = true;
+    Zotero.Prefs.set(
+      INDEX_CHUNK_SIGNATURE_PREF,
+      JSON.stringify(state),
+      true,
+    );
+  } catch (error) {
+    ztoolkit.log(
+      `[HybridSettings] Failed to invalidate chunking signature: ${error}`,
+      "warn",
+    );
+    throw error;
+  }
+}
+
+export function hasIncompleteFullLibraryRebuild(libraryID: number): boolean {
+  return readStoredChunkingSignatures().incompleteLibraries?.[
+    String(libraryID)
+  ] === true;
+}
+
+export function shouldRecordFullLibraryChunkingSignature(params: {
+  rebuild: boolean;
+  itemKeysProvided: boolean;
+  status: string;
+  processed: number;
+  total: number;
+  failedCount: number;
+}): boolean {
+  return (
+    params.rebuild &&
+    !params.itemKeysProvided &&
+    params.status === "completed" &&
+    params.processed === params.total &&
+    params.failedCount === 0
+  );
 }

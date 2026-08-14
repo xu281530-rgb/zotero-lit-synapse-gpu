@@ -209,60 +209,6 @@ for (const weak of [0, 0.05, 0.2, 0.5]) {
   );
 }
 
-// BRANCH TAILS: the basis for deciding whether a full candidate pool could
-// still be hiding qualifying documents.
-//
-// Branches hand over their candidates in descending score order, so whatever a
-// branch did NOT return scores at most what its last returned item scored. That
-// tail is what lets a saturated pool be reported as exact instead of as a lower
-// bound — without it, a pool full of sub-threshold candidates gets announced as
-// "more relevant work exists beyond the pool", contradicting the same
-// response's "nothing reached the threshold" and sending the caller off to
-// re-search for documents that provably do not exist.
-{
-  const tails = fuseHybridSearchResultsDetailed(
-    [keywordItem("A", 12), keywordItem("B", 6), keywordItem("C", 0.5)],
-    [semanticItem("A", 0.9), semanticItem("D", 0.42)],
-    { topK: 10, rrfK: 60, keywordWeight: 1, semanticWeight: 1, minScore: 0 },
-  );
-  assert.equal(
-    tails.keywordTailScore,
-    normalizeLexicalScore(0.5),
-    "the keyword tail must be the weakest keyword score still returned",
-  );
-  assert.equal(
-    tails.semanticTailScore,
-    0.42,
-    "the semantic tail must be the weakest semantic score still returned",
-  );
-
-  // Nothing beyond a pool with these tails could beat the tails themselves.
-  const ceiling = computeFusedScore({
-    normalizedKeywordScore: tails.keywordTailScore,
-    normalizedSemanticScore: tails.semanticTailScore,
-    keywordWeight: 1,
-    semanticWeight: 1,
-  });
-  for (const row of tails.ranked) {
-    if (row.itemKey === "C" || row.itemKey === "D") continue;
-    assert.ok(
-      row.score >= ceiling,
-      "every document better than the tails must outscore the beyond-pool ceiling",
-    );
-  }
-  // A 0.60 floor sits above that ceiling, so a full pool would be EXACT here.
-  assert.ok(ceiling < 0.6, `beyond-pool ceiling ${ceiling} must be below 0.60`);
-
-  // An empty branch has no tail to reason from.
-  const noKeyword = fuseHybridSearchResultsDetailed(
-    [],
-    [semanticItem("A", 0.8)],
-    { topK: 10, rrfK: 60, keywordWeight: 1, semanticWeight: 1, minScore: 0 },
-  );
-  assert.equal(noKeyword.keywordTailScore, undefined);
-  assert.equal(noKeyword.semanticTailScore, 0.8);
-}
-
 const thresholded = fuseHybridSearchResultsDetailed(
   [keywordItem("A", 9), keywordItem("B", 7), keywordItem("C", 1)],
   [semanticItem("B", 0.9), semanticItem("D", 0.3)],
@@ -376,7 +322,7 @@ const chunkRanking = rankLexicalCandidates(
     { text: "columnar-to-equiaxed transition", weight: 1, origin: "provided" },
     { text: "temperature gradient", weight: 1, origin: "provided" },
   ],
-  { candidateK: 3, fieldWeights: CHUNK_FIELD_WEIGHTS },
+  { limit: 3, fieldWeights: CHUNK_FIELD_WEIGHTS },
 );
 assert.equal(
   chunkRanking[0].key,
@@ -419,7 +365,6 @@ const semanticOnlyRun = await runHybridSearch(
   {
     query: "semantic only",
     topK: 2,
-    candidateK: 4,
     rrfK: 60,
     keywordWeight: 0,
     semanticWeight: 1,
@@ -442,7 +387,6 @@ const degraded = await runHybridSearch(
   {
     query: "columnar grains",
     topK: 2,
-    candidateK: 4,
     rrfK: 60,
     keywordWeight: 1,
     semanticWeight: 1,
@@ -469,7 +413,6 @@ const timedOutSemantic = await runHybridSearch(
   {
     query: "bounded semantic search",
     topK: 2,
-    candidateK: 4,
     rrfK: 60,
     keywordWeight: 1,
     semanticWeight: 1,
@@ -496,7 +439,6 @@ await assert.rejects(
     {
       query: "   ",
       topK: 2,
-      candidateK: 4,
       rrfK: 60,
       keywordWeight: 1,
       semanticWeight: 1,
@@ -626,7 +568,6 @@ await assert.rejects(
       query: "keyword validation",
       keywords: ["ok", 5],
       topK: 2,
-      candidateK: 4,
       rrfK: 60,
       keywordWeight: 1,
       semanticWeight: 1,
@@ -646,7 +587,6 @@ const keywordRun = await runHybridSearch(
       "Effects of temperature gradient on columnar-to-equiaxed transition / 温度梯度的影响",
     keywords: ["温度梯度", "temperature gradient", "CET"],
     topK: 2,
-    candidateK: 4,
     rrfK: 60,
     keywordWeight: 1,
     semanticWeight: 1,
@@ -815,7 +755,6 @@ await assert.rejects(
     {
       query: "unavailable",
       topK: 2,
-      candidateK: 4,
       rrfK: 60,
       keywordWeight: 1,
       semanticWeight: 1,
@@ -859,12 +798,21 @@ const specificDoc = lexicalDoc("RARE", {
 const specificityRanking = rankLexicalCandidates(
   [...broadPool, specificDoc],
   [providedKeyword("growth"), providedKeyword("columnar-to-equiaxed transition")],
-  { candidateK: 10 },
+  {},
 );
 assert.equal(
   specificityRanking[0].key,
   "RARE",
   "a discriminative phrase must outrank a term matching most of the pool",
+);
+
+const overFourThousand = Array.from({ length: 4105 }, (_, index) =>
+  lexicalDoc(`LARGE${index}`, { title: `Grain growth study ${index}` }),
+);
+assert.equal(
+  rankLexicalCandidates(overFourThousand, [providedKeyword("growth")], {}).length,
+  4105,
+  "library lexical ranking must not stop at the former 4000-document cap",
 );
 
 // Coverage: matching several distinct keywords beats one strong single hit.
@@ -885,7 +833,7 @@ const coverageRanking = rankLexicalCandidates(
     providedKeyword("directional solidification"),
     providedKeyword("columnar-to-equiaxed transition"),
   ],
-  { candidateK: 5 },
+  {},
 );
 assert.equal(coverageRanking[0].key, "MANY");
 assert.deepEqual(coverageRanking[0].matchedKeywords, [
@@ -906,7 +854,7 @@ const fieldRanking = rankLexicalCandidates(
     lexicalDoc("TITLE", { title: "Cellular automaton model of solidification" }),
   ],
   [providedKeyword("cellular automaton")],
-  { candidateK: 5 },
+  {},
 );
 assert.equal(fieldRanking[0].key, "TITLE");
 
@@ -917,7 +865,7 @@ const boundaryRanking = rankLexicalCandidates(
     lexicalDoc("INSIDE", { title: "Faucet corrosion in cast alloys" }),
   ],
   [providedKeyword("cet")],
-  { candidateK: 5 },
+  {},
 );
 assert.equal(boundaryRanking[0].key, "WORD");
 assert.ok(
@@ -935,7 +883,7 @@ const weightRanking = rankLexicalCandidates(
     { text: "凝固", weight: FALLBACK_NGRAM_WEIGHT, origin: "ngram" },
     { text: "温度梯度", weight: FALLBACK_TOKEN_WEIGHT, origin: "token" },
   ],
-  { candidateK: 5 },
+  {},
 );
 assert.equal(
   weightRanking[0].key,
@@ -943,23 +891,21 @@ assert.equal(
   "a low-weight fallback n-gram must not outrank a full-weight probe",
 );
 
-// Non-matching candidates are dropped and candidateK is honoured.
+// Non-matching candidates are dropped, while every matching candidate is kept.
 assert.equal(
   rankLexicalCandidates(
     [lexicalDoc("A", { title: "irrelevant" })],
     [providedKeyword("solidification")],
-    { candidateK: 5 },
+    {},
   ).length,
   0,
 );
 assert.equal(
   rankLexicalCandidates(broadPool, [providedKeyword("growth")], {
-    candidateK: 3,
   }).length,
-  3,
+  broadPool.length,
 );
 assert.deepEqual(rankLexicalCandidates([], [providedKeyword("x")], {
-  candidateK: 3,
 }), []);
 
 // Ranking must be deterministic for identical candidates.
@@ -969,7 +915,7 @@ const tied = rankLexicalCandidates(
     lexicalDoc("AAA", { title: "growth" }),
   ],
   [providedKeyword("growth")],
-  { candidateK: 5 },
+  {},
 );
 assert.deepEqual(
   tied.map((entry) => entry.key),
@@ -1030,7 +976,6 @@ const cancelledRun = await runHybridSearch(
   {
     query: "cancellation",
     topK: 2,
-    candidateK: 4,
     rrfK: 60,
     keywordWeight: 1,
     semanticWeight: 1,
@@ -1061,7 +1006,6 @@ const throwingCancel = await runHybridSearch(
   {
     query: "canceller failure",
     topK: 1,
-    candidateK: 2,
     rrfK: 60,
     keywordWeight: 1,
     semanticWeight: 1,
@@ -1089,6 +1033,7 @@ assert.match(lexicalSource, /addCondition\("joinMode", "any"\)/);
 assert.match(lexicalSource, /rankLexicalCandidates\(/);
 assert.match(lexicalSource, /deadlineAt/);
 assert.match(lexicalSource, /isCancelled\?\.\(\)/);
+assert.doesNotMatch(lexicalSource, /slice\(0,\s*4000\)/);
 
 const hybridBranch = serverSource.slice(
   serverSource.indexOf("private async callHybridSearch"),
@@ -1108,6 +1053,16 @@ assert.doesNotMatch(
 assert.match(hybridBranch, /cancelKeywordSearch:/);
 assert.match(hybridBranch, /cancelSemanticSearch:/);
 assert.match(hybridBranch, /signal: semanticAbort\?\.signal/);
+assert.match(
+  hybridBranch,
+  /vectorScanTimeoutMs: settings\.searchTimeoutMs/,
+  "hybrid search must apply the persisted timeout only to its vector scan",
+);
+assert.match(hybridBranch, /exhaustive: true/);
+assert.match(hybridBranch, /includeChunkText: false/);
+assert.match(hybridBranch, /minScore: -1/);
+assert.doesNotMatch(hybridBranch, /semanticTimeoutMs|totalTimeoutMs/);
+assert.match(hybridBranch, /detachPageWindow/);
 // Timing log must report every stage of the fusion.
 assert.match(
   hybridBranch,
@@ -1133,6 +1088,12 @@ const semanticServiceSource = fs.readFileSync(
 assert.match(semanticServiceSource, /signal\?: AbortSignal/);
 assert.match(semanticServiceSource, /signal: abortController\?\.signal/);
 assert.match(semanticServiceSource, /deadlineTimer = setTimeout\(abortSearch/);
+assert.match(semanticServiceSource, /vectorScanTimeoutMs\?: number/);
+assert.match(
+  semanticServiceSource,
+  /const vectorDeadlineAt[\s\S]*?Date\.now\(\) \+ vectorScanTimeoutMs/,
+  "the scan deadline must start after query embedding, immediately before scanning",
+);
 
 // ---- group library index lifecycle ----
 
