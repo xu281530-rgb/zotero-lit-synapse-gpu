@@ -39,6 +39,11 @@ pref("embedding.apiBase", "");
 pref("embedding.apiKey", "");
 pref("embedding.allowInsecureHTTP", false);
 pref("embedding.timeoutSeconds", 30);
+// Inputs per embedding request. Deployment-specific and not derivable from
+// the URL, so it is asked for rather than guessed: an Alibaba Cloud MaaS
+// endpoint speaking the OpenAI protocol caps this at 20 while OpenAI allows
+// 2048. Conservative by default; raise it if your endpoint accepts more.
+pref("embedding.maxBatchItems", 20);
 pref("mineru.enabled", true);
 pref("mineru.mode", "cloud");
 pref("mineru.baseURL", "");

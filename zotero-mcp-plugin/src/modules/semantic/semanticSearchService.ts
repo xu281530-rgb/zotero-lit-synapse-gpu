@@ -1305,12 +1305,20 @@ export class SemanticSearchService {
                 }
 
                 // Errors that describe the run rather than this one item.
+                // batch_too_many_inputs belongs here for the same reason as
+                // auth or config: the request shape is wrong for this endpoint
+                // and will be wrong for every remaining document. Pausing puts
+                // the number the server named in front of the user now, and a
+                // resume picks the new setting up on the next request — where
+                // failing per-item meant the whole library failed with an
+                // error that had stated its own fix hundreds of times.
                 const isGlobalError =
                   error.type === 'auth' ||
                   error.type === 'config' ||
                   error.type === 'network' ||
                   error.type === 'rate_limit' ||
-                  error.type === 'server';
+                  error.type === 'server' ||
+                  error.type === 'batch_too_many_inputs';
                 if (isGlobalError) {
                   this.indexProgress.error = error.getUserMessage();
                   this.indexProgress.errorType = error.type;

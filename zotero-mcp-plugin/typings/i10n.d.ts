@@ -124,6 +124,8 @@ export type FluentMessageId =
   | 'pref-embedding-dimensions-auto'
   | 'pref-embedding-dimensions-label'
   | 'pref-embedding-hint'
+  | 'pref-embedding-max-batch-items-hint'
+  | 'pref-embedding-max-batch-items-label'
   | 'pref-embedding-model-change-warning'
   | 'pref-embedding-model-label'
   | 'pref-embedding-provider-custom'

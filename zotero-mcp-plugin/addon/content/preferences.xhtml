@@ -30,6 +30,7 @@
     <preference id="extensions.zotero.__addonRef__.embedding.model" name="extensions.zotero.__addonRef__.embedding.model" type="string" />
     <preference id="extensions.zotero.__addonRef__.embedding.dimensions" name="extensions.zotero.__addonRef__.embedding.dimensions" type="int" />
     <preference id="extensions.zotero.__addonRef__.embedding.timeoutSeconds" name="extensions.zotero.__addonRef__.embedding.timeoutSeconds" type="int" />
+    <preference id="extensions.zotero.__addonRef__.embedding.maxBatchItems" name="extensions.zotero.__addonRef__.embedding.maxBatchItems" type="int" />
     <!-- Rate limit settings -->
     <preference id="extensions.zotero.__addonRef__.embedding.rpm" name="extensions.zotero.__addonRef__.embedding.rpm" type="int" />
     <preference id="extensions.zotero.__addonRef__.embedding.tpm" name="extensions.zotero.__addonRef__.embedding.tpm" type="int" />
@@ -1243,6 +1244,15 @@
               min="5" max="600" placeholder="30"
             />
             <html:div class="zmp-fh" data-l10n-id="pref-embedding-timeout-hint"></html:div>
+          </html:div>
+          <html:div class="zmp-fg">
+            <html:label class="zmp-fl" data-l10n-id="pref-embedding-max-batch-items-label"></html:label>
+            <html:input type="number" class="zmp-fi zmp-fi-s"
+              id="zotero-prefpane-__addonRef__-embedding-max-batch-items"
+              preference="extensions.zotero.__addonRef__.embedding.maxBatchItems"
+              min="1" max="2048" placeholder="20"
+            />
+            <html:div class="zmp-fh" data-l10n-id="pref-embedding-max-batch-items-hint"></html:div>
           </html:div>
           <html:div class="zmp-bg" style="margin-top:6px">
             <html:button class="zmp-b" id="test-embedding-button" data-l10n-id="pref-embedding-test-button-text"></html:button>

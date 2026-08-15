@@ -1,7 +1,7 @@
 {
   "name": "zotero-mcp-plugin",
   "type": "module",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "description": "Zotero MCP Plugin for Zotero 9.0.x: collection-scoped hybrid retrieval (keyword + semantic fused into one 0-1 relevance score), cursor pagination above a user threshold, on-demand abstracts, single-document full-text search, and MCP 2025-06-18 Streamable HTTP",
   "config": {
     "addonName": "Zotero MCP Plugin",
@@ -9,7 +9,7 @@
     "addonRef": "zotero-mcp-plugin",
     "addonInstance": "ZoteroMCP",
     "prefsPrefix": "extensions.zotero.zotero-mcp-plugin",
-    "addonVersion": "1.8.0"
+    "addonVersion": "1.8.1"
   },
   "repository": {
     "type": "git",

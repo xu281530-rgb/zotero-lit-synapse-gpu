@@ -44,6 +44,7 @@ declare namespace _ZoteroTypes {
       "embedding.apiKey": string;
       "embedding.allowInsecureHTTP": boolean;
       "embedding.timeoutSeconds": number;
+      "embedding.maxBatchItems": number;
       "mineru.enabled": boolean;
       "mineru.mode": string;
       "mineru.baseURL": string;

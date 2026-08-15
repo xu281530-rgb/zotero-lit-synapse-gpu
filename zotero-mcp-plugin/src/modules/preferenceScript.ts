@@ -555,6 +555,16 @@ function bindHybridSearchSettings(doc: Document) {
   bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-keyword-search-timeout`, P + "keywordSearchTimeoutMs", 1000, 3600000, 30000);
   bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-chunk-target`, P + "chunkTargetChars", 200, 4000, 1000);
   bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-chunk-tolerance`, P + "chunkAppendToleranceChars", 0, 2000, 500);
+  // Inputs per embedding request. Takes effect on the next request, so
+  // changing it never invalidates vectors that were already written — unlike
+  // the chunk parameters above, which is why there is no stale-index warning.
+  bindBoundedNumber(
+    `#zotero-prefpane-${ref}-embedding-max-batch-items`,
+    "extensions.zotero.zotero-mcp-plugin.embedding.maxBatchItems",
+    1,
+    2048,
+    20,
+  );
 
   const vectorTimeoutInput = doc?.querySelector(
     `#zotero-prefpane-${ref}-hybrid-search-timeout`,
@@ -2461,6 +2471,12 @@ function bindSemanticStatsSettings(doc: Document) {
           // the raw message would print the same sentence twice.
           if (errorType === 'chunk_too_large') {
             return localizedMsg;
+          }
+          // The batch-size error is built from the SERVER's own sentence and
+          // the limit it named. That is the whole value of it, so it is shown
+          // verbatim rather than replaced by a generic translation.
+          if (errorType === 'batch_too_many_inputs') {
+            return originalMessage;
           }
           // For known error types, append original message if it provides additional details
           // For unknown errors or when type is not found, always include original message

@@ -56,9 +56,26 @@ globalThis.Zotero = {
 };
 globalThis.ztoolkit = { log: () => {} };
 
-const { EmbeddingService, SINGLE_CHUNK_TOO_LARGE_MESSAGE } = await import(
-  "../src/modules/semantic/embeddingService.ts"
-);
+const {
+  EmbeddingService,
+  SINGLE_CHUNK_TOO_LARGE_MESSAGE,
+  resolveMaxBatchItems,
+  extractBatchLimit,
+  DEFAULT_MAX_BATCH_ITEMS,
+  MAX_MAX_BATCH_ITEMS,
+} = await import("../src/modules/semantic/embeddingService.ts");
+
+const MAX_ITEMS_PREF =
+  "extensions.zotero.zotero-mcp-plugin.embedding.maxBatchItems";
+
+/**
+ * Raise or lower the inputs-per-request limit for one scenario.
+ *
+ * Tests about CHARACTER capacity set this out of the way, because the two
+ * limits are independent and a test that lets the count limit bind is no
+ * longer testing the thing it claims to.
+ */
+const setMaxBatchItems = (n) => activePrefs.set(MAX_ITEMS_PREF, n);
 const capacity = await import("../src/modules/semantic/batchCapacity.ts");
 
 /** An HTTP error shaped the way Zotero.HTTP surfaces one. */
@@ -288,6 +305,7 @@ await run("persisted records are per endpoint and survive a round trip", () => {
 
 await run("batch shrinks on a length refusal, then climbs back up", async () => {
   // 8000-char server limit; 60 chunks of 500 chars = 30000 chars in total.
+  setMaxBatchItems(2048);
   activeServer = makeServer({ limitChars: 8000 });
   const service = newService();
   const items = chunks(60, 500, "doc");
@@ -327,6 +345,7 @@ await run("batch shrinks on a length refusal, then climbs back up", async () => 
 });
 
 await run("a converged budget is reused instead of re-probing", async () => {
+  setMaxBatchItems(2048);
   activeServer = makeServer({ limitChars: 8000 });
   const first = newService();
   await first.embedBatch(chunks(60, 500, "warm"));
@@ -491,6 +510,7 @@ for (const scenario of NON_LENGTH_FAILURES) {
 
 await run("a non-length error after learning does not narrow the bounds", async () => {
   // Learn a real capacity first...
+  setMaxBatchItems(2048);
   activeServer = makeServer({ limitChars: 8000 });
   const service = newService();
   await service.embedBatch(chunks(60, 500, "pre"));
@@ -518,6 +538,7 @@ await run("a non-length error after learning does not narrow the bounds", async 
 
 await run("capacity learned for one model is not applied to another", async () => {
   // A tight endpoint teaches a small budget.
+  setMaxBatchItems(2048);
   activeServer = makeServer({ limitChars: 3000 });
   const tight = newService({ model: "tiny-context", apiBase: "https://tiny.example.com/v1" });
   await tight.embedBatch(chunks(40, 500, "tiny"));
@@ -541,6 +562,7 @@ await run("capacity learned for one model is not applied to another", async () =
 });
 
 await run("changing the model on one service re-keys its capacity", async () => {
+  setMaxBatchItems(2048);
   activeServer = makeServer({ limitChars: 3000 });
   const service = newService({ model: "model-a" });
   await service.embedBatch(chunks(40, 500, "a"));
@@ -554,22 +576,351 @@ await run("changing the model on one service re-keys its capacity", async () => 
   assert.equal(stateB.failureChars, null);
 });
 
-await run("provider item limits still cap the number of chunks", async () => {
-  // DashScope accepts at most 10 inputs per request regardless of length.
-  activeServer = makeServer({ limitChars: Infinity });
-  const service = newService({
-    apiBase: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    model: "text-embedding-v3",
-  });
-  await service.embedBatch(chunks(35, 100, "ds"));
-  for (const call of activeServer.calls) {
-    assert.ok(call.count <= 10, `dashscope batch of ${call.count} exceeds its 10-input limit`);
+
+
+// ===========================================================================
+// 3. The inputs-per-request limit
+// ===========================================================================
+
+await run("the setting is clamped, and junk falls back to the default", () => {
+  assert.equal(DEFAULT_MAX_BATCH_ITEMS, 20);
+  assert.equal(resolveMaxBatchItems(20), 20);
+  assert.equal(resolveMaxBatchItems("20"), 20);
+  assert.equal(resolveMaxBatchItems(1), 1);
+  assert.equal(resolveMaxBatchItems(2048), MAX_MAX_BATCH_ITEMS);
+  // Above the ceiling is clamped, not honoured.
+  assert.equal(resolveMaxBatchItems(999999), MAX_MAX_BATCH_ITEMS);
+  // Anything that would mean "no limit" must NOT mean "send everything".
+  for (const junk of [0, -1, "", "abc", null, undefined, NaN]) {
+    assert.equal(
+      resolveMaxBatchItems(junk),
+      DEFAULT_MAX_BATCH_ITEMS,
+      `${String(junk)} must fall back to the default, never to unbounded`,
+    );
   }
-  assert.equal(service.getBatchCapacity().maxItems, 10);
+  assert.equal(resolveMaxBatchItems(7.9), 7, "fractions floor");
+});
+
+await run("27, 74 and 152 chunks split exactly at a limit of 20", async () => {
+  // The three batch sizes from the reported log.
+  const expected = {
+    27: [20, 7],
+    74: [20, 20, 20, 14],
+    152: [20, 20, 20, 20, 20, 20, 20, 12],
+  };
+  for (const [count, split] of Object.entries(expected)) {
+    activePrefs = new Map();
+    setMaxBatchItems(20);
+    activeServer = makeServer({ limitChars: Infinity });
+    const service = newService();
+    const items = chunks(Number(count), 400, `s${count}`);
+    const results = await service.embedBatch(items);
+
+    assert.equal(results.size, Number(count), `${count} chunks all embedded`);
+    assert.deepEqual(
+      activeServer.calls.map((c) => c.count),
+      split,
+      `${count} chunks must split as ${split.join("+")}`,
+    );
+    assert.equal(
+      split.reduce((a, b) => a + b, 0),
+      Number(count),
+      "the split must account for every chunk",
+    );
+  }
+});
+
+await run("the count limit and the character budget both bind", async () => {
+  // 20 inputs allowed, but only 3000 characters — so the character budget is
+  // the tighter of the two and decides. Neither limit may stand in for the
+  // other: 20 chunks of 1000 chars is a legal batch size and an illegal
+  // payload, and one chunk of 200 chars is the reverse of nothing at all.
+  setMaxBatchItems(20);
+  activeServer = makeServer({ limitChars: 3000 });
+  const service = newService();
+  await service.embedBatch(chunks(60, 1000, "both"));
+
+  for (const call of activeServer.calls) {
+    assert.ok(call.count <= 20, `count limit breached: ${call.count}`);
+  }
+  const accepted = activeServer.calls.filter((c) => c.chars <= 3000);
+  assert.ok(accepted.length > 0);
+  for (const call of accepted) {
+    assert.ok(
+      call.count <= 3,
+      `1000-char chunks under a 3000-char budget must be <=3 per request, got ${call.count}`,
+    );
+  }
+  // The learned character capacity is real and below the count limit's reach.
+  assert.ok(service.getBatchCapacity().successChars <= 3000);
+  assert.equal(service.getBatchCapacity().maxItems, 20);
+});
+
+await run("the count limit binds when the character budget is loose", async () => {
+  // The mirror image: plenty of character headroom, so the count is what caps
+  // the request. If the two were conflated this is the case that would send
+  // everything in one go — which is exactly the reported bug.
+  setMaxBatchItems(20);
+  activeServer = makeServer({ limitChars: Infinity });
+  const service = newService();
+  await service.embedBatch(chunks(50, 50, "loose"));
+
+  assert.deepEqual(
+    activeServer.calls.map((c) => c.count),
+    [20, 20, 10],
+  );
+  // No length failure ever happened, so the character budget stayed unbounded
+  // — proving the split came from the count limit alone.
+  assert.equal(service.getBatchCapacity().failureChars, null);
+});
+
+await run("a limit of 1 sends one chunk at a time", async () => {
+  setMaxBatchItems(1);
+  activeServer = makeServer({ limitChars: Infinity });
+  const service = newService();
+  await service.embedBatch(chunks(5, 300, "one"));
+  assert.deepEqual(
+    activeServer.calls.map((c) => c.count),
+    [1, 1, 1, 1, 1],
+  );
+});
+
+await run("changing the setting takes effect on the next request", async () => {
+  // Requirement 7: no rebuild, no cache to clear, no vectors invalidated.
+  setMaxBatchItems(20);
+  activeServer = makeServer({ limitChars: Infinity });
+  const service = newService();
+  await service.embedBatch(chunks(30, 100, "before"));
+  assert.deepEqual(activeServer.calls.map((c) => c.count), [20, 10]);
+
+  setMaxBatchItems(5);
+  activeServer = makeServer({ limitChars: Infinity });
+  // Same service instance — the limit is read per request, not cached at
+  // construction, so no restart is needed for the change to apply.
+  await service.embedBatch(chunks(12, 100, "after"));
+  assert.deepEqual(activeServer.calls.map((c) => c.count), [5, 5, 2]);
+});
+
+// ---------------------------------------------------------------------------
+// The reported failure, end to end
+// ---------------------------------------------------------------------------
+
+await run("the reported Alibaba MaaS failure now indexes cleanly", async () => {
+  // The exact shape from the log: an OpenAI-compatible Alibaba Cloud MaaS
+  // endpoint whose hostname is not dashscope.aliyuncs.com, accepting at most
+  // 20 inputs, and a document of 152 chunks. Before the fix the whole document
+  // went out in one request and came back 400 invalid_request, non-retryable,
+  // so every document that needed re-embedding failed.
+  activeServer = makeServer({
+    limitChars: Infinity,
+    reject: (_n, texts) =>
+      texts.length > 20
+        ? httpError(400, {
+            error: {
+              message: "batch size is invalid, it should not be larger than 20",
+            },
+          })
+        : null,
+  });
+  const service = newService({
+    apiBase: "https://maas-api.example-aliyun.com/v1",
+    model: "qwen3.7-text-embedding",
+  });
+
+  for (const count of [27, 37, 74, 114, 152]) {
+    activeServer.calls.length = 0;
+    const items = chunks(count, 420, `maas${count}`);
+    const results = await service.embedBatch(items);
+    assert.equal(results.size, count, `${count} chunks must all be embedded`);
+    for (const call of activeServer.calls) {
+      assert.ok(
+        call.count <= 20,
+        `${count}-chunk document still sent a batch of ${call.count}`,
+      );
+    }
+  }
+});
+
+await run("a batch-size refusal keeps the server's words and names the fix", async () => {
+  // Requirement 6: if the user's setting is still too high, the real error
+  // survives and the message says which setting to change and to what.
+  setMaxBatchItems(50);
+  activeServer = makeServer({
+    limitChars: Infinity,
+    reject: (_n, texts) =>
+      texts.length > 20
+        ? httpError(400, {
+            error: {
+              message: "batch size is invalid, it should not be larger than 20",
+            },
+          })
+        : null,
+  });
+  const service = newService();
+
+  await assert.rejects(
+    () => service.embedBatch(chunks(50, 100, "over")),
+    (error) => {
+      assert.equal(error.type, "batch_too_many_inputs");
+      assert.equal(error.retryable, false);
+      // The server's own sentence, verbatim.
+      assert.match(error.message, /batch size is invalid, it should not be larger than 20/);
+      // How many we actually sent.
+      assert.match(error.message, /50/);
+      // The setting to change, and the number to change it to.
+      assert.match(error.message, /单次请求最大批量/);
+      assert.match(error.message, /Max inputs per request/);
+      assert.match(error.message, /改为 20 或更小/);
+      assert.equal(error.getUserMessage(), error.message);
+      return true;
+    },
+  );
+
+  // A count refusal says nothing about how much TEXT fits, so it must not
+  // touch the learned character capacity.
+  assert.equal(service.getBatchCapacity().successChars, null);
+  assert.equal(service.getBatchCapacity().failureChars, null);
+});
+
+await run("the server's stated limit is extracted from many phrasings", () => {
+  const cases = [
+    ["batch size is invalid, it should not be larger than 20", 20],
+    ["Batch size should not be greater than 10", 10],
+    ["you may submit at most 16 inputs per request", 16],
+    ["maximum of 64 inputs allowed", 64],
+    ["The batch size limit is 25", 25],
+    ["up to 32 texts per request", 32],
+    ["expected no more than 8 items", 8],
+  ];
+  for (const [message, expected] of cases) {
+    assert.equal(extractBatchLimit(message), expected, message);
+  }
+  // Nothing to extract, and nothing invented.
+  assert.equal(extractBatchLimit("batch size is invalid"), null);
+  assert.equal(extractBatchLimit("too many inputs"), null);
+  // Out-of-range numbers are not credible limits.
+  assert.equal(extractBatchLimit("not larger than 999999"), null);
+});
+
+await run("a count refusal is never confused with a length refusal", async () => {
+  // The two are separate failures with separate fixes. Classifying a count
+  // limit as payload_too_large would send the plugin bisecting the character
+  // budget forever against a server that never objected to the text at all.
+  setMaxBatchItems(40);
+  activeServer = makeServer({
+    limitChars: Infinity,
+    reject: (_n, texts) =>
+      texts.length > 20
+        ? httpError(400, { error: { message: "too many inputs in one request" } })
+        : null,
+  });
+  const service = newService();
+  await assert.rejects(
+    () => service.embedBatch(chunks(40, 100, "cnt")),
+    (error) => error.type === "batch_too_many_inputs",
+  );
+  assert.equal(activeServer.calls.length, 1, "no bisection was attempted");
+
+  // ...and the reverse still classifies as a length problem.
+  activePrefs = new Map();
+  setMaxBatchItems(2048);
+  activeServer = makeServer({ limitChars: 4000 });
+  const other = newService();
+  await other.embedBatch(chunks(30, 500, "len"));
+  assert.ok(other.getBatchCapacity().failureChars !== null);
+});
+
+await run("no provider table decides the batch size any more", () => {
+  const source = fs.readFileSync(
+    path.join(rootDir, "src/modules/semantic/embeddingService.ts"),
+    "utf8",
+  );
+  assert.doesNotMatch(
+    source,
+    /getProviderMaxBatchSize/,
+    "the per-provider batch table must be gone",
+  );
+  // Same limit regardless of how the endpoint is detected: the number comes
+  // from the user, not from the hostname.
+  for (const apiBase of [
+    "https://api.openai.com/v1",
+    "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "http://localhost:11434",
+    "https://maas-api.example-aliyun.com/v1",
+  ]) {
+    activePrefs = new Map();
+    setMaxBatchItems(20);
+    assert.equal(
+      newService({ apiBase }).getBatchCapacity().maxItems,
+      20,
+      `${apiBase} must honour the user's setting`,
+    );
+  }
+  // And with nothing configured, the conservative default applies everywhere.
+  activePrefs = new Map();
+  assert.equal(newService().getBatchCapacity().maxItems, DEFAULT_MAX_BATCH_ITEMS);
+});
+
+await run("the setting is exposed in the preferences UI", () => {
+  const xhtml = fs.readFileSync(
+    path.join(rootDir, "addon/content/preferences.xhtml"),
+    "utf8",
+  );
+  assert.match(xhtml, /embedding\.maxBatchItems" type="int"/, "pref declared");
+  assert.match(xhtml, /embedding-max-batch-items/, "input present");
+  assert.match(xhtml, /min="1" max="2048" placeholder="20"/, "bounds on the field");
+
+  const prefsJs = fs.readFileSync(path.join(rootDir, "addon/prefs.js"), "utf8");
+  assert.match(prefsJs, /pref\("embedding\.maxBatchItems", 20\);/);
+
+  const script = fs.readFileSync(
+    path.join(rootDir, "src/modules/preferenceScript.ts"),
+    "utf8",
+  );
+  assert.match(
+    script,
+    /embedding-max-batch-items`,\s*\n\s*"extensions\.zotero\.zotero-mcp-plugin\.embedding\.maxBatchItems",\s*\n\s*1,\s*\n\s*2048,\s*\n\s*20,/,
+    "bound with the 1-2048 range and a default of 20",
+  );
+
+  const locales = fs
+    .readdirSync(path.join(rootDir, "addon/locale"))
+    .filter((entry) =>
+      fs.existsSync(path.join(rootDir, "addon/locale", entry, "preferences.ftl")),
+    );
+  assert.ok(locales.length >= 6);
+  for (const locale of locales) {
+    const ftl = fs.readFileSync(
+      path.join(rootDir, "addon/locale", locale, "preferences.ftl"),
+      "utf8",
+    );
+    for (const key of [
+      "pref-embedding-max-batch-items-label",
+      "pref-embedding-max-batch-items-hint",
+    ]) {
+      assert.match(ftl, new RegExp(`^${key} = \\S`, "m"), `${locale}/${key}`);
+    }
+  }
+});
+
+await run("a batch-size refusal pauses the build instead of failing every item", () => {
+  const serviceSource = fs.readFileSync(
+    path.join(rootDir, "src/modules/semantic/semanticSearchService.ts"),
+    "utf8",
+  );
+  const block = serviceSource.slice(
+    serviceSource.indexOf("const isGlobalError ="),
+    serviceSource.indexOf("const isGlobalError =") + 400,
+  );
+  assert.match(
+    block,
+    /error\.type === 'batch_too_many_inputs'/,
+    "it is a run-level problem: every remaining document would fail identically",
+  );
 });
 
 // ===========================================================================
-// 3. The truncation guarantee
+// 4. The truncation guarantee
 // ===========================================================================
 
 await run("no request ever carried a truncated chunk", () => {

@@ -50,6 +50,7 @@ export type EmbeddingErrorType =
   | 'invalid_request' // Invalid request (400)
   | 'payload_too_large' // Batch exceeded the endpoint's input/context length
   | 'chunk_too_large' // A SINGLE chunk exceeds the endpoint's input length
+  | 'batch_too_many_inputs' // Too many inputs per request (a COUNT limit)
   | 'server'          // Server error (5xx)
   | 'config'          // Configuration error (API not configured)
   | 'paused'          // Indexing was paused by user
@@ -65,6 +66,77 @@ export type EmbeddingErrorType =
  * every later search would score that passage on material the vector never
  * saw. The build stops and asks the user to change a setting they control.
  */
+/**
+ * Phrases meaning "too many inputs in one request" — a limit on the COUNT of
+ * inputs, which no amount of shortening the text can satisfy.
+ *
+ * Kept strictly apart from the length phrases. Conflating the two is what let
+ * `batch size is invalid, it should not be larger than 20` fall through to a
+ * generic non-retryable invalid_request, so every document that needed
+ * re-embedding failed with an error that named its own fix.
+ */
+function isBatchCountMessage(errorMsg: string): boolean {
+  return (
+    errorMsg.includes('batch size') ||
+    errorMsg.includes('batch_size') ||
+    errorMsg.includes('too many inputs') ||
+    errorMsg.includes('too many items') ||
+    errorMsg.includes('too many texts') ||
+    errorMsg.includes('number of inputs') ||
+    errorMsg.includes('input array') ||
+    errorMsg.includes('array too long') ||
+    errorMsg.includes('at most 2048') ||
+    errorMsg.includes('exceeds the maximum number')
+  );
+}
+
+/**
+ * Pull the server's own limit out of its complaint.
+ *
+ * Providers word this differently but nearly all of them state the number —
+ * "should not be larger than 20", "at most 16 inputs", "maximum 10". Echoing
+ * it back turns "lower the setting" into "set it to 20", which is the
+ * difference between a message the user can act on and one they have to
+ * decode. It is only ever used to WRITE the advice, never to change the
+ * setting behind their back.
+ */
+export function extractBatchLimit(message: string): number | null {
+  const patterns = [
+    /(?:not\s+(?:be\s+)?(?:larger|greater|more)\s+than|no\s+more\s+than|at\s+most|maximum(?:\s+of)?|max(?:imum)?\s+is|up\s+to|limit\s+(?:is|of))\s*:?\s*(\d{1,5})/i,
+    /(\d{1,5})\s*(?:inputs?|items?|texts?)\s*(?:per\s+request|maximum|max)/i,
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(message);
+    if (!match) continue;
+    const value = parseInt(match[1], 10);
+    if (Number.isFinite(value) && value >= 1 && value <= MAX_MAX_BATCH_ITEMS) {
+      return value;
+    }
+  }
+  return null;
+}
+
+/**
+ * The advice shown when the endpoint refuses a batch for having too many
+ * inputs. The server's own words come first — it is the authority on its own
+ * limit, and paraphrasing it would lose the number the user needs.
+ */
+export function batchTooManyInputsMessage(
+  serverMessage: string,
+  detectedLimit: number | null,
+  attemptedCount: number,
+): string {
+  const target =
+    detectedLimit !== null
+      ? `${detectedLimit}`
+      : `${Math.max(1, Math.floor(attemptedCount / 2))}`;
+  return (
+    `API 拒绝了本次请求：${serverMessage} / API rejected the request: ${serverMessage}\n` +
+    `本次提交了 ${attemptedCount} 个 chunk。请在「设置 → 语义搜索 → 单次请求最大批量」中改为 ${target} 或更小。 / ` +
+    `This request carried ${attemptedCount} chunks. Set "Max inputs per request" to ${target} or lower in Settings → Semantic Search.`
+  );
+}
+
 export const SINGLE_CHUNK_TOO_LARGE_MESSAGE =
   '单个 Chunk 已超过当前向量模型/API允许的输入长度，请降低 Chunk 长度或更换支持更长输入的向量模型。 / ' +
   'A single chunk exceeds the input length allowed by the current embedding model/API. ' +
@@ -124,6 +196,9 @@ export class EmbeddingAPIError extends Error {
         return '请求数据过大，正在自动减小批次重试 / Payload too large, auto-reducing batch size and retrying';
       case 'chunk_too_large':
         return SINGLE_CHUNK_TOO_LARGE_MESSAGE;
+      case 'batch_too_many_inputs':
+        // Already carries the server's own words and the number to set.
+        return this.message;
       case 'server':
         return 'API 服务器错误，请稍后重试 / API server error, please try again later';
       case 'config':
@@ -183,15 +258,6 @@ export interface EmbeddingConfig {
   apiKey: string;           // API key
   model: string;            // Model name (e.g., text-embedding-3-small)
   dimensions?: number;      // Output dimensions (if supported by model)
-  /**
-   * Hard ceiling on the NUMBER of texts in one request.
-   *
-   * This is only the provider's own per-request input limit; how much text
-   * actually goes out is decided by the learned character budget (see
-   * batchCapacity.ts). It used to be a hand-picked 20, which capped every
-   * endpoint at a number that described none of them.
-   */
-  maxBatchSize: number;
   timeout: number;          // Request timeout in ms
   maxRetries: number;       // Max retry attempts
   apiProvider?: ApiProviderType;  // API provider (auto-detected if 'auto' or not set)
@@ -202,7 +268,6 @@ const DEFAULT_CONFIG: EmbeddingConfig = {
   apiKey: '',
   model: 'text-embedding-3-small',
   dimensions: 512,  // Smaller dimensions for efficiency
-  maxBatchSize: 0,  // 0 = the provider's own per-request input limit
   timeout: 30000,
   maxRetries: 3,
   apiProvider: 'auto'
@@ -219,6 +284,36 @@ const PREF_TIMEOUT_SECONDS = 'extensions.zotero.zotero-mcp-plugin.embedding.time
 // Bounds for the user-configurable API timeout (#59)
 const MIN_TIMEOUT_SECONDS = 5;
 const MAX_TIMEOUT_SECONDS = 600;
+
+/** How many chunks one embedding request may carry — user-configurable. */
+const PREF_MAX_BATCH_ITEMS =
+  'extensions.zotero.zotero-mcp-plugin.embedding.maxBatchItems';
+
+export const MIN_MAX_BATCH_ITEMS = 1;
+export const MAX_MAX_BATCH_ITEMS = 2048;
+/**
+ * Conservative by design.
+ *
+ * Every endpoint accepts at least this many, most accept far more, and the
+ * cost of guessing low is a few extra requests — while the cost of guessing
+ * high is that a whole library fails to index against a server the plugin
+ * cannot interrogate. Users whose endpoint allows 2048 can say so.
+ */
+export const DEFAULT_MAX_BATCH_ITEMS = 20;
+
+/**
+ * Read the setting, clamped, with anything unusable falling back to the
+ * default. A pref is user-editable text: 0, -1, "abc" and 999999 all have to
+ * mean something safe rather than "send everything in one request".
+ */
+export function resolveMaxBatchItems(raw: unknown): number {
+  const parsed =
+    typeof raw === 'number' ? raw : parseInt(String(raw ?? ''), 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_MAX_BATCH_ITEMS;
+  const floored = Math.floor(parsed);
+  if (floored < MIN_MAX_BATCH_ITEMS) return DEFAULT_MAX_BATCH_ITEMS;
+  return Math.min(floored, MAX_MAX_BATCH_ITEMS);
+}
 
 // Preference keys for rate limit and usage stats
 const PREF_RPM = 'extensions.zotero.zotero-mcp-plugin.embedding.rpm';
@@ -511,7 +606,7 @@ export class EmbeddingService {
         this.status.apiConfigured = false;
       } else {
         this.status.apiConfigured = true;
-        ztoolkit.log(`[EmbeddingService] API configured: apiBase=${this.config.apiBase}, model=${this.config.model}, apiKey=${this.config.apiKey ? 'yes' : 'no'}, maxBatchSize=${this.config.maxBatchSize}, timeout=${this.config.timeout}ms`);
+        ztoolkit.log(`[EmbeddingService] API configured: apiBase=${this.config.apiBase}, model=${this.config.model}, apiKey=${this.config.apiKey ? 'yes' : 'no'}, maxBatchItems=${this.getEffectiveMaxItems()}, timeout=${this.config.timeout}ms`);
       }
 
       this.initialized = true;
@@ -615,37 +710,27 @@ export class EmbeddingService {
   }
 
   /**
-   * Get provider-specific max batch size
-   */
-  private getProviderMaxBatchSize(): number {
-    const provider = this.getEffectiveProvider();
-    switch (provider) {
-      case 'dashscope':
-        return 10;  // DashScope limit: max 10 texts per request
-      case 'ollama':
-      case 'ollama-openai':
-        return 50;  // Ollama is local, can handle larger batches
-      case 'openai':
-      default:
-        return 2048; // OpenAI supports up to 2048
-    }
-  }
-
-  /**
-   * Maximum number of texts one request may carry.
+   * Maximum number of inputs one request may carry — the user's setting.
    *
-   * The provider's own limit, unless a caller explicitly asked for less. The
-   * amount of TEXT is governed separately by the learned character budget, so
-   * this rarely binds — which is the point: a batch should be limited by what
-   * the endpoint actually refuses, not by a constant.
+   * There is no provider table here on purpose. There used to be one (10 for
+   * DashScope, 50 for Ollama, 2048 for "OpenAI-compatible"), and it was wrong
+   * in the way such tables always are: the limit belongs to the deployment,
+   * not to the wire format. An Alibaba Cloud MaaS endpoint speaking the
+   * OpenAI protocol caps inputs at 20, but its hostname is not
+   * dashscope.aliyuncs.com, so it fell to the generic 2048 branch and every
+   * document went out in a single request — 27, 74, 152 chunks at a time —
+   * against a server that accepts 20. The guess cannot be made correct,
+   * because the correct number is not derivable from the URL, so it is asked
+   * for instead.
+   *
+   * This is a count of inputs and nothing else. How much TEXT rides along is
+   * governed independently by the learned character budget (batchCapacity.ts);
+   * both apply to every request and neither can stand in for the other, since
+   * twenty short chunks and twenty long ones are the same batch size and
+   * wildly different payloads.
    */
   private getEffectiveMaxItems(): number {
-    const providerMax = this.getProviderMaxBatchSize();
-    const configured = this.config.maxBatchSize;
-    if (typeof configured === 'number' && configured > 0) {
-      return Math.min(configured, providerMax);
-    }
-    return providerMax;
+    return resolveMaxBatchItems(Zotero.Prefs.get(PREF_MAX_BATCH_ITEMS, true));
   }
 
   /**
@@ -926,12 +1011,16 @@ export class EmbeddingService {
   /**
    * Get current configuration (without sensitive data)
    */
-  getConfig(): Omit<EmbeddingConfig, 'apiKey'> & { apiKeyConfigured: boolean } {
+  getConfig(): Omit<EmbeddingConfig, 'apiKey'> & {
+    apiKeyConfigured: boolean;
+    /** The live batch-count limit, which lives in a pref rather than config. */
+    maxBatchItems: number;
+  } {
     return {
       apiBase: this.config.apiBase,
       model: this.config.model,
       dimensions: this.config.dimensions,
-      maxBatchSize: this.config.maxBatchSize,
+      maxBatchItems: this.getEffectiveMaxItems(),
       timeout: this.config.timeout,
       maxRetries: this.config.maxRetries,
       apiKeyConfigured: !!this.config.apiKey
@@ -1143,7 +1232,7 @@ export class EmbeddingService {
 
       ztoolkit.log(
         `[EmbeddingService] Processing batch: items ${itemIndex + 1}-${itemIndex + batch.length}/${items.length} ` +
-        `(chars=${batchChars}, budget=${budget === Infinity ? 'unbounded' : budget}, maxItems=${maxItems}, ` +
+        `(chunks=${batch.length}/${maxItems} max, chars=${batchChars}, budget=${budget === Infinity ? 'unbounded' : budget}, ` +
         `learned=[ok<=${capacity.successChars ?? '?'}, fail>=${capacity.failureChars ?? '?'}])`
       );
 
@@ -1327,6 +1416,14 @@ export class EmbeddingService {
         return { type: 'auth' };
       }
       if (statusCode === 400 || statusCode === 422) {
+        // "Too many inputs" is checked FIRST, and is a different problem from
+        // "too much text": it is a limit on how many array entries the request
+        // may hold, so no amount of shrinking the character budget fixes it.
+        // Reaching the generic invalid_request below is what made a whole
+        // library fail with a message that stated its own remedy.
+        if (isBatchCountMessage(fullMsg)) {
+          return { type: 'batch_too_many_inputs' };
+        }
         // Some providers (dashscope, ollama's OpenAI-compatible endpoint,
         // vLLM) report context/token overflow as 400/422 instead of 413.
         // Only a body that says so counts; every other 4xx-with-a-body stays
@@ -1639,15 +1736,34 @@ export class EmbeddingService {
             }
           }
 
-          lastError = new EmbeddingAPIError(
-            (error.message || String(error)) + errorDetails,
-            type,
-            {
-              statusCode,
-              retryAfterMs,
-              originalError: error
-            }
-          );
+          if (type === 'batch_too_many_inputs') {
+            // The server's own sentence, with the number it named, plus the
+            // setting to change. Everything the user needs is in the message
+            // itself so it survives being logged, shown in the failure list,
+            // or copied into a bug report.
+            const serverMessage =
+              errorDetails.replace(/^ \(|\)$/g, '').trim() ||
+              String(error.message || error);
+            lastError = new EmbeddingAPIError(
+              batchTooManyInputsMessage(
+                serverMessage,
+                extractBatchLimit(serverMessage),
+                texts.length,
+              ),
+              type,
+              { statusCode, retryable: false, originalError: error },
+            );
+          } else {
+            lastError = new EmbeddingAPIError(
+              (error.message || String(error)) + errorDetails,
+              type,
+              {
+                statusCode,
+                retryAfterMs,
+                originalError: error
+              }
+            );
+          }
         }
 
         // A cancelled request must not be retried - the caller stopped caring.
