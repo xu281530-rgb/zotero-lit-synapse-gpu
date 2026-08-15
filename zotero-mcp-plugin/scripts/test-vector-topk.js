@@ -18,6 +18,16 @@ const bytes = (vector) =>
 const vectorForScore = (score) =>
   bytes(new Float32Array([score, Math.sqrt(Math.max(0, 1 - score * score))]));
 
+/** A row shaped like the mozIStorageRow Zotero passes to an onRow callback. */
+const storageRow = (columns) => ({
+  getResultByName(name) {
+    if (!Object.prototype.hasOwnProperty.call(columns, name)) {
+      throw new Error(`DB column '${name}' not found`);
+    }
+    return columns[name];
+  },
+});
+
 function createStore(rows, { int8Count = 0, texts = new Map() } = {}) {
   const calls = [];
   const db = {
@@ -27,35 +37,51 @@ function createStore(rows, { int8Count = 0, texts = new Map() } = {}) {
       if (sql.includes("COUNT(*) FROM embeddings")) return rows.length;
       throw new Error(`Unexpected value query: ${sql}`);
     },
-    queryAsync: async (sql, params = []) => {
+    queryAsync: async (sql, params = [], options = {}) => {
       calls.push({ kind: "query", sql, params });
-      if (sql.includes("SELECT dimensions, vector_int8 IS NOT NULL")) {
-        return rows.length
-          ? [{
-              dimensions: rows[0].dimensions,
-              has_int8: rows[0].vector_int8 ? 1 : 0,
-            }]
-          : [];
+      const resultRows = (() => {
+        if (sql.includes("SELECT dimensions, vector_int8 IS NOT NULL")) {
+          return rows.length
+            ? [{
+                dimensions: rows[0].dimensions,
+                has_int8: rows[0].vector_int8 ? 1 : 0,
+              }]
+            : [];
+        }
+        if (sql.includes("SELECT e.id AS embedding_id")) {
+          const ids = new Set(params);
+          return rows
+            .filter((row) => ids.has(row.id) && row.float32)
+            .map((row) => ({ embedding_id: row.id, vector: row.float32 }));
+        }
+        if (sql.includes("SELECT id, chunk_text")) {
+          return params.map((id) => ({
+            id,
+            chunk_text: texts.get(id) ?? `text-${id}`,
+          }));
+        }
+        if (sql.includes("ORDER BY id LIMIT ? OFFSET ?")) {
+          const limit = params.at(-2);
+          const offset = params.at(-1);
+          return rows.slice(offset, offset + limit).map((row) =>
+            sql.includes("LEFT JOIN vectors_f32")
+              ? { ...row, vector_f32: row.float32 }
+              : row,
+          );
+        }
+        throw new Error(`Unexpected query: ${sql}`);
+      })();
+
+      // Model Zotero faithfully: a SELECT given an onRow callback delivers raw
+      // mozIStorageRows through it and resolves to undefined, and only the
+      // path that RETURNS rows resolves column names as properties. A fake that
+      // hands back plain objects either way makes named access work by accident
+      // and cannot catch a reader that fails against the real database.
+      if (options && options.onRow) {
+        for (const row of resultRows) options.onRow(storageRow(row), () => {});
+        return undefined;
       }
-      if (sql.includes("SELECT e.id AS embedding_id")) {
-        const ids = new Set(params);
-        return rows
-          .filter((row) => ids.has(row.id) && row.float32)
-          .map((row) => ({ embedding_id: row.id, vector: row.float32 }));
-      }
-      if (sql.includes("SELECT id, chunk_text")) {
-        return params.map((id) => ({ id, chunk_text: texts.get(id) ?? `text-${id}` }));
-      }
-      if (sql.includes("ORDER BY id LIMIT ? OFFSET ?")) {
-        const limit = params.at(-2);
-        const offset = params.at(-1);
-        return rows.slice(offset, offset + limit).map((row) =>
-          sql.includes("LEFT JOIN vectors_f32")
-            ? { ...row, vector_f32: row.float32 }
-            : row,
-        );
-      }
-      throw new Error(`Unexpected query: ${sql}`);
+      return resultRows;
     },
   };
   const store = new VectorStore();

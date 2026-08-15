@@ -1566,19 +1566,33 @@
 
         <html:div class="zmp-sw zmp-nrow">
           <html:div>
-            <html:div class="zmp-sw-text" data-l10n-id="pref-hybrid-search-timeout-label"></html:div>
-            <html:div class="zmp-sw-sub" data-l10n-id="pref-hybrid-search-timeout-hint"></html:div>
+            <html:div class="zmp-sw-text" data-l10n-id="pref-hybrid-vector-scan-timeout-label"></html:div>
+            <html:div class="zmp-sw-sub" data-l10n-id="pref-hybrid-vector-scan-timeout-hint"></html:div>
           </html:div>
-          <html:div class="zmp-bg" style="margin-top:0">
-            <html:input type="number" class="zmp-fi zmp-nb"
-              id="zotero-prefpane-__addonRef__-hybrid-search-timeout"
-              preference="extensions.zotero.__addonRef__.hybrid.searchTimeoutMs"
-              min="1" max="3600000" step="1" placeholder="8000"
-            />
-            <html:button class="zmp-b" id="hybrid-scan-benchmark-button"
-              data-l10n-id="pref-hybrid-scan-benchmark-button"></html:button>
-          </html:div>
+          <html:input type="number" class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-hybrid-search-timeout"
+            preference="extensions.zotero.__addonRef__.hybrid.searchTimeoutMs"
+            min="1" max="3600000" step="1" placeholder="8000"
+          />
         </html:div>
+
+        <html:div class="zmp-sw zmp-nrow">
+          <html:div>
+            <html:div class="zmp-sw-text" data-l10n-id="pref-hybrid-keyword-search-timeout-label"></html:div>
+            <html:div class="zmp-sw-sub" data-l10n-id="pref-hybrid-keyword-search-timeout-hint"></html:div>
+          </html:div>
+          <html:input type="number" class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-hybrid-keyword-search-timeout"
+            preference="extensions.zotero.__addonRef__.hybrid.keywordSearchTimeoutMs"
+            min="1000" max="3600000" step="1" placeholder="30000"
+          />
+        </html:div>
+
+        <html:div class="zmp-bg">
+          <html:button class="zmp-b" id="hybrid-scan-benchmark-button"
+            data-l10n-id="pref-hybrid-scan-benchmark-button"></html:button>
+        </html:div>
+        <html:div class="zmp-sw-sub" data-l10n-id="pref-hybrid-scan-benchmark-hint"></html:div>
         <html:div class="zmp-res" id="hybrid-scan-benchmark-result"></html:div>
 
       </html:div>

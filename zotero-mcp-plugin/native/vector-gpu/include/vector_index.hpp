@@ -48,7 +48,10 @@ struct SearchOptions {
   std::string language = "all";
   std::optional<std::vector<std::string>> item_keys;
   double min_score = 0.0;
-  std::int64_t library_id = 0;
+  // Absent means "every resident row, whatever library it belongs to".
+  // Retrieval always sets it; the scan benchmark deliberately does not, so the
+  // GPU measures exactly the same chunk range the CPU path does.
+  std::optional<std::int64_t> library_id;
 };
 
 struct SearchResult {

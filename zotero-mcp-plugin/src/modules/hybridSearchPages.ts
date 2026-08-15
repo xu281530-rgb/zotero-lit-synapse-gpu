@@ -26,6 +26,31 @@ export const MAX_PAGE_STATES = 5;
 const CURSOR_PREFIX = "hs1";
 
 /**
+ * 一个分页会话属于哪个工具。
+ *
+ * 只影响两件事：cursor 的前缀，和错误信息里让调用方重新调用的工具名。
+ * 这不是装饰——find_similar 复用同一套分页机制时，过期 cursor 会告诉 AI
+ * 「重新运行 hybrid_search」，而 hybrid_search 根本产生不了这份排名，AI 照做
+ * 只会得到一份答非所问的结果。默认值保持 hybrid_search，所以它的行为一字未变。
+ */
+export interface PageStoreIdentity {
+  /** 出现在错误信息里的工具名。 */
+  toolName: string;
+  /** cursor 前缀；不同工具的 cursor 因此无法互相误用。 */
+  cursorPrefix: string;
+}
+
+export const HYBRID_PAGE_IDENTITY: PageStoreIdentity = {
+  toolName: "hybrid_search",
+  cursorPrefix: CURSOR_PREFIX,
+};
+
+export const SIMILAR_PAGE_IDENTITY: PageStoreIdentity = {
+  toolName: "find_similar",
+  cursorPrefix: "fs1",
+};
+
+/**
  * 决定「这是不是同一次检索」的参数。
  *
  * 任何一项改变都意味着这是另一份结果集，旧 cursor 不能再用——继续用会把两次
@@ -175,19 +200,26 @@ export function fingerprintsMatch(
   return { match: true };
 }
 
-export function encodeCursor(searchId: string, offset: number): string {
-  return `${CURSOR_PREFIX}_${searchId}_${offset}`;
+export function encodeCursor(
+  searchId: string,
+  offset: number,
+  identity: PageStoreIdentity = HYBRID_PAGE_IDENTITY,
+): string {
+  return `${identity.cursorPrefix}_${searchId}_${offset}`;
 }
 
-export function decodeCursor(cursor: string): {
+export function decodeCursor(
+  cursor: string,
+  identity: PageStoreIdentity = HYBRID_PAGE_IDENTITY,
+): {
   searchId: string;
   offset: number;
 } {
   const raw = String(cursor || "").trim();
   const parts = raw.split("_");
-  if (parts.length !== 3 || parts[0] !== CURSOR_PREFIX) {
+  if (parts.length !== 3 || parts[0] !== identity.cursorPrefix) {
     throw new CursorError(
-      `Malformed cursor "${raw.slice(0, 40)}". Pass a nextCursor exactly as hybrid_search returned it, or omit cursor to start a new search.`,
+      `Malformed cursor "${raw.slice(0, 40)}". Pass a nextCursor exactly as ${identity.toolName} returned it, or omit cursor to start a new search.`,
     );
   }
   const offset = Number(parts[2]);
@@ -215,15 +247,18 @@ export class HybridSearchPageStore<
   private readonly now: () => number;
   private readonly ttlMs: number;
   private readonly maxStates: number;
+  private readonly identity: PageStoreIdentity;
 
   constructor(
     now: () => number = () => Date.now(),
     ttlMs: number = PAGE_STATE_TTL_MS,
     maxStates: number = MAX_PAGE_STATES,
+    identity: PageStoreIdentity = HYBRID_PAGE_IDENTITY,
   ) {
     this.now = now;
     this.ttlMs = ttlMs;
     this.maxStates = maxStates;
+    this.identity = identity;
   }
 
   /** 登记一次新检索的合格名单，返回它的 searchId。 */
@@ -258,7 +293,7 @@ export class HybridSearchPageStore<
     /** 省略时沿用建立这次检索时的页大小。 */
     pageSize?: number,
   ): { state: PageState<TRow, TMeta>; window: PageWindow<TRow> } {
-    const { searchId, offset } = decodeCursor(cursor);
+    const { searchId, offset } = decodeCursor(cursor, this.identity);
     this.evict();
 
     const state = this.states.get(searchId);
@@ -266,14 +301,14 @@ export class HybridSearchPageStore<
       throw new CursorError(
         `This cursor is no longer valid: the search it points to has expired or was replaced (pagination state lives ${Math.round(
           this.ttlMs / 60000,
-        )} minutes and only the ${this.maxStates} most recent searches are kept). Run hybrid_search again without a cursor to get a fresh ranking.`,
+        )} minutes and only the ${this.maxStates} most recent searches are kept). Run ${this.identity.toolName} again without a cursor to get a fresh ranking.`,
       );
     }
 
     const verdict = fingerprintsMatch(state.fingerprint, claim);
     if (!verdict.match) {
       throw new CursorError(
-        `Cannot continue this cursor: ${verdict.changed} differs from the search that produced it. A cursor pages through ONE ranked, threshold-filtered result set; changing ${verdict.changed} means a different result set. Drop the cursor and run hybrid_search again with the new arguments.`,
+        `Cannot continue this cursor: ${verdict.changed} differs from the search that produced it. A cursor pages through ONE ranked, threshold-filtered result set; changing ${verdict.changed} means a different result set. Drop the cursor and run ${this.identity.toolName} again with the new arguments.`,
       );
     }
 
@@ -285,6 +320,7 @@ export class HybridSearchPageStore<
         offset,
         pageSize ?? state.fingerprint.pageSize,
         searchId,
+        this.identity,
       ),
     };
   }
@@ -324,6 +360,7 @@ export function windowOf<TRow>(
   offset: number,
   pageSize: number,
   searchId: string,
+  identity: PageStoreIdentity = HYBRID_PAGE_IDENTITY,
 ): PageWindow<TRow> {
   const size = Math.min(20, Math.max(1, Math.floor(pageSize)));
   const start = Math.min(Math.max(0, Math.floor(offset)), ranked.length);
@@ -337,7 +374,9 @@ export function windowOf<TRow>(
     returned: rows.length,
     totalRelevant: ranked.length,
     hasMore,
-    ...(hasMore ? { nextCursor: encodeCursor(searchId, nextOffset) } : {}),
+    ...(hasMore
+      ? { nextCursor: encodeCursor(searchId, nextOffset, identity) }
+      : {}),
   };
 }
 

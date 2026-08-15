@@ -710,7 +710,7 @@ assert.ok(
 );
 assert.match(
   serviceSource,
-  /const content = await this\.extractItemContent\([\s\S]*?this\.textChunker\.chunk\(content\)/,
+  /const extracted = await this\.extractItemContent\([\s\S]*?const content = extracted\.text;[\s\S]*?this\.textChunker\.chunk\(content\)/,
   "resolved item text flows directly into chunking without a SQLite body cache",
 );
 assert.match(
@@ -751,7 +751,18 @@ assert.match(
   /getByLibraryAndKeyAsync\(libraryID, key\)/,
   "item lookup must use the retry group's original Library ID",
 );
-assert.match(serviceSource, /libraryID: first\.libraryID/);
+// Retry batches carry the Library their keys belong to, never a default.
+assert.match(serviceSource, /libraryID: batch\.libraryID/);
+assert.match(
+  serviceSource,
+  /libraryID: group\[0\]\.libraryID/,
+  "a retry batch built from failure markers keeps that group's Library",
+);
+assert.doesNotMatch(
+  serviceSource,
+  /retryFailedItems[\s\S]{0,3000}?libraryID: Zotero\.Libraries\.userLibraryID/,
+  "retry must never fall back to My Library for keys of unknown Library",
+);
 
 // Targeted/incremental builds keep dimension compatibility checks; only a
 // true full rebuild may replace incompatible vectors.

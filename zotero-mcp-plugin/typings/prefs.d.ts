@@ -35,6 +35,7 @@ declare namespace _ZoteroTypes {
       "hybrid.chunkAppendToleranceChars": number;
       "hybrid.neighborRadius": number;
       "hybrid.searchTimeoutMs": number;
+      "hybrid.keywordSearchTimeoutMs": number;
       "hybrid.gpuAccelerationEnabled": boolean;
       "hybrid.gpuPrecision": string;
       "semantic.enabled": boolean;

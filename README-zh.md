@@ -2,11 +2,10 @@
 
 Zotero MCP 是一个开源项目，旨在通过模型上下文协议（Model Context Protocol, MCP）将强大的 AI 功能与领先的文献管理工具 Zotero 无缝集成，为 AI 助手（如 Claude）提供与您本地 Zotero 文献库交互的能力。
 _This README is also available in: [:gb: English](./README.md) | :cn: 简体中文._
-[![GitHub](https://img.shields.io/badge/GitHub-zotero--mcp-blue?logo=github)](https://github.com/cookjohn/zotero-mcp)
 [![zotero target version](https://img.shields.io/badge/Zotero-7-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-1.7.0-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-1.8.0-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -63,7 +62,7 @@ AI 客户端 ↔ Streamable HTTP ↔ Zotero 插件（集成 MCP 服务器）
 **两步快速开始：**
 
 1.  **安装插件**：
-    - 前往项目的 [Releases 页面](https://github.com/cookjohn/zotero-mcp/releases) 下载最新的 `zotero-mcp-plugin-x.x.x.xpi` 文件。
+    - 从提供本项目给您的人那里获取最新的 `zotero-mcp-plugin-x.x.x.xpi` 文件（或参考下方开发者指南自行构建）。
     - 在 Zotero 中，通过 `工具 -> 附加组件` 安装该 `.xpi` 文件。
     - 重启 Zotero。
 
@@ -146,7 +145,7 @@ AI 客户端 ↔ Streamable HTTP ↔ Zotero 插件（集成 MCP 服务器）
 - **`Error: connect ECONNREFUSED 127.0.0.1:23119`**: 表示 MCP 服务器无法连接到 Zotero 插件。请执行上述排查指南的第 1 步和第 3 步。
 - **JSON 格式错误**: 在手动编辑配置文件时，请确保您的 JSON 语法正确，没有遗漏逗号或括号。
 
-如果以上步骤均无法解决问题，请前往 [GitHub Issues](https://github.com/cookjohn/zotero-mcp/issues) 页面，并附上您的操作系统、客户端版本和相关的日志信息，以便我们更好地帮助您。
+如果以上步骤均无法解决问题，请联系插件维护者，并附上您的操作系统、客户端版本和相关的日志信息，以便更好地帮助您。
 
 ---
 
@@ -198,7 +197,7 @@ AI 客户端 ↔ Streamable HTTP ↔ Zotero 插件（集成 MCP 服务器）
 
 ### 步骤 1: 安装和配置 Zotero 插件
 
-1. 前往项目的 [Releases 页面](https://github.com/cookjohn/zotero-mcp/releases) 下载最新的 `zotero-mcp-plugin-x.x.x.xpi` 文件
+1. 自行构建最新的 `zotero-mcp-plugin-x.x.x.xpi` 文件（见下方步骤 2），或获取他人提供的预构建版本
 2. 在 Zotero 中，通过 `工具 -> 附加组件` 安装该 `.xpi` 文件
 3. 在 Zotero 的 `首选项 -> Zotero MCP Plugin` 标签页中，配置服务器设置：
    - **启用服务器**：启动集成的 MCP 服务器
@@ -209,10 +208,9 @@ AI 客户端 ↔ Streamable HTTP ↔ Zotero 插件（集成 MCP 服务器）
 
 如果您想要修改或开发插件，可以按照以下步骤设置开发环境：
 
-1. 克隆本仓库到本地：
+1. 获取本仓库（克隆或直接复制项目目录）后进入目录：
 
    ```bash
-   git clone https://github.com/cookjohn/zotero-mcp.git
    cd zotero-mcp
    ```
 
@@ -475,7 +473,24 @@ cursor 过期会明确报错，而不是悄悄重新搜一遍。
 
 #### `find_similar`
 
-基于指定条目发现语义相似的文献。参数：`itemKey`（必需）、`topK`、`minScore`。
+以一篇文献的多个代表性段落为查询，发现语义相似的**文献**。全程纯语义，不涉及关键词。
+
+调用链：AI 先用 `search_fulltext` 从目标文献中挑出有代表性的核心段落 → 把这些 `chunkId` 传给本工具 → 直接复用它们已存储的向量扫描整个语义索引（不重新生成向量）→ 自动排除该文献自身 → 按文献聚合成唯一分数 → 过用户阈值 → 分页。
+
+聚合口径：对每个查询 chunk，取候选文献中最相似的两段求平均得到 s_i；文献分 = 0.75 × mean(s_i) + 0.25 × max(s_i)。全部是余弦值的均值/最大值，与阈值同为 0–1 尺度。这样一篇文献要靠「在你给的多个方面上都相关」得分，而不是靠单个偶然高分段落。
+
+达到阈值的文献数量不设上限，按分数排序后每页最多 20 篇，返回 `hasMore` / `nextCursor`；翻页只是在已排好序的名单上开窗口，不会重新扫描全库。返回内容只有身份、分数和命中的 `chunkId`，不含段落原文——要读内容请对该文献调用 `search_fulltext`。
+
+超时：不新增独立设置。扫描截止时间 = 用户的单次扫描超时 `vectorScanTimeoutMs` × 动态倍率，倍率按查询 chunk 数量 N 和实际执行路径确定：CPU 为 `0.8 + 0.35N`（数据库只读一遍，只有点积随 N 增长），GPU 为 `0.5 + 1.1N`（向量常驻显存，每个查询各扫一遍）。两组系数均来自实测（`npm run benchmark:find-similar-scaling`），本次生效的预算会写在返回的 `metadata.scanBudget` 里。
+
+| 参数        | 类型     | 描述                                                              |
+| ----------- | -------- | ----------------------------------------------------------------- |
+| `itemKey`   | string   | 查询文献（新检索必需，翻页时可省略）                              |
+| `chunkIds`  | number[] | 该文献中代表性段落的 chunkId（新检索必需，最多 20 个，须同属一篇） |
+| `minScore`  | number   | 文献级相关度下限，只能比用户设置更严格                            |
+| `topK`      | number   | 每页篇数，上限为用户设置（最大 20）                               |
+| `cursor`    | string   | 续页游标，原样回传 `nextCursor`                                   |
+| `libraryID` | number   | 文献库 ID（默认用户库）                                           |
 
 #### `semantic_status`
 
@@ -605,3 +620,5 @@ cursor 过期会明确报错，而不是悄悄重新搜一遍。
 - [Zotero](https://www.zotero.org/) - 优秀的开源文献管理工具。
 - [Model Context Protocol](https://modelcontextprotocol.org/) - 实现 AI 工具集成的协议。
 - [![Using Zotero Plugin Template](https://img.shields.io/badge/Using-Zotero%20Plugin%20Template-blue?style=flat-square&logo=github)](https://github.com/windingwind/zotero-plugin-template)
+- 本项目基于 [cookjohn](https://github.com/cookjohn) 的原始 [zotero-mcp](https://github.com/cookjohn/zotero-mcp) 项目开发，感谢原作者的工作。
+- 同时感谢 [Zotero Mark Reader](PENDING_URL) 项目作者，本项目的阅读/批注相关功能借鉴了该项目。

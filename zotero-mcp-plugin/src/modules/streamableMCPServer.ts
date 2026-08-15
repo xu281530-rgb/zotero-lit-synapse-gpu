@@ -18,9 +18,24 @@ import {
 import { UnifiedContentExtractor } from './unifiedContentExtractor';
 import { SmartAnnotationExtractor } from './smartAnnotationExtractor';
 import { MCPSettingsService } from './mcpSettingsService';
-import { getSemanticSearchService, SemanticSearchService } from './semantic';
 import {
-  DEFAULT_SEMANTIC_TIMEOUT_MS,
+  DEFAULT_EMBEDDING_TIMEOUT_MS,
+  describeFullTextAvailability,
+  describePageFullTextGaps,
+  emptyFullTextCoverage,
+  fullTextAvailabilityFromState,
+  getSemanticSearchService,
+  type BodyIndexState,
+  type FullTextAvailability,
+  type FullTextCoverage,
+  MAX_SIMILAR_QUERY_CHUNKS,
+  resolveSimilarScanBudget,
+  SemanticSearchService,
+  SIMILAR_CHUNKS_PER_QUERY,
+  SIMILAR_MAX_WEIGHT,
+  SIMILAR_MEAN_WEIGHT,
+} from './semantic';
+import {
   HYBRID_KEYWORD_COVERAGE_BONUS,
   LEXICAL_FIELD_WEIGHTS,
   MAX_HYBRID_KEYWORDS,
@@ -51,6 +66,7 @@ import {
   CursorError,
   detachPageWindow,
   HybridSearchPageStore,
+  SIMILAR_PAGE_IDENTITY,
   windowOf,
 } from './hybridSearchPages';
 import { resolveCollectionScope } from './collectionScope';
@@ -156,6 +172,15 @@ function trimCachedEvidence(row: Record<string, any>): Record<string, any> {
 function describeScope(scope: CollectionScope): string {
   if (scope.searchScope === 'library') return 'library';
   return `collections:${scope.collections.map((c) => c.key).sort().join(',')}`;
+}
+
+/** Everything about one find_similar run that stays the same across its pages. */
+interface SimilarSearchSnapshot {
+  itemKey: string;
+  libraryID: number;
+  queryChunkIds: number[];
+  appliedMinScore: number;
+  metadata: Record<string, any>;
 }
 
 interface HybridSearchSnapshot {
@@ -299,6 +324,19 @@ export class StreamableMCPServer {
     Record<string, any>,
     HybridSearchSnapshot
   >();
+  /**
+   * Paging state for find_similar — deliberately a SEPARATE store from
+   * hybrid_search's.
+   *
+   * Both keep only the few most recent searches, and the two tools are meant to
+   * be used together (find candidates, dig into one, look for more like it).
+   * Sharing one table would let a hybrid_search evict the similarity ranking the
+   * AI was halfway through paging, and vice versa.
+   */
+  private similarPages = new HybridSearchPageStore<
+    Record<string, any>,
+    SimilarSearchSnapshot
+  >(undefined, undefined, undefined, SIMILAR_PAGE_IDENTITY);
 
   constructor() {
     // No initialization needed - using direct function calls
@@ -306,7 +344,8 @@ export class StreamableMCPServer {
 
   clearSemanticState(): void {
     this.hybridPages.clear();
-    if (this.hybridPages.size !== 0) {
+    this.similarPages.clear();
+    if (this.hybridPages.size !== 0 || this.similarPages.size !== 0) {
       throw new Error('Semantic pagination state could not be cleared');
     }
   }
@@ -1311,33 +1350,54 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
       },
       {
         name: 'find_similar',
-        description: 'Find items semantically similar to a given item using AI embeddings. Useful for expanding research from a known relevant paper and discovering thematic clusters.',
+        description: [
+          'Find DOCUMENTS in the library that are semantically similar to ONE paper you already have, using several of that paper\'s own passages as the query. Purely semantic: no keywords are involved at any point.',
+          '',
+          'THE CALL CHAIN, in order. You must do step 1 yourself; this tool does 2-5.',
+          '1. YOU pick the representative chunks. Run search_fulltext on the paper you are expanding from and read the passages it returns. Choose the ones that actually characterise the paper for YOUR task — its method, its mechanism, its material system, its findings, or whichever facets matter — and note their chunkId values. This tool does not and cannot judge which passages are representative; that judgement is the part only you can make, and it decides the quality of everything below.',
+          '2. Full-index semantic scan with every chunk you passed, as separate query vectors. Their stored vectors are reused directly, so nothing is re-embedded.',
+          '3. The query paper itself is excluded from its own results.',
+          '4. DOCUMENT-LEVEL aggregation. Chunk scores are folded into ONE score per candidate document: for each of your query chunks, the candidate\'s two best-matching passages are averaged, then those per-chunk-query scores are combined (mostly their mean, plus a smaller weight on the strongest one). A paper therefore scores high by relating to SEVERAL of the facets you supplied, not by owning one lucky passage. The result is on the same 0-1 scale as every other relevance score in this plugin.',
+          '5. The user\'s relevance threshold is applied to those document scores, and EVERY document above it is ranked and paged - there is no cap on how many papers may qualify.',
+          '',
+          'PAGING: 20 documents per page, ordered best first. When hasMore is true, call again with cursor set to nextCursor and nothing else changed; that replays the stored ranking instead of re-scanning the library. Decide as you page whether to keep going or to stop and dig into a promising candidate with get_item_abstract and search_fulltext.',
+          '',
+          'WHAT COMES BACK: identity, score, the chunkIds that carried the score, and fullText — whether that document has body text in the index, one of: indexed, parse_failed, no_source, not_indexed, unknown. No passage text. To read a candidate, call search_fulltext on its itemKey; a row whose fullText is "parse_failed", "no_source" or "not_indexed" holds only title and abstract and will be refused there, and one that is "unknown" predates the record so its passages are unverified.',
+          '',
+          'Pass chunks from ONE document only. chunkIds are numbered within their own document, so ids from another paper either fail to resolve or would silently mean different passages.',
+        ].join('\n'),
         inputSchema: {
           type: 'object',
           properties: {
             itemKey: {
               type: 'string',
-              description: 'The item key to find similar items for'
+              description: 'The paper the query chunks are taken from. It is excluded from its own results. Required when starting a new search; omit it when following a cursor.'
             },
-            topK: {
-              type: 'number',
-              description: 'Number of similar items to return (default: 5)'
-            },
-            minScore: {
-              type: 'number',
-              description: 'Minimum similarity score 0-1 (default: 0.3)'
+            chunkIds: {
+              type: 'array',
+              items: { type: 'number' },
+              minItems: 1,
+              maxItems: MAX_SIMILAR_QUERY_CHUNKS,
+              description: `The chunkIds of the passages of THAT paper you judged representative, taken from a search_fulltext call on it. How many to pass is your call — enough to cover the facets you care about. Every id must belong to itemKey; ids from another document are rejected. Hard maximum ${MAX_SIMILAR_QUERY_CHUNKS}, because each additional chunk re-scores the entire index. Required when starting a new search.`
             },
             libraryID: {
               type: 'number',
               description: 'Zotero library ID (default: user library)'
             },
-            timeoutMs: {
+            minScore: {
               type: 'number',
-              minimum: 1,
-              description: 'Total similarity search deadline in milliseconds (default: 8000)'
+              description: 'Document-level relevance floor 0-1. May only be STRICTER than the user setting; a lower value is raised back to it.'
+            },
+            topK: {
+              type: 'number',
+              description: 'Page size. Capped by the user\'s maximum (20); it only lowers the page size and never the number of qualifying documents, which is unlimited.'
+            },
+            cursor: {
+              type: 'string',
+              description: 'Continue a previous find_similar. Pass nextCursor exactly as returned; the stored ranking is replayed with no new scan. Do not change itemKey, chunkIds or minScore while paging.'
             }
           },
-          required: ['itemKey']
+          required: []
         }
       },
       {
@@ -1797,7 +1857,22 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
             }
             result = await this.callSemanticSearch(args);
           } else if (name === 'find_similar') {
-            if (!args?.itemKey) throw new Error('itemKey is required');
+            // A cursor names the search it continues, so the query chunks are
+            // required only when starting a new one.
+            const continuing =
+              typeof args?.cursor === 'string' && args.cursor.trim().length > 0;
+            if (!continuing) {
+              if (!args?.itemKey) {
+                throw new Error(
+                  'itemKey is required (or pass cursor to continue a previous find_similar)',
+                );
+              }
+              if (!Array.isArray(args?.chunkIds) || args.chunkIds.length === 0) {
+                throw new Error(
+                  'chunkIds is required: pick the representative passages of this paper with search_fulltext first, then pass their chunkIds here. find_similar does not choose them for you.',
+                );
+              }
+            }
             result = await this.callFindSimilar(args);
           } else {
             result = await this.callSemanticStatus();
@@ -2051,8 +2126,21 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
       keywordWeight: args.keywordWeight ?? 1,
       semanticWeight: args.semanticWeight ?? 1,
       minScore: scoreFloor.value,
-      exhaustive: true,
+      keywordSearchTimeoutMs: settings.keywordSearchTimeoutMs,
+      // Backstop for the fusion layer. The semantic branch's real budget is the
+      // embedding timeout plus the vector-scan timeout, enforced inside the
+      // service; this only catches a dependency that never settles at all.
+      semanticBranchTimeoutMs:
+        settings.vectorScanTimeoutMs + DEFAULT_EMBEDDING_TIMEOUT_MS,
     };
+    // The lexical scan degrades to partial results slightly before the branch's
+    // hard deadline, so an overrun returns the candidates it managed to rank
+    // instead of nothing. The hard deadline still fires when the candidate-ID
+    // query itself never comes back, which is the case no soft check can reach.
+    const lexicalStartedAt = Date.now();
+    const lexicalDeadlineAt =
+      lexicalStartedAt +
+      Math.max(1, Math.floor(settings.keywordSearchTimeoutMs * 0.9));
     const semanticEnabled = Zotero.Prefs.get(
       'extensions.zotero.zotero-mcp-plugin.semantic.enabled',
       true,
@@ -2082,6 +2170,7 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
             keywords: lexicalKeywordEntries,
             libraryID,
             scopeItemKeys,
+            deadlineAt: lexicalDeadlineAt,
             isCancelled: () => lexicalCancelled,
           });
           lexicalDiagnostics = outcome.diagnostics;
@@ -2109,7 +2198,7 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
             // belonging to these items, so out-of-scope chunks are never
             // dequantised and never have a similarity computed for them.
             itemKeys: scope.searchScope === 'collections' ? scope.itemKeys : undefined,
-            vectorScanTimeoutMs: settings.searchTimeoutMs,
+            vectorScanTimeoutMs: settings.vectorScanTimeoutMs,
             signal: semanticAbort?.signal,
             stats: semanticScanStats,
           });
@@ -2298,9 +2387,18 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
     const window = detachPageWindow(
       windowOf<Record<string, any>>(ranked, 0, topK, searchId),
     );
-    await this.enrichHybridResults(window.rows, libraryID);
+    const fullTextCoverage = await this.enrichHybridResults(
+      window.rows,
+      libraryID,
+    );
 
-    return this.buildHybridSearchResponse(snapshot, window, topK, false);
+    return this.buildHybridSearchResponse(
+      snapshot,
+      window,
+      topK,
+      false,
+      fullTextCoverage,
+    );
   }
 
   /**
@@ -2434,13 +2532,22 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
     const window = detachPageWindow(cachedWindow);
     const pageSize = request.requestedPageSize ?? state.fingerprint.pageSize;
 
-    await this.enrichHybridResults(window.rows, state.fingerprint.libraryID);
+    const fullTextCoverage = await this.enrichHybridResults(
+      window.rows,
+      state.fingerprint.libraryID,
+    );
 
     ztoolkit.log(
       `[StreamableMCP][HybridPage] cursor page offset=${window.offset} returned=${window.returned} total=${window.totalRelevant} hasMore=${window.hasMore}`,
     );
 
-    return this.buildHybridSearchResponse(state.meta, window, pageSize, true);
+    return this.buildHybridSearchResponse(
+      state.meta,
+      window,
+      pageSize,
+      true,
+      fullTextCoverage,
+    );
   }
 
   /**
@@ -2454,10 +2561,21 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
     window: PageWindow<Record<string, any>>,
     pageSize: number,
     fromCursor: boolean,
+    fullTextCoverage?: FullTextCoverage,
   ): any {
     const first = window.totalRelevant === 0 ? 0 : window.offset + 1;
     const last = window.offset + window.returned;
     const range = window.totalRelevant === 0 ? 'none' : `${first}-${last}`;
+
+    // Counted per page, not per search: which documents lack full text depends
+    // on which rows this page actually returned, so this cannot live in the
+    // cached snapshot that paging replays.
+    const fullTextWarning = fullTextCoverage
+      ? describePageFullTextGaps(fullTextCoverage)
+      : undefined;
+    const warnings = fullTextWarning
+      ? [...(snapshot.metadata.warnings ?? []), fullTextWarning]
+      : snapshot.metadata.warnings;
 
     return {
       mode: 'hybrid',
@@ -2488,11 +2606,17 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
       data: window.rows.map(projectHybridCandidate),
       metadata: {
         ...snapshot.metadata,
+        warnings,
+        // Exactly the five values a row's `fullText` can take, counted over
+        // the rows THIS page returned. `unknown` is reported as itself: an
+        // index written before the distinction existed is not evidence of
+        // full text, and folding it into `indexed` would overstate coverage.
+        fullTextCoverage,
         extractedAt: new Date().toISOString(),
         resultCount: window.returned,
         totalRelevant: window.totalRelevant,
         servedFromCursor: fromCursor,
-        nextStep: this.hybridNextStep(snapshot, window, range),
+        nextStep: this.hybridNextStep(snapshot, window, range, fullTextWarning),
       },
     };
   }
@@ -2501,6 +2625,7 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
     snapshot: HybridSearchSnapshot,
     window: PageWindow<Record<string, any>>,
     range: string,
+    fullTextWarning?: string,
   ): string {
     if (snapshot.keywordSource === 'fallback') {
       return `This call is not recorded as domain-expert retrieval (${snapshot.fallbackReason}). Redo hybrid_search once with bilingual domain-expert keywords plus domain and expertRole, then work from that ranking. ${snapshot.retryBudgetNote} Triage the rows before fetching anything: get_item_abstract only for a candidate you are seriously considering, then search_fulltext on that one document.`;
@@ -2516,7 +2641,7 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
     }
 
     const funnel =
-      'These are candidates above the relevance threshold, as lightweight rows: title, creators, year, venue, language, fused score, which keywords matched which fields, and a short evidence snippet. Abstracts are NOT included - they were searched, they are just not shipped back. Triage from these rows first. For a paper you are seriously considering going deeper on - and only for those - call get_item_abstract with that one itemKey; a page of 20 candidates does not mean 20 abstracts. After reading an abstract, re-fit domain and expertRole to what THAT paper actually studies, write a query and keywords from its own subject matter in the language it is written in (one language, not both), and call search_fulltext with its single itemKey.';
+      'These are candidates above the relevance threshold, as lightweight rows: title, creators, year, venue, language, fused score, which keywords matched which fields, a short evidence snippet, and fullText — whether that document actually has body text in the index, one of: indexed (real full text), parse_failed (a PDF/Markdown exists but could not be parsed), no_source (no PDF/Markdown/text attachment at all), not_indexed (has a body source but is not in the semantic index yet), unknown (indexed before this was recorded). Read fullText before you read matchedChunks. "indexed" is the only value whose snippets are confirmed body text. For "parse_failed", "no_source" and "not_indexed" the document was indexed from its title and abstract alone, the snippets are that metadata rather than passages from the paper, and search_fulltext will refuse it. For "unknown" the document predates this record: search_fulltext still works, but whether its passages are body text or just an abstract was never established, so do not cite them as the paper\'s content without checking. Every row that is not "indexed" carries a fullTextNote saying what to do about it. metadata.fullTextCoverage counts this page by those same five values, and the five counts add up to the rows returned. Abstracts are NOT included - they were searched, they are just not shipped back. Triage from these rows first. For a paper you are seriously considering going deeper on - and only for those - call get_item_abstract with that one itemKey; a page of 20 candidates does not mean 20 abstracts. After reading an abstract, re-fit domain and expertRole to what THAT paper actually studies, write a query and keywords from its own subject matter in the language it is written in (one language, not both), and call search_fulltext with its single itemKey.';
 
     const paging = window.hasMore
       ? ` PAGING: ${window.totalRelevant} documents cleared the threshold and you are seeing ${range}. If the bottom of this page is still relevant, or the user asked for a comprehensive sweep or a literature review, call hybrid_search again with cursor="${window.nextCursor}" and change nothing else - same query, keywords, domain, expertRole and minScore - to get the next page of the SAME ranking. Do not page by reflex: if this page already answers the question, stop here.`
@@ -2530,7 +2655,12 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
       ? ''
       : ' These are all the documents above the threshold. Do not lower minScore to find more; the threshold is the user\'s setting.';
 
-    return funnel + paging + bound + degradedNote;
+    // Placed in nextStep as well as in warnings: this one changes what the
+    // caller may do with specific rows, so it belongs in the instruction it is
+    // about to follow, not only in a list it may skim.
+    const fullTextNote = fullTextWarning ? ` FULL TEXT: ${fullTextWarning}` : '';
+
+    return funnel + paging + bound + degradedNote + fullTextNote;
   }
 
   /**
@@ -2549,11 +2679,71 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
    * the language the document is written in, which is what stage-3 keywords
    * have to be written in.
    */
+  /**
+   * Mark every row on a page with whether that document has indexed body text.
+   *
+   * This is the earliest point the distinction can be made visible, and making
+   * it visible here is the whole point: refusing at search_fulltext is correct
+   * but happens after the candidate row has already been read. A paper whose
+   * PDF failed to parse produces a row that is identical to a real one — same
+   * fused score, same `matchedBy: "semantic"`, same `matchedChunks` — except
+   * that those chunks are its title and abstract. Without this field there is
+   * nothing in the response that could tell the two apart, so an abstract can
+   * be quoted as if it were the paper's results.
+   *
+   * One batched query per page; rows are annotated in place.
+   */
+  private async annotateFullTextAvailability(
+    results: Array<Record<string, any>>,
+    defaultLibraryID: number,
+  ): Promise<FullTextCoverage> {
+    const coverage = emptyFullTextCoverage();
+    if (results.length === 0) return coverage;
+
+    let states: Map<string, BodyIndexState> | null = null;
+    try {
+      states = await getSemanticSearchService().getItemBodyIndexStates(
+        results.map((result) => ({
+          itemKey: result.itemKey,
+          libraryID: result.libraryID ?? defaultLibraryID,
+        })),
+      );
+    } catch (error) {
+      // A lookup failure must not silently claim every row has full text.
+      // 'unknown' is the honest answer to "we could not find out", and it is
+      // counted as 'unknown' rather than quietly disappearing.
+      ztoolkit.log(
+        `[StreamableMCP] Could not resolve full-text availability for this page: ${error}`,
+        'warn',
+      );
+    }
+
+    // Every row is annotated and counted exactly once, on both the success and
+    // the failure path, so the five counts always sum to the rows returned.
+    for (const result of results) {
+      const libraryID = result.libraryID ?? defaultLibraryID;
+      const availability: FullTextAvailability = states
+        ? fullTextAvailabilityFromState(
+            states.get(`${libraryID}:${result.itemKey}`) ?? 'missing',
+          )
+        : 'unknown';
+      result.fullText = availability;
+      const note = describeFullTextAvailability(availability);
+      if (note) result.fullTextNote = note;
+      coverage[availability] += 1;
+    }
+    return coverage;
+  }
+
   private async enrichHybridResults(
     results: Array<Record<string, any>>,
     defaultLibraryID: number,
-  ): Promise<void> {
+  ): Promise<FullTextCoverage> {
     await getSemanticSearchService().hydrateMatchedChunkTexts(results);
+    const fullTextCoverage = await this.annotateFullTextAvailability(
+      results,
+      defaultLibraryID,
+    );
     for (const result of results) {
       try {
         const item = await Zotero.Items.getByLibraryAndKeyAsync(
@@ -2606,6 +2796,7 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
         );
       }
     }
+    return fullTextCoverage;
   }
 
   private validateSearchParameters(params: {
@@ -2965,14 +3156,17 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
       const language = args.language ?? 'all';
       const libraryID =
         args.libraryID ?? Zotero.Libraries.userLibraryID;
-      const timeoutMs = args.timeoutMs ?? DEFAULT_SEMANTIC_TIMEOUT_MS;
+      // The caller does not get to choose its own deadline: the user's
+      // vector-scan setting is the single source of truth for how long a scan
+      // may run, exactly as it is for hybrid_search.
+      const settings = getHybridSearchSettings();
+      const vectorScanTimeoutMs = settings.vectorScanTimeoutMs;
       this.validateSearchParameters({
         query: args.query,
         topK,
         minScore,
         language,
         libraryID,
-        timeoutMs,
       });
       const semanticService = getSemanticSearchService();
 
@@ -2983,9 +3177,10 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
             minScore,
             language,
             libraryID,
-            timeoutMs,
+            vectorScanTimeoutMs,
           }),
-        timeoutMs,
+        // Backstop only; embedding and scanning are each bounded inside.
+        vectorScanTimeoutMs + DEFAULT_EMBEDDING_TIMEOUT_MS,
         'Semantic search',
       );
 
@@ -3010,47 +3205,331 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
     }
   }
 
+  /**
+   * Multi-chunk, document-level similarity search.
+   *
+   * The order of operations is the point, and it mirrors hybrid_search:
+   *
+   *   scan whole index with every query chunk -> aggregate chunk scores into
+   *   ONE score per document -> apply the user's threshold -> rank -> page
+   *
+   * Aggregating before truncating is what makes "the documents most similar to
+   * this paper" answerable. The previous implementation kept the top-K CHUNKS
+   * and de-duplicated them into documents afterwards, so a single paper with
+   * many strong passages could consume the entire result set.
+   */
   private async callFindSimilar(args: any): Promise<any> {
     try {
-      const topK = args.topK ?? 5;
-      const minScore = args.minScore ?? 0.3;
-      const libraryID =
-        args.libraryID ?? Zotero.Libraries.userLibraryID;
-      const timeoutMs = args.timeoutMs ?? DEFAULT_SEMANTIC_TIMEOUT_MS;
+      const settings = getHybridSearchSettings();
+      const pageCap = resolveResultCap(args.topK, settings.maxDocuments);
+      const scoreFloor = resolveScoreFloor(args.minScore, settings.minScore);
+      const libraryID = args.libraryID ?? Zotero.Libraries.userLibraryID;
+
+      const cursor =
+        typeof args.cursor === 'string' && args.cursor.trim()
+          ? args.cursor.trim()
+          : null;
+      if (cursor) {
+        return this.continueFindSimilar(args, cursor, {
+          requestedPageSize: args.topK === undefined ? undefined : pageCap.value,
+          scoreFloor: scoreFloor.value,
+          libraryID,
+        });
+      }
+
       this.validateSearchParameters({
-        topK,
-        minScore,
+        topK: pageCap.value,
+        minScore: scoreFloor.value,
         libraryID,
-        timeoutMs,
       });
+
+      const chunkIds = (Array.isArray(args.chunkIds) ? args.chunkIds : []).map(
+        (value: unknown) => Number(value),
+      );
+      const vectorScanTimeoutMs = settings.vectorScanTimeoutMs;
       const semanticService = getSemanticSearchService();
 
-      const results = await runWithTimeout(
+      // The scan sizes its own deadline from the same model (query count x
+      // execution path); this outer backstop must be derived from it too, or it
+      // would fire first and turn a legitimate multi-chunk scan into a timeout.
+      // Unique ids only, exactly as the service counts them.
+      const backstop = resolveSimilarScanBudget({
+        queryChunkCount: new Set(chunkIds).size || 1,
+        vectorScanTimeoutMs,
+        path: semanticService.isGpuSearchEnabled() ? 'gpu' : 'cpu',
+      });
+
+      const outcome = await runWithTimeout(
         () =>
-          semanticService.findSimilar(args.itemKey, {
-            topK,
-            minScore,
+          semanticService.findSimilarByChunks({
+            itemKey: String(args.itemKey),
+            chunkIds,
             libraryID,
-            timeoutMs,
+            minScore: scoreFloor.value,
+            vectorScanTimeoutMs,
           }),
-        timeoutMs,
+        // Backstop only; the scan carries its own deadline internally.
+        backstop.timeoutMs + 5000,
         'Similarity search',
       );
 
-      const response = {
-        mode: 'similar',
-        sourceItemKey: args.itemKey,
-        data: results,
+      const warnings: string[] = [];
+      if (pageCap.clamped) {
+        warnings.push(
+          `Requested page size exceeded the user's maximum of ${settings.maxDocuments}; capped at ${pageCap.value}. No qualifying document is lost — page on with nextCursor.`,
+        );
+      }
+      if (scoreFloor.clamped) {
+        warnings.push(
+          `Requested minScore was below the user's relevance threshold; raised to ${scoreFloor.value}.`,
+        );
+      }
+
+      const ranked: Array<Record<string, any>> = outcome.ranked.map(
+        (document) => ({
+          itemKey: document.itemKey,
+          libraryID: document.libraryID,
+          score: roundScore(document.score),
+          bestChunkScore: roundScore(document.bestChunkScore),
+          matchedQueryChunks: document.matchedQueryChunks,
+          perQueryScores: document.perQueryScores.map(roundScore),
+          // Evidence coordinates only: the passages themselves are read with
+          // search_fulltext on the candidate, one paper at a time.
+          matchedChunkIds: document.evidence.map((hit) => hit.chunkId),
+          matchedChunkScores: document.evidence.map((hit) =>
+            roundScore(hit.score),
+          ),
+        }),
+      );
+
+      const snapshot: SimilarSearchSnapshot = {
+        itemKey: outcome.itemKey,
+        libraryID: outcome.libraryID,
+        queryChunkIds: outcome.queryChunkIds,
+        appliedMinScore: scoreFloor.value,
         metadata: {
-          extractedAt: new Date().toISOString(),
-          resultCount: results.length
-        }
+          searchMode: 'similar_documents',
+          scoring: 'pure_semantic_document_aggregate',
+          aggregation: {
+            chunksPerQueryChunk: SIMILAR_CHUNKS_PER_QUERY,
+            meanWeight: SIMILAR_MEAN_WEIGHT,
+            maxWeight: SIMILAR_MAX_WEIGHT,
+            formula:
+              'documentScore = (meanWeight * mean_i(s_i) + maxWeight * max_i(s_i)) / (meanWeight + maxWeight), where s_i is the mean of this document\'s two best chunk cosines against query chunk i (0 when it has none)',
+          },
+          queryItemKey: outcome.itemKey,
+          queryChunkIds: outcome.queryChunkIds,
+          queryChunkCount: outcome.queryChunkIds.length,
+          totalChunksInQueryItem: outcome.totalChunksInItem,
+          candidateDocuments: outcome.candidateDocuments,
+          discardedBelowThreshold: outcome.discardedBelowThreshold,
+          chunksScanned: outcome.chunksScanned,
+          appliedMinScore: scoreFloor.value,
+          userMinScore: settings.minScore,
+          appliedPageSize: pageCap.value,
+          userMaxDocuments: settings.maxDocuments,
+          gpuAcceleration: settings.gpuAccelerationEnabled,
+          // The deadline this call ran under, and how it was derived from the
+          // user's single-scan setting. Reported so a timeout can be read as
+          // "the library is bigger than the configured scan budget" rather than
+          // as an unexplained failure.
+          scanBudget: {
+            appliedTimeoutMs: outcome.budget.timeoutMs,
+            multiplier: Number(outcome.budget.multiplier.toFixed(2)),
+            executionPath: outcome.budget.path,
+            userVectorScanTimeoutMs: outcome.budget.vectorScanTimeoutMs,
+            queryChunkCount: outcome.budget.queryChunkCount,
+            capped: outcome.budget.capped,
+          },
+          warnings,
+          timings: { scanMs: outcome.scanMs, totalMs: outcome.totalMs },
+        },
       };
 
-      return response;
+      const fingerprint: SearchFingerprint = {
+        // The query identity is the source document plus the chunks chosen from
+        // it: change either and this is a different ranking, not another page.
+        query: `${outcome.libraryID}:${outcome.itemKey}`,
+        keywords: outcome.queryChunkIds.map(String),
+        appliedMinScore: scoreFloor.value,
+        language: 'all',
+        libraryID: outcome.libraryID,
+        rrfK: 0,
+        keywordWeight: 0,
+        semanticWeight: 1,
+        pageSize: pageCap.value,
+        scope: 'library',
+      };
+      const searchId =
+        ranked.length > pageCap.value
+          ? this.similarPages.create(fingerprint, ranked, snapshot)
+          : 'single-page';
+
+      const window = detachPageWindow(
+        windowOf<Record<string, any>>(ranked, 0, pageCap.value, searchId),
+      );
+      await this.enrichSimilarResults(window.rows, outcome.libraryID);
+
+      return this.buildFindSimilarResponse(
+        snapshot,
+        window,
+        pageCap.value,
+        false,
+      );
     } catch (error) {
       ztoolkit.log(`[StreamableMCP] Find similar error: ${error}`, 'error');
       throw error;
+    }
+  }
+
+  /**
+   * Serve the next page of a similarity search that already ran.
+   *
+   * Nothing is re-scanned or re-ranked: the stored list was aggregated and
+   * threshold-filtered once, and a page is a window onto it.
+   */
+  private async continueFindSimilar(
+    args: any,
+    cursor: string,
+    request: {
+      requestedPageSize: number | undefined;
+      scoreFloor: number;
+      libraryID: number;
+    },
+  ): Promise<any> {
+    // Only what the caller re-sent is checked; omitting an argument means
+    // "unchanged", re-sending a different one means this is another search.
+    const claim: FingerprintClaim = {};
+    if (typeof args.itemKey === 'string' && args.itemKey.trim()) {
+      claim.query = `${request.libraryID}:${args.itemKey.trim()}`;
+    }
+    if (Array.isArray(args.chunkIds) && args.chunkIds.length > 0) {
+      const seen: number[] = [];
+      for (const raw of args.chunkIds) {
+        const chunkId = Number(raw);
+        if (!seen.includes(chunkId)) seen.push(chunkId);
+      }
+      claim.keywords = seen.map(String);
+    }
+    if (args.minScore !== undefined) claim.appliedMinScore = request.scoreFloor;
+    if (args.libraryID !== undefined) claim.libraryID = request.libraryID;
+
+    const { state, window: cachedWindow } = this.similarPages.read(
+      cursor,
+      claim,
+      request.requestedPageSize,
+    );
+    const window = detachPageWindow(cachedWindow);
+    const pageSize = request.requestedPageSize ?? state.fingerprint.pageSize;
+
+    await this.enrichSimilarResults(window.rows, state.fingerprint.libraryID);
+
+    ztoolkit.log(
+      `[StreamableMCP][SimilarPage] cursor page offset=${window.offset} returned=${window.returned} total=${window.totalRelevant} hasMore=${window.hasMore}`,
+    );
+
+    return this.buildFindSimilarResponse(state.meta, window, pageSize, true);
+  }
+
+  /** Page 1 and page N are described identically; only the window moves. */
+  private buildFindSimilarResponse(
+    snapshot: SimilarSearchSnapshot,
+    window: PageWindow<Record<string, any>>,
+    pageSize: number,
+    fromCursor: boolean,
+  ): any {
+    const first = window.totalRelevant === 0 ? 0 : window.offset + 1;
+    const last = window.offset + window.returned;
+    const range = window.totalRelevant === 0 ? 'none' : `${first}-${last}`;
+
+    const nextStep =
+      window.totalRelevant === 0
+        ? 'No document in the library reached the relevance threshold against these passages. Do not lower the threshold: either pick chunks that characterise this paper more specifically, or accept that the library holds nothing close to it.'
+        : window.hasMore
+          ? 'Read this page first. To see more qualifying documents, call find_similar again with cursor set to nextCursor and nothing else changed. To go deeper on one of these, call get_item_abstract and then search_fulltext on its itemKey.'
+          : 'This is every document above the threshold. Go deeper on the ones worth it with get_item_abstract and search_fulltext on their itemKey.';
+
+    return {
+      mode: 'similar_documents',
+      queryItemKey: snapshot.itemKey,
+      queryChunkIds: snapshot.queryChunkIds,
+      pagination: {
+        appliedMinScore: snapshot.appliedMinScore,
+        // Documents above the threshold in this search — not capped by the page
+        // size, and not a candidate count.
+        totalRelevant: window.totalRelevant,
+        returned: window.returned,
+        offset: window.offset,
+        range,
+        pageSize,
+        hasMore: window.hasMore,
+        ...(window.nextCursor ? { nextCursor: window.nextCursor } : {}),
+        servedFromCursor: fromCursor,
+      },
+      data: window.rows,
+      metadata: {
+        ...snapshot.metadata,
+        extractedAt: new Date().toISOString(),
+        resultCount: window.returned,
+        totalRelevant: window.totalRelevant,
+        servedFromCursor: fromCursor,
+        nextStep,
+      },
+    };
+  }
+
+  /**
+   * Fill in identity for one page of similarity results.
+   *
+   * Deliberately not enrichHybridResults: there is no chunk text to hydrate
+   * here, and pulling passages in for 20 documents at a time is exactly the
+   * cost this tool avoids by returning chunk coordinates instead.
+   */
+  private async enrichSimilarResults(
+    results: Array<Record<string, any>>,
+    defaultLibraryID: number,
+  ): Promise<void> {
+    // Same reason as the hybrid page: a document indexed from metadata alone
+    // ranks and reads exactly like one with full text, and find_similar is
+    // also a triage stage whose rows get acted on before search_fulltext is
+    // ever called.
+    await this.annotateFullTextAvailability(results, defaultLibraryID);
+    for (const result of results) {
+      try {
+        const item = await Zotero.Items.getByLibraryAndKeyAsync(
+          result.libraryID ?? defaultLibraryID,
+          result.itemKey,
+        );
+        if (!item) continue;
+        result.title =
+          item.getDisplayTitle?.() || item.getField?.('title') || '';
+        result.itemType = item.itemType;
+        const date = item.getField?.('date') || '';
+        result.date = String(date).match(/\d{4}/)?.[0] || '';
+        try {
+          result.creators = item
+            .getCreators()
+            .map((creator: any) =>
+              `${creator.firstName || ''} ${creator.lastName || ''}`.trim(),
+            )
+            .filter(Boolean)
+            .join(', ');
+        } catch {
+          // Creator lookup is best-effort; the match itself still stands.
+        }
+        const abstract = String(item.getField?.('abstractNote') || '');
+        result.hasAbstract = abstract.length > 0;
+        result.abstractChars = abstract.length;
+        result.language = detectDocumentLanguage(
+          String(item.getField?.('language') || ''),
+          [result.title, abstract],
+        );
+      } catch (error) {
+        ztoolkit.log(
+          `[StreamableMCP] Could not enrich similar result ${result.itemKey}: ${error}`,
+          'warn',
+        );
+      }
     }
   }
 
@@ -3078,9 +3557,24 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
           ? 'Running in fallback mode (API not configured)'
           : `Semantic search ready with ${stats?.indexStats.totalItems || 0} indexed items`;
 
-      // Add Int8 migration suggestion if needed
+      // Report the Int8 coverage gap, and point at something that exists.
+      //
+      // This used to tell the caller to run an Int8 migration tool. No such
+      // MCP tool has ever been exposed here, so the only thing that advice
+      // could produce was a failed tool call and a confused retry loop. The
+      // conversion is not something an MCP client can trigger at all: it
+      // belongs to the user, in Zotero, and re-indexing performs it because
+      // every vector written today is quantised on the way in.
       if (int8Status?.needed) {
-        message += `. WARNING: ${int8Status.count}/${int8Status.total} vectors need Int8 migration for ~6x faster search. Run migrate_int8 to optimize.`;
+        message += `. NOTE: ${int8Status.count}/${int8Status.total} stored vectors predate Int8 quantisation, so searches over them run on the slower Float32 path. This is not something you can fix from here and it does not affect result quality — searches work normally. If the user asks about it, tell them to rebuild the semantic index from Zotero → Preferences → Zotero MCP Plugin → Semantic Search; newly indexed vectors are always quantised.`;
+      }
+
+      // "Indexed" is not the same as "has full text": say how many indexed
+      // items are only a title and an abstract, so this number cannot be read
+      // as full-text coverage.
+      const coverage = stats?.indexStats?.bodyCoverage;
+      if (coverage && coverage.metadataOnly > 0) {
+        message += `. Of these, ${coverage.metadataOnly} item(s) hold ONLY title and abstract because their PDF/Markdown body could not be parsed — search_fulltext refuses those items rather than returning metadata as evidence. Tell the user to check those PDFs and rebuild their index.`;
       }
 
       return {
@@ -3089,6 +3583,7 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
         fallbackMode: stats?.serviceStatus.fallbackMode || false,
         indexProgress: progress,
         indexStats: stats?.indexStats || null,
+        bodyCoverage: coverage ?? null,
         int8Migration: int8Status,
         message
       };

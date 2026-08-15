@@ -723,10 +723,7 @@ private getCapabilities() {
       // 版本号统一取自 package.json 的 config.addonVersion，
       // 与 manifest.json、设置页脚、MCP serverInfo 保持同一来源。
       version: config.addonVersion,
-      description: "Model Context Protocol integration for Zotero research management",
-      author: config.addonName,
-      repository: "https://github.com/cookjohn/zotero-mcp",
-      documentation: "https://github.com/cookjohn/zotero-mcp/blob/main/README.md"
+      description: "Model Context Protocol integration for Zotero research management"
     },
     protocols: {
       mcp: {

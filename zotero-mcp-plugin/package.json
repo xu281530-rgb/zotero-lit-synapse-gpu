@@ -1,7 +1,7 @@
 {
   "name": "zotero-mcp-plugin",
   "type": "module",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "Zotero MCP Plugin for Zotero 9.0.x: collection-scoped hybrid retrieval (keyword + semantic fused into one 0-1 relevance score), cursor pagination above a user threshold, on-demand abstracts, single-document full-text search, and MCP 2025-06-18 Streamable HTTP",
   "config": {
     "addonName": "Zotero MCP Plugin",
@@ -9,17 +9,12 @@
     "addonRef": "zotero-mcp-plugin",
     "addonInstance": "ZoteroMCP",
     "prefsPrefix": "extensions.zotero.zotero-mcp-plugin",
-    "addonVersion": "1.7.0"
+    "addonVersion": "1.8.0"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/cookjohn/zotero-mcp.git"
+    "url": "git+https://github.com/xu281530-rgb/zotero-mcp-gpu.git"
   },
-  "author": "cookjohn",
-  "bugs": {
-    "url": "https://github.com/cookjohn/zotero-mcp/issues"
-  },
-  "homepage": "https://github.com/cookjohn/zotero-mcp#readme",
   "license": "MIT",
   "scripts": {
     "start": "zotero-plugin serve",
@@ -29,14 +24,13 @@
     "build:gpu": "npm run build:gpu-native && npm run package:gpu-assets",
     "lint:check": "prettier --check . && eslint .",
     "lint:fix": "prettier --write . && eslint . --fix",
-    "release": "npm version patch --force -m \"Release v%s\" && git push --follow-tags",
-    "release:beta": "npm version prepatch --preid beta --force -m \"Release v%s\" && git push --follow-tags",
-    "prepare-release": "node scripts/prepare-release.js",
-    "version": "node scripts/sync-addon-version.js && npm run prepare-release && git add package.json package-lock.json update.json update-beta.json",
-    "release:init": "node scripts/init-release.js",
+    "version": "node scripts/sync-addon-version.js && git add package.json package-lock.json",
     "test": "zotero-plugin test",
     "test:hybrid-search": "node --experimental-strip-types scripts/test-hybrid-search.js",
     "test:chunking": "node --experimental-strip-types scripts/test-chunking.js",
+    "test:body-index": "node --experimental-strip-types scripts/test-body-index.js",
+    "test:embedding-batching": "node --experimental-strip-types scripts/test-embedding-batching.js",
+    "test:chunk-oversize": "node --experimental-strip-types scripts/test-chunk-oversize-policy.js",
     "test:index-lifecycle": "node --experimental-strip-types scripts/test-index-lifecycle.js",
     "test:fulltext-on-demand": "node --experimental-strip-types scripts/test-fulltext-on-demand.js",
     "test:index-recovery": "node --experimental-strip-types scripts/test-index-recovery.js",
@@ -44,7 +38,9 @@
     "test:hybrid-candidates": "node --experimental-strip-types scripts/test-hybrid-candidates.js",
     "test:hybrid-pagination": "node --experimental-strip-types scripts/test-hybrid-pagination.js",
     "test:vector-topk": "node --experimental-strip-types scripts/test-vector-topk.js",
+    "test:find-similar": "node --experimental-strip-types scripts/test-find-similar.js",
     "test:vector-scan-timeout": "node --experimental-strip-types scripts/test-vector-scan-timeout.js",
+    "test:search-timeouts": "node --experimental-strip-types scripts/test-search-timeouts.js",
     "test:gpu-vector-protocol": "node --experimental-strip-types scripts/test-gpu-vector-protocol.js",
     "test:gpu-vector-status": "node --experimental-strip-types scripts/test-gpu-vector-status.js",
     "test:gpu-vector-dispatch": "node --experimental-strip-types scripts/test-gpu-vector-dispatch.js",
@@ -54,6 +50,7 @@
     "test:gpu-assets": "node scripts/test-gpu-assets-package.js",
     "test:gpu-xpi": "node scripts/test-gpu-assets-package.js --xpi .scaffold/build/zotero-mcp-plugin.xpi",
     "benchmark:vector-gpu": "node --experimental-strip-types --experimental-sqlite scripts/benchmark-vector-gpu.js",
+    "benchmark:find-similar-scaling": "node --experimental-strip-types --experimental-sqlite scripts/benchmark-find-similar-scaling.js",
     "test:http-framing": "node --experimental-strip-types scripts/test-http-framing.js",
     "test:http-transport": "node --experimental-strip-types scripts/test-http-transport.js",
     "check:mcp-framing": "node scripts/check-mcp-framing.mjs",

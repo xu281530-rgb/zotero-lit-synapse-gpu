@@ -201,6 +201,36 @@ assert.ok(
   assert.equal(result[0].chunkText, "");
   assert.equal(stats.scanned, 1);
 
+  const scopedSearch = commands.findLast((command) => command.type === "search");
+  assert.equal(
+    scopedSearch.fields.libraryID,
+    1,
+    "ordinary retrieval must stay scoped to its library",
+  );
+
+  // The scan benchmark asks for every resident row. The worker reads an absent
+  // or null libraryID as "no library filter", which is what makes the GPU
+  // measurement cover the same chunks as the CPU one.
+  await service.search({
+    query: new Float32Array([1, 0, 0, 0]),
+    topK: 5,
+    groupByItem: true,
+    maxChunksPerItem: 3,
+    language: "all",
+    minScore: 0,
+    stats: {},
+  });
+  const globalSearch = commands.findLast((command) => command.type === "search");
+  assert.equal(
+    globalSearch.fields.libraryID,
+    null,
+    "an omitted library scope must be sent as null, not dropped or defaulted",
+  );
+  assert.ok(
+    "libraryID" in globalSearch.fields,
+    "the key must still be present so the frame shape does not change",
+  );
+
   service.queuedMutations.push({
     kind: "itemChanged",
     libraryID: 1,

@@ -76,6 +76,7 @@ function resetFixture() {
   state.chunks = CHUNKS;
   state.semanticError = null;
   state.lastSearchOptions = null;
+  state.bodyIndexState = "body";
   state.semanticHits = [
     { chunkId: 1, text: CHUNKS[1].text, score: 0.88 },
     { chunkId: 3, text: CHUNKS[3].text, score: 0.62 },
@@ -301,6 +302,85 @@ assert.match(unknown.warnings.join(" "), /999/);
 await assert.rejects(
   () => expandChunkContext({ itemKey: "ABCD1234", chunkIds: [] }),
   /non-empty array/i,
+);
+
+// ---------------------------------------------------------------------------
+// A document indexed from metadata alone is not a full-text document
+// ---------------------------------------------------------------------------
+//
+// Having chunks is not the same as having body text: a paper whose PDF could
+// not be parsed still gets its title and abstract chunked. Returning those as
+// "passages" is what made the AI cite an abstract as if it were evidence from
+// the paper, so both entry points must refuse instead.
+
+resetFixture();
+state.bodyIndexState = "metadata-only";
+await assert.rejects(
+  () => runDocumentDeepDive({ ...baseRequest }),
+  /no indexed body text/i,
+  "a failed-body-parse document must be refused, not answered from its abstract",
+);
+await assert.rejects(
+  () => expandChunkContext({ itemKey: "ABCD1234", chunkIds: [1] }),
+  /no indexed body text/i,
+  "neighbour expansion must be refused for the same reason",
+);
+
+resetFixture();
+state.bodyIndexState = "no-source";
+await assert.rejects(
+  () => runDocumentDeepDive({ ...baseRequest }),
+  /no full text to search/i,
+  "a bibliography-only record must say so rather than return metadata",
+);
+
+// An index written before the distinction was recorded keeps working: an
+// upgrade must not break search_fulltext across the whole library at once.
+// But this is where passages are read in depth, so it is the worst place to
+// stay silent about "nobody ever established whether these are body text".
+resetFixture();
+state.bodyIndexState = "unknown";
+const legacy = await runDocumentDeepDive({ ...baseRequest });
+assert.ok(
+  legacy.chunks.length > 0,
+  "legacy indexes must keep answering until the item is refreshed",
+);
+assert.match(
+  legacy.warnings.join(" "),
+  /LEGACY INDEX/,
+  "a legacy index must be flagged, not silently trusted",
+);
+assert.match(legacy.warnings[0], /UNCONFIRMED/);
+assert.match(
+  legacy.warnings[0],
+  /rebuild this item's semantic index/i,
+  "the caveat must say how to settle it",
+);
+
+// Neighbour expansion hands back raw passages, so it needs the same caveat.
+resetFixture();
+state.bodyIndexState = "unknown";
+const legacyContext = await expandChunkContext({
+  itemKey: "ABCD1234",
+  chunkIds: [1],
+});
+assert.ok(legacyContext.chunks.length > 0);
+assert.match(legacyContext.warnings.join(" "), /LEGACY INDEX/);
+
+// A confirmed full-text index says nothing extra: a caveat on every call is
+// noise, and noise is skimmed past.
+resetFixture();
+const confirmed = await runDocumentDeepDive({ ...baseRequest });
+assert.doesNotMatch(confirmed.warnings.join(" "), /LEGACY INDEX/);
+
+// No index row at all keeps the original "not indexed" message, which tells
+// the user to build the index rather than to check their PDF.
+resetFixture();
+state.bodyIndexState = "missing";
+state.chunks = [];
+await assert.rejects(
+  () => runDocumentDeepDive({ ...baseRequest }),
+  /has no indexed full text/i,
 );
 
 console.log("Document deep-dive regression tests passed");

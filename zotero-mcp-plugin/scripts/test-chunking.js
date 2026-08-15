@@ -40,7 +40,8 @@ const { validateHybridSearchOptions } = await import(
 );
 const {
   getHybridSearchSettings,
-  setSearchTimeoutMs,
+  setVectorScanTimeoutMs,
+  setKeywordSearchTimeoutMs,
   resolveResultCap,
   resolveScoreFloor,
   resolveNeighborRadius,
@@ -65,7 +66,8 @@ assert.equal(defaults.gpuPrecision, "auto");
 assert.equal(defaults.maxDocuments, 20);
 assert.equal("candidateK" in defaults, false);
 assert.equal(defaults.maxChunksPerItem, 5);
-assert.equal(defaults.searchTimeoutMs, 8000);
+assert.equal(defaults.vectorScanTimeoutMs, 8000);
+assert.equal(defaults.keywordSearchTimeoutMs, 30000);
 assert.equal(defaults.minScore, 0.6);
 assert.equal(defaults.chunkTargetChars, 1000);
 assert.equal(defaults.chunkAppendToleranceChars, 500);
@@ -94,13 +96,23 @@ assert.equal(
 );
 prefs.clear();
 
-assert.equal(setSearchTimeoutMs(1234.01), 1235);
+assert.equal(setVectorScanTimeoutMs(1234.01), 1235);
 assert.equal(
-  getHybridSearchSettings().searchTimeoutMs,
+  getHybridSearchSettings().vectorScanTimeoutMs,
   1235,
   "the benchmark recommendation must persist across a fresh settings read",
 );
-assert.equal(setSearchTimeoutMs(9_000_000), 3_600_000);
+assert.equal(setVectorScanTimeoutMs(9_000_000), 3_600_000);
+assert.equal(setKeywordSearchTimeoutMs(12_345.2), 12_346);
+assert.equal(
+  getHybridSearchSettings().keywordSearchTimeoutMs,
+  12_346,
+  "the keyword-search recommendation must persist across a fresh settings read",
+);
+// Both ends of the keyword bounds, so neither an absurd nor a sub-second value
+// can be stored: a 5ms keyword timeout would fail every real search.
+assert.equal(setKeywordSearchTimeoutMs(5), 1000);
+assert.equal(setKeywordSearchTimeoutMs(9_000_000), 3_600_000);
 prefs.clear();
 
 // A caller may ask for less, never for more.

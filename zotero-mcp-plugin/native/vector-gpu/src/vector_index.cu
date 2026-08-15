@@ -457,7 +457,7 @@ SearchResponse VectorIndex::search(const std::vector<std::uint8_t>& query,
       std::chrono::duration<double, std::milli>(completed - started).count();
   for (const std::size_t slot : order) {
     const IncomingRow& row = impl_->slots[slot].row;
-    if (row.library_id != options.library_id) continue;
+    if (options.library_id && row.library_id != *options.library_id) continue;
     if (options.language != "all" && row.language != options.language) continue;
     if (item_filter && item_filter->find(row.item_key) == item_filter->end()) {
       continue;

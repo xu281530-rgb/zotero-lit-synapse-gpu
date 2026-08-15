@@ -8,6 +8,20 @@
 declare let Zotero: any;
 declare let ztoolkit: ZToolkit;
 
+import {
+  type BatchCapacityState,
+  type CapacityRecords,
+  capacityBudget,
+  capacityKey,
+  createCapacityState,
+  packBatch,
+  parseCapacityRecords,
+  recordCapacityLengthFailure,
+  recordCapacitySuccess,
+  totalChars,
+  writeCapacityRecord,
+} from './batchCapacity';
+
 export interface EmbeddingResult {
   embedding: Float32Array;
   language: 'zh' | 'en';
@@ -34,11 +48,27 @@ export type EmbeddingErrorType =
   | 'rate_limit'      // API rate limit exceeded (429)
   | 'auth'            // Authentication error (401, 403)
   | 'invalid_request' // Invalid request (400)
-  | 'payload_too_large' // Payload too large (413)
+  | 'payload_too_large' // Batch exceeded the endpoint's input/context length
+  | 'chunk_too_large' // A SINGLE chunk exceeds the endpoint's input length
   | 'server'          // Server error (5xx)
   | 'config'          // Configuration error (API not configured)
   | 'paused'          // Indexing was paused by user
+  | 'content'         // Item body text (PDF/Markdown) could not be extracted
   | 'unknown';        // Other errors
+
+/**
+ * The one condition adaptive batching cannot solve.
+ *
+ * Chunks are never split, so once a batch is a single chunk there is no
+ * smaller request to try. Embedding a prefix of the chunk instead would store
+ * a vector that does not describe the text saved next to it in the index, and
+ * every later search would score that passage on material the vector never
+ * saw. The build stops and asks the user to change a setting they control.
+ */
+export const SINGLE_CHUNK_TOO_LARGE_MESSAGE =
+  '单个 Chunk 已超过当前向量模型/API允许的输入长度，请降低 Chunk 长度或更换支持更长输入的向量模型。 / ' +
+  'A single chunk exceeds the input length allowed by the current embedding model/API. ' +
+  'Please reduce the chunk length or switch to an embedding model that supports longer input.';
 
 /**
  * Custom error class for embedding API errors
@@ -65,7 +95,10 @@ export class EmbeddingAPIError extends Error {
     this.name = 'EmbeddingAPIError';
     this.type = type;
     this.statusCode = options.statusCode;
-    this.retryable = options.retryable ?? (type === 'network' || type === 'rate_limit' || type === 'server' || type === 'payload_too_large');
+    // payload_too_large and chunk_too_large are NOT retryable: repeating the
+    // identical request cannot make it shorter. The first is resolved by
+    // embedBatch sending less, the second only by the user changing a setting.
+    this.retryable = options.retryable ?? (type === 'network' || type === 'rate_limit' || type === 'server');
     this.retryAfterMs = options.retryAfterMs;
     this.originalError = options.originalError;
   }
@@ -89,6 +122,8 @@ export class EmbeddingAPIError extends Error {
         return 'API 请求无效，请检查配置 / Invalid API request, please check configuration';
       case 'payload_too_large':
         return '请求数据过大，正在自动减小批次重试 / Payload too large, auto-reducing batch size and retrying';
+      case 'chunk_too_large':
+        return SINGLE_CHUNK_TOO_LARGE_MESSAGE;
       case 'server':
         return 'API 服务器错误，请稍后重试 / API server error, please try again later';
       case 'config':
@@ -148,7 +183,15 @@ export interface EmbeddingConfig {
   apiKey: string;           // API key
   model: string;            // Model name (e.g., text-embedding-3-small)
   dimensions?: number;      // Output dimensions (if supported by model)
-  maxBatchSize: number;     // Max texts per API call
+  /**
+   * Hard ceiling on the NUMBER of texts in one request.
+   *
+   * This is only the provider's own per-request input limit; how much text
+   * actually goes out is decided by the learned character budget (see
+   * batchCapacity.ts). It used to be a hand-picked 20, which capped every
+   * endpoint at a number that described none of them.
+   */
+  maxBatchSize: number;
   timeout: number;          // Request timeout in ms
   maxRetries: number;       // Max retry attempts
   apiProvider?: ApiProviderType;  // API provider (auto-detected if 'auto' or not set)
@@ -159,7 +202,7 @@ const DEFAULT_CONFIG: EmbeddingConfig = {
   apiKey: '',
   model: 'text-embedding-3-small',
   dimensions: 512,  // Smaller dimensions for efficiency
-  maxBatchSize: 20,  // Conservative default to avoid 413 errors; will auto-reduce if needed
+  maxBatchSize: 0,  // 0 = the provider's own per-request input limit
   timeout: 30000,
   maxRetries: 3,
   apiProvider: 'auto'
@@ -182,6 +225,8 @@ const PREF_RPM = 'extensions.zotero.zotero-mcp-plugin.embedding.rpm';
 const PREF_TPM = 'extensions.zotero.zotero-mcp-plugin.embedding.tpm';
 const PREF_COST_PER_1M = 'extensions.zotero.zotero-mcp-plugin.embedding.costPer1M';
 const PREF_USAGE_STATS = 'extensions.zotero.zotero-mcp-plugin.embedding.usageStats';
+// Learned per-endpoint batch capacity, keyed by provider|baseURL|model
+const PREF_BATCH_CAPACITY = 'extensions.zotero.zotero-mcp-plugin.embedding.batchCapacity';
 
 // Default rate limit config
 const DEFAULT_RATE_LIMIT: RateLimitConfig = {
@@ -230,8 +275,81 @@ export class EmbeddingService {
   // Auto-detected API provider type
   private detectedProvider: ApiProviderType | null = null;
 
+  /**
+   * Learned batch capacity per endpoint, mirroring PREF_BATCH_CAPACITY.
+   *
+   * Loaded lazily and kept in memory so a long build does not re-read the pref
+   * for every batch. Keyed by provider|baseURL|model, so switching model or
+   * host reads a different entry rather than inheriting a budget that
+   * described a different context window.
+   */
+  private capacityRecords: CapacityRecords | null = null;
+
   constructor(config: Partial<EmbeddingConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
+  }
+
+  /** Identity of the endpoint currently configured, for capacity lookups. */
+  private currentCapacityKey(): string {
+    return capacityKey(
+      this.getEffectiveProvider(),
+      this.config.apiBase,
+      this.config.model,
+    );
+  }
+
+  private loadCapacityRecords(): CapacityRecords {
+    if (this.capacityRecords) return this.capacityRecords;
+    try {
+      this.capacityRecords = parseCapacityRecords(
+        Zotero.Prefs.get(PREF_BATCH_CAPACITY, true),
+      );
+    } catch (e) {
+      ztoolkit.log(`[EmbeddingService] Failed to load batch capacity: ${e}`, 'warn');
+      this.capacityRecords = {};
+    }
+    return this.capacityRecords;
+  }
+
+  private readCapacityState(key: string): BatchCapacityState {
+    return this.loadCapacityRecords()[key] ?? createCapacityState();
+  }
+
+  private saveCapacityState(key: string, state: BatchCapacityState): void {
+    this.capacityRecords = writeCapacityRecord(
+      this.loadCapacityRecords(),
+      key,
+      state,
+    );
+    try {
+      Zotero.Prefs.set(
+        PREF_BATCH_CAPACITY,
+        JSON.stringify(this.capacityRecords),
+        true,
+      );
+    } catch (e) {
+      // A failed write only costs re-learning next session.
+      ztoolkit.log(`[EmbeddingService] Failed to save batch capacity: ${e}`, 'warn');
+    }
+  }
+
+  /** Learned capacity for the configured endpoint (diagnostics / tests). */
+  getBatchCapacity(): BatchCapacityState & { key: string; maxItems: number } {
+    return {
+      ...this.readCapacityState(this.currentCapacityKey()),
+      key: this.currentCapacityKey(),
+      maxItems: this.getEffectiveMaxItems(),
+    };
+  }
+
+  /** Forget everything learned, e.g. after a manual endpoint reconfiguration. */
+  clearBatchCapacity(): void {
+    this.capacityRecords = {};
+    try {
+      Zotero.Prefs.clear(PREF_BATCH_CAPACITY, true);
+    } catch {
+      // Nothing stored yet.
+    }
   }
 
   /**
@@ -514,6 +632,23 @@ export class EmbeddingService {
   }
 
   /**
+   * Maximum number of texts one request may carry.
+   *
+   * The provider's own limit, unless a caller explicitly asked for less. The
+   * amount of TEXT is governed separately by the learned character budget, so
+   * this rarely binds — which is the point: a batch should be limited by what
+   * the endpoint actually refuses, not by a constant.
+   */
+  private getEffectiveMaxItems(): number {
+    const providerMax = this.getProviderMaxBatchSize();
+    const configured = this.config.maxBatchSize;
+    if (typeof configured === 'number' && configured > 0) {
+      return Math.min(configured, providerMax);
+    }
+    return providerMax;
+  }
+
+  /**
    * Clear detected dimensions (useful when changing models)
    */
   clearDetectedDimensions(): void {
@@ -765,7 +900,24 @@ export class EmbeddingService {
    * Update configuration
    */
   updateConfig(newConfig: Partial<EmbeddingConfig>): void {
+    const previousBase = this.config.apiBase;
+    const previousModel = this.config.model;
+    const previousProvider = this.config.apiProvider;
     this.config = { ...this.config, ...newConfig };
+
+    // The provider is auto-detected from the URL and then cached. Pointing the
+    // plugin at a different host or model must re-detect it, or the endpoint
+    // path, the wire format AND the batch-capacity key would all still
+    // describe the endpoint the user just moved away from.
+    if (
+      this.config.apiBase !== previousBase ||
+      this.config.model !== previousModel ||
+      this.config.apiProvider !== previousProvider
+    ) {
+      this.detectedProvider = null;
+      this.clearQueryCache();
+    }
+
     this.status.apiConfigured = !!this.config.apiBase && !!this.config.model;
     this.saveConfigToPrefs();
     ztoolkit.log(`[EmbeddingService] Config updated: apiBase=${this.config.apiBase}, model=${this.config.model}, apiKey=${this.config.apiKey ? 'yes' : 'no'}`);
@@ -966,9 +1118,11 @@ export class EmbeddingService {
       throw error;
     }
 
-    // Adaptive batch size - start with provider-specific limit, reduce on errors
-    const providerMaxBatch = this.getProviderMaxBatchSize();
-    let currentBatchSize = Math.min(this.config.maxBatchSize, providerMaxBatch);
+    // Batches are sized by learned character capacity, on chunk boundaries.
+    // The number of texts is capped only by what the endpoint itself accepts.
+    const maxItems = this.getEffectiveMaxItems();
+    const key = this.currentCapacityKey();
+    let capacity = this.readCapacityState(key);
     let itemIndex = 0;
 
     while (itemIndex < items.length) {
@@ -982,15 +1136,33 @@ export class EmbeddingService {
         );
       }
 
-      // Create batch with current batch size
-      const batch = items.slice(itemIndex, itemIndex + currentBatchSize);
+      const budget = capacityBudget(capacity);
+      const batch = packBatch(items, itemIndex, budget, maxItems);
+      const batchChars = totalChars(batch);
       const texts = batch.map(item => item.text);
 
-      ztoolkit.log(`[EmbeddingService] Processing batch: items ${itemIndex + 1}-${itemIndex + batch.length}/${items.length} (batchSize=${currentBatchSize})`);
+      ztoolkit.log(
+        `[EmbeddingService] Processing batch: items ${itemIndex + 1}-${itemIndex + batch.length}/${items.length} ` +
+        `(chars=${batchChars}, budget=${budget === Infinity ? 'unbounded' : budget}, maxItems=${maxItems}, ` +
+        `learned=[ok<=${capacity.successChars ?? '?'}, fail>=${capacity.failureChars ?? '?'}])`
+      );
 
       try {
         // Call API
         const embeddings = await this.callEmbeddingAPI(texts);
+
+        // Never fewer vectors than chunks. A short response would otherwise
+        // pair chunk N with the vector for chunk N+1 from here on, quietly
+        // mislabelling every remaining passage in the document.
+        if (embeddings.length !== batch.length) {
+          throw new EmbeddingAPIError(
+            `向量数量与 Chunk 数量不一致，已中止以避免索引错位 / ` +
+            `API returned ${embeddings.length} embeddings for ${batch.length} chunks ` +
+            `(a blank chunk or a provider that drops inputs); aborting rather than misaligning the index`,
+            'invalid_request',
+            { retryable: false }
+          );
+        }
 
         for (let i = 0; i < batch.length; i++) {
           const item = batch[i];
@@ -1004,61 +1176,53 @@ export class EmbeddingService {
           });
         }
 
+        // Raise the proven floor and persist it, so the next document — and
+        // the next session — starts from what this endpoint has demonstrated
+        // rather than from a guess.
+        const learned = recordCapacitySuccess(capacity, batchChars);
+        if (learned !== capacity) {
+          capacity = learned;
+          this.saveCapacityState(key, capacity);
+        }
+
         // Move to next batch
         itemIndex += batch.length;
 
       } catch (error) {
-        // Handle payload_too_large by reducing batch size
+        // ONLY an unambiguous input/context length refusal teaches capacity.
+        // Timeouts, 429s, auth failures, quota exhaustion and 5xx say nothing
+        // about how much text fits, and must not shrink future batches.
         if (error instanceof EmbeddingAPIError && error.type === 'payload_too_large') {
-          if (currentBatchSize > 1) {
-            // Reduce batch size by half, minimum 1
-            const newBatchSize = Math.max(1, Math.floor(currentBatchSize / 2));
-            ztoolkit.log(`[EmbeddingService] Payload too large, reducing batch size from ${currentBatchSize} to ${newBatchSize}`, 'warn');
-            currentBatchSize = newBatchSize;
-            // Retry with smaller batch (don't advance itemIndex)
-            continue;
-          } else {
-            // Already at batch size 1 — try truncating the text instead of failing
-            const oversizedItem = batch[0];
-            const MAX_SAFE_LENGTH = 800;
-            if (oversizedItem && oversizedItem.text.length > MAX_SAFE_LENGTH) {
-              ztoolkit.log(`[EmbeddingService] Truncating oversized item ${oversizedItem.id} from ${oversizedItem.text.length} to ${MAX_SAFE_LENGTH} chars`, 'warn');
-              const truncatedTexts = [oversizedItem.text.substring(0, MAX_SAFE_LENGTH)];
-              try {
-                const embeddings = await this.callEmbeddingAPI(truncatedTexts);
-                const embedding = embeddings[0];
-                const lang = oversizedItem.language || this.detectLanguage(truncatedTexts[0]);
-                results.set(oversizedItem.id, {
-                  embedding: new Float32Array(embedding),
-                  language: lang,
-                  dimensions: embedding.length
-                });
-              } catch (truncateError) {
-                // Only swallow errors that mean "this text cannot be embedded"
-                // (payload/invalid input). Pauses, credential failures and
-                // transient network/server/rate-limit errors must propagate
-                // instead of silently losing the chunk
-                if (truncateError instanceof EmbeddingAPIError &&
-                    truncateError.type !== 'payload_too_large' &&
-                    truncateError.type !== 'invalid_request' &&
-                    truncateError.type !== 'unknown') {
-                  throw truncateError;
-                }
-                ztoolkit.log(`[EmbeddingService] Truncated item still failed, skipping: ${truncateError}`, 'warn');
+          if (batch.length === 1) {
+            // Bisection has bottomed out: one whole chunk is already too long.
+            // There is no smaller request that keeps the chunk intact, so this
+            // document's vectors cannot be built with the current settings.
+            ztoolkit.log(
+              `[EmbeddingService] Single chunk ${batch[0].id} (${batchChars} chars) exceeds the endpoint's input length`,
+              'error'
+            );
+            throw new EmbeddingAPIError(
+              SINGLE_CHUNK_TOO_LARGE_MESSAGE,
+              'chunk_too_large',
+              {
+                retryable: false,
+                statusCode: error.statusCode,
+                originalError: error,
               }
-              itemIndex += 1;
-              continue;
-            } else {
-              ztoolkit.log(`[EmbeddingService] Single item too large to process: ${oversizedItem?.id}`, 'error');
-              throw new EmbeddingAPIError(
-                `单个文本过大无法处理 / Single text too large to process: ${oversizedItem?.text.substring(0, 50)}...`,
-                'payload_too_large',
-                { retryable: false, statusCode: 413 }
-              );
-            }
+            );
           }
+
+          capacity = recordCapacityLengthFailure(capacity, batchChars);
+          this.saveCapacityState(key, capacity);
+          ztoolkit.log(
+            `[EmbeddingService] Input too long at ${batchChars} chars (${batch.length} chunks); ` +
+            `next budget ${capacityBudget(capacity)}`,
+            'warn'
+          );
+          // Retry the same items with a smaller budget (itemIndex unchanged).
+          continue;
         }
-        // Re-throw other errors
+        // Re-throw other errors untouched — including their retry semantics.
         throw error;
       }
     }
@@ -1086,17 +1250,37 @@ export class EmbeddingService {
   }
 
   /**
-   * Provider-specific context/token overflow messages that mean the input
-   * is too large even when the HTTP status is not 413
+   * Phrases that mean "the text you sent is too long", and nothing else.
+   *
+   * Deliberately narrow. Anything matched here shrinks future batches for this
+   * endpoint, so a phrase that ALSO appears in a rate-limit or quota message
+   * would teach the plugin to send one chunk at a time because the account ran
+   * out of credit. The two that were previously here and are now gone:
+   *
+   *  - 'token limit' — OpenAI's 429 body is "Rate limit reached ... tokens per
+   *    min (TPM)"; several gateways phrase the same throttle as "token limit
+   *    exceeded". That is a speed limit, not a size limit.
+   *  - a bare '413' substring, which matched any response that happened to
+   *    contain those three digits (a request id, a token count, a timestamp).
+   *    The status code is checked directly instead.
    */
   private isContextOverflowMessage(errorMsg: string): boolean {
     return errorMsg.includes('input too long') ||
       errorMsg.includes('input length') ||
+      errorMsg.includes('input is too long') ||
       errorMsg.includes('context length') ||
       errorMsg.includes('context_length') ||
       errorMsg.includes('maximum context') ||
       errorMsg.includes('too many tokens') ||
-      errorMsg.includes('token limit');
+      errorMsg.includes('too many input tokens') ||
+      errorMsg.includes('string too long') ||
+      errorMsg.includes('payload too large') ||
+      errorMsg.includes('request entity too large') ||
+      errorMsg.includes('content too large') ||
+      errorMsg.includes('body too large') ||
+      errorMsg.includes('reduce the length') ||
+      errorMsg.includes('maximum input length') ||
+      errorMsg.includes('exceeds the maximum length');
   }
 
   /**
@@ -1134,21 +1318,27 @@ export class EmbeddingService {
         return { type: 'rate_limit', retryAfterMs };
       }
       if (statusCode === 413) {
+        // "Request Entity Too Large" means exactly one thing.
         return { type: 'payload_too_large' };
       }
       if (statusCode === 401 || statusCode === 403) {
+        // Includes exhausted quota and insufficient balance, which some
+        // providers word using "limit"/"exceeded". Never a size problem.
         return { type: 'auth' };
       }
-      if (statusCode === 400) {
-        // Some providers (dashscope, ollama's OpenAI-compatible endpoint)
-        // report context/token overflow as 400 instead of 413; classify it
-        // as payload_too_large so embedBatch can split/truncate instead of failing
+      if (statusCode === 400 || statusCode === 422) {
+        // Some providers (dashscope, ollama's OpenAI-compatible endpoint,
+        // vLLM) report context/token overflow as 400/422 instead of 413.
+        // Only a body that says so counts; every other 4xx-with-a-body stays
+        // an invalid_request and leaves the learned capacity alone.
         if (this.isContextOverflowMessage(fullMsg)) {
           return { type: 'payload_too_large' };
         }
         return { type: 'invalid_request' };
       }
       if (statusCode >= 500) {
+        // A gateway may echo the request or mention token counts in a 5xx
+        // body; that is still a server fault, not evidence about capacity.
         return { type: 'server' };
       }
     }
@@ -1159,13 +1349,10 @@ export class EmbeddingService {
       return { type: 'auth' };
     }
 
-    // Check for payload too large patterns
-    if (fullMsg.includes('413') || fullMsg.includes('payload too large') ||
-        fullMsg.includes('request entity too large') || fullMsg.includes('content too large') ||
-        this.isContextOverflowMessage(fullMsg)) {
-      return { type: 'payload_too_large' };
-    }
-
+    // No status code and no earlier match: the request never reached a point
+    // where the server told us anything about size. Classifying this as a
+    // length problem would shrink the batch on evidence we do not have, so it
+    // stays 'unknown' and is handled by the ordinary error path.
     return { type: 'unknown' };
   }
 
@@ -1468,9 +1655,11 @@ export class EmbeddingService {
 
         ztoolkit.log(`[EmbeddingService] API attempt ${attempt + 1}/${this.config.maxRetries} failed: ${lastError.type} (status=${lastError.statusCode}) - ${lastError.message}`, 'warn');
 
-        // For non-retryable errors or payload_too_large (handled by embedBatch), throw immediately
-        if (!lastError.retryable || lastError.type === 'payload_too_large') {
-          ztoolkit.log(`[EmbeddingService] Non-retryable error or payload_too_large (${lastError.type}), stopping retries`, 'error');
+        // Non-retryable errors surface immediately. payload_too_large is one
+        // of them: resending the same body cannot make it shorter, and only
+        // embedBatch — which knows the chunk boundaries — can send less.
+        if (!lastError.retryable) {
+          ztoolkit.log(`[EmbeddingService] Non-retryable error (${lastError.type}), stopping retries`, 'error');
           throw lastError;
         }
 

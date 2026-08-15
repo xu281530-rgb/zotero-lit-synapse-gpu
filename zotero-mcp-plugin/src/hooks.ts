@@ -305,15 +305,84 @@ export function resumeSemanticAutoUpdates(): void {
 }
 
 /**
- * Queue items touched by a `modify` event.
+ * The parent of every child item this session has seen.
  *
- * Resolves whatever Zotero reports (regular item, attachment, note, annotation)
- * back to the regular item that owns the index entry, then queues it
- * non-forced. Nothing is re-embedded unless needsReindexByTimestamp sees a
- * changed item_modified / attachment_modified stamp, so a tag edit or a sync
- * touch that changes nothing indexable costs a single timestamp comparison.
+ * A `delete` event arrives after the row is already gone, so the deleted PDF
+ * can no longer be asked which paper it belonged to — and without that answer
+ * the old code just removed vectors under the ATTACHMENT's key, which never
+ * matched anything, leaving the deleted PDF's body text in the parent's index
+ * forever. Zotero usually puts the parent key in the event's extraData, but
+ * that is not guaranteed across versions, so every child item we observe is
+ * remembered here as a second source for the same answer.
  */
-function queueModifiedItems(numericIds: number[]): void {
+const childParentMemory = new Map<
+  number,
+  { parentKey: string; libraryID: number; isAnnotation: boolean }
+>();
+const CHILD_PARENT_MEMORY_LIMIT = 5000;
+
+/** Attachments/notes seen in the trash, so restoring one forces a re-extract. */
+const trashedChildren = new Set<number>();
+
+function resolveParentKeyOf(item: any): string | null {
+  return (
+    item?.parentItem?.key ||
+    (item?.parentItemKey as string | undefined) ||
+    null
+  );
+}
+
+function rememberChildParent(item: any): void {
+  try {
+    if (!item?.id || item.isRegularItem?.()) return;
+    const parentKey = resolveParentKeyOf(item);
+    if (!parentKey) return;
+    if (
+      !childParentMemory.has(item.id) &&
+      childParentMemory.size >= CHILD_PARENT_MEMORY_LIMIT
+    ) {
+      const oldest = childParentMemory.keys().next();
+      if (!oldest.done) childParentMemory.delete(oldest.value);
+    }
+    childParentMemory.set(item.id, {
+      parentKey,
+      libraryID: item.libraryID,
+      isAnnotation: item.isAnnotation?.() === true,
+    });
+  } catch {
+    // Remembering is best effort; extraData is the primary source.
+  }
+}
+
+export function clearChildParentMemory(): void {
+  childParentMemory.clear();
+  trashedChildren.clear();
+}
+
+/**
+ * Queue items touched by a `modify` or `trash` event.
+ *
+ * Resolves whatever Zotero reports (regular item, attachment, note) back to
+ * the regular item that owns the index entry, then queues it. Nothing is
+ * re-embedded unless needsReindexByTimestamp sees a changed item_modified /
+ * attachment_modified stamp, so a tag edit or a sync touch that changes
+ * nothing indexable costs a single timestamp comparison.
+ *
+ * Two things are deliberately different from before:
+ *
+ *  - Annotations are ignored outright. Highlights and comments no longer feed
+ *    the body index, so adding, editing or deleting one must not schedule an
+ *    index refresh. Zotero's own annotation features and the annotation MCP
+ *    tools are untouched.
+ *  - A child that has just been trashed is NOT skipped. Trashing a PDF removes
+ *    it from getAttachments(), so the parent's body text really did change;
+ *    it is queued forced, because the parent's own timestamps may not have
+ *    moved at all and the timestamp fast path would otherwise skip it.
+ */
+function queueModifiedItems(
+  numericIds: number[],
+  options: { trashed?: boolean } = {},
+): void {
   let items: any[] = [];
   try {
     items = Zotero.Items.get(numericIds) as any[];
@@ -325,28 +394,56 @@ function queueModifiedItems(numericIds: number[]): void {
   for (const item of items) {
     try {
       if (!item) continue;
-      if (item.deleted) continue;
+      rememberChildParent(item);
+
+      // Annotations never reach the body index any more.
+      if (item.isAnnotation?.()) continue;
 
       if (item.isRegularItem?.()) {
+        if (item.deleted || options.trashed) continue;
         scheduleAutoUpdate(item.key, item.libraryID, false);
         continue;
       }
 
-      // Same loop guard as the add path: the Markdown attachments the indexer
-      // writes itself must never re-queue their own parent.
-      if (item.attachmentContentType === "text/markdown") continue;
-
-      // Attachments, notes and annotations contribute to the parent's indexed
-      // content, so a change to them is a change to the parent.
-      const parentKey =
-        item.parentItem?.key ||
-        (item.parentItemKey as string | undefined) ||
-        // An annotation hangs off an attachment, which hangs off the item.
-        item.parentItem?.parentItem?.key ||
-        null;
-      if (parentKey) {
-        scheduleAutoUpdate(parentKey, item.libraryID, false);
+      const removedFromLibrary = options.trashed === true || item.deleted === true;
+      // The Markdown attachments the indexer writes itself must never re-queue
+      // their own parent — but a Markdown attachment leaving or returning to
+      // the library genuinely changes the parent's body text.
+      if (item.attachmentContentType === "text/markdown" && !removedFromLibrary) {
+        if (item.id !== undefined && trashedChildren.delete(item.id)) {
+          const restoredParent = resolveParentKeyOf(item);
+          if (restoredParent) {
+            scheduleAutoUpdate(restoredParent, item.libraryID, true);
+          }
+        }
+        continue;
       }
+
+      // Attachments and notes contribute to the parent's indexed content, so
+      // a change to them is a change to the parent.
+      const parentKey = resolveParentKeyOf(item);
+      if (!parentKey) continue;
+
+      // A restore out of the trash brings its text back; force so the
+      // timestamp fast path cannot decide "nothing changed".
+      const restored =
+        !removedFromLibrary &&
+        item.id !== undefined &&
+        trashedChildren.delete(item.id);
+      if (removedFromLibrary && item.id !== undefined) {
+        trashedChildren.add(item.id);
+      }
+
+      if (removedFromLibrary) {
+        ztoolkit.log(
+          `[MCP Plugin] Child ${item.key} trashed; rebuilding parent index ${parentKey}`,
+        );
+      }
+      scheduleAutoUpdate(
+        parentKey,
+        item.libraryID,
+        removedFromLibrary || restored,
+      );
     } catch (error) {
       ztoolkit.log(`[MCP Plugin] Skipped modified item: ${error}`, 'warn');
     }
@@ -354,25 +451,56 @@ function queueModifiedItems(numericIds: number[]): void {
 }
 
 /**
- * Handle deleted items - remove their indexes
+ * Handle permanently erased items.
+ *
+ * A deleted PDF is not a deleted paper. Removing vectors under the deleted
+ * item's own key is right for a top-level item and useless for an attachment:
+ * the body text extracted from that PDF lives in the PARENT's index, under the
+ * parent's key. So each erased item is first resolved to its owner:
+ *
+ *  - erased top-level item  -> delete its index
+ *  - erased attachment/note -> rebuild the parent from whatever body sources
+ *    are left. If a MinerU Markdown attachment survives the PDF, the parent
+ *    keeps a real full-text index; if nothing is left, the rebuild replaces
+ *    the old body vectors with a metadata-only index that is recorded as
+ *    having no full text.
+ *  - erased annotation      -> nothing, annotations no longer feed the index
+ *  - erased item whose parent is gone too -> delete the parent's index
  */
 async function handleItemsDeleted(itemIds: number[], extraData: any) {
   try {
     const { getVectorStore } = await import("./modules/semantic/vectorStore");
     const vectorStore = getVectorStore();
 
-    // Try to get item keys from extraData (Zotero passes old data for deleted items)
-    const itemIdentities: Array<{ itemKey: string; libraryID?: number }> = [];
-    if (extraData) {
-      for (const id of itemIds) {
-        const oldData = extraData[id];
-        if (oldData?.key) {
-          itemIdentities.push({
-            itemKey: oldData.key,
-            libraryID: oldData.libraryID,
-          });
-        }
-      }
+    interface DeletedIdentity {
+      itemKey?: string;
+      libraryID?: number;
+      parentKey: string | null;
+      knownAnnotation: boolean;
+    }
+
+    const itemIdentities: DeletedIdentity[] = [];
+    for (const id of itemIds) {
+      const oldData = extraData?.[id];
+      const remembered = childParentMemory.get(id);
+      childParentMemory.delete(id);
+      trashedChildren.delete(id);
+      // Zotero has spelled the parent key differently across versions, and it
+      // is absent entirely in some paths; the remembered map covers those.
+      const parentKey =
+        oldData?.parentItem ||
+        oldData?.parentKey ||
+        oldData?.parentItemKey ||
+        remembered?.parentKey ||
+        null;
+      const itemKey = oldData?.key || undefined;
+      if (!itemKey && !parentKey) continue;
+      itemIdentities.push({
+        itemKey,
+        libraryID: oldData?.libraryID ?? remembered?.libraryID,
+        parentKey,
+        knownAnnotation: remembered?.isAnnotation === true,
+      });
     }
 
     if (itemIdentities.length === 0) {
@@ -382,12 +510,48 @@ async function handleItemsDeleted(itemIds: number[], extraData: any) {
 
     ztoolkit.log(`[MCP Plugin] Cleaning up indexes for ${itemIdentities.length} deleted items`);
 
-    for (const { itemKey, libraryID } of itemIdentities) {
+    for (const identity of itemIdentities) {
+      const { itemKey, libraryID, parentKey, knownAnnotation } = identity;
       try {
-        await vectorStore.deleteItemVectors(itemKey, libraryID);
-        ztoolkit.log(`[MCP Plugin] Deleted index for item: ${itemKey}`);
+        if (!parentKey) {
+          // Top-level item: its own index is the one that has to go.
+          if (!itemKey) continue;
+          await vectorStore.deleteItemVectors(itemKey, libraryID);
+          ztoolkit.log(`[MCP Plugin] Deleted index for item: ${itemKey}`);
+          continue;
+        }
+        if (knownAnnotation) continue;
+
+        const effectiveLibraryID =
+          libraryID ?? Zotero.Libraries.userLibraryID;
+        const owner = await Zotero.Items.getByLibraryAndKeyAsync(
+          effectiveLibraryID,
+          parentKey,
+        );
+        if (!owner) {
+          // The parent went with it: nothing to rebuild, only to remove.
+          await vectorStore.deleteItemVectors(parentKey, effectiveLibraryID);
+          ztoolkit.log(
+            `[MCP Plugin] Parent ${parentKey} of deleted child is gone too; removed its index`,
+          );
+          continue;
+        }
+        if (!owner.isRegularItem?.()) {
+          // Only annotations hang off an attachment, and those no longer
+          // affect the index.
+          continue;
+        }
+        ztoolkit.log(
+          `[MCP Plugin] Child ${itemKey ?? '(unknown)'} erased; rebuilding parent index ${owner.key}`,
+        );
+        // Forced: the parent's own timestamps may not have moved, and its body
+        // text certainly has.
+        scheduleAutoUpdate(owner.key, owner.libraryID, true);
       } catch (e) {
-        // Ignore errors for items that weren't indexed
+        ztoolkit.log(
+          `[MCP Plugin] Could not clean up index for deleted item ${itemKey ?? parentKey}: ${e}`,
+          'warn',
+        );
       }
     }
   } catch (error) {
@@ -423,13 +587,22 @@ function registerItemNotifier() {
       const enabled = Zotero.Prefs.get(PREF_SEMANTIC_AUTO_UPDATE, true);
       if (!enabled) return;
 
-      // add / modify / delete. `modify` used to be dropped outright, which is
-      // why editing a title, abstract, tags, or annotations never reached the
-      // index. It is safe to handle now: the queue is debounced, the
+      // add / modify / trash / delete. `modify` used to be dropped outright,
+      // which is why editing a title or abstract never reached the index, and
+      // `trash` was never handled at all — which is why moving a PDF to the
+      // trash (the normal way a PDF is removed) left its body text in the
+      // parent's index. All four are safe: the queue is debounced, the
       // isAutoIndexing guard above still blocks events raised by our own
       // indexing, and modify-driven work is queued non-forced so an unchanged
       // item costs one timestamp comparison and nothing else.
-      if (event !== 'add' && event !== 'modify' && event !== 'delete') return;
+      if (
+        event !== 'add' &&
+        event !== 'modify' &&
+        event !== 'trash' &&
+        event !== 'delete'
+      ) {
+        return;
+      }
 
       ztoolkit.log(`[MCP Plugin] Item notifier: event=${event}, type=${type}, ids=${ids.length}`);
 
@@ -439,10 +612,15 @@ function registerItemNotifier() {
         // For add events, schedule indexing for new items
         const items = Zotero.Items.get(numericIds);
         for (const item of items) {
+          // Record the ownership now, while the row still exists: a later
+          // delete event may not carry it.
+          rememberChildParent(item);
           if (item.isRegularItem?.()) {
             scheduleAutoUpdate(item.key, item.libraryID, true);
             continue;
           }
+          // A new highlight or comment does not change the body text.
+          if (item.isAnnotation?.()) continue;
           // The Markdown attachments the indexer itself writes must not
           // re-queue their own parent. This guard is the only thing stopping
           // that loop: the import deliberately does NOT suppress the notifier,
@@ -454,10 +632,7 @@ function registerItemNotifier() {
           // A PDF normally lands a few seconds after its parent, long after the
           // parent was indexed from metadata alone. Re-queue the parent so the
           // full text actually makes it into the index.
-          const parentKey =
-            item.parentItem?.key ||
-            (item.parentItemKey as string | undefined) ||
-            null;
+          const parentKey = resolveParentKeyOf(item);
           if (parentKey) {
             ztoolkit.log(`[MCP Plugin] Attachment added, re-queueing parent item: ${parentKey} (libraryID=${item.libraryID})`);
             // The attachment always lives in the same library as its parent.
@@ -466,9 +641,14 @@ function registerItemNotifier() {
         }
       } else if (event === 'modify') {
         queueModifiedItems(numericIds);
+      } else if (event === 'trash') {
+        // Zotero does not always pair a trash with a modify, so this branch
+        // cannot rely on one arriving. It also cannot rely on item.deleted
+        // being committed yet, hence the explicit flag.
+        queueModifiedItems(numericIds, { trashed: true });
       } else if (event === 'delete') {
-        // For delete events, remove index for deleted items
-        // Extract item keys from extraData (items are already deleted)
+        // For delete events, resolve each erased item to the item that owns
+        // its index (extraData carries the old row; items are already gone)
         handleItemsDeleted(numericIds, extraData);
       }
     }
@@ -630,6 +810,10 @@ function unregisterItemNotifier() {
     ztoolkit.log(`[MCP Plugin] Item notifier unregistered: ${itemNotifierID}`);
     itemNotifierID = null;
   }
+
+  // Nothing observes items any more, so the remembered child→parent mapping
+  // can only go stale.
+  clearChildParentMemory();
 
   // Stop auto-index check timer
   stopAutoIndexCheck();
@@ -1584,6 +1768,7 @@ async function runBuildsPerLibrary(
     unchanged: 0,
     skipped: 0,
     failedCount: 0,
+    bodyFailures: 0,
     minerUFailures: 0,
     minerUAttachments: 0,
     status: "completed",
@@ -1605,6 +1790,7 @@ async function runBuildsPerLibrary(
     merged.unchanged += result?.unchanged ?? 0;
     merged.skipped += result?.skipped ?? 0;
     merged.failedCount += result?.failedCount ?? 0;
+    merged.bodyFailures += result?.bodyFailures ?? 0;
     merged.minerUFailures += result?.minerUFailures ?? 0;
     merged.minerUAttachments += result?.minerUAttachments ?? 0;
     if (result?.status && result.status !== "completed") {
@@ -2226,6 +2412,21 @@ function describeIndexResult(result: any, prefix?: string): NoticeOptions {
   if (failed > 0) {
     type = "warning";
     lines.push(`${getString("notice-index-failed" as any) || "Failed items"}: ${failed}`);
+  }
+
+  // Reported apart from `failed` on purpose: the index itself is fine for
+  // these items, their PDF is not. They did not fail the build, and they stay
+  // queued for the next incremental pass, so the wording says what the user
+  // can actually do about them.
+  const bodyFailures = result?.bodyFailures ?? 0;
+  if (bodyFailures > 0) {
+    if (type === "success") type = "warning";
+    lines.push(
+      `${getString("notice-index-body-failed" as any) || "Indexed without full text (body parse failed)"}: ${bodyFailures} — ${
+        getString("notice-index-body-failed-hint" as any) ||
+        "title and abstract only; these are retried automatically and are excluded from full-text search"
+      }`,
+    );
   }
 
   if (minerUFailures > 0) {

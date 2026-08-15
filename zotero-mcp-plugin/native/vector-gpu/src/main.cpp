@@ -260,8 +260,14 @@ int main(int argc, char** argv) {
                 request.header["itemKeys"].get<std::vector<std::string>>();
           }
           options.min_score = request.header.value("minScore", 0.0);
-          options.library_id =
-              request.header.at("libraryID").get<std::int64_t>();
+          // Omitted or null means "scan every resident row". Retrieval always
+          // sends a library; the scan benchmark omits it so the GPU covers the
+          // same chunks the CPU path does.
+          if (request.header.contains("libraryID") &&
+              !request.header["libraryID"].is_null()) {
+            options.library_id =
+                request.header.at("libraryID").get<std::int64_t>();
+          }
           const auto result = index->search(request.payload, options);
           json response = success(request);
           response["scanned"] = result.scanned;

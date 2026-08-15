@@ -8,19 +8,11 @@ export default {
   name: pkg.config.addonName,
   id: pkg.config.addonID,
   namespace: pkg.config.addonRef,
-  updateURL: `https://github.com/cookjohn/zotero-mcp/releases/latest/download/${
-    pkg.config.addonVersion.includes("-") ? "update-beta.json" : "update.json"
-  }`,
-  xpiDownloadLink:
-    "https://github.com/{{owner}}/{{repo}}/releases/download/v{{version}}/{{xpiName}}.xpi",
-
   build: {
     assets: ["addon/**/*.*"],
     define: {
       ...pkg.config,
-      author: pkg.author,
       description: pkg.description,
-      homepage: pkg.homepage,
       buildVersion: pkg.version,
       addonVersion: pkg.config.addonVersion,
       buildTime: "{{buildTime}}",

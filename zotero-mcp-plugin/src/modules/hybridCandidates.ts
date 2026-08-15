@@ -66,6 +66,23 @@ export function detectDocumentLanguage(
   return cjk * 2 >= latin ? "zh" : "en";
 }
 
+/**
+ * 一行候选的全文可用性，取值与 metadata.fullTextCoverage 的五个计数键完全一致
+ * ——同一套词汇，一处是单篇的判定，一处是整页的分布。汇总侧一旦另起一套名字，
+ * 就变成两份互相打架的词汇表，而且几乎必然顺手把 unknown 并进「有全文」那一
+ * 项，把「从没记录过」说成「确认有」——这正是这个字段要防的那种夸大。
+ *
+ * 这里重新声明而不是从 semantic 模块导入：本文件是纯函数层，刻意不依赖任何
+ * 会把 XPCOM 拖进来的模块，否则 Node 下的单测就跑不起来。两处的一致性由
+ * test-body-index.js 断言钉住。
+ */
+export type FullTextAvailability =
+  | "indexed"
+  | "parse_failed"
+  | "no_source"
+  | "not_indexed"
+  | "unknown";
+
 export interface HybridCandidate {
   itemKey: string;
   libraryID?: number;
@@ -85,6 +102,22 @@ export interface HybridCandidate {
   /** 有没有摘要可取、有多长——是「可用性」，不是内容。 */
   hasAbstract?: boolean;
   abstractChars?: number;
+  /**
+   * 这篇到底有没有被索引到正文。
+   *
+   * 没有这一项的时候，「PDF 解析失败、只索引了标题摘要」的文献和真正有全文的
+   * 文献长得一模一样：同样的分数、同样的 matchedBy: semantic、同样带
+   * matchedChunks——而那几段恰恰就是它的标题和摘要。调用方没有任何依据能把
+   * 它们和正文段落区分开，于是摘要会被当成论文的结论引用。这一项就是在筛选
+   * 阶段、在引用发生之前把这个区别摆出来。
+   */
+  fullText?: FullTextAvailability;
+  /**
+   * fullText 不是 indexed 时出现，说明这一行的 matchedChunks 该怎么读：
+   * parse_failed / no_source / not_indexed 是「这就是元数据，不是正文」，
+   * unknown 是「旧索引，是不是正文没人记录过，别直接当正文引用」。
+   */
+  fullTextNote?: string;
   matchedChunks?: Array<{
     chunkId?: number;
     score?: number;
@@ -147,6 +180,10 @@ export function projectHybridCandidate(
     matchedFields: result.matchedFields,
     hasAbstract: result.hasAbstract,
     abstractChars: result.abstractChars,
+    fullText: result.fullText,
+    // Carried right next to fullText, and before matchedChunks in the object,
+    // so it is read before the snippets it is warning about.
+    ...(result.fullTextNote ? { fullTextNote: result.fullTextNote } : {}),
     ...(evidence.length ? { matchedChunks: evidence } : {}),
   };
 }

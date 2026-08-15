@@ -416,8 +416,8 @@ const timedOutSemantic = await runHybridSearch(
     rrfK: 60,
     keywordWeight: 1,
     semanticWeight: 1,
-    semanticTimeoutMs: 25,
-    totalTimeoutMs: 100,
+    semanticBranchTimeoutMs: 25,
+    keywordSearchTimeoutMs: 100,
   },
   {
     keywordSearch: async () => [keywordItem("A", 9)],
@@ -979,8 +979,8 @@ const cancelledRun = await runHybridSearch(
     rrfK: 60,
     keywordWeight: 1,
     semanticWeight: 1,
-    semanticTimeoutMs: 25,
-    totalTimeoutMs: 80,
+    semanticBranchTimeoutMs: 25,
+    keywordSearchTimeoutMs: 80,
   },
   {
     keywordSearch: async () => [keywordItem("A", 9)],
@@ -1009,8 +1009,8 @@ const throwingCancel = await runHybridSearch(
     rrfK: 60,
     keywordWeight: 1,
     semanticWeight: 1,
-    semanticTimeoutMs: 20,
-    totalTimeoutMs: 80,
+    semanticBranchTimeoutMs: 20,
+    keywordSearchTimeoutMs: 80,
   },
   {
     keywordSearch: async () => [keywordItem("A", 9)],
@@ -1055,8 +1055,18 @@ assert.match(hybridBranch, /cancelSemanticSearch:/);
 assert.match(hybridBranch, /signal: semanticAbort\?\.signal/);
 assert.match(
   hybridBranch,
-  /vectorScanTimeoutMs: settings\.searchTimeoutMs/,
+  /vectorScanTimeoutMs: settings\.vectorScanTimeoutMs/,
   "hybrid search must apply the persisted timeout only to its vector scan",
+);
+assert.match(
+  hybridBranch,
+  /keywordSearchTimeoutMs: settings\.keywordSearchTimeoutMs/,
+  "the keyword branch must be bounded by the user's keyword-search setting",
+);
+assert.match(
+  hybridBranch,
+  /deadlineAt: lexicalDeadlineAt/,
+  "the lexical scan needs a soft deadline so an overrun degrades to partial results",
 );
 assert.match(hybridBranch, /exhaustive: true/);
 assert.match(hybridBranch, /includeChunkText: false/);
@@ -1091,8 +1101,20 @@ assert.match(semanticServiceSource, /deadlineTimer = setTimeout\(abortSearch/);
 assert.match(semanticServiceSource, /vectorScanTimeoutMs\?: number/);
 assert.match(
   semanticServiceSource,
-  /const vectorDeadlineAt[\s\S]*?Date\.now\(\) \+ vectorScanTimeoutMs/,
+  /const effectiveVectorDeadlineAt[\s\S]*?Date\.now\(\) \+ vectorScanTimeoutMs/,
   "the scan deadline must start after query embedding, immediately before scanning",
+);
+// The scan budget must no longer be shareable with anything else: a single
+// whole-search deadline let a slow embedding endpoint eat the scan's time.
+assert.doesNotMatch(
+  semanticServiceSource,
+  /const deadlineAt = timeoutMs \? startTime \+ timeoutMs/,
+);
+assert.match(semanticServiceSource, /embeddingTimeoutMs\?: number/);
+assert.match(
+  semanticServiceSource,
+  /export const DEFAULT_EMBEDDING_TIMEOUT_MS/,
+  "the query embedding needs its own bound or a dead endpoint hangs the branch",
 );
 
 // ---- group library index lifecycle ----

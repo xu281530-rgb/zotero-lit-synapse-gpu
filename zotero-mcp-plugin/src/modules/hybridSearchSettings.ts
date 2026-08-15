@@ -28,8 +28,21 @@ export interface HybridSearchSettings {
   chunkAppendToleranceChars: number;
   /** How many chunks either side may be pulled in for context. */
   neighborRadius: number;
-  /** Maximum time spent in the full-library vector scan itself. */
-  searchTimeoutMs: number;
+  /**
+   * Maximum time spent in the full-library vector scan itself.
+   *
+   * The query embedding is NOT covered by this: it is a network request with
+   * its own fixed deadline (see EMBEDDING_TIMEOUT_MS in semanticSearchService),
+   * so a slow embedding endpoint cannot eat the scan's budget.
+   */
+  vectorScanTimeoutMs: number;
+  /**
+   * Maximum time the keyword (metadata) branch of hybrid retrieval may take.
+   *
+   * This is a per-branch deadline, not a whole-search deadline: the keyword and
+   * vector branches run in parallel and are bounded independently.
+   */
+  keywordSearchTimeoutMs: number;
 }
 
 export const HYBRID_SETTING_DEFAULTS: HybridSearchSettings = {
@@ -41,7 +54,13 @@ export const HYBRID_SETTING_DEFAULTS: HybridSearchSettings = {
   chunkTargetChars: 1000,
   chunkAppendToleranceChars: 500,
   neighborRadius: 1,
-  searchTimeoutMs: 8000,
+  vectorScanTimeoutMs: 8000,
+  // The keyword branch loads and scans the metadata of every candidate item, so
+  // on a large library it is routinely slower than the vector scan. The old
+  // 10s hybrid-wide budget was measured against a much cheaper per-keyword
+  // implementation and degraded constantly; 30s is the untuned starting point
+  // and the scan test replaces it with a value measured on the real library.
+  keywordSearchTimeoutMs: 30000,
 };
 
 export const HYBRID_SETTING_BOUNDS = {
@@ -51,7 +70,8 @@ export const HYBRID_SETTING_BOUNDS = {
   chunkTargetChars: { min: 200, max: 4000 },
   chunkAppendToleranceChars: { min: 0, max: 2000 },
   neighborRadius: { min: 0, max: 10 },
-  searchTimeoutMs: { min: 1, max: 3600000 },
+  vectorScanTimeoutMs: { min: 1, max: 3600000 },
+  keywordSearchTimeoutMs: { min: 1000, max: 3600000 },
 } as const;
 
 export const HYBRID_SETTING_PREF_KEYS = {
@@ -63,7 +83,12 @@ export const HYBRID_SETTING_PREF_KEYS = {
   chunkTargetChars: "hybrid.chunkTargetChars",
   chunkAppendToleranceChars: "hybrid.chunkAppendToleranceChars",
   neighborRadius: "hybrid.neighborRadius",
-  searchTimeoutMs: "hybrid.searchTimeoutMs",
+  // Deliberately still `searchTimeoutMs`: this pref has always meant the vector
+  // scan, and renaming the stored key would reset every user who has already
+  // tuned it (addon/prefs.js declares a default, so "unset" is indistinguishable
+  // from "set to the default" and a migration could not tell them apart).
+  vectorScanTimeoutMs: "hybrid.searchTimeoutMs",
+  keywordSearchTimeoutMs: "hybrid.keywordSearchTimeoutMs",
 } as const;
 
 function clamp(value: number, min: number, max: number): number {
@@ -130,23 +155,31 @@ export function getHybridSearchSettings(): HybridSearchSettings {
       true,
     ),
     neighborRadius: readNumberPref("neighborRadius", true),
-    searchTimeoutMs: readNumberPref("searchTimeoutMs", true),
+    vectorScanTimeoutMs: readNumberPref("vectorScanTimeoutMs", true),
+    keywordSearchTimeoutMs: readNumberPref("keywordSearchTimeoutMs", true),
   };
 }
 
-/** Persist an integer vector-scan timeout, rounding benchmark maxima upward. */
-export function setSearchTimeoutMs(value: number): number {
-  const bounds = HYBRID_SETTING_BOUNDS.searchTimeoutMs;
-  const finite = Number.isFinite(value)
-    ? value
-    : HYBRID_SETTING_DEFAULTS.searchTimeoutMs;
+/** Persist an integer timeout, rounding benchmark recommendations upward. */
+function setTimeoutPref(
+  key: "vectorScanTimeoutMs" | "keywordSearchTimeoutMs",
+  value: number,
+): number {
+  const bounds = HYBRID_SETTING_BOUNDS[key];
+  const finite = Number.isFinite(value) ? value : HYBRID_SETTING_DEFAULTS[key];
   const stored = Math.ceil(clamp(finite, bounds.min, bounds.max));
-  Zotero.Prefs.set(
-    PREF_PREFIX + HYBRID_SETTING_PREF_KEYS.searchTimeoutMs,
-    stored,
-    true,
-  );
+  Zotero.Prefs.set(PREF_PREFIX + HYBRID_SETTING_PREF_KEYS[key], stored, true);
   return stored;
+}
+
+/** Persist the vector-scan timeout. */
+export function setVectorScanTimeoutMs(value: number): number {
+  return setTimeoutPref("vectorScanTimeoutMs", value);
+}
+
+/** Persist the keyword-search timeout. */
+export function setKeywordSearchTimeoutMs(value: number): number {
+  return setTimeoutPref("keywordSearchTimeoutMs", value);
 }
 
 /**

@@ -2,11 +2,10 @@
 
 Zotero MCP is an open-source project designed to seamlessly integrate powerful AI capabilities with the leading reference management tool, Zotero, through the Model Context Protocol (MCP). This project consists of two core components: a Zotero plugin and an MCP server, which work together to provide AI assistants (like Claude) with the ability to interact with your local Zotero library.
 _This README is also available in: [:cn: 简体中文](./README-zh.md) | :gb: English._
-[![GitHub](https://img.shields.io/badge/GitHub-zotero--mcp-blue?logo=github)](https://github.com/cookjohn/zotero-mcp)
 [![zotero target version](https://img.shields.io/badge/Zotero-7-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-1.7.0-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-1.8.0-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -63,7 +62,7 @@ Simply put, Zotero MCP is a bridge connecting your AI client (like Cherry Studio
 **Two-Step Quick Start:**
 
 1.  **Install the Plugin**:
-    - Go to the project's [Releases Page](https://github.com/cookjohn/zotero-mcp/releases) to download the latest `zotero-mcp-plugin-x.x.x.xpi` file.
+    - Get the latest `zotero-mcp-plugin-x.x.x.xpi` file from whoever provided you this project (or build it yourself, see the Developer Guide below).
     - In Zotero, install the `.xpi` file via `Tools -> Add-ons`.
     - Restart Zotero.
 
@@ -109,15 +108,14 @@ For detailed client-specific configuration instructions, see the [Chinese README
 
 ### Step 1: Install and Configure the Zotero Plugin
 
-1.  Download the latest `zotero-mcp-plugin.xpi` from the [Releases Page](https://github.com/cookjohn/zotero-mcp/releases).
+1.  Build the plugin yourself (see Step 2) or obtain a prebuilt `zotero-mcp-plugin.xpi`.
 2.  Install it in Zotero via `Tools -> Add-ons`.
 3.  Enable the server in `Preferences -> Zotero MCP Plugin`.
 
 ### Step 2: Development Setup
 
-1.  Clone the repository:
+1.  Get the repository (clone it or copy the project directory), then enter it:
     ```bash
-    git clone https://github.com/cookjohn/zotero-mcp.git
     cd zotero-mcp
     ```
 2.  Set up the plugin development environment:
@@ -334,9 +332,15 @@ AI-powered semantic search using embedding vectors. Finds conceptually related c
 
 #### `find_similar`
 
-Find items semantically similar to a given item.
+Find DOCUMENTS semantically similar to one paper, using several of that paper's own passages as the query. Purely semantic — no keywords take part.
 
-- `itemKey` (required), `topK`, `minScore`
+The AI first picks representative chunks of the source paper with `search_fulltext`, then passes their `chunkId`s here. Every chunk is scanned against the whole index as its own query vector; chunk scores are aggregated into ONE score per candidate document (for each query chunk, the candidate's two best passages are averaged; those per-query scores are combined as 0.75 × mean + 0.25 × max), so a paper qualifies by relating to several of the facets supplied rather than by owning one lucky passage. The source paper is excluded from its own results.
+
+Every document above the user's relevance threshold is returned — there is no cap on how many qualify — ranked and paged 20 per page. Results carry identity, scores and matched `chunkId`s, not passage text; read a candidate with `search_fulltext`.
+
+Timeout: no separate setting. The scan deadline is the user's single-scan `vectorScanTimeoutMs` scaled by the number of query chunks and the path that will run it — `0.8 + 0.35N` on the CPU (one shared pass over the index) and `0.5 + 1.1N` on the GPU (one resident-vector scan per query). Both multipliers come from measurements (`npm run benchmark:find-similar-scaling`) and the applied budget is reported in the response metadata.
+
+- `itemKey` (required for a new search), `chunkIds` (required for a new search, max 20, all from that one item), `minScore`, `topK` (page size), `libraryID`, `cursor` (page on without re-scanning)
 
 #### `semantic_status`
 
@@ -397,5 +401,7 @@ This project is licensed under the [MIT License](./LICENSE).
 - [Zotero](https://www.zotero.org/) - An excellent open-source reference management tool.
 - [Model Context Protocol](https://modelcontextprotocol.org/) - The protocol for AI tool integration.
 - [![Using Zotero Plugin Template](https://img.shields.io/badge/Using-Zotero%20Plugin%20Template-blue?style=flat-square&logo=github)](https://github.com/windingwind/zotero-plugin-template)
+- This project builds on the original [zotero-mcp](https://github.com/cookjohn/zotero-mcp) by [cookjohn](https://github.com/cookjohn) - thank you for the original Zotero MCP integration this project is derived from.
+- Thanks also to the author of [Zotero Mark Reader](PENDING_URL) for the reading/annotation functionality this project draws on.
   Contact us
   ![Contact us](./IMG/0320.jpg)

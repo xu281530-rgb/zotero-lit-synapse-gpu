@@ -523,7 +523,9 @@ export class GpuVectorService implements GpuVectorSearchBackend {
           maxChunksPerItem: request.maxChunksPerItem,
           language: request.language,
           itemKeys: request.itemKeys,
-          libraryID: request.libraryID,
+          // Explicit null rather than an omitted key: the worker treats both as
+          // "all libraries", and sending the key keeps the frame shape stable.
+          libraryID: request.libraryID ?? null,
           minScore: request.minScore,
         },
         new Uint8Array(query.buffer, query.byteOffset, query.byteLength),

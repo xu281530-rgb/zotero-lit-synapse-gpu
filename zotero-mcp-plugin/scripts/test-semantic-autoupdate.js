@@ -30,8 +30,8 @@ assert.doesNotMatch(
 );
 assert.match(
   hooksSource,
-  /event !== 'add' && event !== 'modify' && event !== 'delete'/,
-  "the notifier must accept add, modify and delete",
+  /event !== 'add' &&\s*\n?\s*event !== 'modify' &&\s*\n?\s*event !== 'trash' &&\s*\n?\s*event !== 'delete'/,
+  "the notifier must accept add, modify, trash and delete",
 );
 assert.match(hooksSource, /queueModifiedItems\(numericIds\)/);
 // modify is queued non-forced so an unchanged item costs only a timestamp check.

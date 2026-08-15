@@ -4,7 +4,8 @@
  * Splits text into semantically meaningful chunks for embedding generation.
  * Features:
  * - Document structure detection (abstract, sections, references)
- * - Quality assessment and garbage filtering
+ * - Whitespace-only preprocessing: no line is ever dropped for being short,
+ *   symbol-heavy, repeated or low-scoring
  * - Sentence-level splitting with semantic boundaries
  * - Support for Chinese and English academic papers
  */
@@ -70,7 +71,22 @@ interface QualityResult {
 
 export class TextQualityPreprocessor {
   /**
-   * Preprocess and assess text quality
+   * Normalise whitespace, and nothing else.
+   *
+   * This used to delete content: lines whose "valid character" ratio fell
+   * below 30%, lines of one or two characters that were not digits, lines
+   * repeating more than three times, and — through a whole-document quality
+   * score — entire documents. Every one of those rules destroyed real body
+   * text. `γ′`, `α`, a bare formula, a two-character section heading and a
+   * symbol-heavy table row all look like OCR garbage to a character-ratio
+   * test, and are all things a materials paper is actually about.
+   *
+   * What survives is only what cannot carry meaning: line-ending and
+   * whitespace normalisation, control characters, and blank / whitespace-only
+   * lines. Blank lines are collapsed rather than removed, because one blank
+   * line is what separates two Markdown paragraphs and the chunker splits on
+   * exactly that — deleting them would fuse the document into a single
+   * paragraph and silently change chunking, which must not change here.
    */
   static process(text: string): { text: string; quality: QualityResult } {
     if (!text || text.trim().length === 0) {
@@ -94,86 +110,38 @@ export class TextQualityPreprocessor {
     // 2. Remove control characters (keep newlines)
     processed = processed.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
 
-    // 3. Remove garbage lines (OCR failures)
-    processed = this.removeGarbageLines(processed);
+    // 3. Blank-line cleanup: a whitespace-only line becomes empty, and a run
+    //    of blank lines collapses to the single blank line that means
+    //    "paragraph break". No line carrying content is ever removed.
+    processed = processed
+      .replace(/^[ \t]+$/gm, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
 
-    // 4. Remove repeated header/footer lines
-    processed = this.removeRepeatedLines(processed);
-
-    // 5. Clean up excessive newlines
-    processed = processed.replace(/\n{4,}/g, '\n\n\n').trim();
-
-    // 6. Assess quality
+    // 4. Score the result — for the log only, never as a filter.
     const quality = this.assessQuality(processed);
 
     return { text: processed, quality };
   }
 
   /**
-   * Remove lines that are mostly punctuation/symbols (OCR failure signature)
-   */
-  private static removeGarbageLines(text: string): string {
-    return text.split('\n').filter(line => {
-      const trimmed = line.trim();
-      if (trimmed.length === 0) return true; // Keep empty lines for structure
-
-      // Valid characters: Chinese + English letters + digits
-      const validChars = (trimmed.match(/[a-zA-Z\u4e00-\u9fa5\d]/g) || []).length;
-      const validRatio = validChars / trimmed.length;
-
-      // If valid characters < 30% and line is not too short, it's garbage
-      if (validRatio < 0.3 && trimmed.length > 5) {
-        return false;
-      }
-
-      // Remove single character lines (likely OCR artifacts) except numbers
-      if (trimmed.length <= 2 && !/^[\d]+[.、)]?$/.test(trimmed)) {
-        return false;
-      }
-
-      return true;
-    }).join('\n');
-  }
-
-  /**
-   * Remove lines that appear too frequently (headers/footers)
-   */
-  private static removeRepeatedLines(text: string): string {
-    const lines = text.split('\n');
-    if (lines.length <= 10) return text;
-
-    // Count line frequency
-    const freq: Record<string, number> = {};
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed.length >= 5 && trimmed.length <= 100) {
-        freq[trimmed] = (freq[trimmed] || 0) + 1;
-      }
-    }
-
-    // Remove lines appearing more than 3 times
-    const filtered = lines.filter(line => {
-      const trimmed = line.trim();
-      return !freq[trimmed] || freq[trimmed] <= 3;
-    });
-
-    // Only apply if we didn't remove too much
-    if (filtered.length >= lines.length * 0.9) {
-      return filtered.join('\n');
-    }
-    return text;
-  }
-
-  /**
-   * Assess text quality
+   * Score text for diagnostics.
+   *
+   * `shouldIndex` now answers only "is there anything here at all". The score
+   * and the issue list are still produced so a badly OCR'd document shows up
+   * in the log, but a low score no longer discards it: a paper the user put in
+   * the library is a paper the user wants searchable, and a whole-document
+   * threshold was silently dropping exactly the scanned and symbol-heavy
+   * papers that most need indexing.
    */
   private static assessQuality(text: string): QualityResult {
     const issues: string[] = [];
     let score = 100;
 
-    if (!text || text.length < 50) {
-      return { score: 0, issues: ['too_short'], shouldIndex: false };
+    if (!text || text.trim().length === 0) {
+      return { score: 0, issues: ['empty'], shouldIndex: false };
     }
+    if (text.length < 50) issues.push('short_document');
 
     const noSpace = text.replace(/\s/g, '');
 
@@ -212,7 +180,8 @@ export class TextQualityPreprocessor {
     return {
       score: Math.max(0, score),
       issues,
-      shouldIndex: score >= 30 && text.length >= 50
+      // Content, not quality, decides. The score is advisory.
+      shouldIndex: text.trim().length > 0
     };
   }
 }
@@ -266,10 +235,10 @@ export class TextChunker {
    * document-level deep dive relies on when it expands context around a hit.
    *
    * The pipeline never drops body text: no minimum-length filter, no
-   * per-chunk quality filter, and an oversized paragraph is split on complete
-   * sentence boundaries rather than truncated. The only content deliberately
-   * left out is the references list (when skipReferences is on) and the
-   * OCR-garbage lines the preprocessor strips.
+   * per-chunk quality filter, no line-level filter in the preprocessor, and an
+   * oversized paragraph is split on complete sentence boundaries rather than
+   * truncated. The only content deliberately left out is the references list,
+   * when skipReferences is on.
    */
   chunk(text: string): string[] {
     const startTime = Date.now();

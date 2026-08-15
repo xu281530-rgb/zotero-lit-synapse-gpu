@@ -10,6 +10,7 @@ declare let ztoolkit: ZToolkit;
 declare let PathUtils: any;
 declare let IOUtils: any;
 
+import { bodyIndexStateFromSourceKind } from './bodyIndexState';
 import {
   runVectorScanBenchmark,
   type VectorScanBenchmarkResult,
@@ -27,6 +28,55 @@ import type {
   GpuVectorSnapshotInfo,
   GpuVectorSnapshotRow,
 } from './gpuVectorBackend';
+
+/**
+ * Make a streamed SQLite row readable by column name.
+ *
+ * Zotero's `queryAsync` only wraps rows in its name-resolving Proxy on the path
+ * that RETURNS them (db.js: "the individual rows are Proxy objects that return
+ * values from the underlying mozIStorageRows based on column names"). Supply an
+ * `onRow` callback and two things change: the callback receives a raw
+ * mozIStorageRow, and the function returns undefined instead of any rows. On a
+ * raw row, `row.dimensions` is not the column — it is just a missing property —
+ * so every mapper in this file silently produced rows of all-undefined values.
+ *
+ * This mirrors Zotero's own handler, which is what makes it correct: values come
+ * from `getResultByName`, the sanctioned accessor. Rows that already resolve
+ * names (the non-streaming path, and the plain objects used by tests) are passed
+ * through untouched.
+ *
+ * A column the query did not select resolves to `undefined` rather than
+ * throwing. That is deliberate: `mapScanRow` is shared by the Int8 and Float32
+ * scan queries, which select different columns, and Zotero cancels the whole
+ * query and rethrows if an onRow callback throws — so a strict lookup would
+ * abort the scan instead of leaving one field empty.
+ */
+const STREAMED_ROW_HANDLER: ProxyHandler<any> = {
+  get(target: any, name: string | symbol) {
+    // Guard the await/thenable probe: without this a row would look like a
+    // promise to any code that awaits it.
+    if (typeof name !== 'string' || name === 'then') return undefined;
+    try {
+      return target.getResultByName(name);
+    } catch {
+      return undefined;
+    }
+  },
+  has(target: any, name: string | symbol) {
+    if (typeof name !== 'string') return false;
+    try {
+      target.getResultByName(name);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+};
+
+function wrapStreamedRow(row: any): any {
+  if (!row || typeof row.getResultByName !== 'function') return row;
+  return new Proxy(row, STREAMED_ROW_HANDLER);
+}
 
 export interface VectorRecord {
   itemKey: string;
@@ -67,10 +117,58 @@ export interface VectorSearchOptions {
   itemKeys?: string[];
   minScore?: number;
   libraryID?: number;
+  /**
+   * Scan every stored vector regardless of which library it belongs to.
+   *
+   * Only the scan benchmark uses this: retrieval is always library-scoped.
+   * Ignored when `itemKeys` is given, which is a narrower scope already.
+   */
+  allLibraries?: boolean;
   deadlineAt?: number;
   signal?: AbortSignal;
   /** Filled in with how many stored vectors this scan actually read. */
   stats?: { scanned?: number };
+}
+
+/** One chunk of a candidate document, scored against ONE query vector. */
+export interface MultiQueryChunkHit {
+  chunkId: number;
+  score: number;
+  rowId?: number;
+}
+
+/**
+ * A candidate document's best chunks, kept separately per query vector.
+ *
+ * `perQuery[i]` belongs to `queryVectors[i]` and is sorted best-first. The
+ * store deliberately stops here instead of collapsing the two dimensions into
+ * one number: how a document's per-query evidence becomes one document score is
+ * a ranking decision (see similarDocumentAggregation), not a storage one.
+ */
+export interface MultiQueryDocumentMatch {
+  itemKey: string;
+  libraryID: number;
+  perQuery: MultiQueryChunkHit[][];
+}
+
+export interface MultiQuerySearchOptions {
+  /** How many chunks to keep per document PER query vector. */
+  chunksPerQuery?: number;
+  language?: 'zh' | 'en' | 'all';
+  itemKeys?: string[];
+  /** Documents dropped from the result — normally the query document itself. */
+  excludeItemKeys?: string[];
+  /**
+   * Chunk-level floor. Callers that aggregate per document should pass -1
+   * (keep everything): a chunk omitted here is indistinguishable from a chunk
+   * the document does not have, so any floor above the lowest possible cosine
+   * silently changes what the aggregate means — see findSimilarByChunks.
+   */
+  minChunkScore?: number;
+  libraryID?: number;
+  deadlineAt?: number;
+  signal?: AbortSignal;
+  stats?: { scanned?: number; documents?: number };
 }
 
 export interface IndexStatus {
@@ -106,7 +204,19 @@ export interface IndexBuildSession {
   buildID: string;
   libraryID: number;
   scope: 'full-library' | 'targeted' | 'incremental';
-  status: 'indexing' | 'paused' | 'failed' | 'aborted' | 'completed';
+  /**
+   * 'incomplete' is a run that finished but deliberately left documents out
+   * (an oversized chunk the user chose to skip). It is intentionally absent
+   * from getResumableBuildSession's list: the run is over, and the skipped
+   * documents are reachable through the failed-items retry instead.
+   */
+  status:
+    | 'indexing'
+    | 'paused'
+    | 'failed'
+    | 'aborted'
+    | 'completed'
+    | 'incomplete';
   chunkSignature?: string;
   chunkTargetChars?: number;
   chunkAppendToleranceChars?: number;
@@ -137,6 +247,20 @@ export interface VectorStoreStats {
     migrated: number;
     total: number;
     percent: number;
+  };
+  /**
+   * How many indexed items actually hold body text, so "N items indexed" can
+   * no longer hide a pile of items that are only a title and an abstract.
+   */
+  bodyCoverage?: {
+    /** Body text (PDF / Markdown / text / note) is in the index. */
+    withBody: number;
+    /** A body source exists but could not be parsed — an indexing failure. */
+    metadataOnly: number;
+    /** No body source exists; metadata-only is expected for these. */
+    noBodySource: number;
+    /** Indexed before this was recorded; treated as "has body" until refreshed. */
+    unknown: number;
   };
   dbPath?: string;                  // Path to database file
 }
@@ -847,33 +971,85 @@ export class VectorStore {
   }
 
   /**
-   * Benchmark the same read-only full-Library scan used by hybrid retrieval.
-   * One stored Float32 vector is the query seed, avoiding an embedding API
-   * request and any need to read source document text.
+   * Pick any indexed vector to use as a benchmark query seed.
+   *
+   * Deliberately not scoped to a library and deliberately not dependent on the
+   * Float32 table: real searches run on the Int8 column by default, so an index
+   * whose `vectors_f32` rows are absent still searches perfectly well and must
+   * still be benchmarkable. Float32 is preferred when present only because it
+   * needs no dequantisation.
    */
-  async benchmarkLibraryScan(
-    libraryID: number = Zotero.Libraries.userLibraryID,
+  private async loadBenchmarkSeed(
     signal?: AbortSignal,
-  ): Promise<VectorScanBenchmarkResult> {
-    await this.ensureInitialized();
-    const scope =
-      libraryID === Zotero.Libraries.userLibraryID
-        ? { clause: "e.item_key NOT GLOB '[0-9]*:*'", params: [] }
-        : { clause: 'e.item_key GLOB ?', params: [`${libraryID}:*`] };
-    const seedRows = await this.queryRowsCancellable(
-      `SELECT e.dimensions, f.vector FROM embeddings e JOIN vectors_f32 f ON f.item_key = e.item_key AND f.chunk_id = e.chunk_id WHERE ${scope.clause} ORDER BY e.id LIMIT 1`,
-      scope.params,
+  ): Promise<Float32Array | null> {
+    const float32Rows = await this.queryRowsCancellable(
+      `SELECT e.dimensions, f.vector FROM embeddings e JOIN vectors_f32 f ON f.item_key = e.item_key AND f.chunk_id = e.chunk_id ORDER BY e.id LIMIT 1`,
+      [],
       signal,
       undefined,
       (row: any) => ({ dimensions: row.dimensions, vector: row.vector }),
     );
-    if (!seedRows.length || !seedRows[0].vector) {
-      throw new Error('No vectors are indexed in My Library');
+    if (float32Rows.length && float32Rows[0].vector) {
+      return this.bufferToFloat32Array(
+        float32Rows[0].vector,
+        Number(float32Rows[0].dimensions),
+      );
     }
-    const seed = this.bufferToFloat32Array(
-      seedRows[0].vector,
-      Number(seedRows[0].dimensions),
+
+    const int8Rows = await this.queryRowsCancellable(
+      `SELECT dimensions, vector_int8, vector_scale FROM embeddings WHERE vector_int8 IS NOT NULL ORDER BY id LIMIT 1`,
+      [],
+      signal,
+      undefined,
+      (row: any) => ({
+        dimensions: row.dimensions,
+        vectorInt8: row.vector_int8,
+        scale: row.vector_scale,
+      }),
     );
+    if (int8Rows.length && int8Rows[0].vectorInt8) {
+      const dimensions = Number(int8Rows[0].dimensions);
+      const scale = Number(int8Rows[0].scale);
+      if (Number.isFinite(dimensions) && Number.isFinite(scale) && scale !== 0) {
+        return this.dequantizeFromInt8(
+          this.bufferToInt8Array(int8Rows[0].vectorInt8, dimensions),
+          scale,
+        );
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Benchmark the same read-only scan used by hybrid retrieval, over every
+   * chunk currently in the index.
+   *
+   * One stored vector is the query seed, avoiding an embedding API request and
+   * any need to read source document text.
+   */
+  async benchmarkLibraryScan(
+    signal?: AbortSignal,
+  ): Promise<VectorScanBenchmarkResult> {
+    await this.ensureInitialized();
+    const seed = await this.loadBenchmarkSeed(signal);
+    if (!seed) {
+      // Report what is actually in the tables. "No vectors are indexed" was
+      // wrong often enough to be misleading: it also fired for an index that
+      // was fully present but stored in a column this query did not read.
+      const [embeddingCount, int8Count, float32Count] = await Promise.all([
+        this.db.valueQueryAsync(`SELECT COUNT(*) FROM embeddings`),
+        this.db.valueQueryAsync(
+          `SELECT COUNT(*) FROM embeddings WHERE vector_int8 IS NOT NULL`,
+        ),
+        this.db.valueQueryAsync(`SELECT COUNT(*) FROM vectors_f32`),
+      ]);
+      throw new Error(
+        `No usable seed vector found (embeddings=${Number(embeddingCount || 0)}, ` +
+          `int8=${Number(int8Count || 0)}, float32=${Number(float32Count || 0)}). ` +
+          `Build the semantic index before running the scan test.`,
+      );
+    }
 
     return runVectorScanBenchmark(() =>
       this.search(seed, {
@@ -884,10 +1060,21 @@ export class VectorStore {
         language: 'all',
         itemKeys: undefined,
         minScore: -1,
-        libraryID,
+        // Every chunk in the index, not one library's worth: the test measures
+        // the worst case the scan can be asked to do.
+        allLibraries: true,
         signal,
       }),
     );
+  }
+
+  /** How many chunks the scan test would cover, for reporting coverage. */
+  async getIndexedChunkTotal(): Promise<number> {
+    await this.ensureInitialized();
+    const total = await this.db.valueQueryAsync(
+      `SELECT COUNT(*) FROM embeddings`,
+    );
+    return Number(total || 0);
   }
 
   /**
@@ -929,7 +1116,13 @@ export class VectorStore {
       language: options.language ?? 'all',
       itemKeys: options.itemKeys,
       minScore: options.minScore ?? 0,
-      libraryID: options.libraryID ?? Zotero.Libraries.userLibraryID,
+      // Undefined tells the worker to scan every resident row, which is what
+      // keeps the GPU benchmark over the same chunks as the CPU one. itemKeys
+      // is a narrower scope already, so it wins as it does on the CPU path.
+      libraryID:
+        options.allLibraries && options.itemKeys === undefined
+          ? undefined
+          : (options.libraryID ?? Zotero.Libraries.userLibraryID),
       timeoutMs:
         options.deadlineAt === undefined
           ? undefined
@@ -972,6 +1165,7 @@ export class VectorStore {
       itemKeys,
       minScore = 0,
       libraryID = Zotero.Libraries.userLibraryID,
+      allLibraries = false,
       deadlineAt,
       signal,
       stats,
@@ -1001,6 +1195,8 @@ export class VectorStore {
       const placeholders = storageKeys.map(() => '?').join(',');
       conditions.push(`item_key IN (${placeholders})`);
       params.push(...storageKeys);
+    } else if (allLibraries) {
+      // No library predicate at all — every stored vector participates.
     } else if (libraryID === Zotero.Libraries.userLibraryID) {
       conditions.push("item_key NOT GLOB '[0-9]*:*'");
     } else {
@@ -1341,6 +1537,402 @@ export class VectorStore {
     return topResults;
   }
 
+  /**
+   * Whether a search issued right now would run on the GPU.
+   *
+   * Callers that must size a deadline before searching need this: the two paths
+   * scale differently with the number of query vectors (one shared pass on the
+   * CPU, one resident-vector scan per query on the GPU).
+   */
+  isGpuSearchEnabled(): boolean {
+    try {
+      return this.gpuBackend.isEnabled();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Score the index against SEVERAL query vectors in one pass, returning each
+   * candidate document's best chunks per query vector.
+   *
+   * Why this exists as its own entry point rather than N calls to `search()`:
+   * the expensive parts of a scan are the SQL read and the per-row Int8 decode,
+   * and both are shared across query vectors. Calling `search()` five times
+   * re-reads and re-decodes the whole index five times; this reads and decodes
+   * once and does five dot products per row.
+   *
+   * Nothing is truncated at chunk level beyond `chunksPerQuery` per document,
+   * so document-level ranking downstream sees every document the index holds
+   * evidence for — which is what makes "the N most similar DOCUMENTS" a
+   * question this can actually answer.
+   */
+  async searchMultiQuery(
+    queryVectors: Float32Array[],
+    options: MultiQuerySearchOptions = {},
+  ): Promise<MultiQueryDocumentMatch[]> {
+    if (queryVectors.length === 0) return [];
+    if (options.itemKeys !== undefined && options.itemKeys.length === 0) {
+      return [];
+    }
+
+    if (!this.gpuBackend.isEnabled()) {
+      return this.searchMultiQueryCpu(
+        queryVectors,
+        options,
+        this.gpuBackend.getCpuFallbackPrecision(),
+      );
+    }
+
+    await this.ensureInitialized();
+    this.throwIfVectorScanCancelled(options.signal, options.deadlineAt);
+    try {
+      return await this.searchMultiQueryGpu(queryVectors, options);
+    } catch (error) {
+      if (options.signal?.aborted) {
+        throw new Error('Vector scan cancelled');
+      }
+      const fallbackPrecision = this.gpuBackend.getEffectivePrecision();
+      this.gpuBackend.fallback(error);
+      return this.searchMultiQueryCpu(
+        queryVectors,
+        options,
+        fallbackPrecision,
+      );
+    }
+  }
+
+  /**
+   * GPU path: one resident-vector scan per query vector.
+   *
+   * The worker already returns per-document top chunks (`groupByItem`), which
+   * is exactly the shape needed here, and the vectors stay resident on the
+   * device between calls — so the repeated scans cost kernel time, not I/O.
+   * The single-pass argument that shapes the CPU path does not apply.
+   */
+  private async searchMultiQueryGpu(
+    queryVectors: Float32Array[],
+    options: MultiQuerySearchOptions,
+  ): Promise<MultiQueryDocumentMatch[]> {
+    const chunksPerQuery = Math.max(1, Math.floor(options.chunksPerQuery ?? 2));
+    const excluded = new Set(options.excludeItemKeys ?? []);
+    const documents = new Map<string, MultiQueryDocumentMatch>();
+    let scanned = 0;
+
+    for (let queryIndex = 0; queryIndex < queryVectors.length; queryIndex++) {
+      this.throwIfVectorScanCancelled(options.signal, options.deadlineAt);
+      const scanStats: { scanned?: number } = {};
+      const results = await this.gpuBackend.search({
+        query: queryVectors[queryIndex],
+        // Ignored by the worker when groupByItem is set; the document map is
+        // what bounds the result there.
+        topK: chunksPerQuery,
+        groupByItem: true,
+        // No document cap: cutting candidates here is the very truncation that
+        // made the old find_similar return two papers when asked for twenty.
+        documentLimit: undefined,
+        maxChunksPerItem: chunksPerQuery,
+        language: options.language ?? 'all',
+        itemKeys: options.itemKeys,
+        minScore: options.minChunkScore ?? 0,
+        libraryID: options.libraryID ?? Zotero.Libraries.userLibraryID,
+        timeoutMs:
+          options.deadlineAt === undefined
+            ? undefined
+            : Math.max(0, options.deadlineAt - Date.now()),
+        signal: options.signal,
+        stats: scanStats,
+      });
+      scanned += scanStats.scanned ?? 0;
+
+      for (const result of results) {
+        if (excluded.has(result.itemKey)) continue;
+        const documentKey = `${result.libraryID}:${result.itemKey}`;
+        let entry = documents.get(documentKey);
+        if (!entry) {
+          entry = {
+            itemKey: result.itemKey,
+            libraryID: result.libraryID,
+            perQuery: Array.from({ length: queryVectors.length }, () => []),
+          };
+          documents.set(documentKey, entry);
+        }
+        this.pushChunkHit(
+          entry.perQuery[queryIndex],
+          { chunkId: result.chunkId, score: result.score, rowId: result.rowId },
+          chunksPerQuery,
+        );
+      }
+    }
+
+    if (options.stats) {
+      options.stats.scanned = scanned;
+      options.stats.documents = documents.size;
+    }
+    return Array.from(documents.values());
+  }
+
+  /** Keep a per-document, per-query list of the best chunks, best-first. */
+  private pushChunkHit(
+    hits: MultiQueryChunkHit[],
+    hit: MultiQueryChunkHit,
+    cap: number,
+  ): void {
+    if (hits.length >= cap && hit.score <= hits[hits.length - 1].score) return;
+    hits.push(hit);
+    hits.sort((a, b) => b.score - a.score);
+    if (hits.length > cap) hits.length = cap;
+  }
+
+  private async searchMultiQueryCpu(
+    queryVectors: Float32Array[],
+    options: MultiQuerySearchOptions,
+    forcedPrecision?: GpuVectorPrecision,
+  ): Promise<MultiQueryDocumentMatch[]> {
+    await this.ensureInitialized();
+
+    const {
+      chunksPerQuery = 2,
+      language = 'all',
+      itemKeys,
+      excludeItemKeys,
+      minChunkScore = 0,
+      libraryID = Zotero.Libraries.userLibraryID,
+      deadlineAt,
+      signal,
+      stats,
+    } = options;
+    const startTime = Date.now();
+    const chunkCap = Math.max(1, Math.floor(chunksPerQuery));
+    const excluded = new Set(excludeItemKeys ?? []);
+
+    if (itemKeys !== undefined && itemKeys.length === 0) return [];
+
+    const conditions: string[] = ['1=1'];
+    const params: any[] = [];
+    if (language !== 'all') {
+      conditions.push('language = ?');
+      params.push(language);
+    }
+    if (itemKeys !== undefined) {
+      const storageKeys = itemKeys.map((key) =>
+        this.toStorageKey(key, libraryID),
+      );
+      conditions.push(
+        `item_key IN (${storageKeys.map(() => '?').join(',')})`,
+      );
+      params.push(...storageKeys);
+    } else if (libraryID === Zotero.Libraries.userLibraryID) {
+      conditions.push("item_key NOT GLOB '[0-9]*:*'");
+    } else {
+      conditions.push('item_key GLOB ?');
+      params.push(`${libraryID}:*`);
+    }
+
+    this.throwIfVectorScanCancelled(signal, deadlineAt);
+
+    const whereClause = conditions.join(' AND ');
+    const metadataRows = await this.queryRowsCancellable(
+      `SELECT dimensions, vector_int8 IS NOT NULL AS has_int8 FROM embeddings WHERE ${whereClause} ORDER BY id LIMIT 1`,
+      params,
+      signal,
+      deadlineAt,
+      (row: any) => ({ dimensions: row.dimensions, has_int8: row.has_int8 }),
+    );
+    if (metadataRows.length === 0) return [];
+
+    const storedDims = Number(metadataRows[0].dimensions);
+    const mismatched = queryVectors.filter(
+      (vector) => vector.length !== storedDims,
+    );
+    if (mismatched.length > 0) {
+      ztoolkit.log(
+        `[VectorStore] searchMultiQuery(): dimension mismatch, query=${mismatched[0].length}, stored=${storedDims}`,
+        'error',
+      );
+      return [];
+    }
+
+    const useInt8 =
+      forcedPrecision === 'float32'
+        ? false
+        : forcedPrecision === 'int8'
+          ? true
+          : Boolean(Number(metadataRows[0].has_int8));
+    this.gpuBackend.reportCpuPrecision(useInt8 ? 'int8' : 'float32');
+
+    // Every query vector is prepared once, not once per row.
+    const preparedQueries = queryVectors.map((vector) => ({
+      quantized: this.quantizeWithNorm(vector),
+      ...this.prepareQueryVector(vector),
+    }));
+    if (preparedQueries.some((query) => query.norm === 0)) {
+      ztoolkit.log(
+        `[VectorStore] searchMultiQuery(): a query vector has zero norm`,
+        'error',
+      );
+      return [];
+    }
+
+    const documents = new Map<string, MultiQueryDocumentMatch>();
+    const BATCH_SIZE = 50000;
+    let offset = 0;
+    let totalScanned = 0;
+    let batchCount = 0;
+
+    for (;;) {
+      this.throwIfVectorScanCancelled(signal, deadlineAt);
+      batchCount++;
+      const batchParams = [...params, BATCH_SIZE, offset];
+      const selectCols = useInt8
+        ? 'id, item_key, chunk_id, vector_int8, vector_scale, vector_norm, language, dimensions'
+        : 'e.id, e.item_key, e.chunk_id, e.language, e.dimensions, f.vector AS vector_f32';
+      const mapScanRow = (row: any) => ({
+        id: row.id,
+        item_key: row.item_key,
+        chunk_id: row.chunk_id,
+        vector_int8: row.vector_int8,
+        vector_scale: row.vector_scale,
+        vector_norm: row.vector_norm,
+        language: row.language,
+        dimensions: row.dimensions,
+        vector_f32: row.vector_f32,
+      });
+      const rows = useInt8
+        ? await this.queryRowsCancellable(
+            `SELECT ${selectCols} FROM embeddings WHERE ${whereClause} ORDER BY id LIMIT ? OFFSET ?`,
+            batchParams,
+            signal,
+            deadlineAt,
+            mapScanRow,
+          )
+        : await this.queryRowsCancellable(
+            `SELECT ${selectCols} FROM (SELECT id, item_key, chunk_id, language, dimensions FROM embeddings WHERE ${whereClause} ORDER BY id LIMIT ? OFFSET ?) e LEFT JOIN vectors_f32 f ON f.item_key = e.item_key AND f.chunk_id = e.chunk_id ORDER BY e.id`,
+            batchParams,
+            signal,
+            deadlineAt,
+            mapScanRow,
+          );
+
+      if (!rows || rows.length === 0) break;
+
+      const decodedInt8 = new Map<number, Int8Array>();
+      const fallbackRowIDs: number[] = [];
+      if (useInt8) {
+        for (const row of rows) {
+          if (
+            row.vector_int8 &&
+            row.vector_norm &&
+            row.dimensions === storedDims
+          ) {
+            try {
+              const decoded = this.bufferToInt8Array(
+                row.vector_int8,
+                row.dimensions,
+              );
+              if (decoded.length === preparedQueries[0].quantized.int8Data.length) {
+                decodedInt8.set(row.id, decoded);
+                continue;
+              }
+            } catch {
+              // Falls through to the batched Float32 fallback below.
+            }
+          }
+          fallbackRowIDs.push(row.id);
+        }
+      }
+      const float32Fallbacks = useInt8
+        ? await this.getFloat32VectorsByEmbeddingIDs(
+            fallbackRowIDs,
+            signal,
+            deadlineAt,
+          )
+        : new Map<number, any>();
+
+      for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+        if (rowIndex % 256 === 0) {
+          this.throwIfVectorScanCancelled(signal, deadlineAt);
+        }
+        const row = rows[rowIndex];
+        try {
+          const identity = this.fromStorageKey(row.item_key);
+          const storedInt8 = decodedInt8.get(row.id);
+          let storedFloat32: Float32Array | null = null;
+          if (!storedInt8) {
+            const vectorBlob = useInt8
+              ? float32Fallbacks.get(row.id)
+              : row.vector_f32;
+            if (!vectorBlob || row.dimensions !== storedDims) continue;
+            storedFloat32 = this.bufferToFloat32Array(
+              vectorBlob,
+              row.dimensions,
+            );
+          }
+          totalScanned++;
+          // The row is decoded once; only the dot products repeat per query.
+          if (excluded.has(identity.itemKey)) continue;
+
+          const documentKey = `${identity.libraryID}:${identity.itemKey}`;
+          let entry: MultiQueryDocumentMatch | undefined;
+
+          for (
+            let queryIndex = 0;
+            queryIndex < preparedQueries.length;
+            queryIndex++
+          ) {
+            const query = preparedQueries[queryIndex];
+            const score = storedInt8
+              ? this.cosineSimilarityInt8WithNorm(
+                  query.quantized.int8Data,
+                  query.quantized.norm,
+                  storedInt8,
+                  row.vector_norm,
+                )
+              : this.cosineSimilarityWithNormalizedQuery(
+                  query.normalized,
+                  storedFloat32 as Float32Array,
+                );
+            if (isNaN(score) || score < minChunkScore) continue;
+
+            if (!entry) {
+              entry = documents.get(documentKey);
+              if (!entry) {
+                entry = {
+                  itemKey: identity.itemKey,
+                  libraryID: identity.libraryID,
+                  perQuery: Array.from(
+                    { length: preparedQueries.length },
+                    () => [],
+                  ),
+                };
+                documents.set(documentKey, entry);
+              }
+            }
+            this.pushChunkHit(
+              entry.perQuery[queryIndex],
+              { chunkId: row.chunk_id, score, rowId: row.id },
+              chunkCap,
+            );
+          }
+        } catch {
+          // Skip invalid vectors, exactly as the single-query scan does.
+        }
+      }
+
+      offset += rows.length;
+      if (rows.length < BATCH_SIZE) break;
+    }
+
+    if (stats) {
+      stats.scanned = totalScanned;
+      stats.documents = documents.size;
+    }
+    ztoolkit.log(
+      `[VectorStore] searchMultiQuery() completed in ${Date.now() - startTime}ms: queries=${queryVectors.length}, scanned=${totalScanned} in ${batchCount} batches, documents=${documents.size}`,
+    );
+    return Array.from(documents.values());
+  }
+
   private async getFloat32VectorsByEmbeddingIDs(
     rowIDs: number[],
     signal?: AbortSignal,
@@ -1522,7 +2114,12 @@ export class VectorStore {
     const deadlineTimer =
       remaining === undefined ? undefined : setTimeout(cancel, remaining);
     try {
-      const returnedRows = await this.db.queryAsync(sql, params, {
+      // For a SELECT with onRow, Zotero returns undefined and delivers every
+      // row through the callback instead — so `streamedRows` is the only
+      // source, and there is deliberately no second path to fall back to. An
+      // empty result here means the query matched nothing, not that rows were
+      // delivered somewhere this function forgot to look.
+      await this.db.queryAsync(sql, params, {
         onRow: (row: any, sqliteCancel: any) => {
           cancelQuery = () => {
             if (typeof sqliteCancel === 'function') sqliteCancel();
@@ -1536,14 +2133,12 @@ export class VectorStore {
             cancel();
             return;
           }
-          streamedRows.push(mapRow(row));
+          streamedRows.push(mapRow(wrapStreamedRow(row)));
         },
       });
       this.throwIfVectorScanCancelled(signal, deadlineAt);
       if (cancelled) throw new Error('Vector scan cancelled');
-      return streamedRows.length > 0
-        ? streamedRows
-        : (returnedRows || []).map(mapRow);
+      return streamedRows;
     } catch (error) {
       if (signal?.aborted || cancelled) {
         this.throwIfVectorScanCancelled(signal, deadlineAt);
@@ -1594,10 +2189,13 @@ export class VectorStore {
    */
   /**
    * Keys the incremental build may skip: everything already in index_status
-   * except items recorded as 'empty'. An 'empty' row only means the item had
-   * no extractable content at the time — typically because its PDF had not
-   * been attached yet — so it must stay eligible for a retry. 'failed:%'
-   * markers are still skipped on purpose.
+   * except items recorded as 'empty' and except items indexed from metadata
+   * alone. An 'empty' row only means the item had no extractable content at
+   * the time — typically because its PDF had not been attached yet — so it
+   * must stay eligible for a retry. A 'metadata-only' row means the body text
+   * FAILED to parse, which is exactly the case a later build should try again
+   * (the PDF may have been repaired, MinerU switched on, or its options
+   * changed). 'failed:%' markers are still skipped on purpose.
    */
   async getItemsToSkip(
     libraryID: number = Zotero.Libraries.userLibraryID,
@@ -1605,7 +2203,7 @@ export class VectorStore {
     await this.ensureInitialized();
 
     // IMPORTANT: Single-line query to avoid Zotero queryAsync bug with multi-line SQL
-    const rows = await this.db.queryAsync(`SELECT item_key FROM index_status WHERE content_hash != 'empty' AND version >= 2`);
+    const rows = await this.db.queryAsync(`SELECT item_key FROM index_status WHERE content_hash != 'empty' AND version >= 2 AND source_kind != 'metadata-only'`);
 
     if (!rows || rows.length === 0) {
       return new Set();
@@ -1617,6 +2215,72 @@ export class VectorStore {
         .filter((identity: any) => identity.libraryID === libraryID)
         .map((identity: any) => identity.itemKey),
     );
+  }
+
+  /**
+   * The stored source_kind of many items at once, keyed `libraryID:itemKey`.
+   *
+   * Batched because a search page asks about every row it is about to return,
+   * and 20 single-row round trips on the hot path of every hybrid_search is
+   * not a cost worth paying to learn one column.
+   */
+  async getSourceKinds(
+    identities: Array<{ itemKey: string; libraryID?: number }>,
+  ): Promise<Map<string, string>> {
+    const found = new Map<string, string>();
+    if (identities.length === 0) return found;
+    await this.ensureInitialized();
+
+    // Storage keys are namespaced by library outside My Library, so the
+    // lookup has to go through the same mapping the writes used.
+    const byStorageKey = new Map<string, string>();
+    for (const identity of identities) {
+      const libraryID = identity.libraryID ?? Zotero.Libraries.userLibraryID;
+      byStorageKey.set(
+        this.toStorageKey(identity.itemKey, libraryID),
+        `${libraryID}:${identity.itemKey}`,
+      );
+    }
+
+    const storageKeys = Array.from(byStorageKey.keys());
+    const BATCH = 200;
+    for (let offset = 0; offset < storageKeys.length; offset += BATCH) {
+      const slice = storageKeys.slice(offset, offset + BATCH);
+      const placeholders = slice.map(() => '?').join(',');
+      const rows = await this.db.queryAsync(
+        `SELECT item_key, source_kind FROM index_status WHERE item_key IN (${placeholders})`,
+        slice,
+      );
+      for (const row of rows || []) {
+        const identity = byStorageKey.get(String(row.item_key));
+        if (identity) found.set(identity, String(row.source_kind || ''));
+      }
+    }
+    return found;
+  }
+
+  /**
+   * Items indexed from title/abstract alone because their body text failed.
+   *
+   * These are not in index_failures: a failed PDF parse is a content problem,
+   * not an indexing failure, so it must not fail a build. The row itself is
+   * the retry record — durable across restarts, and the same fact that
+   * getItemsToSkip reads to keep them eligible for the next incremental pass.
+   * This is what lets an explicit "retry" also reach them.
+   */
+  async getMetadataOnlyItems(
+    libraryID?: number,
+  ): Promise<Array<{ libraryID: number; itemKey: string }>> {
+    await this.ensureInitialized();
+    const rows = await this.db.queryAsync(
+      `SELECT item_key FROM index_status WHERE source_kind = 'metadata-only'`,
+    );
+    return (rows || [])
+      .map((row: any) => this.fromStorageKey(String(row.item_key)))
+      .filter(
+        (identity: any) =>
+          libraryID === undefined || identity.libraryID === libraryID,
+      );
   }
 
   async getIndexedItems(): Promise<Set<string>> {
@@ -2417,6 +3081,37 @@ export class VectorStore {
       ztoolkit.log(`[VectorStore] Stats mismatch: index_status=${indexStatusCount}, embeddings(DISTINCT item_key)=${items}. Some items may have index_status but no embeddings.`, 'warn');
     }
 
+    // How much of the index is real body text rather than title+abstract.
+    const bodyCoverage = {
+      withBody: 0,
+      metadataOnly: 0,
+      noBodySource: 0,
+      unknown: 0,
+    };
+    try {
+      const coverageRows = await this.db.queryAsync(
+        `SELECT source_kind, COUNT(*) AS n FROM index_status GROUP BY source_kind`,
+      );
+      for (const row of coverageRows || []) {
+        const count = Number(row.n) || 0;
+        switch (bodyIndexStateFromSourceKind(String(row.source_kind || ''))) {
+          case 'body':
+            bodyCoverage.withBody += count;
+            break;
+          case 'metadata-only':
+            bodyCoverage.metadataOnly += count;
+            break;
+          case 'no-source':
+            bodyCoverage.noBodySource += count;
+            break;
+          default:
+            bodyCoverage.unknown += count;
+        }
+      }
+    } catch (e) {
+      ztoolkit.log(`[VectorStore] Could not compute body coverage: ${e}`, 'warn');
+    }
+
     return {
       totalVectors: total || 0,
       totalItems: items || 0,
@@ -2427,14 +3122,20 @@ export class VectorStore {
       storageMode: 'on-demand',
       storedDimensions,
       int8MigrationStatus,
+      bodyCoverage,
       dbSizeBytes,
       dbPath: this.dbPath
     };
   }
 
   /**
-   * Get vectors for a specific item (for find_similar).
-   * Reads float32 vectors from vectors_f32 table.
+   * Get the stored vectors of one item's chunks (for find_similar).
+   *
+   * Float32 is preferred because it needs no dequantisation, but it is NOT
+   * required: an index built (or migrated) with Int8 only has no `vectors_f32`
+   * rows at all, and searches on it work perfectly well. Reading Float32 alone
+   * made find_similar report such an item as "not indexed" while every other
+   * search found it.
    */
   async getItemVectors(itemKey: string, libraryID?: number): Promise<Array<{
     chunkId: number;
@@ -2445,7 +3146,7 @@ export class VectorStore {
 
     // Get dimensions and language from embeddings table
     const storageKey = this.toStorageKey(itemKey, libraryID);
-    const metaRows = await this.db.queryAsync(`SELECT chunk_id, language, dimensions FROM embeddings WHERE item_key = ? ORDER BY chunk_id`, [storageKey]);
+    const metaRows = await this.db.queryAsync(`SELECT chunk_id, language, dimensions, vector_int8, vector_scale FROM embeddings WHERE item_key = ? ORDER BY chunk_id`, [storageKey]);
 
     if (!metaRows || metaRows.length === 0) {
       return [];
@@ -2464,11 +3165,33 @@ export class VectorStore {
 
     const results: Array<{ chunkId: number; vector: Float32Array; language: string }> = [];
     for (const row of metaRows) {
+      const dimensions = Number(row.dimensions);
       const vecBlob = vecMap.get(row.chunk_id);
+      let vector: Float32Array | null = null;
       if (vecBlob) {
+        try {
+          vector = this.bufferToFloat32Array(vecBlob, dimensions);
+        } catch {
+          vector = null;
+        }
+      }
+      if (!vector && row.vector_int8) {
+        const scale = Number(row.vector_scale);
+        if (Number.isFinite(dimensions) && Number.isFinite(scale) && scale !== 0) {
+          try {
+            vector = this.dequantizeFromInt8(
+              this.bufferToInt8Array(row.vector_int8, dimensions),
+              scale,
+            );
+          } catch {
+            vector = null;
+          }
+        }
+      }
+      if (vector) {
         results.push({
           chunkId: row.chunk_id,
-          vector: this.bufferToFloat32Array(vecBlob, row.dimensions),
+          vector,
           language: row.language
         });
       }

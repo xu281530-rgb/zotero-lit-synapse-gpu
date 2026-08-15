@@ -22,7 +22,15 @@ export interface GpuVectorSearchRequest {
   language: "zh" | "en" | "all";
   itemKeys?: string[];
   minScore: number;
-  libraryID: number;
+  /**
+   * Restrict the scan to one library. Omitted means every resident row.
+   *
+   * Retrieval always sets it. The scan benchmark deliberately omits it so the
+   * GPU measures the same chunk range the CPU path measures — a timeout
+   * recommendation derived from a narrower scan than production runs would be
+   * too small for the searches it is supposed to bound.
+   */
+  libraryID?: number;
   timeoutMs?: number;
   signal?: AbortSignal;
   stats?: { scanned?: number };

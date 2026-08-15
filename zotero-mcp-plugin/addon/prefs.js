@@ -25,7 +25,12 @@ pref("hybrid.minScore", "0.6");
 pref("hybrid.chunkTargetChars", 1000);
 pref("hybrid.chunkAppendToleranceChars", 500);
 pref("hybrid.neighborRadius", 1);
+// Vector scan only; the query embedding has its own fixed timeout in code.
 pref("hybrid.searchTimeoutMs", 8000);
+// Keyword (metadata) branch. Higher than the vector scan because it loads and
+// ranks the metadata of every candidate item; the scan test replaces this with
+// a value measured on the user's own library.
+pref("hybrid.keywordSearchTimeoutMs", 30000);
 pref("hybrid.gpuAccelerationEnabled", false);
 pref("hybrid.gpuPrecision", "auto");
 pref("semantic.enabled", false);

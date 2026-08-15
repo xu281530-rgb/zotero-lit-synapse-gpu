@@ -216,4 +216,45 @@ function fusedMatch(overrides = {}) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// A row must say whether the document actually has indexed body text.
+// ---------------------------------------------------------------------------
+//
+// Without this, a paper whose PDF failed to parse produces a row that is
+// indistinguishable from a real one: same fused score, same
+// matchedBy: "semantic", same matchedChunks — except those chunks ARE its
+// title and abstract. Nothing else in the response could tell them apart, so
+// the abstract gets quoted as the paper's findings.
+{
+  const indexed = projectHybridCandidate(
+    fusedMatch({ fullText: "indexed" }),
+  );
+  assert.equal(indexed.fullText, "indexed");
+  assert.equal(
+    "fullTextNote" in indexed,
+    false,
+    "a document that has full text needs no warning; a note on every row is noise",
+  );
+
+  const broken = projectHybridCandidate(
+    fusedMatch({
+      fullText: "parse_failed",
+      fullTextNote: "NO FULL TEXT: this paper has a PDF/Markdown attachment but it could not be parsed",
+    }),
+  );
+  assert.equal(broken.fullText, "parse_failed");
+  assert.match(broken.fullTextNote, /NO FULL TEXT/);
+
+  // The note has to be readable before the snippets it is about.
+  const keys = Object.keys(broken);
+  assert.ok(
+    keys.indexOf("fullTextNote") < keys.indexOf("matchedChunks"),
+    "the warning must precede the evidence it qualifies",
+  );
+
+  // Evidence still travels: the caller must be able to see WHY it matched,
+  // it just must not read it as body text.
+  assert.equal(broken.matchedChunks.length, 2);
+}
+
 console.log("Hybrid candidate projection regression tests passed");

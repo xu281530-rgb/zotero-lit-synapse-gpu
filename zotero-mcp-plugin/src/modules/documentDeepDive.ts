@@ -16,8 +16,6 @@
 
 import {
   CHUNK_FIELD_WEIGHTS,
-  DEFAULT_HYBRID_TIMEOUT_MS,
-  DEFAULT_SEMANTIC_TIMEOUT_MS,
   rankLexicalCandidates,
   resolveHybridKeywords,
   resolveKeywordProvenance,
@@ -33,7 +31,13 @@ import {
   resolveResultCap,
   resolveScoreFloor,
 } from "./hybridSearchSettings";
-import { getSemanticSearchService } from "./semantic";
+import {
+  DEFAULT_EMBEDDING_TIMEOUT_MS,
+  describeFullTextAvailability,
+  describeMissingBodyText,
+  getSemanticSearchService,
+  hasBodyText,
+} from "./semantic";
 
 declare const Zotero: any;
 declare let ztoolkit: ZToolkit;
@@ -53,8 +57,6 @@ export interface DeepDiveRequest {
   keywordWeight?: number;
   semanticWeight?: number;
   rrfK?: number;
-  semanticTimeoutMs?: number;
-  totalTimeoutMs?: number;
 }
 
 export interface DeepDiveChunk {
@@ -109,6 +111,41 @@ export interface ChunkContextResult {
   degraded: boolean;
   warnings: string[];
   metadata: Record<string, unknown>;
+}
+
+/**
+ * Refuse to dig into a document whose index holds no body text.
+ *
+ * Having chunks is not the same as having full text: a paper whose PDF could
+ * not be parsed still gets its title and abstract chunked, and this stage used
+ * to hand those back as "passages", which reads exactly like evidence from the
+ * paper. Indexes written before this was recorded report `unknown` and are
+ * still allowed through, so upgrading the plugin does not break every existing
+ * item at once — they get a real answer the next time they are refreshed.
+ *
+ * A legacy item is let through with a warning rather than silently: this is
+ * the stage where passages are actually read in depth, so it is the worst
+ * place to stay quiet about "we never established whether these are body text".
+ * Returns the caveat to attach, or undefined when there is nothing to say.
+ */
+async function assertBodyTextIndexed(
+  itemKey: string,
+  libraryID: number,
+): Promise<string | undefined> {
+  const state = await getSemanticSearchService().getItemBodyIndexState(
+    itemKey,
+    libraryID,
+  );
+  if (state === "unknown") {
+    return describeFullTextAvailability("unknown");
+  }
+  if (hasBodyText(state)) return undefined;
+  if (state === "metadata-only" || state === "no-source") {
+    throw new Error(describeMissingBodyText(itemKey, state));
+  }
+  // 'missing': no index row at all — the existing "not indexed" message below
+  // is the right one, so let the caller reach it.
+  return undefined;
 }
 
 async function resolveItem(itemKey: string, libraryID: number): Promise<any> {
@@ -176,6 +213,11 @@ export async function runDocumentDeepDive(
   const cap = resolveResultCap(request.maxChunks, settings.maxChunksPerItem);
   const floor = resolveScoreFloor(request.minScore, settings.minScore);
 
+  const legacyIndexWarning = await assertBodyTextIndexed(
+    request.itemKey,
+    libraryID,
+  );
+
   const semanticService = getSemanticSearchService();
   const storedChunks = await semanticService.getItemChunks(
     request.itemKey,
@@ -210,11 +252,11 @@ export async function runDocumentDeepDive(
   );
   const candidatePoolTruncated = storedChunks.length > MAX_CHUNK_CANDIDATES;
 
-  const totalTimeoutMs = request.totalTimeoutMs ?? DEFAULT_HYBRID_TIMEOUT_MS;
-  const semanticTimeoutMs = Math.min(
-    request.semanticTimeoutMs ?? DEFAULT_SEMANTIC_TIMEOUT_MS,
-    totalTimeoutMs,
-  );
+  // Same two user-configured budgets as library-level retrieval. The keyword
+  // branch here ranks already-loaded chunks rather than querying Zotero, so it
+  // is far cheaper than a library scan — but it is still bounded, because
+  // "cheap in practice" is not a guarantee.
+  const { keywordSearchTimeoutMs, vectorScanTimeoutMs } = settings;
   const semanticAbort =
     typeof AbortController !== "undefined" ? new AbortController() : null;
 
@@ -227,8 +269,9 @@ export async function runDocumentDeepDive(
       keywordWeight: request.keywordWeight ?? 1,
       semanticWeight: request.semanticWeight ?? 1,
       minScore: floor.value,
-      semanticTimeoutMs,
-      totalTimeoutMs,
+      keywordSearchTimeoutMs,
+      semanticBranchTimeoutMs:
+        vectorScanTimeoutMs + DEFAULT_EMBEDDING_TIMEOUT_MS,
     },
     {
       keywordSearch: async () =>
@@ -243,7 +286,7 @@ export async function runDocumentDeepDive(
           itemKey: request.itemKey,
           libraryID,
           topK: candidateLimit,
-          timeoutMs: semanticTimeoutMs,
+          vectorScanTimeoutMs,
           signal: semanticAbort?.signal,
         });
         // The fusion layer is keyed by "document"; inside one paper the
@@ -261,6 +304,9 @@ export async function runDocumentDeepDive(
   semanticAbort?.abort();
 
   const warnings = [...searchResult.warnings];
+  // Front of the list, ahead of retrieval-quality notes: it qualifies what the
+  // returned passages ARE, which outranks how well they were ranked.
+  if (legacyIndexWarning) warnings.unshift(legacyIndexWarning);
   if (provenance.keywordSource === "fallback") {
     warnings.unshift(
       `warning: Keywords for this document were not confirmed as domain-expert output. ${provenance.reason} Re-run this deep dive once with keywords derived from THIS paper — its study object, material system, method, variables, mechanism and abbreviations — written in the language this paper is written in, plus a domain and expertRole declaration re-fitted to this paper. Do not simply reuse the library-level bilingual search terms.`,
@@ -389,6 +435,11 @@ export async function expandChunkContext(
   const item = await resolveItem(request.itemKey, libraryID);
   const radius = resolveNeighborRadius(request.radius, settings.neighborRadius);
 
+  const legacyIndexWarning = await assertBodyTextIndexed(
+    request.itemKey,
+    libraryID,
+  );
+
   const semanticService = getSemanticSearchService();
   const storedChunks = await semanticService.getItemChunks(
     request.itemKey,
@@ -439,6 +490,9 @@ export async function expandChunkContext(
     }));
 
   const warnings: string[] = [];
+  // Same caveat as the ranked deep dive: neighbour expansion returns raw
+  // passages, so a legacy index must not hand them over unqualified.
+  if (legacyIndexWarning) warnings.push(legacyIndexWarning);
   if (unknownAnchors.length > 0) {
     warnings.push(
       `These chunkIds do not exist in this document and were ignored: ${unknownAnchors.join(", ")}. Valid ids run from ${storedChunks[0].chunkId} to ${storedChunks[storedChunks.length - 1].chunkId}.`,

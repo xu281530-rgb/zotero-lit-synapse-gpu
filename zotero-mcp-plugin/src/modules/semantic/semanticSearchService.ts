@@ -8,19 +8,42 @@
  * - Integration with existing Zotero services
  */
 
-import { getEmbeddingService, EmbeddingService, EmbeddingAPIError, EmbeddingErrorType } from './embeddingService';
+import {
+  getEmbeddingService,
+  EmbeddingService,
+  EmbeddingAPIError,
+  // Type-only: importing it as a value makes the module unloadable by Node's
+  // strip-only type stripping, which the regression tests run under.
+  type EmbeddingErrorType,
+} from './embeddingService';
 import {
   getVectorStore,
   VectorStore,
   type FailedIndexItem,
 } from './vectorStore';
+import {
+  MAX_SIMILAR_QUERY_CHUNKS,
+  rankSimilarDocuments,
+  SIMILAR_CHUNKS_PER_QUERY,
+  type AggregatedSimilarDocument,
+} from './similarDocumentAggregation';
+import {
+  resolveSimilarScanBudget,
+  type SimilarScanBudget,
+} from './similarScanBudget';
 import { getTextChunker, TextChunker } from './textChunker';
 import { TextFormatter } from '../textFormatter';
 import { PDFProcessor } from '../pdfProcessor';
 import {
   getMinerUService,
   getOriginalPDFAttachmentsForItem,
+  markdownToIndexText,
 } from '../mineru';
+import {
+  bodyIndexStateFromSourceKind,
+  sourceKindForBodyState,
+  type BodyIndexState,
+} from './bodyIndexState';
 import {
   getChunkingSignature,
   getHybridSearchSettings,
@@ -29,6 +52,13 @@ import {
   shouldRecordFullLibraryChunkingSignature,
 } from '../hybridSearchSettings';
 import { runIndexWorkQueue, type IndexWorkOutcome } from './indexBuildQueue';
+import {
+  ChunkOversizeDecisionGate,
+  applyOversizeSkipToStatus,
+  type ChunkTooLargeAsk,
+  type ChunkTooLargeDecision,
+  type ChunkTooLargeDecisionRequest,
+} from './chunkOversizePolicy';
 import { groupFailedIndexItems } from './failedIndexRetry';
 
 declare let Zotero: any;
@@ -36,6 +66,46 @@ declare let ztoolkit: ZToolkit;
 
 // Preference key for persisting index progress
 const PREF_INDEX_PROGRESS = 'extensions.zotero.zotero-mcp-plugin.semantic.indexProgress';
+
+/**
+ * Deadline for the query-embedding request during a search.
+ *
+ * Deliberately NOT user-configurable and deliberately separate from the
+ * vector-scan timeout: embedding is a remote HTTP call whose latency has
+ * nothing to do with how large the local index is, so folding it into the scan
+ * budget would let a slow endpoint eat the time meant for scanning. It exists
+ * so no search branch can ever wait forever.
+ */
+export const DEFAULT_EMBEDDING_TIMEOUT_MS = 30000;
+
+/** Run `operation`, rejecting if it has not settled within `timeoutMs`. */
+async function withDeadline<T>(
+  operation: () => Promise<T>,
+  timeoutMs: number,
+  label: string,
+  onTimeout?: () => void,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          // Abort the in-flight work as well: rejecting only stops the caller
+          // waiting, it does not stop the request burning quota in background.
+          try {
+            onTimeout?.();
+          } catch {
+            // Cancellation is best-effort.
+          }
+          reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 /**
  * Body text longer than this is still indexed in full — it just takes a while,
@@ -55,7 +125,55 @@ function warnIfHugeDocument(
   );
 }
 
+/**
+ * Title MinerUService gives the Markdown files it writes: the source PDF's key
+ * is embedded in it, which is how a Markdown attachment can be matched back to
+ * the PDF it was generated from — including after that PDF has been deleted.
+ */
+const GENERATED_MARKDOWN_TITLE = /^MinerU Markdown \(([A-Z0-9]+)\)\.md$/i;
+
+/** The key of the PDF a generated Markdown came from, or null if not one. */
+function generatedMarkdownSourceKey(attachment: any): string | null {
+  try {
+    const title = String(attachment?.getField?.('title') || '');
+    const match = GENERATED_MARKDOWN_TITLE.exec(title);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 // ============ Interfaces ============
+
+/** What extractItemContent found, and where it found it. */
+export interface ExtractedItemContent {
+  /** Title + abstract + whatever body text was obtained. */
+  text: string;
+  /** At least one body source produced text. */
+  hasBody: boolean;
+  /** The item offers at least one candidate body source. */
+  hasBodySource: boolean;
+  /** Sources that produced text, for the log and the failure message. */
+  bodySources: string[];
+  /** Sources that were tried and produced nothing. */
+  failedSources: string[];
+}
+
+/**
+ * Classify one extraction result.
+ *
+ *  - `body`          the paper's body text is in the index
+ *  - `metadata-only` a body source exists but nothing could be read from it;
+ *                    only title/abstract were indexed. This is a FAILURE.
+ *  - `no-source`     no body source exists at all (a bibliography-only
+ *                    record). Expected, and not counted as a failure.
+ */
+export function classifyExtractedContent(
+  extracted: ExtractedItemContent,
+): 'body' | 'metadata-only' | 'no-source' {
+  if (extracted.hasBody) return 'body';
+  return extracted.hasBodySource ? 'metadata-only' : 'no-source';
+}
 
 export interface SemanticSearchOptions {
   topK?: number;              // Number of results
@@ -73,9 +191,14 @@ export interface SemanticSearchOptions {
   stats?: { chunksScanned?: number; chunksMatched?: number };
   itemKeys?: string[];        // Limit to specific items
   libraryID?: number;
-  timeoutMs?: number;
   /** Deadline for vector scanning only; query embedding has its own timeout. */
   vectorScanTimeoutMs?: number;
+  /**
+   * Deadline for the query-embedding request. Defaults to
+   * DEFAULT_EMBEDDING_TIMEOUT_MS — never unbounded, because the embedding
+   * endpoint is a network call the vector-scan deadline does not cover.
+   */
+  embeddingTimeoutMs?: number;
   /**
    * Caller-owned cancellation. A timeout alone only stops the caller waiting;
    * the signal is what actually aborts the in-flight embedding request so
@@ -101,18 +224,58 @@ export interface SemanticSearchResult {
   }>;
 }
 
+/** What one multi-chunk similarity search produced, before pagination. */
+export interface SimilarDocumentsResult {
+  /** The document the query chunks were taken from. */
+  itemKey: string;
+  libraryID: number;
+  queryChunkIds: number[];
+  /** How many chunks that document has in total, for context. */
+  totalChunksInItem: number;
+  /** EVERY document above the threshold, ranked. Not capped, not paged. */
+  ranked: AggregatedSimilarDocument[];
+  /** Documents the scan found any evidence for, before the threshold. */
+  candidateDocuments: number;
+  discardedBelowThreshold: number;
+  chunksScanned: number;
+  scanMs: number;
+  totalMs: number;
+  /** The deadline this call actually ran under, and how it was derived. */
+  budget: SimilarScanBudget;
+}
+
 export interface IndexProgress {
   total: number;
   processed: number;
   currentItem?: string;
-  status: 'idle' | 'indexing' | 'paused' | 'completed' | 'failed' | 'error' | 'aborted' | 'busy';
+  /**
+   * 'incomplete' is a finished run that deliberately left documents out —
+   * distinct from 'failed' (something went wrong) and from 'completed', which
+   * is the only status allowed to record the full-library chunking signature.
+   */
+  status: 'idle' | 'indexing' | 'paused' | 'completed' | 'incomplete' | 'failed' | 'error' | 'aborted' | 'busy';
   error?: string;
   errorType?: EmbeddingErrorType;  // Type of error for UI display
   errorRetryable?: boolean;        // Whether the error can be retried
   startTime?: number;
   estimatedRemaining?: number;
   failedCount?: number;            // Number of failed items
+  /**
+   * Items that carry a PDF/Markdown/text body source but whose body could not
+   * be read this run, so only title/abstract were indexed. A subset of
+   * failedCount, broken out because it is the number the user can act on.
+   */
+  bodyFailures?: number;
   skipped?: number;                // Items filtered out as already indexed
+  /**
+   * Items left out this run because one of their chunks exceeded the embedding
+   * endpoint's input length and the user chose to skip rather than stop. Also
+   * counted in failedCount (they are recorded in index_failures so "retry
+   * failed items" can pick them up once the chunk length is lowered), but
+   * reported separately because "skipped on purpose" and "broke" are different
+   * things to tell a user.
+   */
+  chunkOversizeSkipped?: number;
   indexed?: number;                // Items whose vectors were actually (re)written
   unchanged?: number;              // Items visited but left as-is (nothing changed)
   minerUFailures?: number;         // PDFs MinerU could not parse this run
@@ -129,6 +292,13 @@ export interface SemanticServiceStats {
     cachedContentItems?: number;
     cachedContentSizeBytes?: number;
     dbSizeBytes?: number;
+    /** How many indexed items really hold body text — see VectorStoreStats. */
+    bodyCoverage?: {
+      withBody: number;
+      metadataOnly: number;
+      noBodySource: number;
+      unknown: number;
+    };
   };
   serviceStatus: {
     initialized: boolean;
@@ -169,6 +339,9 @@ export class SemanticSearchService {
   // Error handling
   private _onErrorCallback?: (error: EmbeddingAPIError) => void;
   private _failedItems: Map<string, FailedIndexItem> = new Map();
+
+  // Oversized-chunk handling: asked once per run, then applied silently.
+  private _chunkOversizeGate = new ChunkOversizeDecisionGate();
 
   constructor() {
     ztoolkit.log(`[SemanticSearch] Constructor called`);
@@ -242,6 +415,7 @@ export class SemanticSearchService {
             startTime: saved.startTime,
             estimatedRemaining: saved.estimatedRemaining,
             failedCount: saved.failedCount || 0,
+            chunkOversizeSkipped: saved.chunkOversizeSkipped || 0,
           };
           this._activeBuildID = saved.buildID || null;
           this._activeFullLibraryRebuild =
@@ -268,6 +442,9 @@ export class SemanticSearchService {
         startTime: this.indexProgress.startTime,
         estimatedRemaining: this.indexProgress.estimatedRemaining,
         failedCount: this.indexProgress.failedCount ?? 0,
+        // Carried across a pause, and across a Zotero restart during one, so
+        // the closing summary still names every document that was skipped.
+        chunkOversizeSkipped: this.indexProgress.chunkOversizeSkipped ?? 0,
         buildID: this._activeBuildID,
         fullLibraryRebuild: this._activeFullLibraryRebuild,
       };
@@ -306,13 +483,12 @@ export class SemanticSearchService {
       language = 'all',
       itemKeys,
       libraryID = Zotero.Libraries.userLibraryID,
-      timeoutMs,
       vectorScanTimeoutMs,
+      embeddingTimeoutMs = DEFAULT_EMBEDDING_TIMEOUT_MS,
       signal,
       stats,
     } = options;
-    const deadlineAt = timeoutMs ? startTime + timeoutMs : undefined;
-    // Own an internal controller even when the caller passed none, so the
+    // Own an internal controller even when the caller passed none, so a
     // deadline can abort the embedding request instead of orphaning it.
     const abortController =
       typeof AbortController !== 'undefined' ? new AbortController() : null;
@@ -327,34 +503,30 @@ export class SemanticSearchService {
       if (signal.aborted) abortSearch();
       else signal.addEventListener('abort', abortSearch, { once: true });
     }
-    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-    if (timeoutMs) {
-      deadlineTimer = setTimeout(abortSearch, timeoutMs);
-    }
     try {
       await this.initialize();
-      if (deadlineAt && Date.now() >= deadlineAt) {
-        throw new Error(`Semantic search timed out after ${timeoutMs}ms`);
-      }
       ztoolkit.log(`[SemanticSearch] Searching: "${query.substring(0, 50)}..."`);
 
       try {
         // 1. Generate query embedding (isQuery=true for BGE instruction prefix)
         ztoolkit.log(`[SemanticSearch] Step 1: Generating query embedding...`);
         const embeddingStartedAt = Date.now();
-        const queryEmbedding = await this.embeddingService.embed(
-          query,
-          'auto',
-          true,
-          { signal: abortController?.signal },
+        // Bounded independently of the vector scan: a hung embedding endpoint
+        // must not be able to stall the branch forever, and must not silently
+        // consume the budget the scan was given.
+        const queryEmbedding = await withDeadline(
+          () =>
+            this.embeddingService.embed(query, 'auto', true, {
+              signal: abortController?.signal,
+            }),
+          embeddingTimeoutMs,
+          'Query embedding',
+          abortSearch,
         );
         const embeddingMs = Date.now() - embeddingStartedAt;
         ztoolkit.log(
           `[SemanticSearch][Timing] embedding=${embeddingMs}ms libraryID=${libraryID}`,
         );
-        if (deadlineAt && Date.now() >= deadlineAt) {
-          throw new Error(`Semantic search timed out after ${timeoutMs}ms`);
-        }
         ztoolkit.log(`[SemanticSearch] Query embedding: lang=${queryEmbedding.language}, dims=${queryEmbedding.dimensions}`);
 
         // 2. Vector search. "all" remains unfiltered; "auto" uses query language.
@@ -363,14 +535,13 @@ export class SemanticSearchService {
         // Score chunks once, aggregate by document during the scan, and retain
         // lightweight references to each document's best evidence.
         const vectorStartedAt = Date.now();
-        const vectorDeadlineAt =
+        // Measured from HERE, not from the start of the call: the embedding
+        // above had its own budget, so the scan always gets the full amount the
+        // user configured regardless of how slow the endpoint was.
+        const effectiveVectorDeadlineAt =
           vectorScanTimeoutMs !== undefined
             ? Date.now() + vectorScanTimeoutMs
-            : deadlineAt;
-        const effectiveVectorDeadlineAt =
-          deadlineAt !== undefined && vectorDeadlineAt !== undefined
-            ? Math.min(deadlineAt, vectorDeadlineAt)
-            : vectorDeadlineAt;
+            : undefined;
         let vectorScanMs = 0;
         let vectorResults: Awaited<
           ReturnType<typeof this.vectorStore.search>
@@ -476,7 +647,6 @@ export class SemanticSearchService {
         throw error;
       }
     } finally {
-      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
       signal?.removeEventListener('abort', abortSearch);
       // Nothing is waiting on this search any more; stop whatever still runs.
       abortSearch();
@@ -500,7 +670,10 @@ export class SemanticSearchService {
       topK: number;
       minScore?: number;
       language?: 'zh' | 'en' | 'all' | 'auto';
-      timeoutMs?: number;
+      /** Deadline for scanning this document's chunks. */
+      vectorScanTimeoutMs?: number;
+      /** Deadline for the query-embedding request; never unbounded. */
+      embeddingTimeoutMs?: number;
       signal?: AbortSignal;
     },
   ): Promise<Array<{ chunkId: number; text: string; score: number }>> {
@@ -514,11 +687,10 @@ export class SemanticSearchService {
       // chunks that the keyword branch would have rescued.
       minScore = 0,
       language = 'all',
-      timeoutMs,
+      vectorScanTimeoutMs,
+      embeddingTimeoutMs = DEFAULT_EMBEDDING_TIMEOUT_MS,
       signal,
     } = options;
-    const deadlineAt = timeoutMs ? startTime + timeoutMs : undefined;
-
     const abortController =
       typeof AbortController !== 'undefined' ? new AbortController() : null;
     const abortSearch = () => {
@@ -532,23 +704,28 @@ export class SemanticSearchService {
       if (signal.aborted) abortSearch();
       else signal.addEventListener('abort', abortSearch, { once: true });
     }
+    // The scan deadline is armed only once embedding has returned, so a slow
+    // embedding endpoint cannot consume the budget meant for scanning. Each
+    // stage is bounded, so neither can run unbounded.
+    let deadlineAt: number | undefined;
     let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-    if (timeoutMs) deadlineTimer = setTimeout(abortSearch, timeoutMs);
 
     try {
       await this.initialize();
-      if (deadlineAt && Date.now() >= deadlineAt) {
-        throw new Error(`Semantic search timed out after ${timeoutMs}ms`);
-      }
 
-      const queryEmbedding = await this.embeddingService.embed(
-        query,
-        'auto',
-        true,
-        { signal: abortController?.signal },
+      const queryEmbedding = await withDeadline(
+        () =>
+          this.embeddingService.embed(query, 'auto', true, {
+            signal: abortController?.signal,
+          }),
+        embeddingTimeoutMs,
+        'Query embedding',
+        abortSearch,
       );
-      if (deadlineAt && Date.now() >= deadlineAt) {
-        throw new Error(`Semantic search timed out after ${timeoutMs}ms`);
+
+      if (vectorScanTimeoutMs) {
+        deadlineAt = Date.now() + vectorScanTimeoutMs;
+        deadlineTimer = setTimeout(abortSearch, vectorScanTimeoutMs);
       }
 
       const searchLanguage =
@@ -578,6 +755,16 @@ export class SemanticSearchService {
       signal?.removeEventListener('abort', abortSearch);
       abortSearch();
     }
+  }
+
+  /**
+   * Whether a scan would run on the GPU right now.
+   *
+   * Exposed so callers can size a deadline before searching: the two paths
+   * scale differently with the number of query vectors.
+   */
+  isGpuSearchEnabled(): boolean {
+    return this.vectorStore.isGpuSearchEnabled();
   }
 
   /** Every stored chunk of one document, in reading order. */
@@ -610,78 +797,149 @@ export class SemanticSearchService {
   }
 
   /**
-   * Find similar items
+   * Find DOCUMENTS similar to a set of chunks taken from ONE document.
+   *
+   * The unit of the answer is the document, not the chunk. Chunk-level scores
+   * are produced by the scan and are then aggregated per document, so the
+   * result cannot be dominated by a single paper that happens to own many
+   * high-scoring passages — the failure mode of the previous implementation,
+   * which took the top-K chunks and de-duplicated them afterwards.
+   *
+   * No embedding request is made: the query vectors are the caller's own
+   * chunks, already stored in the index, so the vector-scan budget is the whole
+   * budget for this call.
    */
-  async findSimilar(
-    itemKey: string,
-    options: {
-      topK?: number;
-      minScore?: number;
-      libraryID?: number;
-      timeoutMs?: number;
-    } = {}
-  ): Promise<SemanticSearchResult[]> {
+  async findSimilarByChunks(options: {
+    itemKey: string;
+    chunkIds: number[];
+    libraryID?: number;
+    /** Document-level relevance floor, on the same 0..1 scale as cosine. */
+    minScore: number;
+    language?: 'zh' | 'en' | 'all';
+    chunksPerQuery?: number;
+    /**
+     * The user's budget for ONE full-library scan. It is scaled here by the
+     * number of query chunks and the execution path — see resolveSimilarScanBudget.
+     */
+    vectorScanTimeoutMs?: number;
+    signal?: AbortSignal;
+  }): Promise<SimilarDocumentsResult> {
     const startTime = Date.now();
-    const deadlineAt = options.timeoutMs
-      ? startTime + options.timeoutMs
-      : undefined;
     await this.initialize();
 
     const {
-      topK = 5,
-      minScore = 0.3,
+      itemKey,
       libraryID = Zotero.Libraries.userLibraryID,
-      timeoutMs,
+      minScore,
+      language = 'all',
+      chunksPerQuery = SIMILAR_CHUNKS_PER_QUERY,
+      signal,
     } = options;
-    if (deadlineAt && Date.now() >= deadlineAt) {
-      throw new Error(`Similarity search timed out after ${timeoutMs}ms`);
-    }
 
-    try {
-      // Get item's vectors
-      const itemVectors = await this.vectorStore.getItemVectors(itemKey, libraryID);
-
-      if (itemVectors.length === 0) {
-        ztoolkit.log(`[SemanticSearch] Item ${itemKey} not indexed`);
-        return [];
+    const requestedChunkIds: number[] = [];
+    for (const raw of options.chunkIds) {
+      const chunkId = Number(raw);
+      if (!Number.isInteger(chunkId)) {
+        throw new Error(`chunkIds must be integers; received ${String(raw)}`);
       }
-
-      // Use first chunk vector as query (or could average all)
-      const queryVector = itemVectors[0].vector;
-
-      // Search for similar
-      const results = await this.vectorStore.search(queryVector, {
-        topK: topK + 1,
-        minScore,
-        libraryID,
-        deadlineAt,
-      });
-
-      // Filter out the source item and map results
-      const filteredResults = results
-        .filter(r => r.itemKey !== itemKey)
-        .slice(0, topK)
-        .map(r => ({
-          itemKey: r.itemKey,
-          libraryID: r.libraryID,
-          title: '',
-          score: r.score,
-          matchedChunks: [{
-            chunkId: r.chunkId,
-            text: r.chunkText,
-            score: r.score
-          }]
-        }));
-
-      // Fill metadata
-      await this.fillItemMetadata(filteredResults);
-
-      return filteredResults;
-
-    } catch (error) {
-      ztoolkit.log(`[SemanticSearch] findSimilar error: ${error}`, 'error');
-      throw error;
+      if (!requestedChunkIds.includes(chunkId)) requestedChunkIds.push(chunkId);
     }
+    if (requestedChunkIds.length === 0) {
+      throw new Error(
+        'chunkIds must contain at least one chunk of the query document',
+      );
+    }
+    if (requestedChunkIds.length > MAX_SIMILAR_QUERY_CHUNKS) {
+      throw new Error(
+        `Too many query chunks: ${requestedChunkIds.length}. At most ${MAX_SIMILAR_QUERY_CHUNKS} chunks of one document may be used as the query, because every additional chunk re-scores the whole index. Pick the passages that actually characterise the paper.`,
+      );
+    }
+
+    // The stored vectors ARE the query. Reading them here also validates that
+    // every requested chunk exists in THIS document: a chunkId is only unique
+    // within one item, so a chunk borrowed from another paper simply does not
+    // resolve here and must be reported rather than silently scored.
+    const itemVectors = await this.vectorStore.getItemVectors(
+      itemKey,
+      libraryID,
+    );
+    if (itemVectors.length === 0) {
+      throw new Error(
+        `Item ${itemKey} has no indexed vectors, so it cannot be used as a similarity query. Build or refresh its semantic index (Zotero → item context menu → update semantic index) and retry.`,
+      );
+    }
+
+    const vectorByChunkId = new Map<number, Float32Array>();
+    for (const chunk of itemVectors) {
+      vectorByChunkId.set(chunk.chunkId, chunk.vector);
+    }
+    const missing = requestedChunkIds.filter((id) => !vectorByChunkId.has(id));
+    if (missing.length > 0) {
+      const known = itemVectors.map((chunk) => chunk.chunkId);
+      throw new Error(
+        `These chunkIds do not belong to item ${itemKey}: ${missing.join(', ')}. Valid chunkIds for this document run from ${known[0]} to ${known[known.length - 1]}. All query chunks must come from ONE document — take them from a single search_fulltext call on that item.`,
+      );
+    }
+
+    const queryVectors = requestedChunkIds.map(
+      (chunkId) => vectorByChunkId.get(chunkId) as Float32Array,
+    );
+
+    // The deadline is sized for THIS call: N query chunks on the path that will
+    // actually run. Reusing the single-scan budget unchanged made a normal
+    // 5-chunk query on the GPU (≈3.8 scans' worth of work) time out on a
+    // setting calibrated for one scan.
+    const budget = resolveSimilarScanBudget({
+      queryChunkCount: requestedChunkIds.length,
+      vectorScanTimeoutMs:
+        options.vectorScanTimeoutMs ?? getHybridSearchSettings().vectorScanTimeoutMs,
+      path: this.vectorStore.isGpuSearchEnabled() ? 'gpu' : 'cpu',
+    });
+    const deadlineAt = Date.now() + budget.timeoutMs;
+
+    const scanStats: { scanned?: number; documents?: number } = {};
+    const scanStartedAt = Date.now();
+    const matches = await this.vectorStore.searchMultiQuery(queryVectors, {
+      chunksPerQuery,
+      language,
+      libraryID,
+      // The query document is excluded during the scan, so it can never take a
+      // slot in its own result set.
+      excludeItemKeys: [itemKey],
+      // Keep every chunk, including negatively-scoring ones. A floor of 0 made
+      // "this document has no second passage" and "this document's second
+      // passage is unrelated" indistinguishable, and the aggregate then had a
+      // single spike to average — which is exactly the case the top-2 average
+      // exists to damp.
+      minChunkScore: -1,
+      deadlineAt,
+      signal,
+      stats: scanStats,
+    });
+    const scanMs = Date.now() - scanStartedAt;
+
+    const { ranked, discardedBelowThreshold } = rankSimilarDocuments(matches, {
+      minScore,
+      chunksPerQuery,
+    });
+
+    ztoolkit.log(
+      `[SemanticSearch] findSimilarByChunks(${itemKey}): queryChunks=${requestedChunkIds.length}, candidates=${matches.length}, above threshold=${ranked.length} (minScore=${minScore}), scanned=${scanStats.scanned ?? 0} chunks in ${scanMs}ms (budget=${budget.timeoutMs}ms = ${budget.multiplier.toFixed(2)}x ${budget.vectorScanTimeoutMs}ms on ${budget.path})`,
+    );
+
+    return {
+      itemKey,
+      libraryID,
+      queryChunkIds: requestedChunkIds,
+      totalChunksInItem: itemVectors.length,
+      ranked,
+      candidateDocuments: matches.length,
+      discardedBelowThreshold,
+      chunksScanned: scanStats.scanned ?? 0,
+      scanMs,
+      totalMs: Date.now() - startTime,
+      budget,
+    };
   }
 
   // ============ Indexing Methods ============
@@ -749,12 +1007,26 @@ export class SemanticSearchService {
       this._forceRun = force;
       getMinerUService().resetRunStats();
 
+      // "Skip the rest of them too" is scoped to one run. Resuming a build
+      // continues the same run, so the answer carries over; starting a new one
+      // asks again, because by then the user may have changed the setting the
+      // question was about.
+      if (!resumeBuildID) this._chunkOversizeGate.reset();
+      // Likewise the tally: a build that paused for an unrelated network error
+      // and was resumed must still report every document it skipped before the
+      // pause, or the closing summary silently under-counts.
+      const carriedOversizeSkips = resumeBuildID
+        ? this.indexProgress.chunkOversizeSkipped || 0
+        : 0;
+
       this.indexProgress = {
         total: 0,
         processed: 0,
         indexed: 0,
         unchanged: 0,
         failedCount: 0,
+        bodyFailures: 0,
+        chunkOversizeSkipped: carriedOversizeSkips,
         status: 'indexing',
         startTime: Date.now()
       };
@@ -916,6 +1188,15 @@ export class SemanticSearchService {
         this.indexProgress.status =
           journal.succeeded === journal.total ? 'completed' : 'failed';
         this.indexProgress.failedCount = journal.failed;
+        // Reachable with skips: a run that skipped documents, paused for an
+        // unrelated error and was then resumed can arrive here with nothing
+        // left to do. The tally carried across the pause, so the verdict must
+        // travel with it — otherwise this branch is the one place a run that
+        // dropped documents could still be called 'completed'.
+        this.indexProgress.status = applyOversizeSkipToStatus(
+          this.indexProgress.status,
+          this.indexProgress.chunkOversizeSkipped ?? 0,
+        );
         if (
           shouldRecordFullLibraryChunkingSignature({
             rebuild: this._activeFullLibraryRebuild,
@@ -932,7 +1213,12 @@ export class SemanticSearchService {
           buildID,
           this.indexProgress.status,
         );
-        if (this.indexProgress.status === 'completed') {
+        // 'incomplete' is finished, like 'completed' — there is nothing to
+        // resume into, so it must not leave a resumable record behind.
+        if (
+          this.indexProgress.status === 'completed' ||
+          this.indexProgress.status === 'incomplete'
+        ) {
           this.clearSavedIndexProgress();
         } else {
           this.saveIndexProgress();
@@ -986,6 +1272,39 @@ export class SemanticSearchService {
                 if (error.type === 'paused') {
                   return { status: 'incomplete' };
                 }
+                // An oversized chunk is a settings problem wearing a single
+                // document's clothes: chunk length is global, so the rest of
+                // the queue's long papers are about to fail identically. It is
+                // also the only failure where continuing anyway may be exactly
+                // what the user wants, so it is the one failure we ask about
+                // rather than decide for them.
+                if (error.type === 'chunk_too_large') {
+                  const decision = await this.resolveChunkTooLarge(item, error);
+                  if (decision === 'skip') {
+                    this.indexProgress.chunkOversizeSkipped =
+                      (this.indexProgress.chunkOversizeSkipped || 0) + 1;
+                    // Recorded as a failure as well as a skip, so lowering the
+                    // chunk length and pressing "retry failed items" picks
+                    // these up without rebuilding the whole library.
+                    await this.recordFailedItem(item, error, error.type);
+                    return { status: 'failed', error };
+                  }
+                  // Stop: end the run now rather than pausing. There is
+                  // nothing to resume into — the setting has to change first,
+                  // and changing it invalidates the chunks already built.
+                  this.indexProgress.error = error.getUserMessage();
+                  this.indexProgress.errorType = error.type;
+                  this.indexProgress.errorRetryable = false;
+                  this._aborted = true;
+                  this.indexProgress.status = 'aborted';
+                  await this.vectorStore.updateBuildSessionStatus(buildID, 'aborted');
+                  this.saveIndexProgress();
+                  this._onErrorCallback?.(error);
+                  onProgress?.(this.indexProgress);
+                  return { status: 'incomplete' };
+                }
+
+                // Errors that describe the run rather than this one item.
                 const isGlobalError =
                   error.type === 'auth' ||
                   error.type === 'config' ||
@@ -1074,7 +1393,30 @@ export class SemanticSearchService {
         );
       }
 
-      if (this.indexProgress.status === 'completed') {
+      // A run that deliberately left documents out is neither a success nor a
+      // malfunction. Naming it 'incomplete' keeps the two apart in the build
+      // history, and — because only 'completed' may record it — guarantees the
+      // full-library chunking signature is withheld, so the index is never
+      // claimed to match the current chunk settings when part of it is absent.
+      const withSkips = applyOversizeSkipToStatus(
+        this.indexProgress.status,
+        this.indexProgress.chunkOversizeSkipped ?? 0,
+      );
+      if (withSkips !== this.indexProgress.status) {
+        ztoolkit.log(
+          `[SemanticSearch] Build marked incomplete: ${this.indexProgress.chunkOversizeSkipped} item(s) skipped for oversized chunks`,
+          'warn',
+        );
+        this.indexProgress.status = withSkips;
+      }
+
+      if (this.indexProgress.status === 'incomplete') {
+        await this.vectorStore.updateBuildSessionStatus(buildID, 'incomplete');
+        // The run is over — there is nothing to resume into, and the skipped
+        // documents are reachable through the failed-items retry instead. So
+        // the saved progress is cleared, exactly as for a clean completion.
+        this.clearSavedIndexProgress();
+      } else if (this.indexProgress.status === 'completed') {
         if (
           shouldRecordFullLibraryChunkingSignature({
             rebuild: this._activeFullLibraryRebuild,
@@ -1197,7 +1539,20 @@ export class SemanticSearchService {
     }
 
     // Extract content (PDF extraction happens here)
-    const content = await this.extractItemContent(item, sharedProcessor);
+    const extracted = await this.extractItemContent(item, sharedProcessor);
+    const content = extracted.text;
+    // Recorded on the index row, so every reader afterwards — search_fulltext,
+    // the progress counters, the retry queue — can tell an indexed body from
+    // an index that is only a title and an abstract.
+    const bodyState = classifyExtractedContent(extracted);
+    const sourceKind = sourceKindForBodyState(bodyState);
+    if (bodyState === 'metadata-only') {
+      ztoolkit.log(
+        `[SemanticSearch] indexItem() ${item.key}: body text FAILED. Tried [${extracted.failedSources.join('; ')}]. ` +
+          `Only title/abstract will be indexed and this item counts as a failure.`,
+        'warn',
+      );
+    }
     if (!content.trim()) {
       await this.vectorStore.replaceItemIndex({
         itemKey: item.key,
@@ -1205,13 +1560,13 @@ export class SemanticSearchService {
         records: [],
         contentHash: 'empty',
         contentLength: 0,
-        sourceKind: 'zotero-content-on-demand',
+        sourceKind,
         itemModified,
         attachmentModified,
         buildID: this._activeBuildID ?? undefined,
       });
       ztoolkit.log(`[SemanticSearch] indexItem() skip: no content for ${item.key}, marked in index_status to avoid retry loop`);
-      return { status: 'succeeded' };
+      return this.noteBodyExtractionOutcome(item, bodyState, extracted, { status: 'succeeded' });
     }
     ztoolkit.log(`[SemanticSearch] indexItem() extracted content: ${content.length} chars`);
 
@@ -1225,28 +1580,52 @@ export class SemanticSearchService {
     const contentHash = this.hashContent(content);
 
     // Check if content actually changed (compare with stored hash)
+    const storedStatus = await this.vectorStore.getIndexStatus(
+      item.key,
+      item.libraryID,
+    );
+    const storedBodyState = bodyIndexStateFromSourceKind(
+      storedStatus?.sourceKind,
+    );
     const needsIndex = await this.vectorStore.needsReindex(
       item.key,
       contentHash,
       item.libraryID,
     );
-    if (!needsIndex) {
-      // Content hash unchanged, just update timestamps
-      const status = await this.vectorStore.getIndexStatus(
-        item.key,
-        item.libraryID,
+    // A body parse that has just failed must never leave the PREVIOUS body
+    // vectors in place. The unchanged-hash shortcut below writes no vectors at
+    // all, so taking it here would keep serving passages from a PDF we can no
+    // longer read — and, worse, would let a completed full-library rebuild
+    // record its chunking signature over chunks produced by the old rules.
+    // Going the long way round replaces the whole item atomically
+    // (replaceItemIndex deletes every embedding for the key first), so what
+    // remains is exactly the title/abstract chunks this run produced.
+    //
+    // Only skipped when the stored row is already metadata-only: then there is
+    // provably no body left to clear, and re-embedding a title and an abstract
+    // on every incremental pass would burn quota for nothing.
+    const mustClearStaleBody =
+      bodyState === 'metadata-only' && storedBodyState !== 'metadata-only';
+    if (!needsIndex && mustClearStaleBody) {
+      ztoolkit.log(
+        `[SemanticSearch] indexItem() ${item.key}: content hash unchanged but body text just failed ` +
+          `(stored=${storedBodyState}); rewriting the index anyway so no stale body vectors survive`,
+        'warn',
       );
-      if (status) {
+    }
+    if (!needsIndex && !mustClearStaleBody) {
+      // Content hash unchanged, just update timestamps
+      if (storedStatus) {
           await this.vectorStore.updateIndexStatus(
-            item.key, status.chunkCount, contentHash, itemModified, attachmentModified,
+            item.key, storedStatus.chunkCount, contentHash, itemModified, attachmentModified,
             item.libraryID,
             content.length,
-            'zotero-content-on-demand',
+            sourceKind,
         );
       }
       this.indexProgress.unchanged = (this.indexProgress.unchanged || 0) + 1;
       ztoolkit.log(`[SemanticSearch] indexItem() skip: content unchanged, updated timestamps`);
-      return { status: 'succeeded' };
+      return this.noteBodyExtractionOutcome(item, bodyState, extracted, { status: 'succeeded' });
     }
 
     // Chunk the content
@@ -1297,7 +1676,7 @@ export class SemanticSearchService {
       records,
       contentHash,
       contentLength: content.length,
-      sourceKind: 'zotero-content-on-demand',
+      sourceKind,
       itemModified,
       attachmentModified,
       buildID: this._activeBuildID ?? undefined,
@@ -1306,11 +1685,96 @@ export class SemanticSearchService {
     this.indexProgress.indexed = (this.indexProgress.indexed || 0) + 1;
 
     const elapsed = Date.now() - startTime;
-    if (records.length < chunks.length) {
-      ztoolkit.log(`[SemanticSearch] indexItem() ${item.key}: ${chunks.length - records.length}/${chunks.length} chunks skipped (oversized)`, 'warn');
+    ztoolkit.log(`[SemanticSearch] indexItem() completed: ${item.key} (${records.length} vectors, source=${sourceKind}) in ${elapsed}ms`);
+    return this.noteBodyExtractionOutcome(item, bodyState, extracted, { status: 'succeeded' });
+  }
+
+  /**
+   * Count "we could not read this paper's body" — as a content problem, not
+   * as an indexing failure.
+   *
+   * These are two different kinds of bad, and conflating them was wrong in
+   * both directions:
+   *
+   *  - A PDF that will not parse is a property of that file. The index itself
+   *    is complete and correct: the item was visited, its stale body vectors
+   *    were cleared, and its title/abstract were written under a source_kind
+   *    that says plainly there is no body text. Nothing about the run is
+   *    unreliable, so it must NOT fail the build and must NOT withhold the
+   *    chunking signature — doing that left a permanent "chunk settings
+   *    changed" warning on any library containing one broken PDF.
+   *  - An embedding error, a database write error or an interrupted run mean
+   *    the index may be incomplete or internally inconsistent. Those still
+   *    throw, still land in index_failures, still fail the build and still
+   *    withhold the signature. That path is untouched.
+   *
+   * Retryability does not come from index_failures here, it comes from the
+   * row itself: source_kind='metadata-only' is excluded by getItemsToSkip, so
+   * every later incremental build tries the body again, and it survives
+   * restarts because it lives in the database rather than in a session's
+   * failure list.
+   */
+  private noteBodyExtractionOutcome(
+    item: any,
+    bodyState: 'body' | 'metadata-only' | 'no-source',
+    extracted: ExtractedItemContent,
+    outcome: IndexWorkOutcome,
+  ): IndexWorkOutcome {
+    if (bodyState !== 'metadata-only') return outcome;
+    if (outcome.status !== 'succeeded') return outcome;
+    this.indexProgress.bodyFailures =
+      (this.indexProgress.bodyFailures || 0) + 1;
+    ztoolkit.log(
+      `[SemanticSearch] indexItem() ${item.key}: counted as a body-text failure ` +
+        `(bodyFailures=${this.indexProgress.bodyFailures}); the index row is complete and marked metadata-only, ` +
+        `so the build is not failed. Tried: ${extracted.failedSources.join('; ') || 'no source produced text'}`,
+      'warn',
+    );
+    return outcome;
+  }
+
+  /**
+   * Whether one item's stored index actually holds its body text.
+   *
+   * The single question search_fulltext has to ask before it digs into a
+   * document: without it, a paper indexed from its title and abstract alone
+   * looks identical to one whose full text was parsed.
+   */
+  async getItemBodyIndexState(
+    itemKey: string,
+    libraryID?: number,
+  ): Promise<BodyIndexState> {
+    await this.initialize();
+    const status = await this.vectorStore.getIndexStatus(itemKey, libraryID);
+    if (!status) return 'missing';
+    return bodyIndexStateFromSourceKind(status.sourceKind);
+  }
+
+  /**
+   * The same question for a whole page of search results, in one query.
+   *
+   * Returned keyed `libraryID:itemKey`. An item with no index row is reported
+   * as 'missing' rather than omitted, so the caller cannot mistake "not in the
+   * map" for "has full text".
+   */
+  async getItemBodyIndexStates(
+    identities: Array<{ itemKey: string; libraryID?: number }>,
+  ): Promise<Map<string, BodyIndexState>> {
+    const states = new Map<string, BodyIndexState>();
+    if (identities.length === 0) return states;
+    await this.initialize();
+    const sourceKinds = await this.vectorStore.getSourceKinds(identities);
+    for (const identity of identities) {
+      const libraryID = identity.libraryID ?? Zotero.Libraries.userLibraryID;
+      const mapKey = `${libraryID}:${identity.itemKey}`;
+      states.set(
+        mapKey,
+        sourceKinds.has(mapKey)
+          ? bodyIndexStateFromSourceKind(sourceKinds.get(mapKey))
+          : 'missing',
+      );
     }
-    ztoolkit.log(`[SemanticSearch] indexItem() completed: ${item.key} (${records.length} vectors) in ${elapsed}ms`);
-    return { status: 'succeeded' };
+    return states;
   }
 
   /**
@@ -1547,6 +2011,7 @@ export class SemanticSearchService {
       processed: 0,
       status: 'idle',
       failedCount: 0,
+      bodyFailures: 0,
     };
     this._paused = false;
     this._aborted = false;
@@ -1566,6 +2031,62 @@ export class SemanticSearchService {
    */
   setOnIndexError(callback: (error: EmbeddingAPIError) => void): void {
     this._onErrorCallback = callback;
+  }
+
+  /**
+   * Set the handler that asks the user what to do about an oversized chunk.
+   *
+   * Registered by the preferences window, which is the only place that can put
+   * a dialog on screen. When nothing is registered — a background auto-update,
+   * an MCP-triggered build — there is nobody to ask, so the run stops. That is
+   * the conservative half of the choice and matches what the plugin did before
+   * this prompt existed.
+   */
+  setOnChunkTooLargeDecision(callback: ChunkTooLargeAsk): void {
+    this._chunkOversizeGate.setAsk(callback);
+  }
+
+  /**
+   * Decide what to do about an oversized chunk — asking at most once per run.
+   *
+   * Every later occurrence reuses the answer without a dialog, which is the
+   * whole point: a library whose chunk length is too big for the model can
+   * produce hundreds of these, and a prompt per document would be unusable.
+   */
+  private async resolveChunkTooLarge(
+    item: any,
+    error: EmbeddingAPIError,
+  ): Promise<ChunkTooLargeDecision> {
+    const request: ChunkTooLargeDecisionRequest = {
+      itemKey: item.key,
+      libraryID: item.libraryID ?? Zotero.Libraries.userLibraryID,
+      title: this.safeItemTitle(item),
+      message: error.getUserMessage(),
+    };
+    const decision = await this._chunkOversizeGate.decide(
+      request,
+      // A dialog that could not be shown must not be read as consent to drop
+      // documents; the gate turns this into 'stop'.
+      (promptError) =>
+        ztoolkit.log(
+          `[SemanticSearch] Oversized-chunk prompt failed, stopping: ${promptError}`,
+          'warn',
+        ),
+    );
+    ztoolkit.log(
+      `[SemanticSearch] Oversized chunk on ${item.key}: '${decision}' applies to the rest of this run`,
+      'warn',
+    );
+    return decision;
+  }
+
+  private safeItemTitle(item: any): string | undefined {
+    try {
+      const title = item?.getField?.('title');
+      return typeof title === 'string' && title ? title : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -1591,6 +2112,7 @@ export class SemanticSearchService {
   clearFailedItems(): void {
     this._failedItems.clear();
     this.indexProgress.failedCount = 0;
+    this.indexProgress.bodyFailures = 0;
   }
 
   /** Record a Library-qualified failure in memory and in index_failures. */
@@ -1625,8 +2147,16 @@ export class SemanticSearchService {
   }
 
   /**
-   * Retry failed items (both in-memory failures from this session and
-   * failure markers persisted by previous runs)
+   * Retry everything worth retrying: real indexing failures, and items whose
+   * body text could not be read.
+   *
+   * The two come from different places on purpose. A real failure (embedding,
+   * database, interruption) lives in index_failures. A failed body parse does
+   * not — it is not an indexing failure and must not fail a build — so it is
+   * recorded on the index row itself as source_kind='metadata-only'. Both are
+   * durable across restarts, and both are things the user pressing "retry"
+   * means to retry: their PDF may have been repaired, or MinerU switched on,
+   * since the last run.
    */
   async retryFailedItems(onProgress?: (progress: IndexProgress) => void): Promise<IndexProgress> {
     await this.initialize();
@@ -1646,29 +2176,59 @@ export class SemanticSearchService {
     for (const failure of this._failedItems.values()) {
       failures.set(`${failure.libraryID}:${failure.itemKey}`, failure);
     }
-    if (failures.size === 0) {
+
+    // Items still stuck on metadata alone. They carry no buildID, so they
+    // group by library only and never resume someone else's build session.
+    const bodyRetries = (await this.vectorStore.getMetadataOnlyItems()).filter(
+      (identity) => !failures.has(`${identity.libraryID}:${identity.itemKey}`),
+    );
+
+    if (failures.size === 0 && bodyRetries.length === 0) {
       ztoolkit.log('[SemanticSearch] No failed items to retry');
-      return { ...this.indexProgress, total: 0, processed: 0, failedCount: 0, status: 'completed' };
+      return { ...this.indexProgress, total: 0, processed: 0, failedCount: 0, bodyFailures: 0, status: 'completed' };
     }
 
-    ztoolkit.log(`[SemanticSearch] Retrying ${failures.size} failed items`);
+    ztoolkit.log(
+      `[SemanticSearch] Retrying ${failures.size} failed items and ${bodyRetries.length} items whose body text failed`,
+    );
 
     const merged: IndexProgress = {
       total: 0,
       processed: 0,
       failedCount: 0,
+      bodyFailures: 0,
       indexed: 0,
       unchanged: 0,
       status: 'completed',
     };
-    for (const group of groupFailedIndexItems(failures.values())) {
-      const first = group[0];
-      const session = first.buildID
-        ? await this.vectorStore.getBuildSession(first.buildID)
+
+    const batches: Array<{
+      itemKeys: string[];
+      libraryID: number;
+      buildID?: string;
+    }> = groupFailedIndexItems(failures.values()).map((group) => ({
+      itemKeys: group.map((failure) => failure.itemKey),
+      libraryID: group[0].libraryID,
+      buildID: group[0].buildID,
+    }));
+
+    const bodyByLibrary = new Map<number, string[]>();
+    for (const identity of bodyRetries) {
+      const keys = bodyByLibrary.get(identity.libraryID) ?? [];
+      keys.push(identity.itemKey);
+      bodyByLibrary.set(identity.libraryID, keys);
+    }
+    for (const [libraryID, itemKeys] of bodyByLibrary) {
+      batches.push({ itemKeys, libraryID });
+    }
+
+    for (const batch of batches) {
+      const session = batch.buildID
+        ? await this.vectorStore.getBuildSession(batch.buildID)
         : null;
       const result = await this.buildIndex({
-        itemKeys: group.map((failure) => failure.itemKey),
-        libraryID: first.libraryID,
+        itemKeys: batch.itemKeys,
+        libraryID: batch.libraryID,
         rebuild: false,
         force: true,
         resumeBuildID: session?.buildID,
@@ -1689,6 +2249,8 @@ export class SemanticSearchService {
       merged.processed += result.processed;
       merged.failedCount =
         (merged.failedCount ?? 0) + (result.failedCount ?? 0);
+      merged.bodyFailures =
+        (merged.bodyFailures ?? 0) + (result.bodyFailures ?? 0);
       merged.indexed = (merged.indexed ?? 0) + (result.indexed ?? 0);
       merged.unchanged =
         (merged.unchanged ?? 0) + (result.unchanged ?? 0);
@@ -1790,12 +2352,34 @@ export class SemanticSearchService {
   // ============ Private Methods ============
 
   /**
-   * Extract content from item for indexing
+   * Extract the text of one item for indexing, and report where it came from.
+   *
+   * The return value is deliberately not a bare string. A string cannot
+   * distinguish "this paper's body text is in the index" from "every parser
+   * failed and all we have is the title and abstract", and that distinction is
+   * the whole point: the second case is an indexing FAILURE that used to be
+   * reported as success, which in turn let search_fulltext dig into a document
+   * that has no body text and hand back metadata as if it were evidence.
+   *
+   * Annotations and highlights are deliberately NOT part of this. The body
+   * index is title + abstract + PDF/Markdown/plain-text/note body, nothing
+   * else; Zotero's own annotation features and the separate annotation MCP
+   * tools are untouched.
+   *
    * @param item The Zotero item
    * @param sharedProcessor Optional shared PDFProcessor for better performance
    */
-  private async extractItemContent(item: any, sharedProcessor?: PDFProcessor | null): Promise<string> {
+  private async extractItemContent(
+    item: any,
+    sharedProcessor?: PDFProcessor | null,
+  ): Promise<ExtractedItemContent> {
     const parts: string[] = [];
+    /** Sources that could have produced body text, whether or not they did. */
+    const attemptedSources: string[] = [];
+    /** Sources that actually produced body text. */
+    const bodySources: string[] = [];
+    /** Sources that were tried and produced nothing. */
+    const failedSources: string[] = [];
     ztoolkit.log(`[SemanticSearch] extractItemContent() start: ${item.key}, type=${item.itemType}`);
 
     try {
@@ -1813,147 +2397,208 @@ export class SemanticSearchService {
         ztoolkit.log(`[SemanticSearch] extractItemContent() got abstract: ${abstract.length} chars`);
       }
 
-      // Get content from attachments (full text + annotations)
+      // Body text from attachments
       if (item.isRegularItem?.()) {
         const attachmentIds = item.getAttachments?.() || [];
         const originalPDFs = await getOriginalPDFAttachmentsForItem(item);
         const originalPDFIds = new Set(originalPDFs.map((attachment) => attachment.id));
-        ztoolkit.log(
-          "[SemanticSearch] attachment selection: " +
-            attachmentIds.length +
-            " total, " +
-            originalPDFIds.size +
-            " original PDF",
-        );
-        let annotationCount = 0;
-        let fullTextCount = 0;
+
+        // Collected first, then processed in a fixed order, so a Markdown
+        // attachment can be skipped when the PDF it was generated from already
+        // supplied the same text.
+        const pdfAttachments: any[] = [];
+        const markdownAttachments: any[] = [];
+        const plainTextAttachments: any[] = [];
+        /** Keys of every PDF still attached, and of the originals among them. */
+        const presentPDFKeys = new Set<string>();
+        const originalPDFKeys = new Set<string>();
 
         for (const attachmentId of attachmentIds) {
           try {
             const attachment = await Zotero.Items.getAsync(attachmentId);
             if (!attachment) continue;
-
-            // Extract full text from PDF attachments using PDFProcessor
-            if (
-              attachment.isPDFAttachment?.() &&
-              originalPDFIds.has(attachment.id)
-            ) {
-              try {
-                const filePath = await attachment.getFilePathAsync?.();
-                if (filePath) {
-                  ztoolkit.log(`[SemanticSearch] extractItemContent() extracting PDF: ${filePath}`);
-
-                  // MinerU 高精度解析优先：索引是批处理任务，允许阻塞等待解析。
-                  // 未启用 / 解析失败时返回 null，自动落到下面的内置提取。
-                  const minerUText = await getMinerUService().getIndexTextForAttachment(
-                    attachment,
-                    {
-                      allowParse: true,
-                      // A forced re-index is the user asking us to try again,
-                      // so don't sit on a cached parse failure.
-                      ignoreFailureCache: this._forceRun,
-                    },
-                  );
-                  if (minerUText) {
-                    // The complete body text is indexed. It used to be cut at
-                    // 50k characters, which silently made everything past
-                    // roughly the middle of a long paper unsearchable.
-                    warnIfHugeDocument(item.key, minerUText.length, 'MinerU');
-                    parts.push(minerUText);
-                    fullTextCount++;
-                    ztoolkit.log(`[SemanticSearch] extractItemContent() got MinerU text: ${minerUText.length} chars`);
-                  } else {
-                    // 回退：Zotero 内置 pdfWorker 提取
-                    // Use shared processor if provided (much faster for batch processing)
-                    const processor = sharedProcessor || new PDFProcessor(ztoolkit);
-                    const shouldTerminate = !sharedProcessor;  // Only terminate if we created it
-                    try {
-                      const textContent = await processor.extractText(filePath);
-                      if (textContent && textContent.length > 0) {
-                        // Complete body text, same as the MinerU branch above.
-                        warnIfHugeDocument(item.key, textContent.length, 'pdfWorker');
-                        parts.push(textContent);
-                        fullTextCount++;
-                        ztoolkit.log(`[SemanticSearch] extractItemContent() got PDF text: ${textContent.length} chars`);
-                      } else {
-                        ztoolkit.log(`[SemanticSearch] extractItemContent() PDF extraction returned empty`);
-                      }
-                    } finally {
-                      if (shouldTerminate) {
-                        processor.terminate();
-                      }
-                    }
-                  }
-                } else {
-                  ztoolkit.log(`[SemanticSearch] extractItemContent() no file path for attachment ${attachmentId}`);
-                }
-              } catch (pdfError) {
-                ztoolkit.log(`[SemanticSearch] extractItemContent() PDF extraction failed: ${pdfError}`, 'warn');
+            if (attachment.isPDFAttachment?.()) {
+              presentPDFKeys.add(attachment.key);
+              if (originalPDFIds.has(attachment.id)) {
+                originalPDFKeys.add(attachment.key);
+                pdfAttachments.push(attachment);
               }
+              continue;
             }
-
-            // Extract text from plain text attachments
+            if (attachment.attachmentContentType === 'text/markdown') {
+              markdownAttachments.push(attachment);
+              continue;
+            }
             if (attachment.attachmentContentType === 'text/plain') {
-              try {
-                const filePath = await attachment.getFilePathAsync?.();
-                if (filePath) {
-                  const textContent = await Zotero.File.getContentsAsync(filePath);
-                  if (textContent && textContent.length > 0) {
-                    parts.push(textContent);
-                    fullTextCount++;
-                    ztoolkit.log(`[SemanticSearch] extractItemContent() got plain text: ${textContent.length} chars`);
-                  }
-                }
-              } catch (e) {
-                ztoolkit.log(`[SemanticSearch] extractItemContent() plain text extraction failed: ${e}`, 'warn');
-              }
-            }
-
-            // Get annotations from PDF attachments
-            if (
-              attachment.isPDFAttachment?.() &&
-              originalPDFIds.has(attachment.id)
-            ) {
-              const annotations = attachment.getAnnotations?.() || [];
-              for (const ann of annotations) {
-                const text = ann.annotationText;
-                const comment = ann.annotationComment;
-                if (text) {
-                  parts.push(TextFormatter.htmlToText(text));
-                  annotationCount++;
-                }
-                if (comment) {
-                  parts.push(TextFormatter.htmlToText(comment));
-                  annotationCount++;
-                }
-              }
+              plainTextAttachments.push(attachment);
             }
           } catch (e) {
-            // Skip failed attachments
             ztoolkit.log(`[SemanticSearch] extractItemContent() attachment error: ${e}`, 'warn');
           }
         }
 
-        if (fullTextCount > 0) {
-          ztoolkit.log(`[SemanticSearch] extractItemContent() got ${fullTextCount} full text contents`);
+        ztoolkit.log(
+          `[SemanticSearch] attachment selection: ${attachmentIds.length} total, ` +
+            `${pdfAttachments.length} original PDF, ${markdownAttachments.length} markdown, ` +
+            `${plainTextAttachments.length} plain text`,
+        );
+
+        if (pdfAttachments.length === 0 && presentPDFKeys.size > 0) {
+          // Every PDF on this item was filtered out as a generated duplicate.
+          // The user still sees a PDF, so silently reporting "no body source"
+          // would hide a real problem.
+          attemptedSources.push('pdf:(all filtered as generated duplicates)');
+          failedSources.push(
+            `pdf: ${presentPDFKeys.size} attachment(s) present but none selected as the original PDF`,
+          );
         }
-        if (annotationCount > 0) {
-          ztoolkit.log(`[SemanticSearch] extractItemContent() got ${annotationCount} annotations`);
+
+        /** PDFs whose body text we already have; their .md is a duplicate. */
+        const pdfKeysWithText = new Set<string>();
+
+        for (const attachment of pdfAttachments) {
+          const label = `pdf:${attachment.key}`;
+          attemptedSources.push(label);
+          try {
+            const filePath = await attachment.getFilePathAsync?.();
+            if (!filePath) {
+              ztoolkit.log(`[SemanticSearch] extractItemContent() no file path for attachment ${attachment.key}`);
+              failedSources.push(`${label} (file missing)`);
+              continue;
+            }
+            ztoolkit.log(`[SemanticSearch] extractItemContent() extracting PDF: ${filePath}`);
+
+            // MinerU 高精度解析优先：索引是批处理任务，允许阻塞等待解析。
+            // 未启用 / 解析失败时返回 null，自动落到下面的内置提取。
+            const minerUText = await getMinerUService().getIndexTextForAttachment(
+              attachment,
+              {
+                allowParse: true,
+                // A forced re-index is the user asking us to try again,
+                // so don't sit on a cached parse failure.
+                ignoreFailureCache: this._forceRun,
+              },
+            );
+            if (minerUText) {
+              // The complete body text is indexed. It used to be cut at
+              // 50k characters, which silently made everything past
+              // roughly the middle of a long paper unsearchable.
+              warnIfHugeDocument(item.key, minerUText.length, 'MinerU');
+              parts.push(minerUText);
+              pdfKeysWithText.add(attachment.key);
+              bodySources.push(`${label} (MinerU)`);
+              ztoolkit.log(`[SemanticSearch] extractItemContent() got MinerU text: ${minerUText.length} chars`);
+              continue;
+            }
+
+            // 回退：Zotero 内置 pdfWorker 提取
+            // Use shared processor if provided (much faster for batch processing)
+            const processor = sharedProcessor || new PDFProcessor(ztoolkit);
+            const shouldTerminate = !sharedProcessor;  // Only terminate if we created it
+            try {
+              const textContent = await processor.extractText(filePath);
+              if (textContent && textContent.length > 0) {
+                // Complete body text, same as the MinerU branch above.
+                warnIfHugeDocument(item.key, textContent.length, 'pdfWorker');
+                parts.push(textContent);
+                pdfKeysWithText.add(attachment.key);
+                bodySources.push(`${label} (pdfWorker)`);
+                ztoolkit.log(`[SemanticSearch] extractItemContent() got PDF text: ${textContent.length} chars`);
+              } else {
+                ztoolkit.log(`[SemanticSearch] extractItemContent() PDF extraction returned empty`);
+                failedSources.push(`${label} (MinerU and pdfWorker both returned nothing)`);
+              }
+            } finally {
+              if (shouldTerminate) {
+                processor.terminate();
+              }
+            }
+          } catch (pdfError) {
+            ztoolkit.log(`[SemanticSearch] extractItemContent() PDF extraction failed: ${pdfError}`, 'warn');
+            failedSources.push(`${label} (${pdfError})`);
+          }
+        }
+
+        // Markdown bodies. This is what keeps a paper searchable after its PDF
+        // is deleted: the generated .md is still a complete body text, and it
+        // is read directly here rather than through the PDF it came from,
+        // which no longer exists to be stat'ed.
+        for (const attachment of markdownAttachments) {
+          const sourcePDFKey = generatedMarkdownSourceKey(attachment);
+          if (sourcePDFKey && pdfKeysWithText.has(sourcePDFKey)) {
+            // Same text we already took from the PDF itself.
+            continue;
+          }
+          if (
+            sourcePDFKey &&
+            presentPDFKeys.has(sourcePDFKey) &&
+            !originalPDFKeys.has(sourcePDFKey)
+          ) {
+            // Belongs to a translated/duplicate PDF the selection deliberately
+            // ignores; indexing it would double the paper's body text.
+            continue;
+          }
+          const label = `markdown:${attachment.key}`;
+          attemptedSources.push(label);
+          try {
+            const filePath = await attachment.getFilePathAsync?.();
+            if (!filePath) {
+              failedSources.push(`${label} (file missing)`);
+              continue;
+            }
+            const raw = await Zotero.File.getContentsAsync(filePath);
+            const text = raw ? markdownToIndexText(String(raw)).trim() : '';
+            if (text) {
+              warnIfHugeDocument(item.key, text.length, 'Markdown attachment');
+              parts.push(text);
+              bodySources.push(label);
+              ztoolkit.log(`[SemanticSearch] extractItemContent() got Markdown attachment text: ${text.length} chars`);
+            } else {
+              failedSources.push(`${label} (empty)`);
+            }
+          } catch (e) {
+            ztoolkit.log(`[SemanticSearch] extractItemContent() markdown extraction failed: ${e}`, 'warn');
+            failedSources.push(`${label} (${e})`);
+          }
+        }
+
+        for (const attachment of plainTextAttachments) {
+          const label = `text:${attachment.key}`;
+          attemptedSources.push(label);
+          try {
+            const filePath = await attachment.getFilePathAsync?.();
+            if (!filePath) {
+              failedSources.push(`${label} (file missing)`);
+              continue;
+            }
+            const textContent = await Zotero.File.getContentsAsync(filePath);
+            if (textContent && textContent.length > 0) {
+              parts.push(textContent);
+              bodySources.push(label);
+              ztoolkit.log(`[SemanticSearch] extractItemContent() got plain text: ${textContent.length} chars`);
+            } else {
+              failedSources.push(`${label} (empty)`);
+            }
+          } catch (e) {
+            ztoolkit.log(`[SemanticSearch] extractItemContent() plain text extraction failed: ${e}`, 'warn');
+            failedSources.push(`${label} (${e})`);
+          }
         }
       }
 
-      // If it's an annotation item itself
-      if (item.isAnnotation?.()) {
-        const text = item.annotationText;
-        const comment = item.annotationComment;
-        if (text) parts.push(TextFormatter.htmlToText(text));
-        if (comment) parts.push(TextFormatter.htmlToText(comment));
-      }
-
-      // Notes
+      // Notes indexed on their own. Annotations are NOT indexed at all any
+      // more — neither an annotation item itself nor the annotations hanging
+      // off a PDF attachment.
       if (item.isNote?.()) {
+        attemptedSources.push(`note:${item.key}`);
         const noteText = item.getNote?.();
-        if (noteText) parts.push(TextFormatter.htmlToText(noteText));
+        const text = noteText ? TextFormatter.htmlToText(noteText) : '';
+        if (text.trim()) {
+          parts.push(text);
+          bodySources.push(`note:${item.key}`);
+        } else {
+          failedSources.push(`note:${item.key} (empty)`);
+        }
       }
 
     } catch (error) {
@@ -1961,8 +2606,17 @@ export class SemanticSearchService {
     }
 
     const result = parts.join('\n\n');
-    ztoolkit.log(`[SemanticSearch] extractItemContent() done: ${parts.length} parts, total ${result.length} chars`);
-    return result;
+    ztoolkit.log(
+      `[SemanticSearch] extractItemContent() done: ${parts.length} parts, total ${result.length} chars, ` +
+        `bodySources=[${bodySources.join(', ')}], failedSources=[${failedSources.join(', ')}]`,
+    );
+    return {
+      text: result,
+      hasBody: bodySources.length > 0,
+      hasBodySource: attemptedSources.length > 0,
+      bodySources,
+      failedSources,
+    };
   }
 
   /**

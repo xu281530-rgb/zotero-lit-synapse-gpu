@@ -15,8 +15,16 @@ import {
   hasUntrustedLegacyChunkingSignature,
   clearStoredChunkingSignatures,
   shouldShowChunkingWarning,
-  setSearchTimeoutMs,
+  setKeywordSearchTimeoutMs,
+  setVectorScanTimeoutMs,
 } from "./hybridSearchSettings";
+import { recommendTimeoutMs } from "./semantic/vectorScanBenchmark";
+import {
+  buildKeywordProfiles,
+  runKeywordSearchBenchmark,
+  sampleLibraryTerms,
+} from "./keywordSearchBenchmark";
+import { runLexicalSearch } from "./lexicalSearch";
 import {
   clearIndexRefreshQueue,
   resumeIndexRefreshQueue,
@@ -544,11 +552,15 @@ function bindHybridSearchSettings(doc: Document) {
   bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-min-score`, P + "minScore", 0, 1, 0.6, true);
   bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-neighbor-radius`, P + "neighborRadius", 0, 10, 1);
   bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-search-timeout`, P + "searchTimeoutMs", 1, 3600000, 8000);
+  bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-keyword-search-timeout`, P + "keywordSearchTimeoutMs", 1000, 3600000, 30000);
   bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-chunk-target`, P + "chunkTargetChars", 200, 4000, 1000);
   bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-chunk-tolerance`, P + "chunkAppendToleranceChars", 0, 2000, 500);
 
-  const timeoutInput = doc?.querySelector(
+  const vectorTimeoutInput = doc?.querySelector(
     `#zotero-prefpane-${ref}-hybrid-search-timeout`,
+  ) as HTMLInputElement;
+  const keywordTimeoutInput = doc?.querySelector(
+    `#zotero-prefpane-${ref}-hybrid-keyword-search-timeout`,
   ) as HTMLInputElement;
   const benchmarkButton = doc?.querySelector(
     "#hybrid-scan-benchmark-button",
@@ -558,37 +570,111 @@ function bindHybridSearchSettings(doc: Document) {
   ) as HTMLElement;
   benchmarkButton?.addEventListener("click", async () => {
     benchmarkButton.disabled = true;
-    if (benchmarkResult) {
-      benchmarkResult.textContent =
-        getString("pref-hybrid-scan-benchmark-running" as any) || "Testing...";
-    }
+    const report = (line: string) => {
+      if (benchmarkResult) benchmarkResult.textContent = line;
+    };
     try {
       const { getVectorStore } = require("./semantic/vectorStore");
       const vectorStore = getVectorStore();
-      const result = await vectorStore.benchmarkLibraryScan(
-        Zotero.Libraries.userLibraryID,
+      const libraryID = Zotero.Libraries.userLibraryID;
+
+      // 1. Vector scan: ten runs over every indexed chunk.
+      report(
+        getString("pref-hybrid-scan-benchmark-running-vector" as any) ||
+          "Running vector scans...",
       );
-      const timeout = setSearchTimeoutMs(result.maxMs);
-      if (timeoutInput) timeoutInput.value = String(timeout);
-      if (benchmarkResult) {
-        benchmarkResult.textContent = getString(
-          "pref-hybrid-scan-benchmark-result" as any,
-          {
-            args: {
-              min: result.minMs.toFixed(1),
-              average: result.averageMs.toFixed(1),
-              max: result.maxMs.toFixed(1),
-            },
+      const vectorResult = await vectorStore.benchmarkLibraryScan();
+      const indexedChunks = await vectorStore.getIndexedChunkTotal();
+
+      // 2. Keyword search: three probe profiles derived from this library,
+      //    five runs each. Sampling first so the profiles reflect the real
+      //    vocabulary rather than a fixed word that happens to be fast.
+      report(
+        getString("pref-hybrid-scan-benchmark-running-keyword" as any) ||
+          "Running keyword searches...",
+      );
+      const { documentFrequency, sampledItems } =
+        await sampleLibraryTerms(libraryID);
+      const profiles = buildKeywordProfiles(documentFrequency, sampledItems);
+      const keywordResult = await runKeywordSearchBenchmark(
+        profiles,
+        async (keywords) => {
+          const outcome = await runLexicalSearch({
+            keywords: keywords.map((text) => ({
+              text,
+              weight: 1,
+              origin: "provided" as const,
+            })),
+            libraryID,
+          });
+          return { candidateItems: outcome.diagnostics.candidateIDs };
+        },
+        sampledItems,
+      );
+
+      // 3. Recommend and persist. The user can still overwrite either box.
+      const vectorTimeout = setVectorScanTimeoutMs(
+        recommendTimeoutMs(vectorResult),
+      );
+      const keywordTimeout = setKeywordSearchTimeoutMs(
+        recommendTimeoutMs(keywordResult.worst),
+      );
+      if (vectorTimeoutInput) vectorTimeoutInput.value = String(vectorTimeout);
+      if (keywordTimeoutInput)
+        keywordTimeoutInput.value = String(keywordTimeout);
+
+      const vectorLine =
+        getString("pref-hybrid-scan-benchmark-result-vector" as any, {
+          args: {
+            runs: vectorResult.runs,
+            min: vectorResult.minMs.toFixed(1),
+            average: vectorResult.averageMs.toFixed(1),
+            max: vectorResult.maxMs.toFixed(1),
+            recommended: vectorTimeout,
+            chunks: indexedChunks,
           },
-        );
-      }
+        }) || "";
+      const keywordLine =
+        getString("pref-hybrid-scan-benchmark-result-keyword" as any, {
+          args: {
+            runs: keywordResult.runsPerProfile,
+            min: keywordResult.worst.minMs.toFixed(1),
+            average: keywordResult.worst.averageMs.toFixed(1),
+            max: keywordResult.worst.maxMs.toFixed(1),
+            recommended: keywordTimeout,
+            profile: keywordResult.worstProfile,
+          },
+        }) || "";
+      const profileLines = keywordResult.profiles.map(
+        (profile) =>
+          getString("pref-hybrid-scan-benchmark-result-profile" as any, {
+            args: {
+              profile: profile.name,
+              min: profile.minMs.toFixed(1),
+              average: profile.averageMs.toFixed(1),
+              max: profile.maxMs.toFixed(1),
+              candidates: profile.candidateItems,
+            },
+          }) || "",
+      );
+      // The measurement is only as complete as the index behind it. Say so
+      // rather than quietly recommending a timeout sized for a partial index.
+      const coverageLine =
+        getString("pref-hybrid-scan-benchmark-coverage" as any, {
+          args: { chunks: indexedChunks, items: sampledItems },
+        }) || "";
+
+      report(
+        [vectorLine, keywordLine, ...profileLines, coverageLine]
+          .filter(Boolean)
+          .join("\n"),
+      );
     } catch (error) {
-      if (benchmarkResult) {
-        benchmarkResult.textContent = getString(
-          "pref-hybrid-scan-benchmark-error" as any,
-          { args: { message: String((error as any)?.message || error) } },
-        );
-      }
+      report(
+        getString("pref-hybrid-scan-benchmark-error" as any, {
+          args: { message: String((error as any)?.message || error) },
+        }) || String((error as any)?.message || error),
+      );
     } finally {
       benchmarkButton.disabled = false;
     }
@@ -2000,6 +2086,28 @@ function bindSemanticStatsSettings(doc: Document) {
           showMessage(getString("pref-semantic-index-completed" as any) + ` (${result.processed}/${result.total})`, "success");
         }
         if (rebuild) updateChunkStaleWarning(doc);
+      } else if (result.status === 'incomplete') {
+        // Finished, but on purpose missing documents. Report the two numbers
+        // separately — "42 indexed, 3 skipped" is actionable in a way that a
+        // single failure count is not — and say plainly that the index does
+        // not yet cover the whole library.
+        const { summarizeRun } = require("./semantic");
+        const { indexed, skipped, otherFailures } = summarizeRun(result);
+        const parts = [
+          `${getString("pref-semantic-index-indexed-items" as any) || "indexed"}: ${indexed}`,
+          `${getString("pref-semantic-index-skipped-oversize" as any) || "skipped (chunk too long)"}: ${skipped}`,
+        ];
+        if (otherFailures > 0) {
+          parts.push(
+            `${getString("pref-semantic-index-failed-items" as any) || "items failed"}: ${otherFailures}`,
+          );
+        }
+        showMessage(
+          `${getString("pref-semantic-index-incomplete" as any) || "Indexing finished but is incomplete"} (${parts.join(", ")})。` +
+            `${getString("pref-semantic-index-incomplete-hint" as any) || "Lower the chunk length or switch to a model that accepts longer input, then retry the failed items."}`,
+          "warning",
+        );
+        if (rebuild) updateChunkStaleWarning(doc);
       } else if (result.status === 'failed') {
         showMessage(
           `${getString("pref-semantic-index-error" as any) || "Indexing failed"} (${result.processed}/${result.total}, ${result.failedCount || 0} ${getString("pref-semantic-index-failed-items" as any) || "items failed"})`,
@@ -2313,6 +2421,7 @@ function bindSemanticStatsSettings(doc: Document) {
       'indexing': getString("pref-semantic-stats-status-indexing" as any) || 'Indexing',
       'paused': getString("pref-semantic-stats-status-paused" as any) || 'Paused',
       'completed': getString("pref-semantic-stats-status-completed" as any) || 'Completed',
+      'incomplete': getString("pref-semantic-stats-status-incomplete" as any) || 'Incomplete',
       'failed': getString("pref-semantic-index-error" as any) || 'Failed',
       'error': getString("pref-semantic-stats-status-error" as any) || 'Error',
       'aborted': 'Aborted'
@@ -2343,10 +2452,16 @@ function bindSemanticStatsSettings(doc: Document) {
             'auth': getString("pref-semantic-index-error-auth" as any) || 'API authentication failed, please check your API key',
             'invalid_request': getString("pref-semantic-index-error-invalid-request" as any) || 'Invalid API request, please check configuration',
             'server': getString("pref-semantic-index-error-server" as any) || 'API server error, please try again later',
+            'chunk_too_large': getString("pref-semantic-index-error-chunk-too-large" as any) || 'A single chunk exceeds the input length allowed by the current embedding model/API. Please reduce the chunk length or switch to an embedding model that supports longer input',
             'config': getString("pref-semantic-index-error-config" as any) || 'Configuration error, please check API settings',
             'unknown': getString("pref-semantic-index-error-unknown" as any) || 'Unknown error'
           };
           const localizedMsg = errorTypeMap[errorType];
+          // The chunk-too-large error carries its own instructions; appending
+          // the raw message would print the same sentence twice.
+          if (errorType === 'chunk_too_large') {
+            return localizedMsg;
+          }
           // For known error types, append original message if it provides additional details
           // For unknown errors or when type is not found, always include original message
           if (localizedMsg) {
@@ -2389,9 +2504,103 @@ function bindSemanticStatsSettings(doc: Document) {
         // resumeIndex() path instead of spawning a second buildIndex run.
       });
 
+      // Ask the user what to do about a chunk that is longer than the
+      // embedding endpoint accepts. Asked once per run; the service applies
+      // the answer to every later occurrence without coming back here.
+      semanticService.setOnChunkTooLargeDecision(async (request: any) => {
+        const decision = askChunkTooLarge(request);
+        ztoolkit.log(
+          `[PreferenceScript] Oversized chunk on ${request.itemKey}: user chose '${decision}'`,
+        );
+        if (decision === "stop") {
+          // The build is ending, so leave the same standing explanation on
+          // screen that the stop path would otherwise have to duplicate.
+          lastErrorInfo = {
+            message:
+              getString("pref-semantic-index-error-chunk-too-large" as any) ||
+              request.message,
+            type: "chunk_too_large",
+            retryable: false,
+          };
+        }
+        return decision;
+      });
+
       ztoolkit.log("[PreferenceScript] Registered error callback for semantic service");
     } catch (error) {
       ztoolkit.log(`[PreferenceScript] Failed to register error callback: ${error}`, "warn");
     }
+  }
+
+  /**
+   * The oversized-chunk dialog: skip these documents, or stop and fix it.
+   *
+   * Two clearly labelled buttons via Services.prompt.confirmEx, because
+   * "OK / Cancel" gives no hint which one drops documents. If confirmEx is
+   * unavailable it falls back to the plain confirm the rest of the plugin
+   * uses, with the mapping spelled out in the text; if even that fails, the
+   * answer is "stop", since being unable to ask is not permission to discard
+   * a user's papers.
+   */
+  function askChunkTooLarge(request: {
+    itemKey: string;
+    title?: string;
+    message: string;
+  }): "skip" | "stop" {
+    const win = addon.data.prefs?.window as any;
+    const which = request.title
+      ? `${request.title} (${request.itemKey})`
+      : request.itemKey;
+    const title =
+      getString("pref-semantic-chunk-oversize-title" as any) ||
+      "Chunk too long for the embedding model";
+    const skipLabel =
+      getString("pref-semantic-chunk-oversize-skip" as any) ||
+      "Skip and continue";
+    const stopLabel =
+      getString("pref-semantic-chunk-oversize-stop" as any) || "Stop indexing";
+    const body =
+      `${request.message}\n\n` +
+      `${getString("pref-semantic-chunk-oversize-item" as any) || "Affected item"}: ${which}\n\n` +
+      `${getString("pref-semantic-chunk-oversize-explain" as any) || "Skipping leaves these documents out of the index; the rebuild will be marked incomplete. Stopping lets you lower the chunk length or switch model, then rebuild."}`;
+
+    try {
+      const prompts = (Services as any)?.prompt;
+      if (prompts?.confirmEx) {
+        const flags =
+          prompts.BUTTON_POS_0 * prompts.BUTTON_TITLE_IS_STRING +
+          prompts.BUTTON_POS_1 * prompts.BUTTON_TITLE_IS_STRING;
+        const pressed = prompts.confirmEx(
+          win ?? null,
+          title,
+          body,
+          flags,
+          skipLabel,
+          stopLabel,
+          null,
+          null,
+          { value: false },
+        );
+        return pressed === 0 ? "skip" : "stop";
+      }
+    } catch (error) {
+      ztoolkit.log(
+        `[PreferenceScript] confirmEx unavailable, falling back to confirm: ${error}`,
+        "warn",
+      );
+    }
+
+    try {
+      if (win?.confirm) {
+        const fallback = `${title}\n\n${body}\n\n${skipLabel} (OK) / ${stopLabel} (Cancel)`;
+        return win.confirm(fallback) ? "skip" : "stop";
+      }
+    } catch (error) {
+      ztoolkit.log(
+        `[PreferenceScript] Could not show the oversized-chunk prompt: ${error}`,
+        "warn",
+      );
+    }
+    return "stop";
   }
 }

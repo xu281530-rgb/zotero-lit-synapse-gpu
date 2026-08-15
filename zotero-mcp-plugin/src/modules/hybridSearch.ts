@@ -37,10 +37,28 @@ export interface HybridSearchOptions {
   rrfK: number;
   keywordWeight: number;
   semanticWeight: number;
-  /** Disable branch deadlines for exhaustive library-level retrieval. */
-  exhaustive?: boolean;
-  semanticTimeoutMs?: number;
-  totalTimeoutMs?: number;
+  // NOTE: there is deliberately no `exhaustive` option here. Fusion is already
+  // exhaustive — `ranked` holds every scored candidate and `results` is just the
+  // topK window onto it — so the flag had no effect at this layer except the one
+  // it should never have had: it used to replace both branch deadlines with an
+  // unbounded await. Exhaustiveness is a property of the semantic scan
+  // (SemanticSearchOptions.exhaustive), never of a timeout.
+  /**
+   * Deadline for the keyword (metadata) branch. Defaults to
+   * DEFAULT_KEYWORD_SEARCH_TIMEOUT_MS; production callers pass the user's
+   * setting. The semantic branch is bounded inside the semantic service by the
+   * vector-scan and embedding deadlines, not here.
+   */
+  keywordSearchTimeoutMs?: number;
+  /**
+   * Backstop deadline for the semantic branch as seen from the fusion layer.
+   *
+   * The real bound lives inside the semantic service (embedding timeout +
+   * vector-scan timeout); this only guarantees that fusion cannot be left
+   * waiting forever if a dependency never settles. Callers pass the sum of the
+   * budgets they gave the service.
+   */
+  semanticBranchTimeoutMs?: number;
 }
 
 export interface HybridSearchResult extends Record<string, unknown> {
@@ -111,8 +129,23 @@ interface FusedCandidate {
   rrfScore: number;
 }
 
-export const DEFAULT_SEMANTIC_TIMEOUT_MS = 8000;
-export const DEFAULT_HYBRID_TIMEOUT_MS = 10000;
+/**
+ * Fallback keyword-branch deadline for callers that pass no explicit budget.
+ *
+ * Production callers read the user's `keywordSearchTimeoutMs` setting instead;
+ * this only keeps direct/test callers of runHybridSearch bounded. It matches
+ * HYBRID_SETTING_DEFAULTS.keywordSearchTimeoutMs.
+ */
+export const DEFAULT_KEYWORD_SEARCH_TIMEOUT_MS = 30000;
+
+/**
+ * Fallback backstop for the semantic branch as seen from the fusion layer.
+ *
+ * The semantic branch's real budget is embedding timeout + vector-scan timeout,
+ * enforced inside the semantic service. This is only the "the dependency never
+ * settled at all" backstop, so it is deliberately looser than either.
+ */
+export const DEFAULT_SEMANTIC_BRANCH_TIMEOUT_MS = 60000;
 
 /**
  * Upper bound on lexical probes issued per hybrid call — the only hard limit.
@@ -845,11 +878,19 @@ export function validateHybridSearchOptions(
   // depth above it fails the scan rather than shortening it. The floor is a
   // configuration concern — a caller driving this directly (a test, a narrow
   // internal search) may legitimately fuse four candidates.
-  if (options.semanticTimeoutMs !== undefined) {
-    validateFiniteNumber(options.semanticTimeoutMs, "semanticTimeoutMs", 1);
+  if (options.keywordSearchTimeoutMs !== undefined) {
+    validateFiniteNumber(
+      options.keywordSearchTimeoutMs,
+      "keywordSearchTimeoutMs",
+      1,
+    );
   }
-  if (options.totalTimeoutMs !== undefined) {
-    validateFiniteNumber(options.totalTimeoutMs, "totalTimeoutMs", 1);
+  if (options.semanticBranchTimeoutMs !== undefined) {
+    validateFiniteNumber(
+      options.semanticBranchTimeoutMs,
+      "semanticBranchTimeoutMs",
+      1,
+    );
   }
   if (options.keywords !== undefined) {
     normalizeKeywords(options.keywords);
@@ -1121,48 +1162,25 @@ async function settleWithTimeout<T>(
   }
 }
 
-async function settleOperation<T>(
-  operation: () => Promise<T>,
-): Promise<{ outcome: PromiseSettledResult<T>; elapsedMs: number }> {
-  const startedAt = Date.now();
-  try {
-    return {
-      outcome: { status: "fulfilled", value: await operation() },
-      elapsedMs: Date.now() - startedAt,
-    };
-  } catch (reason) {
-    return {
-      outcome: { status: "rejected", reason },
-      elapsedMs: Date.now() - startedAt,
-    };
-  }
-}
-
 export async function runHybridSearch(
   options: HybridSearchOptions & { query: string },
   dependencies: HybridSearchDependencies,
 ): Promise<HybridSearchRunResult> {
   validateHybridSearchOptions(options);
   const startedAt = Date.now();
-  const totalTimeoutMs = options.totalTimeoutMs ?? DEFAULT_HYBRID_TIMEOUT_MS;
-  const semanticTimeoutMs = Math.min(
-    options.semanticTimeoutMs ?? DEFAULT_SEMANTIC_TIMEOUT_MS,
-    totalTimeoutMs,
-  );
-  const runBranch = <T>(
-    operation: () => Promise<T>,
-    timeoutMs: number,
-    label: string,
-    onTimeout?: () => void,
-  ) =>
-    options.exhaustive
-      ? settleOperation(operation)
-      : settleWithTimeout(operation, timeoutMs, label, onTimeout);
+  const keywordSearchTimeoutMs =
+    options.keywordSearchTimeoutMs ?? DEFAULT_KEYWORD_SEARCH_TIMEOUT_MS;
+  const semanticBranchTimeoutMs =
+    options.semanticBranchTimeoutMs ?? DEFAULT_SEMANTIC_BRANCH_TIMEOUT_MS;
+  // Both branches are ALWAYS bounded. `exhaustive` widens what is retrieved, it
+  // never removes a deadline: an unbounded branch here used to let a single
+  // hybrid_search hang the caller indefinitely, because the library-level tool
+  // always sets exhaustive.
   const [keywordRun, semanticRun] = await Promise.all([
     options.keywordWeight > 0
-      ? runBranch(
+      ? settleWithTimeout(
           dependencies.keywordSearch,
-          totalTimeoutMs,
+          keywordSearchTimeoutMs,
           "Keyword search",
           dependencies.cancelKeywordSearch,
         )
@@ -1174,9 +1192,9 @@ export async function runHybridSearch(
           elapsedMs: 0,
         }),
     options.semanticWeight > 0
-      ? runBranch(
+      ? settleWithTimeout(
           dependencies.semanticSearch,
-          semanticTimeoutMs,
+          semanticBranchTimeoutMs,
           "Semantic search",
           dependencies.cancelSemanticSearch,
         )
