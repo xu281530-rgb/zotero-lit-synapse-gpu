@@ -385,18 +385,37 @@ async function defaultBodyKeywordDependencies(
           wanted.set(pair.itemKey, set);
         }
         const texts = new Map<string, string>();
+        /*
+         * getItemChunks matches the stored `item_key` verbatim, and stored keys
+         * carry a `libraryID:` prefix for every library EXCEPT the user's own.
+         * Passing bare keys therefore worked in the user library and silently
+         * returned nothing in a group library — no verification text, so every
+         * Chinese and multi-word hit there would have been discarded as
+         * unverifiable. The prefix has to be applied on the way in and stripped
+         * on the way out.
+         */
+        const userLibraryID = Zotero.Libraries.userLibraryID;
+        const toStorageKey = (itemKey: string): string =>
+          libraryID === userLibraryID ? itemKey : `${libraryID}:${itemKey}`;
+        const fromStorageKey = (storageKey: string): string => {
+          const separator = storageKey.indexOf(":");
+          return separator === -1
+            ? storageKey
+            : storageKey.slice(separator + 1);
+        };
+
         // Batched per item, because the stored chunks are addressed per item and
         // one query per passage would dominate a search that touches hundreds.
         const itemKeys = Array.from(wanted.keys());
         const BATCH = 100;
         for (let offset = 0; offset < itemKeys.length; offset += BATCH) {
           const slice = itemKeys.slice(offset, offset + BATCH);
-          const chunks = await vectorStore.getItemChunks(slice);
-          for (const [itemKey, list] of chunks) {
-            const bare = itemKey.includes(":")
-              ? itemKey.slice(itemKey.indexOf(":") + 1)
-              : itemKey;
-            const need = wanted.get(bare) ?? wanted.get(itemKey);
+          const chunks = await vectorStore.getItemChunks(
+            slice.map(toStorageKey),
+          );
+          for (const [storageKey, list] of chunks) {
+            const bare = fromStorageKey(storageKey);
+            const need = wanted.get(bare);
             if (!need) continue;
             for (const chunk of list) {
               if (!need.has(chunk.chunkId)) continue;
