@@ -1,4 +1,9 @@
-import { StreamableMCPServer } from "./streamableMCPServer";
+import {
+  isWriteEnabled,
+  MUTATING_TOOL_NAMES,
+  StreamableMCPServer,
+} from "./streamableMCPServer";
+import { filterToolCatalog } from "./toolCatalog";
 import { serverPreferences } from "./serverPreferences";
 import { testMCPIntegration } from "./mcpTest";
 import {
@@ -714,6 +719,54 @@ export class HttpServer {
   };
 
 /**
+ * Project the shared tool catalog into the shape /capabilities describes.
+ *
+ * The parameter table is derived from each tool's JSON Schema rather than
+ * written out again: `required` comes from the schema's own `required` array,
+ * so a tool whose schema changes cannot end up documented here with the old
+ * signature. The pref filtering is the same one tools/list applies, so with
+ * write operations disabled this stops advertising the write_* tools instead
+ * of promising capabilities the server would refuse.
+ */
+private projectCatalogForCapabilities(): any[] {
+  const tools = filterToolCatalog({
+    semanticEnabled:
+      Zotero.Prefs.get(
+        "extensions.zotero.zotero-mcp-plugin.semantic.enabled",
+        true,
+      ) !== false,
+    writeEnabled: isWriteEnabled(),
+    mutatingToolNames: MUTATING_TOOL_NAMES,
+  });
+
+  return tools.map((tool) => {
+    const schema = tool.inputSchema ?? {};
+    const properties: Record<string, any> = schema.properties ?? {};
+    const required: string[] = Array.isArray(schema.required)
+      ? schema.required
+      : [];
+    const parameters: Record<string, any> = {};
+    for (const [name, definition] of Object.entries(properties)) {
+      const spec = definition as Record<string, any>;
+      parameters[name] = {
+        type: spec.type,
+        ...(spec.enum ? { enum: spec.enum } : {}),
+        ...(spec.items ? { items: spec.items } : {}),
+        ...(spec.default !== undefined ? { default: spec.default } : {}),
+        description: spec.description,
+        required: required.includes(name),
+      };
+    }
+    return {
+      name: tool.name,
+      category: tool.category,
+      description: tool.description,
+      parameters,
+    };
+  });
+}
+
+/**
  * Get comprehensive capabilities and API documentation
  */
 private getCapabilities() {
@@ -759,245 +812,18 @@ private getCapabilities() {
         markdown: false
       }
     },
-    tools: [
-      {
-        name: "hybrid_search",
-        description: "Default first step for literature discovery. Searches Zotero metadata fields and the semantic index in parallel, then fuses them into one normalized 0-1 relevance score (the stronger branch sets the score, the weaker one adds a bounded agreement bonus; Reciprocal Rank Fusion is only the tie-break). Does not scan full document text. Always covers Chinese and English literature together: pass a complete natural-language query for the semantic branch plus bilingual keywords for the lexical branch, whichever language the user asked in. About 5-12 keywords is the recommended amount for best results, not a required range; any number from 1 to " + MAX_HYBRID_KEYWORDS + " is accepted. Returns ONE PAGE of lightweight candidate rows (itemKey, title, creators, year, venue, language, fused score, matched keywords/fields, a short evidence snippet, and whether an abstract exists), plus a pagination block with appliedMinScore, totalRelevant, returned, hasMore and nextCursor. The relevance threshold is applied BEFORE paging, so no page contains a document below it and a short last page is never padded; pass nextCursor back as cursor to window further down the same ranking. Abstracts are searched but NOT returned: fetch one with get_item_abstract only for a candidate worth going deeper on, then dig into that single paper with search_fulltext.",
-        category: "search",
-        parameters: {
-          query: { type: "string", description: "Complete natural-language sentence describing the information need, embedded as-is for cross-lingual semantic search. Include an English and a Chinese phrasing separated by ' / '.", required: true },
-          keywords: { type: "array", items: { type: "string" }, description: "Precise Chinese AND English domain terms, translations, synonyms and abbreviations. For best results, it is recommended to provide 5-12 relevant Chinese and/or English keywords; fewer or more are still allowed, from 1 up to " + MAX_HYBRID_KEYWORDS + " entries. Each is searched separately over title, abstract, creator, publicationTitle and tags, then aggregated, deduplicated and scored with a coverage bonus. Omitting this falls back to splitting the query, which only probes the language the user typed in.", required: false },
-          topK: { type: "number", description: "Page size: 1-20 documents per response (also capped by the user setting). Anything past it is reachable with cursor, not lost.", required: false },
-          cursor: { type: "string", description: "Continue a previous hybrid_search by passing the nextCursor it returned. Returns the next page of the SAME ranked, threshold-filtered result set without re-running retrieval. Send the other search arguments unchanged or omitted; changing them is a new search.", required: false },
-          minScore: { type: "number", description: "Minimum fused relevance score (0-1)", required: false },
-          language: { type: "string", enum: ["zh", "en", "all", "auto"], description: "Semantic branch language filter. Keep the 'all' default for cross-lingual recall; zh/en/auto drop literature written in the other language", required: false },
-          rrfK: { type: "number", description: "Rank constant for the Reciprocal Rank Fusion TIE-BREAK (default: 60). Ranking is decided by the fused 0-1 relevance score; RRF only separates candidates whose fused scores are equal.", required: false },
-          keywordWeight: { type: "number", description: "Keyword branch weight (default: 1)", required: false },
-          semanticWeight: { type: "number", description: "Semantic branch weight (default: 1)", required: false },
-          libraryID: { type: "number", description: "Library used by keyword and semantic retrieval", required: false },
-        },
-        examples: [
-          {
-            query: {
-              query: "Effects of temperature gradient on columnar-to-equiaxed transition during directional solidification / 温度梯度对定向凝固柱状晶-等轴晶转变的影响",
-              keywords: ["温度梯度", "定向凝固", "柱状晶", "等轴晶", "柱状晶-等轴晶转变", "temperature gradient", "directional solidification", "columnar grain", "equiaxed grain", "columnar-to-equiaxed transition", "CET"]
-            },
-            description: "Chinese question, bilingual retrieval: the full sentence drives cross-lingual semantic search while the keywords drive lexical search in both languages"
-          }
-        ]
-      },
-      {
-        name: "get_libraries",
-        description: "List all Zotero libraries available in the current client. Returns: [{libraryID, name, libraryType}]",
-        category: "retrieval",
-        parameters: {
-          limit: { type: "number", description: "Maximum results to return", required: false },
-          offset: { type: "number", description: "Pagination offset", required: false }
-        }
-      },
-      {
-        name: "search_libraries",
-        description: "Search libraries by name. Returns: [{libraryID, name, libraryType}]",
-        category: "retrieval",
-        parameters: {
-          q: { type: "string", description: "Library name search query", required: true },
-          limit: { type: "number", description: "Maximum results to return", required: false },
-          offset: { type: "number", description: "Pagination offset", required: false }
-        }
-      },
-      {
-        name: "search_library",
-        description: "Structured Zotero metadata search for explicit title, author, year, item type, or field constraints. Use hybrid_search first for general literature discovery.",
-        category: "search",
-        parameters: {
-          libraryID: { type: "number", description: "Optional target Zotero library ID. Defaults to the user library when omitted.", required: false },
-          q: { type: "string", description: "General search query", required: false },
-          title: { type: "string", description: "Title search", required: false },
-          titleOperator: { 
-            type: "string", 
-            enum: ["contains", "exact", "startsWith", "endsWith", "regex"],
-            description: "Title search operator",
-            required: false
-          },
-          yearRange: { type: "string", description: "Year range (e.g., '2020-2023')", required: false },
-          relevanceScoring: { type: "boolean", description: "Enable relevance scoring", required: false },
-          sort: { 
-            type: "string", 
-            enum: ["relevance", "date", "title", "year"],
-            description: "Sort order",
-            required: false
-          },
-          limit: { type: "number", description: "Maximum results to return", required: false },
-          offset: { type: "number", description: "Pagination offset", required: false }
-        },
-        examples: [
-          { query: { q: "machine learning" }, description: "Basic text search" },
-          { query: { title: "deep learning", titleOperator: "contains" }, description: "Title-specific search" },
-          { query: { yearRange: "2020-2023", sort: "relevance" }, description: "Year-filtered search with relevance sorting" }
-        ]
-      },
-      {
-        name: "search_annotations",
-        description: "Search all notes, PDF annotations and highlights with smart content processing",
-        category: "search",
-        parameters: {
-          libraryID: { type: "number", description: "Optional target Zotero library ID. Defaults to the user library when omitted.", required: false },
-          q: { type: "string", description: "Search query for content, comments, and tags", required: false },
-          type: { 
-            type: "string", 
-            enum: ["note", "highlight", "annotation", "ink", "text", "image"],
-            description: "Filter by annotation type",
-            required: false
-          },
-          detailed: { type: "boolean", description: "Return detailed content (default: false for preview)", required: false },
-          limit: { type: "number", description: "Maximum results (preview: 20, detailed: 50)", required: false },
-          offset: { type: "number", description: "Pagination offset", required: false }
-        },
-        examples: [
-          { query: { q: "important findings" }, description: "Search annotation content" },
-          { query: { type: "highlight", detailed: true }, description: "Get detailed highlights" }
-        ]
-      },
-      {
-        name: "get_item_details",
-        description: "Get detailed information for a specific item including metadata, abstract, attachments info, notes, and tags but not fulltext content. Returns: {key, title, creators, date, itemType, publicationTitle, volume, issue, pages, DOI, url, abstractNote, tags, notes: [note_content], attachments: [{key, title, path, contentType, filename, url, linkMode, hasFulltext, size}]}",
-        category: "retrieval",
-        parameters: {
-          libraryID: { type: "number", description: "Optional target Zotero library ID. Defaults to the user library when omitted.", required: false },
-          itemKey: { type: "string", description: "Unique item key", required: true }
-        },
-        examples: [
-          { query: { itemKey: "ABCD1234" }, description: "Get item by key" }
-        ]
-      },
-      {
-        name: "get_annotation_by_id",
-        description: "Get complete content of a specific annotation by ID",
-        category: "retrieval",
-        parameters: {
-          annotationId: { type: "string", description: "Annotation ID", required: true }
-        }
-      },
-      {
-        name: "get_annotations_batch",
-        description: "Get complete content of multiple annotations by IDs",
-        category: "retrieval",
-        parameters: {
-          ids: { 
-            type: "array", 
-            items: { type: "string" },
-            description: "Array of annotation IDs",
-            required: true
-          }
-        }
-      },
-      {
-        name: "get_item_pdf_content",
-        description: "Extract text content from PDF attachments",
-        category: "retrieval",
-        parameters: {
-          itemKey: { type: "string", description: "Item key", required: true },
-          page: { type: "number", description: "Specific page number (optional)", required: false }
-        }
-      },
-      {
-        name: "get_collections",
-        description: "Get list of all collections in the library",
-        category: "collections",
-        parameters: {
-          libraryID: { type: "number", description: "Optional target Zotero library ID. Defaults to the user library when omitted.", required: false },
-          limit: { type: "number", description: "Maximum results to return", required: false },
-          offset: { type: "number", description: "Pagination offset", required: false }
-        }
-      },
-      {
-        name: "search_collections",
-        description: "Search collections by name",
-        category: "collections",
-        parameters: {
-          libraryID: { type: "number", description: "Optional target Zotero library ID. Defaults to the user library when omitted.", required: false },
-          q: { type: "string", description: "Collection name search query", required: true },
-          limit: { type: "number", description: "Maximum results to return", required: false },
-          offset: { type: "number", description: "Pagination offset", required: false }
-        }
-      },
-      {
-        name: "get_collection_details",
-        description: "Get detailed information about a specific collection",
-        category: "collections",
-        parameters: {
-          collectionKey: { type: "string", description: "Collection key", required: true },
-          libraryID: { type: "number", description: "Optional target Zotero library ID. Defaults to the user library when omitted.", required: false }
-        }
-      },
-      {
-        name: "get_collection_items",
-        description: "Get items in a specific collection",
-        category: "collections",
-        parameters: {
-          collectionKey: { type: "string", description: "Collection key", required: true },
-          libraryID: { type: "number", description: "Optional target Zotero library ID. Defaults to the user library when omitted.", required: false },
-          limit: { type: "number", description: "Maximum results to return", required: false },
-          offset: { type: "number", description: "Pagination offset", required: false }
-        }
-      },
-      {
-        name: "get_item_fulltext",
-        description: "Get comprehensive fulltext content from item including attachments, notes, abstracts, and webpage snapshots. Returns: {itemKey, title, itemType, abstract, fulltext: {attachments: [{attachmentKey, filename, filePath, contentType, type, content, length, extractionMethod}], notes: [{noteKey, title, content, htmlContent, length, dateModified}], webpage: {url, filename, filePath, content, length, type}, total_length}, metadata: {extractedAt, sources}}",
-        category: "fulltext",
-        parameters: {
-          itemKey: { type: "string", description: "Item key", required: true },
-          attachments: { type: "boolean", description: "Include attachment content (default: true)", required: false },
-          notes: { type: "boolean", description: "Include notes content (default: true)", required: false },
-          webpage: { type: "boolean", description: "Include webpage snapshots (default: true)", required: false },
-          abstract: { type: "boolean", description: "Include abstract (default: true)", required: false }
-        },
-        examples: [
-          { query: { itemKey: "ABCD1234" }, description: "Get all fulltext content for an item" },
-          { query: { itemKey: "ABCD1234", attachments: true, notes: false }, description: "Get only attachment content" }
-        ]
-      },
-      {
-        name: "get_attachment_content",
-        description: "Extract text content from a specific attachment (PDF, HTML, text files). Returns: {attachmentKey, filename, filePath, contentType, type, content, length, extractionMethod, extractedAt}",
-        category: "fulltext",
-        parameters: {
-          attachmentKey: { type: "string", description: "Attachment key", required: true },
-          format: { type: "string", enum: ["json", "text"], description: "Response format (default: json)", required: false }
-        }
-      },
-      {
-        name: "search_fulltext",
-        description: "Final stage of the retrieval funnel: hybrid keyword + semantic search over the passages of ONE document located by hybrid_search, fused into the same normalized 0-1 score and filtered by the user's relevance threshold. Read that paper's abstract with get_item_abstract first, re-fit domain/expertRole to it, and write query and keywords from its own subject matter in its own language. Also serves neighbouring-passage context expansion via chunkIds. Whole-library scanning is disabled.",
-        category: "fulltext",
-        parameters: {
-          libraryID: { type: "number", description: "Optional target Zotero library ID. Defaults to the user library when omitted.", required: false },
-          itemKey: { type: "string", description: "The single item key to dig into, from hybrid_search", required: true },
-          q: { type: "string", description: "Natural-language query written for THIS paper", required: true },
-          keywords: { type: "string", description: "Comma-separated probes specific to this paper, written in the language THIS paper is written in (one language, not both - the other language matches nothing inside a single document)", required: false },
-          domain: { type: "string", description: "Discipline / sub-field of this paper", required: false },
-          expertRole: { type: "string", description: "Expert perspective adopted for this paper", required: false },
-          maxChunks: { type: "number", description: "Upper bound on returned passages; capped by the user setting", required: false },
-          minScore: { type: "number", description: "Relevance floor 0-1; may only be stricter than the user setting", required: false },
-          chunkIds: { type: "string", description: "Comma-separated chunk ids for context expansion mode", required: false },
-          neighborRadius: { type: "number", description: "Neighbour radius for context expansion; capped by the user setting", required: false }
-        },
-        examples: [
-          { query: { q: "Conditions under which the columnar-to-equiaxed transition occurs in this alloy", itemKey: "ABCD1234", keywords: "CET,columnar-to-equiaxed transition,thermal gradient,growth rate" }, description: "Hybrid search inside one English document: probes in that document's language only" },
-          { query: { itemKey: "ABCD1234", chunkIds: "17" }, description: "Pull in the passages neighbouring chunk 17" }
-        ]
-      },
-      {
-        name: "get_item_abstract",
-        description: "Get ONE item's abstract. On-demand middle step of the retrieval funnel, not a batch step after hybrid_search: call it only for a candidate you are seriously considering reading in depth, one itemKey at a time. Read it, re-fit domain/expertRole to what that paper actually studies, then call search_fulltext with that itemKey and keywords written in the paper's own language.",
-        category: "retrieval",
-        parameters: {
-          libraryID: { type: "number", description: "Optional target Zotero library ID. Defaults to the user library when omitted.", required: false },
-          itemKey: { type: "string", description: "Item key", required: true },
-          format: { type: "string", enum: ["json", "text"], description: "Response format (default: json)", required: false }
-        }
-      }
-    ],
+    // Mirrored from the MCP tool catalog, never written out again.
+    //
+    // This block used to be a second, hand-maintained copy of the tool list,
+    // and it had drifted badly: it still advertised get_annotation_by_id,
+    // get_annotations_batch, get_item_pdf_content, get_item_fulltext and
+    // get_attachment_content, none of which had existed for some time, while
+    // omitting eleven tools that did — including every collection-mutation
+    // tool and every semantic tool. A client that read /capabilities to decide
+    // what to call was being told to call things that would fail, and never
+    // told about half the server. The projection below cannot drift, and
+    // scripts/test-tool-catalog.js fails the build if the two shapes diverge.
+    tools: this.projectCatalogForCapabilities(),
     endpoints: {
       mcp: {
         "/mcp": {

@@ -19,6 +19,38 @@ export function formatItemBrief(item: Zotero.Item): Record<string, any> {
 }
 
 /**
+ * The metadata every caller of this formatter gets when it does not ask for
+ * something narrower.
+ *
+ * `abstractNote` and `notes` used to be in here, which is how a metadata
+ * lookup came to ship a paper's abstract and the user's private note bodies:
+ * `get_item_details`, `get_collection_items` and `search_library` all default
+ * to this list, so every one of them returned content none of them was for. A
+ * 200-item collection listing carried 200 abstracts and every note body in it.
+ *
+ * Both are now availability flags (`hasAbstract`, `abstractChars`,
+ * `noteCount`) and the text comes from the tool that exists to return it —
+ * get_item_abstract and get_annotations respectively.
+ */
+export const DEFAULT_ITEM_FIELDS = [
+  "title",
+  "creators",
+  "date",
+  "itemType",
+  "publicationTitle",
+  "volume",
+  "issue",
+  "pages",
+  "DOI",
+  "url",
+  "language",
+  "tags",
+  "hasAbstract",
+  "noteCount",
+  "attachments",
+];
+
+/**
  * Formats a single Zotero item into a detailed JSON object.
  * @param item The Zotero.Item object to format.
  * @param fields Optional array of fields to include in the output.
@@ -28,28 +60,7 @@ export async function formatItem(
   item: Zotero.Item,
   fields?: string[],
 ): Promise<Record<string, any>> {
-  let fieldsToExport: string[];
-
-  if (fields) {
-    fieldsToExport = fields;
-  } else {
-    fieldsToExport = [
-      "title",
-      "creators",
-      "date",
-      "itemType",
-      "publicationTitle",
-      "volume",
-      "issue",
-      "pages",
-      "DOI",
-      "url",
-      "abstractNote",
-      "tags",
-      "notes",
-      "attachments",
-    ];
-  }
+  const fieldsToExport: string[] = fields ?? DEFAULT_ITEM_FIELDS;
   const formattedItem: Record<string, any> = {
     key: item.key,
     libraryID: item.libraryID,
@@ -82,7 +93,14 @@ export async function formatItem(
                 const attachmentData: any = {
                   key: attachment.key || '',
                   linkMode: attachment.attachmentLinkMode || 0,
-                  hasFulltext: false,
+                  // Renamed from `hasFulltext`, because that is not what it
+                  // measured: it checks the file's extension and content type,
+                  // so it said true for every PDF including ones that had
+                  // never parsed and had no text anywhere. The honest claim is
+                  // "this file type could yield text". Whether the plugin
+                  // actually HAS the text is the item-level `fullText` field,
+                  // resolved from the semantic index.
+                  hasExtractableText: false,
                   size: 0
                 };
                 
@@ -123,7 +141,7 @@ export async function formatItem(
                 }
                 
                 try {
-                  attachmentData.hasFulltext = hasExtractableText(attachment);
+                  attachmentData.hasExtractableText = hasExtractableText(attachment);
                 } catch (e) {
                   ztoolkit.log(`[ItemFormatter] Error checking extractable text: ${e}`, "error");
                 }
@@ -210,9 +228,62 @@ export async function formatItem(
         case "date":
           try {
             formattedItem[field] = safeGetString(item.getField("date"));
+            // Callers overwhelmingly want the publication year, and every
+            // other tool in this plugin reports one; deriving it here keeps
+            // them from parsing Zotero's free-form date strings themselves.
+            formattedItem.year =
+              safeGetString(item.getField("date")).match(/\d{4}/)?.[0] || "";
           } catch (e) {
             ztoolkit.log(`[ItemFormatter] Error getting date: ${e}`, "error");
             formattedItem[field] = "";
+          }
+          break;
+        case "itemType":
+          // NOT the default branch. `getField("itemType")` returns "" in
+          // Zotero — itemType is a property, not a field — so falling through
+          // to `default:` overwrote the correct value set above with an empty
+          // string. Every get_item_details response reported itemType: "".
+          formattedItem[field] = safeGetString(item.itemType);
+          break;
+        case "hasAbstract":
+          // Availability, not content: what get_item_abstract WOULD return.
+          try {
+            const abstract = safeGetString(item.getField("abstractNote")).trim();
+            formattedItem.hasAbstract = abstract.length > 0;
+            formattedItem.abstractChars = abstract.length;
+          } catch (e) {
+            ztoolkit.log(`[ItemFormatter] Error probing abstract: ${e}`, "error");
+            formattedItem.hasAbstract = false;
+            formattedItem.abstractChars = 0;
+          }
+          break;
+        case "noteCount":
+          // Likewise: how many notes exist, never their bodies.
+          try {
+            formattedItem.noteCount = item.getNotes(false).length;
+          } catch (e) {
+            ztoolkit.log(`[ItemFormatter] Error counting notes: ${e}`, "error");
+            formattedItem.noteCount = 0;
+          }
+          break;
+        case "collections":
+          try {
+            const collectionIDs = item.getCollections() || [];
+            formattedItem.collections = (
+              Zotero.Collections.get(collectionIDs) as unknown as any[]
+            )
+              .filter(Boolean)
+              .map((collection: any) => ({
+                collectionKey: collection.key,
+                name: collection.name,
+                path: collectionPath(collection),
+              }));
+          } catch (e) {
+            ztoolkit.log(
+              `[ItemFormatter] Error getting collections: ${e}`,
+              "error",
+            );
+            formattedItem.collections = [];
           }
           break;
         default:
@@ -235,6 +306,29 @@ export async function formatItem(
   }
 
   return formattedItem;
+}
+
+/**
+ * "Library/Parent/Child" for one collection, so a caller reading an item's
+ * collections can see where it sits without walking the tree itself.
+ */
+function collectionPath(collection: any): string {
+  const segments: string[] = [];
+  const seen = new Set<string>();
+  let current: any = collection;
+  while (current && !seen.has(current.key)) {
+    seen.add(current.key);
+    segments.unshift(current.name || current.key);
+    try {
+      const parentKey = current.parentKey;
+      current = parentKey
+        ? Zotero.Collections.getByLibraryAndKey(current.libraryID, parentKey)
+        : null;
+    } catch {
+      current = null;
+    }
+  }
+  return segments.join("/");
 }
 
 /**

@@ -94,22 +94,10 @@ export function formatCollectionList(collections: Zotero.Collection[]) {
   return collections.map(formatCollectionBrief);
 }
 
-/**
- * Recursively builds a hierarchical tree of a collection and all its descendants.
- * @param collection - The root Zotero.Collection object.
- * @returns A formatted collection object with nested `subcollections` arrays.
- */
-export function formatCollectionTree(collection: Zotero.Collection): any {
-  const formatted: any = formatCollectionBrief(collection);
-  const childCollectionIDs = collection.getChildCollections(true);
-  if (childCollectionIDs.length > 0) {
-    const children = Zotero.Collections.get(childCollectionIDs) as Zotero.Collection[];
-    formatted.subcollections = children.map(formatCollectionTree);
-  } else {
-    formatted.subcollections = [];
-  }
-  return formatted;
-}
+// REMOVED: formatCollectionTree - its only callers returned the whole
+// nested tree in one unpaginated response. get_collection_items walks the
+// same structure a level at a time and reports subtree sizes without
+// materialising them.
 
 /**
  * Formats collection details, including items and subcollections.

@@ -5,13 +5,29 @@
 
 declare let ztoolkit: ZToolkit;
 
+import {
+  resolveAnnotationKeys,
+  type NoSourceItemReason,
+} from './annotationKeys';
 import { TextFormatter } from './textFormatter';
 
 // 注释内容接口
 export interface AnnotationContent {
   id: string;
   itemKey: string;
-  parentKey?: string;
+  /**
+   * This mark's own key. Identical to `itemKey`, named for what it is so a
+   * caller never has to guess which of the three keys on a row is which.
+   */
+  annotationKey: string;
+  /**
+   * The PDF/attachment the mark was drawn on. Absent for notes, which are
+   * items in their own right and hang off the document directly.
+   *
+   * This is NOT an item key: passing it to a document-level tool such as
+   * get_item_details or search_fulltext finds nothing. Use `sourceItemKey`.
+   */
+  attachmentKey?: string;
   type: "note" | "highlight" | "annotation" | "ink" | "text" | "image";
   content: string;
   text?: string; // 高亮的原始文本
@@ -23,6 +39,19 @@ export interface AnnotationContent {
   page?: number;
   position?: any; // PDF中的位置信息
   sortIndex?: number;
+  /**
+   * The bibliographic item this mark belongs to, and the only key on the row
+   * that a document-level tool accepts: get_annotations(itemKeys),
+   * get_item_details, search_fulltext, get_document_chunks.
+   *
+   * Null when there is no such item - a top-level note, or a mark on an
+   * attachment filed under nothing. Substituting the container's own key there
+   * reproduces the bug this field replaced: every document-level tool rejects
+   * it, quietly. See noSourceItemReason.
+   */
+  sourceItemKey: string | null;
+  /** Set exactly when sourceItemKey is null, saying which case it is. */
+  noSourceItemReason?: NoSourceItemReason;
 }
 
 // 搜索参数
@@ -230,7 +259,7 @@ export class AnnotationService {
             try {
               const annotationContent = this.formatAnnotationItem(
                 annotationItem,
-                attachment.key,
+                attachment,
               );
               if (annotationContent) {
                 annotations.push(annotationContent);
@@ -322,13 +351,13 @@ export class AnnotationService {
             const annotationItems = await Zotero.Items.getAsync(annotationIds);
             for (const annotationItem of annotationItems) {
               try {
-                // Get parent attachment key for context
-                const parentItem = annotationItem.parentItem;
-                const parentKey = parentItem ? parentItem.key : '';
+                // An annotation's parent is its attachment; the document is
+                // one level further up and is resolved inside the formatter.
+                const attachment = annotationItem.parentItem || null;
 
                 const annotationContent = this.formatAnnotationItem(
                   annotationItem,
-                  parentKey
+                  attachment,
                 );
                 if (annotationContent) {
                   allAnnotations.push(annotationContent);
@@ -443,7 +472,12 @@ export class AnnotationService {
       return {
         id: item.key,
         itemKey: item.key,
-        parentKey: item.parentKey || undefined,
+        // A note attached to a document belongs to that document; a top-level
+        // note is itself the document, so it is its own source.
+        ...resolveAnnotationKeys({
+          ownKey: item.key,
+          noteParentKey: item.parentKey,
+        }),
         type: "note",
         content: noteText,
         text: textContent,
@@ -465,7 +499,7 @@ export class AnnotationService {
    */
   private formatAnnotationItem(
     item: Zotero.Item,
-    parentKey: string,
+    attachment: Zotero.Item | null,
   ): AnnotationContent | null {
     try {
       if (!item.isAnnotation()) {
@@ -503,10 +537,19 @@ export class AnnotationService {
           break;
       }
 
+      // An annotation hangs off an attachment, and the attachment hangs off
+      // the document. Reporting only the attachment key -- as this did -- hands
+      // the caller a key that every document-level tool rejects.
       return {
         id: item.key,
         itemKey: item.key,
-        parentKey: parentKey,
+        ...resolveAnnotationKeys({
+          ownKey: item.key,
+          attachmentKey: attachment?.key,
+          attachmentParentKey: attachment
+            ? (attachment as any).parentKey
+            : undefined,
+        }),
         type,
         content: annotationComment || annotationText,
         text: annotationText,

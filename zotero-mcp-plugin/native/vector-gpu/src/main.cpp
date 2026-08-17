@@ -220,7 +220,10 @@ int main(int argc, char** argv) {
           index->upsert(parse_item(request.header.at("item")), rows,
                         request.payload,
                         request.header.value("dimensions", 0U));
-          write_frame(success(request));
+          json response = success(request);
+          response["vectors"] = index->active_count();
+          response["deviceBytes"] = index->device_bytes();
+          write_frame(response);
         } else if (type == "index.delete") {
           require_precision(*index, request.header);
           std::vector<ItemIdentity> items;
@@ -228,7 +231,10 @@ int main(int argc, char** argv) {
             items.push_back(parse_item(value));
           }
           index->erase_items(items);
-          write_frame(success(request));
+          json response = success(request);
+          response["vectors"] = index->active_count();
+          response["deviceBytes"] = index->device_bytes();
+          write_frame(response);
         } else if (type == "index.clear") {
           require_precision(*index, request.header);
           if (request.header.value("all", false)) {

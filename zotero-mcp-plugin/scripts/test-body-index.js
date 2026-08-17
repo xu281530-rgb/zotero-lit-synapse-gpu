@@ -376,7 +376,7 @@ const noteBody = serviceSource.slice(noteBodyStart, noteBodyEnd);
 
 assert.match(
   noteBody,
-  /this\.indexProgress\.bodyFailures =\s*\n?\s*\(this\.indexProgress\.bodyFailures \|\| 0\) \+ 1;/,
+  /this\.indexProgress\.bodyFailures =\s*\r?\n?\s*\(this\.indexProgress\.bodyFailures \|\| 0\) \+ 1;/,
   "a failed body parse must move its own counter",
 );
 assert.doesNotMatch(
@@ -407,7 +407,7 @@ assert.ok(
 // path: thrown, recorded in index_failures, build target marked failed.
 assert.match(
   serviceSource,
-  /await this\.recordFailedItem\(item, error, 'unknown'\);\s*\n\s*return \{ status: 'failed', error \};/,
+  /await this\.recordFailedItem\(item, error, 'unknown'\);\s*\r?\n\s*return \{ status: 'failed', error \};/,
   "infrastructure failures must still fail the item and the build",
 );
 assert.match(
@@ -458,7 +458,7 @@ assert.match(
 // over chunks produced by the old rules.
 assert.match(
   serviceSource,
-  /const mustClearStaleBody =\s*\n?\s*bodyState === 'metadata-only' && storedBodyState !== 'metadata-only';/,
+  /const mustClearStaleBody =\s*\r?\n?\s*bodyState === 'metadata-only' && storedBodyState !== 'metadata-only';/,
 );
 assert.match(
   serviceSource,
@@ -491,24 +491,31 @@ assert.match(
   /enrichSimilarResults[\s\S]{0,600}?await this\.annotateFullTextAvailability\(/,
   "find_similar rows are the same triage stage and need the same annotation",
 );
+// Four sites, and the count is the assertion: hybrid_search page 1, its
+// cursor pages, and the same two for the single-branch pipeline that
+// semantic_search and keyword_search share. Every path that returns candidate
+// rows must annotate them — a metadata-only paper is just as likely to sit on
+// page 2 of a semantic search as on page 1 of a hybrid one, and it was
+// semantic_search returning UNannotated rows that let an abstract be read as
+// body text.
 assert.equal(
   (
     mcpSource.match(
       /const fullTextCoverage = await this\.enrichHybridResults\(/g,
     ) || []
   ).length,
-  2,
-  "both the first page and cursor pages must compute the coverage breakdown",
+  4,
+  "every first page and cursor page must compute the coverage breakdown",
 );
 assert.equal(
-  (mcpSource.match(/fullTextCoverage,\n\s+\);/g) || []).length,
-  2,
-  "both pages must pass the coverage into the response builder",
+  (mcpSource.match(/fullTextCoverage,\r?\n\s+\);/g) || []).length,
+  4,
+  "every page must pass the coverage into its response builder",
 );
 // The summary is emitted verbatim: no renaming, no derived count, no merging.
 assert.match(
   mcpSource,
-  /\n\s+fullTextCoverage,\n/,
+  /\r?\n\s+fullTextCoverage,\r?\n/,
   "metadata.fullTextCoverage must be the breakdown itself, shorthand-assigned",
 );
 assert.match(mcpSource, /const coverage = emptyFullTextCoverage\(\);/);
@@ -519,7 +526,7 @@ assert.match(
 );
 // A lookup failure must not silently claim every row has full text — it is
 // reported as unknown, and still counted.
-assert.match(mcpSource, /: 'unknown';\n\s+result\.fullText = availability;/);
+assert.match(mcpSource, /: 'unknown';\r?\n\s+result\.fullText = availability;/);
 
 // No stale vocabulary anywhere: a second name for the same thing is how the
 // row and the summary drift apart again.
@@ -542,7 +549,7 @@ assert.match(serviceSource, /async getItemBodyIndexStates\(/);
 // from the map" must never be readable as "has full text".
 assert.match(
   serviceSource,
-  /sourceKinds\.has\(mapKey\)\s*\n?\s*\?[\s\S]{0,120}?: 'missing',/,
+  /sourceKinds\.has\(mapKey\)\s*\r?\n?\s*\?[\s\S]{0,120}?: 'missing',/,
 );
 // The tool descriptions have to point at the field, or it is just another
 // unread key in the JSON.
@@ -551,11 +558,29 @@ assert.match(
   /Read fullText before you read matchedChunks/,
   "hybrid_search must tell the caller to read fullText first",
 );
+// find_similar's description lives in the shared tool catalog, which is what
+// tools/list and /capabilities both project from.
+const catalogSource = read("src/modules/toolCatalog.ts");
 assert.match(
-  mcpSource,
+  catalogSource,
   /WHAT COMES BACK[\s\S]{0,300}?fullText/,
   "find_similar must document the field too",
 );
+// The two retrieval tools that share the single-branch pipeline return the
+// same rows, so they owe the caller the same instruction. semantic_search
+// returning unannotated rows is precisely how an abstract could be read as a
+// paper's body.
+for (const tool of ["keyword_search", "semantic_search"]) {
+  const block = catalogSource.slice(
+    catalogSource.indexOf(`name: '${tool}'`),
+    catalogSource.indexOf("inputSchema", catalogSource.indexOf(`name: '${tool}'`)),
+  );
+  assert.match(
+    block,
+    /fullText/,
+    `${tool} must document the full-text status on its rows`,
+  );
+}
 
 // search_fulltext refuses rather than passing metadata off as passages.
 assert.match(deepDiveSource, /async function assertBodyTextIndexed\(/);
@@ -579,7 +604,7 @@ assert.equal(
 // a refusal.
 assert.match(
   deepDiveSource,
-  /if \(state === "unknown"\) \{\s*\n\s*return describeFullTextAvailability\("unknown"\);/,
+  /if \(state === "unknown"\) \{\s*\r?\n\s*return describeFullTextAvailability\("unknown"\);/,
 );
 
 // ---------------------------------------------------------------------------
@@ -720,7 +745,7 @@ assert.match(
 // A trashed child no longer falls out of the queue at the `deleted` guard.
 assert.doesNotMatch(
   hooksSource,
-  /if \(item\.deleted\) continue;\n\n\s+if \(item\.isRegularItem/,
+  /if \(item\.deleted\) continue;\r?\n\r?\n\s+if \(item\.isRegularItem/,
   "a trashed attachment must not be skipped before its parent is queued",
 );
 
@@ -909,7 +934,7 @@ assert.ok(short.quality.issues.includes("short_document"));
 const spaced = "Para one.\n   \n\n\n\nPara two.\n \nPara three.";
 const spacedOut = TextQualityPreprocessor.process(spaced).text;
 assert.equal(spacedOut, "Para one.\n\nPara two.\n\nPara three.");
-assert.doesNotMatch(spacedOut, /\n{3,}/);
+assert.doesNotMatch(spacedOut, /\r?\n{3,}/);
 
 // End to end: the chunker keeps every line, in reading order, and the
 // existing paragraph rules still apply.

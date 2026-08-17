@@ -16,12 +16,24 @@ var markReaderStarted = false;
 function install(data, reason) {}
 
 function reportBootstrapError(stage, error) {
+  // This is the last-resort reporter, so both catches stay silent on purpose:
+  // there is deliberately no logging to add. If Zotero.logError itself throws
+  // — which during bootstrap means Zotero is not far enough along to log at
+  // all — the only channels available are the two being attempted here, and
+  // reporting the reporter's own failure through them would either recurse or
+  // throw again. Falling through to the next channel, and then giving up, is
+  // the behaviour we want: a startup diagnostic must never be the thing that
+  // aborts startup.
   try {
     Zotero.logError(error);
-  } catch (_) {}
+  } catch (_) {
+    // Nothing to log to: fall through and try Zotero.debug instead.
+  }
   try {
     Zotero.debug(`Zotero MCP: ${stage}: ${error}`);
-  } catch (_) {}
+  } catch (_) {
+    // Both channels are gone. Give up silently rather than abort startup.
+  }
 }
 
 function normalizeRootURI(startupData) {

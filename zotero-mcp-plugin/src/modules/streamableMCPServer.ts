@@ -7,7 +7,6 @@ import {
   handleSearchCollections,
   handleGetCollectionDetails,
   handleGetCollectionItems,
-  handleGetSubcollections,
   handleGetItemAbstract,
   handleCreateCollection,
   handleUpdateCollection,
@@ -15,8 +14,37 @@ import {
   handleAddItemsToCollection,
   handleRemoveItemsFromCollection,
 } from './apiHandlers';
+import {
+  describeNonDocumentKey,
+  type ItemKeyKind,
+} from './itemKeyKind';
 import { UnifiedContentExtractor } from './unifiedContentExtractor';
 import { SmartAnnotationExtractor } from './smartAnnotationExtractor';
+import {
+  filterToolCatalog,
+  REMOVED_TOOL_REPLACEMENTS,
+  type ToolDefinition,
+} from './toolCatalog';
+import {
+  describeTextMethod,
+  isEmptyTextMethod,
+  selectAttachment,
+  takeTextWindow,
+  type AttachmentSummary,
+  type AttachmentTextMethod,
+} from './attachmentText';
+import {
+  DocumentChunksError,
+  readDocumentChunks,
+  type DocumentChunksDeps,
+} from './documentChunks';
+import {
+  browseCollection,
+  CollectionBrowserError,
+  type BrowsedItem,
+  type CollectionBrowserDeps,
+  type CollectionNode,
+} from './collectionBrowser';
 import { MCPSettingsService } from './mcpSettingsService';
 import {
   DEFAULT_EMBEDDING_TIMEOUT_MS,
@@ -36,10 +64,13 @@ import {
   SIMILAR_MEAN_WEIGHT,
 } from './semantic';
 import {
+  computeFusedScore,
   HYBRID_KEYWORD_COVERAGE_BONUS,
   LEXICAL_FIELD_WEIGHTS,
   MAX_HYBRID_KEYWORDS,
   MAX_SUPPLIED_KEYWORDS,
+  normalizeLexicalScore,
+  normalizeSemanticScore,
   resolveHybridKeywords,
   resolveKeywordProvenance,
   runHybridSearch,
@@ -49,12 +80,23 @@ import {
   type SemanticSearchItem,
 } from './hybridSearch';
 import {
+  DIMENSION_MISMATCH_HINT,
+  isVectorDimensionMismatchError,
+} from './semantic/dimensionMismatch';
+import {
   getHybridSearchSettings,
   resolveResultCap,
   resolveScoreFloor,
 } from './hybridSearchSettings';
 import { expandChunkContext, runDocumentDeepDive } from './documentDeepDive';
-import { runLexicalSearch } from './lexicalSearch';
+import {
+  isLexicalSearchTimeoutError,
+  runLexicalSearch,
+} from './lexicalSearch';
+import {
+  isKeywordSearchGateError,
+  isKeywordSearchUnavailableError,
+} from './keywordSearchGate';
 import {
   HYBRID_EVIDENCE_CHUNKS,
   detectDocumentLanguage,
@@ -65,7 +107,10 @@ import {
 import {
   CursorError,
   detachPageWindow,
+  HYBRID_PAGE_IDENTITY,
   HybridSearchPageStore,
+  KEYWORD_PAGE_IDENTITY,
+  SEMANTIC_PAGE_IDENTITY,
   SIMILAR_PAGE_IDENTITY,
   windowOf,
 } from './hybridSearchPages';
@@ -195,6 +240,13 @@ interface HybridSearchSnapshot {
   libraryID: number;
   /** True when a retrieval branch failed or timed out during this search. */
   branchFailed: boolean;
+  /**
+   * The semantic branch is offline because the stored vectors were produced by
+   * a different embedding model than the one configured now. Carried on the
+   * snapshot so every page of the result — not just the first — states that
+   * these rows are keyword-only and that the fix is a rebuild.
+   */
+  semanticIndexIncompatible?: boolean;
   metadata: Record<string, any>;
 }
 
@@ -337,6 +389,24 @@ export class StreamableMCPServer {
     Record<string, any>,
     SimilarSearchSnapshot
   >(undefined, undefined, undefined, SIMILAR_PAGE_IDENTITY);
+  /**
+   * Paging state for semantic_search and keyword_search — one store each, for
+   * the same reason find_similar has its own.
+   *
+   * The intended chain is keyword_search (coarse) then semantic_search (fine)
+   * over the shortlist, so both are live at once by design. A shared table
+   * would let the fine search evict the coarse ranking the caller is still
+   * paging through, and the cursor prefixes keep the four tools' cursors from
+   * being accepted by each other.
+   */
+  private semanticPages = new HybridSearchPageStore<
+    Record<string, any>,
+    HybridSearchSnapshot
+  >(undefined, undefined, undefined, SEMANTIC_PAGE_IDENTITY);
+  private keywordPages = new HybridSearchPageStore<
+    Record<string, any>,
+    HybridSearchSnapshot
+  >(undefined, undefined, undefined, KEYWORD_PAGE_IDENTITY);
 
   constructor() {
     // No initialization needed - using direct function calls
@@ -345,7 +415,14 @@ export class StreamableMCPServer {
   clearSemanticState(): void {
     this.hybridPages.clear();
     this.similarPages.clear();
-    if (this.hybridPages.size !== 0 || this.similarPages.size !== 0) {
+    this.semanticPages.clear();
+    this.keywordPages.clear();
+    if (
+      this.hybridPages.size !== 0 ||
+      this.similarPages.size !== 0 ||
+      this.semanticPages.size !== 0 ||
+      this.keywordPages.size !== 0
+    ) {
       throw new Error('Semantic pagination state could not be cleared');
     }
   }
@@ -602,7 +679,16 @@ STAGE 3 - dig into one paper (search_fulltext, one document per call):
 13. Call search_fulltext with that one itemKey, plus the re-fitted domain and expertRole. It runs keyword matching and semantic retrieval across that paper's passages, fuses them with the same scoring, discards passages below the threshold and returns at most the user's configured number of passages.
 14. Read those passages. If the evidence answers the question, STOP. Only if a passage is missing its cause, its consequence, its experimental conditions or its mechanism context, call search_fulltext again with chunkIds set to that passage's chunkId to pull in its immediate neighbours, within the user's radius limit. Never request neighbouring text by default.
 
-Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accepted, at both stage 1 and stage 3. If you omit keywords the server falls back to mechanical tokenization, returns keywordSource "fallback" with degraded: true, and you should redo that call ONCE with proper terms. Never perform unscoped whole-library full-text search.`,
+Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accepted, at both stage 1 and stage 3. If you omit keywords the server falls back to mechanical tokenization, returns keywordSource "fallback" with degraded: true, and you should redo that call ONCE with proper terms. Never perform unscoped whole-library full-text search.
+BEYOND THE FUNNEL - the other tools, and when each one is the right call:
+- keyword_search: lexical-only retrieval over metadata. Use it for an exact term you must not miss, or as a COARSE FILTER whose itemKeys you then hand to semantic_search for a fine pass over just that shortlist.
+- semantic_search: embedding-only retrieval. Use it for a concept whose vocabulary you cannot pin down, or as the fine pass over a keyword_search shortlist. Both accept collectionKeys and itemKeys, both page with nextCursor, and both return the SAME row shape as hybrid_search - including fullText, which you must read before you read any snippet.
+- get_item_details: bibliographic metadata for citing a paper. It never returns abstract text, note bodies, annotation text or full text.
+- get_annotations / search_annotations: YOUR OWN marks - PDF highlights, comments, and notes you typed in Zotero. get_annotations reads documents you name (itemKeys takes several); search_annotations finds marks when you do not know which document holds them. Everything they return is the user's own reading, never the paper's words: quote it verbatim and attribute it to the user.
+- get_attachment_text: the text of ONE attachment, in character windows, with textSource.method naming where it came from (doc2x, mineru, zotero_fulltext_cache, ...). Text from Zotero's flat cache has no layout - never rebuild a table from it.
+- get_document_chunks: read one paper's indexed body straight through, in order, a few chunks per page. Use it when the question is about the whole argument; use search_fulltext when it is about one fact.
+- get_collection_items: browse the library one level at a time, like a file manager - the subfolders here and the documents filed here, with counts on each subfolder so you can choose where to descend. This is navigation. If the user is asking about a TOPIC, stop browsing and search.
+Nothing in this server returns a whole document in one response. Every reading tool pages, and continuing to page is a decision you make each time, not a default.`,
     });
   }
 
@@ -647,994 +733,26 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
    * The tools this server actually serves right now, after the same pref
    * filtering tools/list applies.
    *
-   * getStatus() used to carry a second, hand-written copy of this list. It
-   * drifted — the collection tools were added here and never there, so
-   * /mcp/status under-reported by six — and it was blind to both prefs below,
-   * which is the worse half: with write disabled it still advertised the
-   * write_* tools that tools/list was hiding, i.e. it claimed capabilities the
-   * server would refuse. One source of truth, both callers.
+   * The definitions themselves live in `toolCatalog.ts` and are shared with
+   * the HTTP `/capabilities` endpoint. They used to be written out three
+   * times — here, in `getStatus()`, and in `httpServer.getCapabilities()` —
+   * and every copy drifted from the others in its own direction: getStatus()
+   * under-reported by six and was blind to both prefs below (so with write
+   * disabled it still advertised the write_* tools that tools/list was
+   * hiding), and /capabilities was still advertising five tools that had
+   * ceased to exist while missing eleven that had not. One source, all three
+   * callers, and `scripts/test-tool-catalog.js` fails if they diverge again.
    */
-  private getAvailableTools(): any[] {
-    const tools = [
-      {
-        name: 'hybrid_search',
-        description: [
-          'DEFAULT FIRST STEP for locating literature. Runs Zotero metadata/field keyword retrieval and semantic vector retrieval in parallel, then fuses them into one normalized 0-1 relevance score: each branch is normalised on its own scale, the stronger branch sets the score, and the weaker branch adds a bounded agreement bonus, so corroboration can only lift a document and never dilute it. Reciprocal Rank Fusion is computed too, but only as the tie-break between candidates whose fused scores are equal — rrfK tunes that tie-break, not the ranking. It does not scan full document text.',
-          '',
-          'The library is bilingual, so every call must retrieve Chinese AND English literature, no matter which language the user asked in. Do NOT translate the question into a single language and do NOT restrict the search to the language of the question. You (the calling AI) are responsible for the query rewrite: this tool never calls an LLM of its own.',
-          '',
-          'BEFORE writing any argument, run this analysis on the user question — it is the difference between a good and a useless search, and no part of it happens server-side:',
-          'A. Classify the question: which discipline, and which specific sub-field or research direction inside it?',
-          'B. Adopt that expert role for the rest of this call — reason as a specialist in that sub-field would, using the vocabulary of its literature.',
-          'C. Determine the real research intent: which mechanism, property, process, material system or quantitative relationship is actually being asked about, including what the user implied but did not say.',
-          'D. Only then derive query and keywords FROM that domain analysis, not from the surface wording of the question.',
-          '',
-          'Build the arguments like this:',
-          '1. query — one complete natural-language sentence expressing the real information need as an expert in that field would state it, used verbatim as the embedding input for cross-lingual semantic search. Do not reduce it to loose tokens. Writing it as an English phrasing followed by " / " and the Chinese phrasing is recommended, so the embedding sees both surface forms.',
-          `2. keywords — the terms a specialist in that sub-field would actually search on, covering BOTH Chinese and English: the core concepts, the mechanism and governing variables behind the question, standard technical translations, accepted synonyms and variant phrasings, the field's abbreviations, and closely coupled concepts with a clear professional link to the intent. For best results, providing about 5-12 relevant Chinese and/or English keywords is recommended; this is guidance, not a constraint — any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted. All of them are matched in a single pass over the candidate records (title, abstract, creator, publication title, tags), then scored by term specificity, field weight and how many distinct keywords each record matched, so short exact terms work far better than long sentences.`,
-          '3. Do NOT pad the list. Every keyword must be defensible as a term of art tied to the research intent; generic, weakly related or category-level words dilute keyword-coverage scoring and push the right papers down the ranking.',
-          '',
-          'Worked example — user asks "温度梯度如何影响定向凝固中的柱状晶转变？":',
-          '  A/B/C: materials science → solidification / microstructure formation; reasoning as a solidification specialist, the real intent is how the thermal gradient G, together with the growth rate R, governs the columnar-to-equiaxed transition — i.e. G-R processing maps and nucleation ahead of the growth front.',
-          '  query: "Effects of temperature gradient on columnar-to-equiaxed transition during directional solidification / 温度梯度对定向凝固柱状晶-等轴晶转变的影响"',
-          '  keywords: ["温度梯度", "定向凝固", "柱状晶", "等轴晶", "柱状晶-等轴晶转变", "凝固速率", "temperature gradient", "directional solidification", "columnar grain", "equiaxed grain", "columnar-to-equiaxed transition", "CET", "growth rate"]',
-          '  Note what came from domain knowledge rather than from the question: the CET abbreviation, growth rate / 凝固速率 as the co-governing variable, and the columnar/equiaxed grain pair. Note also what was left out: "材料", "实验", "influence factors" — true of the question but too generic to discriminate between papers.',
-          '',
-          'If you do not pass keywords - or pass an array that is empty after blank entries are trimmed - the server falls back to mechanically tokenizing the query, returns keywordSource "fallback", a keywordFallbackReason naming which of the two happened, and a warning stating the keywords were NOT produced by domain-expert analysis. That path exists only so the call still runs, and it does return a real ranking. Redo the search ONCE with proper keywords; if you have already retried, keep the results rather than calling a third time.',
-          '',
-          'Leave language at its "all" default so retrieval stays genuinely cross-lingual; the other language values only narrow recall.',
-          '',
-          'SCORING: both branches are normalized to 0-1 and fused into one relevance score by taking the stronger branch and adding a bounded share of the weaker one, so a second, weaker hit can never push a document below what it scored on its own. Documents below the user-configured threshold are discarded by the server, and at most the user-configured number of documents is returned. That number is an upper bound, NOT a target: a weakly related paper is never added to make the list longer.',
-          '',
-          'WHAT YOU GET BACK: a LIGHTWEIGHT candidate row per surviving document — itemKey, title, creators, year, venue, the language it is written in, the fused score, which of your keywords matched which fields, and a short snippet from its best-matching passages. That is a shortlist to triage, not a reading pile.',
-          '',
-          'ABSTRACTS ARE NOT RETURNED, on purpose. They are still indexed, still searched by the keyword branch, and still part of what produced this ranking — they are simply not shipped back, because most candidates never need to be read in full. Judge each row from its title, score, matched keywords and snippet. Only for a paper you are seriously considering going deeper on, call get_item_abstract with that one itemKey. Reading every candidate\'s abstract is the exact behaviour this design removes: 20 candidates does not mean 20 abstracts.',
-          '',
-          'SCOPE: by default this searches the entire library. When the user question is clearly confined to part of their collection, call get_collections FIRST, read the real folder names, and pass the relevant ones as collectionKeys — the scope is applied before scoring, so it cuts the work rather than filtering the results afterwards. Judge each collection by what it plainly is: include what the user named, include what obviously relates, exclude only what obviously does not, and INCLUDE anything you cannot classify. Personal folder names carry no subject information — "待读", "综述", "课题资料", "论文写作" — yet often hold exactly the papers that matter, so uncertainty means include, never exclude. When most of the structure is opaque to you, or the question spans several fields, skip collectionKeys and search everything: a scope that misses a paper is a worse outcome than a scan that costs a little more.',
-          '',
-          'PAGING: topK is the size of ONE page, not the depth of the search. The response carries a pagination block: appliedMinScore (the floor these results passed), totalRelevant (how many documents cleared that floor — often more than one page), returned, hasMore and nextCursor. Filtering happens BEFORE paging, so a later page can never contain a document below the threshold, and a short last page is never padded out. To read further, call hybrid_search again with cursor set to nextCursor and everything else unchanged; that returns the next window of the SAME ranking rather than a fresh search. Page on when the bottom of a page is still relevant, or when the user asked for a comprehensive sweep or a literature review — not by reflex. Never lower minScore to make more results appear.',
-          '',
-          'THEN: having read one paper\'s abstract, redo the expert analysis for THAT paper — re-fit domain and expertRole to what it actually studies, write a query and keywords out of its own subject matter, in the language that paper is written in — and call search_fulltext with its single itemKey. Answer from the stage-1 rows alone when the user only asks which literature is relevant.',
-        ].join('\n'),
-        inputSchema: {
-          type: 'object',
-          properties: {
-            query: {
-              type: 'string',
-              description: 'Complete natural-language sentence describing the information need as a specialist in the question\'s sub-field would state it, written after you have classified the discipline and worked out the real research intent. Embedded as-is for cross-lingual semantic search, so it must read as prose, not a token list. Include both an English and a Chinese phrasing (separated by " / ") so the embedding covers both.'
-            },
-            keywords: {
-              type: 'array',
-              items: { type: 'string' },
-              minItems: 1,
-              maxItems: MAX_SUPPLIED_KEYWORDS,
-              description: `Lexical probes for the keyword branch, derived from your domain analysis of the question rather than from its wording: the core concepts and mechanism, precise Chinese AND English terms of art, standard technical translations, accepted synonyms, field abbreviations, and closely coupled concepts with a clear professional link to the research intent. For best results, it is recommended to provide 5-12 relevant Chinese and/or English keywords. Fewer or more keywords are still allowed within the implemented input limit of 1 to ${MAX_HYBRID_KEYWORDS} entries. Always supply both scripts regardless of the language the user asked in. Do not pad with generic or weakly related words — keyword coverage is part of the score, so filler actively hurts ranking. All keywords are matched together in one pass over title, abstract, creator, publicationTitle and tags, and ranked by term specificity, field weight and keyword coverage, so a broad word cannot outrank a discriminative phrase. Omitting this makes the server fall back to mechanically splitting the query: it can only probe the language the user typed in, is scored at a lower weight, and the response is flagged with keywordSource "fallback" plus an explicit warning.`
-            },
-            domain: {
-              type: 'string',
-              description: 'The discipline and specific sub-field you classified the question into before writing the query, e.g. "materials science / solidification microstructure". Required, together with expertRole, for the call to be recorded as domain-expert retrieval; without both, the response comes back with keywordSource "fallback" and degraded: true even when your keywords were good.'
-            },
-            expertRole: {
-              type: 'string',
-              description: 'The expert perspective you adopted for this call, e.g. "solidification processing specialist". Required together with domain.'
-            },
-            topK: {
-              type: 'number',
-              description: 'PAGE SIZE: how many documents one response carries. The user configures the real maximum; this can only ask for FEWER. It is a ceiling and never a quota to fill — and it no longer decides how far the ranking goes, because anything past it is reachable through cursor rather than lost.'
-            },
-            collectionKeys: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Restrict the search to these Zotero collections (keys from get_collections), their subcollections included. The restriction is applied BEFORE scoring: the keyword branch only reads items inside the scope and the vector scan only computes similarity for their chunks, so this is a real reduction in work rather than a filter over whole-library results. Omit it to search everything. SELECTION RULE — include a collection when the user named it, when its subject plainly relates to the question, AND when you cannot tell what it contains: names like "综述", "待读", "课题资料", "论文写作", "New Folder" carry no subject information but routinely hold the most relevant papers, so they belong IN the scope. Exclude only what is plainly unrelated. If most collections are unreadable to you, or the question spans fields, omit this argument and search the whole library. Missing a paper is a worse failure than scanning extra ones.'
-            },
-            uncertainCollectionKeys: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Of the collectionKeys you passed, which ones you included because you could NOT judge their subject rather than because you judged them relevant. Declaring them changes nothing about the search; it is reported back in metadata so the user can see which parts of the scope were guesses. Leave it out when every choice was a judgement.'
-            },
-            cursor: {
-              type: 'string',
-              description: 'Continue a previous hybrid_search: pass the nextCursor it returned, exactly as given. The cursor names one already-ranked, already-threshold-filtered result set, and returns the next page of THAT set — it does not re-run retrieval, so pages cannot duplicate, drop or reorder documents. Send it with query, keywords, domain, expertRole and minScore either unchanged or omitted; changing any of them is a different search and is rejected. Omit cursor to start a new search.'
-            },
-            minScore: {
-              type: 'number',
-              description: 'Relevance floor 0-1 applied to the fused score. May only be STRICTER than the user setting; a lower value is raised back to the user threshold. Documents below it are discarded and are never padded back in.'
-            },
-            language: {
-              type: 'string',
-              enum: ['zh', 'en', 'all', 'auto'],
-              description: 'Semantic branch language filter. Keep the "all" default for genuinely cross-lingual recall; "zh"/"en" restrict the index to that language and "auto" restricts it to the detected query language, both of which drop literature written in the other language. Only set this when the user explicitly asks for one language.'
-            },
-            rrfK: {
-              type: 'number',
-              description: 'Rank constant for the Reciprocal Rank Fusion TIE-BREAK (default: 60). Ranking is decided by the fused 0-1 relevance score; RRF only orders candidates whose fused scores are equal, so changing this rarely changes anything.'
-            },
-            keywordWeight: {
-              type: 'number',
-              description: 'Non-negative keyword branch weight (default: 1)'
-            },
-            semanticWeight: {
-              type: 'number',
-              description: 'Non-negative semantic branch weight (default: 1)'
-            },
-            libraryID: {
-              type: 'number',
-              description: 'Zotero library ID used by both keyword and semantic retrieval'
-            },
-          },
-          required: ['query']
-        }
-      },
-      {
-        name: 'get_libraries',
-        description: 'List all Zotero libraries available in the current client. Returns minimal library metadata for each library as a paginated array.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            limit: { type: 'number', description: 'Maximum results to return' },
-            offset: { type: 'number', description: 'Pagination offset' },
-          },
-        },
-      },
-      {
-        name: 'search_library',
-        description: 'Structured Zotero metadata/field search for explicit title, author, year, item type, or other field constraints. For general literature discovery, use hybrid_search first. Attachment full-text search is not available through this tool. To find standalone PDFs without metadata, use itemType="attachment" with includeAttachments="true".',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            q: { type: 'string', description: 'General search query' },
-            title: { type: 'string', description: 'Title search' },
-            titleOperator: {
-              type: 'string',
-              enum: ['contains', 'exact', 'startsWith', 'endsWith', 'regex'],
-              description: 'Title search operator'
-            },
-            yearRange: { type: 'string', description: 'Year range (e.g., "2020-2023")' },
-            itemType: {
-              type: 'string',
-              description: 'Filter by item type (e.g., "attachment" to list standalone files like PDFs imported without metadata, "journalArticle", "book", etc.)'
-            },
-            includeAttachments: {
-              type: 'string',
-              enum: ['true', 'false'],
-              description: 'Include standalone attachment items (e.g., PDFs without parent item) in results. Must be "true" when itemType is "attachment". Default: false.'
-            },
-            mode: {
-              type: 'string',
-              enum: ['minimal', 'preview', 'standard', 'complete'],
-              description: 'Processing mode: minimal (30 results), preview (100), standard (adaptive), complete (500+). Uses user default if not specified.'
-            },
-            relevanceScoring: { type: 'boolean', description: 'Enable relevance scoring' },
-            sort: {
-              type: 'string',
-              enum: ['relevance', 'date', 'title', 'year'],
-              description: 'Sort order'
-            },
-            limit: { type: 'number', description: 'Maximum results to return (overrides mode default)' },
-            offset: { type: 'number', description: 'Pagination offset' },
-          },
-        },
-      },
-      {
-        name: 'search_libraries',
-        description: 'Search libraries by name',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            q: { type: 'string', description: 'Library name search query' },
-            limit: { type: 'number', description: 'Maximum results to return' },
-            offset: { type: 'number', description: 'Pagination offset' },
-          },
-          required: ['q'],
-        },
-      },
-      {
-        name: 'search_annotations',
-        description: 'Search and filter annotations (highlights, notes, comments) by query, colors, or tags. Returns user\'s personal research notes with relevance scoring. Preserve exact wording when quoting.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            q: { type: 'string', description: 'Search query (optional if colors or tags provided)' },
-            itemKeys: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Limit search to specific items'
-            },
-            types: {
-              type: 'array',
-              items: {
-                type: 'string',
-                enum: ['note', 'highlight', 'annotation', 'ink', 'text', 'image']
-              },
-              description: 'Types of annotations to search'
-            },
-            colors: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Filter by colors. Use hex codes (#ffd400) or names (yellow, red, green, blue, purple, orange). Common mappings: yellow=question, red=error/important, green=agree, blue=info, purple=definition'
-            },
-            tags: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Filter by tags attached to annotations'
-            },
-            mode: {
-              type: 'string',
-              enum: ['standard', 'preview', 'complete', 'minimal'],
-              description: 'Content processing mode (uses user setting default if not specified)'
-            },
-            maxTokens: {
-              type: 'number',
-              description: 'Token budget (uses user setting default if not specified)'
-            },
-            minRelevance: {
-              type: 'number',
-              minimum: 0,
-              maximum: 1,
-              default: 0.1,
-              description: 'Minimum relevance threshold (only applies when q is provided)'
-            },
-            limit: { type: 'number', default: 15, description: 'Maximum results' },
-            offset: { type: 'number', default: 0, description: 'Pagination offset' }
-          },
-          description: 'Requires at least one of: q (query), colors, or tags'
-        },
-      },
-      {
-        name: 'get_item_details',
-        description: 'Get detailed bibliographic metadata for a specific item (title, authors, dates, identifiers, attachments, notes, tags). Use get_content for full text. Suitable for generating citations and references.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            itemKey: { type: 'string', description: 'Unique item key' },
-            mode: {
-              type: 'string',
-              enum: ['minimal', 'preview', 'standard', 'complete'],
-              description: 'Processing mode: minimal (basic info), preview (key fields), standard (comprehensive), complete (all fields). Uses user default if not specified.'
-            },
-          },
-          required: ['itemKey'],
-        },
-      },
-      {
-        name: 'get_annotations',
-        description: 'Get annotations and notes for specific items with color/tag filtering. REQUIRED: provide one of itemKey, annotationId, or annotationIds (use search_library first to find the itemKey; use search_annotations to search by colors/tags across the library). Returns user\'s personal highlights and comments from PDFs. Preserve exact wording when quoting.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            itemKey: { type: 'string', description: 'Get all annotations for this item' },
-            annotationId: { type: 'string', description: 'Get specific annotation by ID' },
-            annotationIds: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Get multiple annotations by IDs'
-            },
-            types: {
-              type: 'array',
-              items: {
-                type: 'string',
-                enum: ['note', 'highlight', 'annotation', 'ink', 'text', 'image']
-              },
-              default: ['note', 'highlight', 'annotation'],
-              description: 'Types of annotations to include'
-            },
-            colors: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Filter by colors. Use hex codes (#ffd400) or names (yellow, red, green, blue, purple, orange). Example: ["yellow", "red"] to get question and error annotations'
-            },
-            tags: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Filter by tags attached to annotations'
-            },
-            mode: {
-              type: 'string',
-              enum: ['standard', 'preview', 'complete', 'minimal'],
-              description: 'Content processing mode (uses user setting default if not specified)'
-            },
-            maxTokens: {
-              type: 'number',
-              description: 'Token budget (uses user setting default if not specified)'
-            },
-            limit: { type: 'number', default: 20, description: 'Maximum results' },
-            offset: { type: 'number', default: 0, description: 'Pagination offset' }
-          },
-          description: 'Requires either itemKey, annotationId, or annotationIds parameter'
-        },
-      },
-      {
-        name: 'get_content',
-        description: 'Get full-text content from PDFs, attachments, notes, and abstracts. May contain OCR artifacts. When user asks for complete text, provide it without summarization.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            itemKey: { type: 'string', description: 'Item key to get all content from this item' },
-            attachmentKey: { type: 'string', description: 'Attachment key to get content from specific attachment' },
-            mode: {
-              type: 'string',
-              enum: ['minimal', 'preview', 'standard', 'complete'],
-              description: 'Content processing mode: minimal (500 chars, fastest), preview (1.5K chars, quick scan), standard (3K chars, balanced), complete (unlimited, complete content). Uses user default if not specified.'
-            },
-            include: {
-              type: 'object',
-              properties: {
-                pdf: { type: 'boolean', default: true, description: 'Include PDF attachments content' },
-                attachments: { type: 'boolean', default: true, description: 'Include other attachments content' },
-                notes: { type: 'boolean', default: true, description: 'Include notes content' },
-                abstract: { type: 'boolean', default: true, description: 'Include abstract' },
-                webpage: { type: 'boolean', default: false, description: 'Include webpage snapshots (auto-enabled in standard/complete modes)' }
-              },
-              description: 'Content types to include (only applies to itemKey)'
-            },
-            contentControl: {
-              type: 'object',
-              properties: {
-                preserveOriginal: { type: 'boolean', default: true, description: 'Always preserve original text structure when processing' },
-                allowExtended: { type: 'boolean', default: false, description: 'Allow retrieving more content than mode default when important' },
-                expandIfImportant: { type: 'boolean', default: false, description: 'Expand content length for high-importance content' },
-                maxContentLength: { type: 'number', description: 'Override maximum content length for this request' },
-                prioritizeCompleteness: { type: 'boolean', default: false, description: 'Prioritize complete sentences/paragraphs over strict length limits' },
-                standardExpansion: {
-                  type: 'object',
-                  properties: {
-                    enabled: { type: 'boolean', default: false, description: 'Enable standard content expansion' },
-                    trigger: { 
-                      type: 'string', 
-                      enum: ['high_importance', 'user_query', 'context_needed'],
-                      default: 'high_importance',
-                      description: 'Trigger condition for standard expansion'
-                    },
-                    maxExpansionRatio: { type: 'number', default: 2.0, minimum: 1.0, maximum: 10.0, description: 'Maximum expansion ratio (1.0 = no expansion, 2.0 = double)' }
-                  },
-                  description: 'Smart expansion configuration'
-                }
-              },
-              description: 'Advanced content control parameters to override mode defaults'
-            },
-            format: { 
-              type: 'string', 
-              enum: ['json', 'text'],
-              default: 'json',
-              description: 'Output format: json (structured with metadata) or text (plain text)' 
-            }
-          },
-          description: 'Requires either itemKey or attachmentKey parameter'
-        },
-      },
-      {
-        name: 'get_collections',
-        description: 'Get collections in the library. By default returns a flat, paginated list of top-level collections. Use recursive=true to retrieve the complete nested collection tree (all levels) in one call. Use parentCollection to scope to a specific parent\'s direct children.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            mode: {
-              type: 'string',
-              enum: ['minimal', 'preview', 'standard', 'complete'],
-              description: 'Processing mode: minimal (20 collections), preview (50), standard (100), complete (500+). Uses user default if not specified. Ignored when recursive=true.'
-            },
-            limit: { type: 'number', description: 'Maximum results to return (overrides mode default). Ignored when recursive=true.' },
-            offset: { type: 'number', description: 'Pagination offset. Ignored when recursive=true.' },
-            recursive: {
-              type: 'boolean',
-              description: 'When true, recursively return the full nested collection tree. Each collection includes a subcollections array of its children. Pagination is ignored.'
-            },
-            parentCollection: {
-              type: 'string',
-              description: 'Key of a parent collection. When provided, returns direct children of that collection instead of top-level collections.'
-            },
-          },
-        },
-      },
-      {
-        name: 'search_collections',
-        description: 'Search collections by name',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            q: { type: 'string', description: 'Collection name search query' },
-            limit: { type: 'number', description: 'Maximum results to return' },
-          },
-        },
-      },
-      {
-        name: 'get_collection_details',
-        description: 'Get detailed information about a specific collection',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            collectionKey: { type: 'string', description: 'Collection key' },
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-          },
-          required: ['collectionKey'],
-        },
-      },
-      {
-        name: 'get_collection_items',
-        description: 'Get items in a specific collection',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            collectionKey: { type: 'string', description: 'Collection key' },
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            limit: { type: 'number', description: 'Maximum results to return' },
-            offset: { type: 'number', description: 'Pagination offset' },
-          },
-          required: ['collectionKey'],
-        },
-      },
-      {
-        name: 'get_subcollections',
-        description: 'Get subcollections (child collections) of a specific collection. Use recursive=true to retrieve the full nested hierarchy of all descendant collections.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            collectionKey: { type: 'string', description: 'Parent collection key' },
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            limit: { type: 'number', description: 'Maximum results to return (default: 100). Ignored when recursive=true.' },
-            offset: { type: 'number', description: 'Pagination offset (default: 0). Ignored when recursive=true.' },
-            recursive: { 
-              type: 'boolean', 
-              description: 'When true, recursively return all descendant subcollections as a nested tree (default: false).' 
-            },
-          },
-          required: ['collectionKey'],
-        },
-      },
-      {
-        name: 'create_collection',
-        description: 'Create a new collection in the library. Optionally nest it under a parent collection.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            name: { type: 'string', description: 'Name of the new collection' },
-            parentCollection: {
-              type: 'string',
-              description: 'Key of the parent collection. If omitted, creates a top-level collection.'
-            },
-          },
-          required: ['name'],
-        },
-      },
-      {
-        name: 'update_collection',
-        description: 'Rename or move an existing collection. Provide name to rename, parentCollection to move (empty string moves to top level).',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            collectionKey: { type: 'string', description: 'Key of the collection to update' },
-            name: { type: 'string', description: 'New name for the collection' },
-            parentCollection: {
-              type: 'string',
-              description: 'Key of the new parent collection. Use empty string "" to move to top level.'
-            },
-          },
-          required: ['collectionKey'],
-        },
-      },
-      {
-        name: 'delete_collection',
-        description: 'Delete a collection. WARNING: This is a destructive operation. By default, items in the collection are NOT deleted (only removed from the collection). Set deleteItems=true to also send items to trash.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            collectionKey: { type: 'string', description: 'Key of the collection to delete' },
-            deleteItems: {
-              type: 'boolean',
-              description: 'If true, also send items in the collection to trash. Default: false (items remain in library).'
-            },
-          },
-          required: ['collectionKey'],
-        },
-      },
-      {
-        name: 'add_items_to_collection',
-        description: 'Add one or more items to a collection by their item keys.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            collectionKey: { type: 'string', description: 'Key of the target collection' },
-            itemKeys: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Array of item keys to add to the collection'
-            },
-          },
-          required: ['collectionKey', 'itemKeys'],
-        },
-      },
-      {
-        name: 'remove_items_from_collection',
-        description: 'Remove one or more items from a collection. Items are NOT deleted from the library, only removed from this collection.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            collectionKey: { type: 'string', description: 'Key of the collection' },
-            itemKeys: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Array of item keys to remove from the collection'
-            },
-          },
-          required: ['collectionKey', 'itemKeys'],
-        },
-      },
-      {
-        name: 'search_fulltext',
-        description: [
-          'SECOND-STAGE retrieval: a hybrid search inside the full text of ONE document located by hybrid_search. Same machinery as hybrid_search - keyword matching plus vector semantic retrieval over the same index, fused into the same normalized 0-1 relevance score, filtered by the same user threshold - except the candidates are the passages (chunks) of a single paper instead of the whole library.',
-          '',
-          "Call it once per document, with that document's own itemKey.",
-          '',
-          'BEFORE you write the arguments, redo the expert analysis FOR THIS PAPER. Do not reuse the library-level query and keywords: they were written for the user question in general, and they will retrieve the same generic passages from every paper.',
-          'A. Get this paper\'s abstract first, with get_item_abstract on its itemKey — hybrid_search does not return abstracts. Read it together with the hit evidence hybrid_search gave you for this paper.',
-          "B. Re-judge the field from \"user question + this paper's title + its abstract + its evidence\", and adopt the expert role that THIS paper belongs to. Expect it to be narrower or simply different from the stage-1 pair, and pass the re-fitted values in domain and expertRole.",
-          'C. Identify what is particular to THIS paper: its study object, material or sample system, experimental or computational method, the variables it manipulates and measures, the mechanism it argues for, and its own terminology and abbreviations.',
-          'D. Write query and keywords out of THAT: a natural-language sentence about what you need from this paper, and probes in this paper\'s own vocabulary and terms of art.',
-          'E. Write those keywords in the LANGUAGE THIS PAPER IS WRITTEN IN — one language, not both. Library-wide search is bilingual because the library is; this search is not, because a single document is not. Chinese probes cannot match an English paper\'s passages and vice versa: they match nothing and only dilute keyword coverage. hybrid_search reports each candidate\'s language, and the abstract confirms it. Only a genuinely mixed-language document takes mixed probes.',
-          '',
-          'CONTEXT EXPANSION: read the returned passages first and stop when the evidence is sufficient. Only when a passage is clearly missing its cause, its consequence, its experimental conditions or its mechanism context, call this tool again with chunkIds set to the chunkId(s) of that passage - it then returns those passages plus their immediate neighbours in reading order, within the radius the user allows. Never request neighbours by default and never ask for the whole document.',
-          '',
-          "Result counts are capped by the user's preferences and the relevance threshold is a floor you cannot lower. Passages below it are discarded; the cap is a ceiling, not a quota, so a document with only one good passage returns one passage.",
-        ].join('\n'),
-        inputSchema: {
-          type: 'object',
-          properties: {
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            itemKey: {
-              type: 'string',
-              description: 'The single item key to dig into, taken from a hybrid_search candidate row whose abstract you have already read with get_item_abstract.'
-            },
-            query: {
-              type: 'string',
-              description: 'Natural-language sentence describing what you need FROM THIS PAPER, written after re-judging the field from the user question plus this paper\'s abstract (fetched with get_item_abstract) and its stage-1 evidence. Embedded as-is for semantic retrieval over this paper\'s passages, so write prose, not tokens, and write it in the language this paper is written in. Required unless chunkIds is used.'
-            },
-            keywords: {
-              type: 'array',
-              items: { type: 'string' },
-              minItems: 1,
-              maxItems: MAX_SUPPLIED_KEYWORDS,
-              description: `Probes specific to THIS paper: its study object, material system, method, variables, mechanism terms and its own abbreviations. Write them in the LANGUAGE THIS PAPER IS WRITTEN IN - one language, not both: this searches inside a single document, so probes in the other language match nothing and only dilute keyword coverage. hybrid_search reports each candidate's language and the abstract confirms it. Do not copy the library-level bilingual keyword set. 1 to ${MAX_HYBRID_KEYWORDS} entries; around 5-12 is recommended. Omitting them makes the server fall back to mechanically splitting the query and flags the result as keywordSource "fallback".`
-            },
-            domain: {
-              type: 'string',
-              description: 'The discipline and sub-field THIS paper belongs to, as you judged it from the question plus this paper\'s abstract and evidence. Re-fit it to this paper instead of repeating the library-level domain; it is normal for it to come out narrower or simply different. Required, together with expertRole, for the call to count as domain-expert retrieval.'
-            },
-            expertRole: {
-              type: 'string',
-              description: 'The specialist perspective you adopted for this paper, e.g. "solidification microstructure specialist". Required, together with domain, for the call to count as domain-expert retrieval.'
-            },
-            chunkIds: {
-              type: 'array',
-              items: { type: 'number' },
-              description: 'CONTEXT EXPANSION mode. The chunkId(s) of passages that lack surrounding context. Returns those passages plus their neighbours within the user-configured radius, in reading order, and performs no ranking. Use only after reading the search results and finding a specific gap.'
-            },
-            neighborRadius: {
-              type: 'number',
-              description: 'How many chunks either side to include in context expansion. Capped by the user setting; ask for less, never more.'
-            },
-            maxChunks: {
-              type: 'number',
-              description: 'Upper bound on returned passages. Capped by the user setting. Only lowers the cap; it can never raise it, and it never pads weak passages in to reach a count.'
-            },
-            minScore: {
-              type: 'number',
-              description: 'Relevance floor 0-1 for the fused score. May only be stricter than the user setting; a lower value is raised back to it.'
-            },
-          },
-          required: ['itemKey'],
-        },
-      },
-      {
-        name: 'get_item_abstract',
-        description: [
-          "Get ONE item's abstract - the author's own summary from the original publication.",
-          '',
-          'This is the on-demand middle step of the retrieval funnel, and it is deliberately not part of what hybrid_search returns. Call it for a candidate you are seriously considering going deeper on, one itemKey at a time. Do NOT sweep it across a result set: if 3 of 20 candidates look worth pursuing, you fetch 3 abstracts. When a candidate row already shows a paper is off-topic, decide that from the row and never fetch its abstract at all.',
-          '',
-          'What to do with what comes back: read it together with the user question, the title and the hit evidence hybrid_search gave for this paper, then re-fit domain and expertRole to what THIS paper actually studies, and derive a query and keywords from its own subject matter - in the language the paper is written in - for a search_fulltext call on that single itemKey.',
-        ].join('\n'),
-        inputSchema: {
-          type: 'object',
-          properties: {
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            itemKey: { type: 'string', description: 'Item key' },
-            format: {
-              type: 'string',
-              enum: ['json', 'text'],
-              description: 'Response format (default: json)'
-            },
-          },
-          required: ['itemKey'],
-        },
-      },
-      // Semantic Search Tools
-      {
-        name: 'semantic_search',
-        description: 'Pure embedding-similarity search. For normal literature discovery, use hybrid_search first; use this tool only when the user explicitly requests semantic-only retrieval.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            query: {
-              type: 'string',
-              description: 'Natural language search query (e.g., "machine learning in healthcare")'
-            },
-            topK: {
-              type: 'number',
-              description: 'Number of results to return (default: 10)'
-            },
-            minScore: {
-              type: 'number',
-              description: 'Minimum similarity score 0-1 (default: 0.3)'
-            },
-            language: {
-              type: 'string',
-              enum: ['zh', 'en', 'all', 'auto'],
-              description: 'Filter by language; all searches every language, auto uses query language (default: all)'
-            },
-            libraryID: {
-              type: 'number',
-              description: 'Zotero library ID (default: user library)'
-            },
-            timeoutMs: {
-              type: 'number',
-              minimum: 1,
-              description: 'Total semantic search deadline in milliseconds (default: 8000)'
-            }
-          },
-          required: ['query']
-        }
-      },
-      {
-        name: 'find_similar',
-        description: [
-          'Find DOCUMENTS in the library that are semantically similar to ONE paper you already have, using several of that paper\'s own passages as the query. Purely semantic: no keywords are involved at any point.',
-          '',
-          'THE CALL CHAIN, in order. You must do step 1 yourself; this tool does 2-5.',
-          '1. YOU pick the representative chunks. Run search_fulltext on the paper you are expanding from and read the passages it returns. Choose the ones that actually characterise the paper for YOUR task — its method, its mechanism, its material system, its findings, or whichever facets matter — and note their chunkId values. This tool does not and cannot judge which passages are representative; that judgement is the part only you can make, and it decides the quality of everything below.',
-          '2. Full-index semantic scan with every chunk you passed, as separate query vectors. Their stored vectors are reused directly, so nothing is re-embedded.',
-          '3. The query paper itself is excluded from its own results.',
-          '4. DOCUMENT-LEVEL aggregation. Chunk scores are folded into ONE score per candidate document: for each of your query chunks, the candidate\'s two best-matching passages are averaged, then those per-chunk-query scores are combined (mostly their mean, plus a smaller weight on the strongest one). A paper therefore scores high by relating to SEVERAL of the facets you supplied, not by owning one lucky passage. The result is on the same 0-1 scale as every other relevance score in this plugin.',
-          '5. The user\'s relevance threshold is applied to those document scores, and EVERY document above it is ranked and paged - there is no cap on how many papers may qualify.',
-          '',
-          'PAGING: 20 documents per page, ordered best first. When hasMore is true, call again with cursor set to nextCursor and nothing else changed; that replays the stored ranking instead of re-scanning the library. Decide as you page whether to keep going or to stop and dig into a promising candidate with get_item_abstract and search_fulltext.',
-          '',
-          'WHAT COMES BACK: identity, score, the chunkIds that carried the score, and fullText — whether that document has body text in the index, one of: indexed, parse_failed, no_source, not_indexed, unknown. No passage text. To read a candidate, call search_fulltext on its itemKey; a row whose fullText is "parse_failed", "no_source" or "not_indexed" holds only title and abstract and will be refused there, and one that is "unknown" predates the record so its passages are unverified.',
-          '',
-          'Pass chunks from ONE document only. chunkIds are numbered within their own document, so ids from another paper either fail to resolve or would silently mean different passages.',
-        ].join('\n'),
-        inputSchema: {
-          type: 'object',
-          properties: {
-            itemKey: {
-              type: 'string',
-              description: 'The paper the query chunks are taken from. It is excluded from its own results. Required when starting a new search; omit it when following a cursor.'
-            },
-            chunkIds: {
-              type: 'array',
-              items: { type: 'number' },
-              minItems: 1,
-              maxItems: MAX_SIMILAR_QUERY_CHUNKS,
-              description: `The chunkIds of the passages of THAT paper you judged representative, taken from a search_fulltext call on it. How many to pass is your call — enough to cover the facets you care about. Every id must belong to itemKey; ids from another document are rejected. Hard maximum ${MAX_SIMILAR_QUERY_CHUNKS}, because each additional chunk re-scores the entire index. Required when starting a new search.`
-            },
-            libraryID: {
-              type: 'number',
-              description: 'Zotero library ID (default: user library)'
-            },
-            minScore: {
-              type: 'number',
-              description: 'Document-level relevance floor 0-1. May only be STRICTER than the user setting; a lower value is raised back to it.'
-            },
-            topK: {
-              type: 'number',
-              description: 'Page size. Capped by the user\'s maximum (20); it only lowers the page size and never the number of qualifying documents, which is unlimited.'
-            },
-            cursor: {
-              type: 'string',
-              description: 'Continue a previous find_similar. Pass nextCursor exactly as returned; the stored ranking is replayed with no new scan. Do not change itemKey, chunkIds or minScore while paging.'
-            }
-          },
-          required: []
-        }
-      },
-      {
-        name: 'semantic_status',
-        description: 'Get the status of the semantic search service including index statistics.',
-        inputSchema: {
-          type: 'object',
-          properties: {}
-        }
-      },
-      // Full-text Database Tool (read-only operations)
-      {
-        name: 'fulltext_database',
-        description: 'Read full text on demand. Search is second-stage only and requires itemKeys returned by hybrid_search; unscoped whole-library content scanning is disabled. Actions: list, search, get, stats.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            action: {
-              type: 'string',
-              enum: ['list', 'search', 'get', 'stats'],
-              description: 'Action: list (show indexed metadata), search (search explicit candidate content), get (read explicit item content), stats (database statistics)'
-            },
-            query: {
-              type: 'string',
-              description: 'Search query (required for search action)'
-            },
-            itemKeys: {
-              type: 'array',
-              items: { type: 'string' },
-              minItems: 1,
-              description: 'Required for search and get actions'
-            },
-            limit: {
-              type: 'number',
-              description: 'Maximum results to return (default: 20 for list/search)'
-            },
-            caseSensitive: {
-              type: 'boolean',
-              description: 'Case sensitive search (default: false)'
-            },
-            libraryID: {
-              type: 'number',
-              description: 'Optional Zotero library ID (default: user library)'
-            }
-          },
-          required: ['action']
-        }
-      },
-      // Write Tools
-      {
-        name: 'write_note',
-        description: 'Create or modify Zotero notes. Supports child notes (attached to items), standalone notes, updating, or appending. Markdown is auto-converted to HTML. Confirm with user before writing.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            action: {
-              type: 'string',
-              enum: ['create', 'update', 'append'],
-              description: 'create: new note, update: replace content, append: add to end'
-            },
-            parentKey: {
-              type: 'string',
-              description: 'Item key to attach note to (create action only, omit for standalone note)'
-            },
-            noteKey: {
-              type: 'string',
-              description: 'Existing note key (required for update/append actions)'
-            },
-            content: {
-              type: 'string',
-              description: 'Note content in HTML or Markdown format. Markdown is auto-converted to HTML for Zotero storage.'
-            },
-            tags: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Tags to add to the note'
-            }
-          },
-          required: ['action', 'content']
-        }
-      },
-      {
-        name: 'write_tag',
-        description: 'Add, remove, or replace tags on Zotero items. Works on any item type. Response includes before/after tag lists for verification. Confirm with user before executing.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            action: {
-              type: 'string',
-              enum: ['add', 'remove', 'set'],
-              description: 'add: add tags (keep existing), remove: remove specific tags, set: replace all tags with provided list'
-            },
-            itemKey: {
-              type: 'string',
-              description: 'Item key to modify tags on'
-            },
-            tags: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Tags to add/remove/set'
-            }
-          },
-          required: ['action', 'itemKey', 'tags']
-        }
-      },
-      {
-        name: 'write_metadata',
-        description: 'Update metadata fields on Zotero items (title, abstract, date, URL, DOI, creators, etc.). Only works on regular items, not notes or attachments. Confirm with user before executing.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            itemKey: {
-              type: 'string',
-              description: 'Item key to update metadata on'
-            },
-            fields: {
-              type: 'object',
-              description: 'Fields to update. Common fields: title, abstractNote, date, url, DOI, language, shortTitle, volume, issue, pages, publisher, place, ISBN, ISSN, extra, rights, series, seriesNumber, edition, numPages, journalAbbreviation, publicationTitle, bookTitle',
-              additionalProperties: { type: 'string' }
-            },
-            creators: {
-              type: 'array',
-              description: 'Set the creators list (replaces all existing creators). Each creator has creatorType (author/editor/translator/etc.), and either firstName+lastName or name (for organizations).',
-              items: {
-                type: 'object',
-                properties: {
-                  creatorType: {
-                    type: 'string',
-                    description: 'Creator type: author, editor, translator, contributor, bookAuthor, seriesEditor, reviewedAuthor, etc.'
-                  },
-                  firstName: { type: 'string', description: 'First name (for individuals)' },
-                  lastName: { type: 'string', description: 'Last name (for individuals)' },
-                  name: { type: 'string', description: 'Full name (for organizations, use instead of firstName/lastName)' }
-                },
-                required: ['creatorType']
-              }
-            }
-          },
-          required: ['itemKey']
-        }
-      },
-      {
-        name: 'write_item',
-        description: 'Create a new Zotero item, re-parent existing attachments, or import a local file as an attachment. Common workflows: (1) read PDF → extract metadata → create item → attach PDF via attachmentKeys; (2) convert PDF to Markdown → import the .md file as attachment via import action. Confirm with user before executing.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            libraryID: {
-              type: 'number',
-              description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
-            },
-            action: {
-              type: 'string',
-              enum: ['create', 'reparent', 'import'],
-              description: 'create: create a new item with metadata. reparent: move an attachment under a different parent item. import: import a local file (e.g., Markdown, PDF) as an attachment to an existing item; this action additionally requires the "Allow File Import" preference to be enabled and fails otherwise.'
-            },
-            itemType: {
-              type: 'string',
-              description: 'Item type for create action (e.g., journalArticle, book, conferencePaper, thesis, report, webpage, preprint, bookSection, etc.)'
-            },
-            fields: {
-              type: 'object',
-              description: 'Metadata fields for create action. Common: title, abstractNote, date, url, DOI, language, volume, issue, pages, publisher, place, publicationTitle, bookTitle, etc.',
-              additionalProperties: { type: 'string' }
-            },
-            creators: {
-              type: 'array',
-              description: 'Creators for create action. Each: {creatorType, firstName, lastName} or {creatorType, name} for organizations.',
-              items: {
-                type: 'object',
-                properties: {
-                  creatorType: { type: 'string', description: 'author, editor, translator, contributor, etc.' },
-                  firstName: { type: 'string' },
-                  lastName: { type: 'string' },
-                  name: { type: 'string', description: 'For organizations' }
-                },
-                required: ['creatorType']
-              }
-            },
-            tags: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Tags to add to the new item'
-            },
-            attachmentKeys: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'For create: existing standalone attachment keys to re-parent under the new item. For reparent: attachment keys to move.'
-            },
-            parentKey: {
-              type: 'string',
-              description: 'For reparent action: the target parent item key to move attachments to'
-            },
-            filePath: {
-              type: 'string',
-              description: 'For import action: absolute path to the file to import as an attachment'
-            },
-            parentItemKey: {
-              type: 'string',
-              description: 'For import action: Zotero item key of the parent to attach the file to'
-            },
-            title: {
-              type: 'string',
-              description: 'For import action: display title for the attachment (defaults to the file name)'
-            }
-          },
-          required: ['action']
-        }
-      }
-    ];
-
-    // Filter out semantic tools if semantic search is disabled
-    const semanticEnabled = Zotero.Prefs.get('extensions.zotero.zotero-mcp-plugin.semantic.enabled', true);
-    const semanticToolNames = new Set(['semantic_search', 'find_similar', 'semantic_status']);
-    const filteredTools = semanticEnabled === false
-      ? tools.filter((t: any) => !semanticToolNames.has(t.name))
-      : tools;
-
-    // Filter out write tools if write operations are disabled (default: disabled)
-    const writeEnabled = isWriteEnabled();
-    const finalTools = writeEnabled
-      ? filteredTools
-      : filteredTools.filter((t: any) => !MUTATING_TOOL_NAMES.has(t.name));
-
-    return finalTools;
+  private getAvailableTools(): ToolDefinition[] {
+    return filterToolCatalog({
+      semanticEnabled:
+        Zotero.Prefs.get(
+          'extensions.zotero.zotero-mcp-plugin.semantic.enabled',
+          true,
+        ) !== false,
+      writeEnabled: isWriteEnabled(),
+      mutatingToolNames: MUTATING_TOOL_NAMES,
+    });
   }
 
   private async handleToolCall(request: MCPRequest): Promise<MCPResponse> {
@@ -1699,17 +817,24 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
           break;
 
         case 'get_annotations':
-          if (!args?.itemKey && !args?.annotationId && !args?.annotationIds) {
-            throw new Error('Either itemKey, annotationId, or annotationIds is required');
+          if (
+            !args?.itemKey &&
+            !(Array.isArray(args?.itemKeys) && args.itemKeys.length > 0) &&
+            !args?.annotationId &&
+            !args?.annotationIds
+          ) {
+            throw new Error('One of itemKeys, itemKey, annotationId or annotationIds is required');
           }
           result = await this.callGetAnnotations(args);
           break;
 
-        case 'get_content':
-          if (!args?.itemKey && !args?.attachmentKey) {
-            throw new Error('Either itemKey or attachmentKey is required');
+        case 'get_attachment_text':
+          if (!args?.itemKey) {
+            throw new Error(
+              'itemKey is required. Call with itemKey alone to see the item\'s attachments, then again with the attachmentKey you want to read.',
+            );
           }
-          result = await this.callGetContent(args);
+          result = await this.callGetAttachmentText(args);
           break;
 
         case 'get_collections':
@@ -1727,18 +852,10 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
           result = await this.callGetCollectionDetails(args);
           break;
 
+        // Browsing: no collectionKey means "the top level of the library",
+        // which is where a caller with no keys in hand has to start.
         case 'get_collection_items':
-          if (!args?.collectionKey) {
-            throw new Error('collectionKey is required');
-          }
           result = await this.callGetCollectionItems(args);
-          break;
-
-        case 'get_subcollections':
-          if (!args?.collectionKey) {
-            throw new Error('collectionKey is required');
-          }
-          result = await this.callGetSubcollections(args);
           break;
 
         case 'create_collection': {
@@ -1832,6 +949,14 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
               );
             }
           }
+          // Same guard as get_document_chunks: a note key here produced
+          // "has no indexed full text", which invites the caller to build an
+          // index that can never make a note searchable as a document.
+          await this.assertDocumentKey(
+            fulltextArgs.itemKey,
+            fulltextArgs.libraryID,
+            'search_fulltext',
+          );
           result = await this.callSearchFulltext(fulltextArgs);
           break;
         }
@@ -1845,6 +970,8 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
 
         // Semantic Search Tools
         case 'semantic_search':
+        case 'keyword_search':
+        case 'get_document_chunks':
         case 'find_similar':
         case 'semantic_status': {
           const semEnabled = Zotero.Prefs.get('extensions.zotero.zotero-mcp-plugin.semantic.enabled', true);
@@ -1852,10 +979,32 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
             throw new Error('Semantic search is disabled. Enable it in Zotero MCP Plugin preferences.');
           }
           if (name === 'semantic_search') {
-            if (typeof args?.query !== 'string' || !args.query.trim()) {
-              throw new Error('query is required');
+            // A cursor names the search it continues, so the query is required
+            // only when starting a new one.
+            if (
+              (typeof args?.cursor !== 'string' || !args.cursor.trim()) &&
+              (typeof args?.query !== 'string' || !args.query.trim())
+            ) {
+              throw new Error(
+                'query is required (or pass cursor to continue a previous semantic_search)',
+              );
             }
             result = await this.callSemanticSearch(args);
+          } else if (name === 'keyword_search') {
+            const continuingKeyword =
+              typeof args?.cursor === 'string' && args.cursor.trim().length > 0;
+            if (
+              !continuingKeyword &&
+              !(Array.isArray(args?.keywords) && args.keywords.length > 0) &&
+              (typeof args?.query !== 'string' || !args.query.trim())
+            ) {
+              throw new Error(
+                'keywords is required: pass the bilingual domain terms to match (or pass cursor to continue a previous keyword_search). A query alone is only used to derive mechanical fallback probes.',
+              );
+            }
+            result = await this.callKeywordSearch(args);
+          } else if (name === 'get_document_chunks') {
+            result = await this.callGetDocumentChunks(args);
           } else if (name === 'find_similar') {
             // A cursor names the search it continues, so the query chunks are
             // required only when starting a new one.
@@ -1879,20 +1028,6 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
           }
           break;
         }
-
-        case 'fulltext_database':
-          if (!args?.action) {
-            throw new Error('action is required');
-          }
-          if (args.action === 'search') {
-            const cachedSearchItemKeys = this.coerceStringArray(args?.itemKeys);
-            if (!cachedSearchItemKeys || cachedSearchItemKeys.length === 0) {
-              throw new Error('itemKeys from hybrid_search are required for search; whole-library full-text scanning is disabled');
-            }
-            args.itemKeys = cachedSearchItemKeys;
-          }
-          result = await this.callFulltextDatabase(args);
-          break;
 
         // Write Tools
         case 'write_note': {
@@ -1946,8 +1081,15 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
           break;
         }
 
-        default:
+        default: {
+          // A stale client still holding a removed tool name gets the
+          // replacement, not a shrug. "Unknown tool" would make a capable
+          // model retry variations of a name that will never work again;
+          // naming the successor gets it back on the funnel in one turn.
+          const replacement = REMOVED_TOOL_REPLACEMENTS[name];
+          if (replacement) throw new Error(replacement);
           throw new Error(`Unknown tool: ${name}`);
+        }
       }
 
       // 结构化路径字段必须在序列化成 content[0].text 之前清掉——
@@ -2026,7 +1168,7 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
       setTimeout(() => reject(new Error("Search timed out after 25 seconds. Try narrowing your query or reducing the limit.")), SEARCH_TIMEOUT_MS);
     });
     const response = await Promise.race([searchPromise, timeoutPromise]);
-    let result = response.body ? JSON.parse(response.body) : response;
+    const result = response.body ? JSON.parse(response.body) : response;
     if (response.status < 200 || response.status >= 300 || result?.error) {
       throw new Error(
         result?.error ||
@@ -2302,8 +1444,17 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
       // unavailable: ..."). An empty result set means something completely
       // different depending on this flag, so it has to travel with the page.
       branchFailed: searchResult.warnings.length > 0,
+      semanticIndexIncompatible: searchResult.semanticIndexIncompatible,
       metadata: {
         searchMode: 'hybrid',
+        keywordSearchUnavailable: searchResult.keywordSearchUnavailable,
+        keywordStatus: searchResult.keywordSearchUnavailable
+          ? 'unavailable'
+          : searchResult.warnings.some((warning) =>
+                warning.startsWith('Keyword metadata search unavailable'),
+              )
+            ? 'degraded'
+            : 'ok',
         fusion: 'normalized_weighted_hybrid',
         keywordSource: keywordOrigin,
         keywordProbeOrigin: provenance.probeOrigin,
@@ -2346,6 +1497,17 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
         keywordResultCount: searchResult.keywordResultCount,
         semanticResultCount: searchResult.semanticResultCount,
         degraded,
+        // A machine-readable form of the warning above: "the semantic half of
+        // this search produced nothing and cannot produce anything until the
+        // index is rebuilt", which prose alone leaves a client free to miss.
+        semanticIndexIncompatible: searchResult.semanticIndexIncompatible,
+        semanticStatus: searchResult.semanticIndexIncompatible
+          ? 'error'
+          : searchResult.warnings.some((warning) =>
+                warning.startsWith('Semantic search unavailable'),
+              )
+            ? 'degraded'
+            : 'ok',
         warnings: hybridWarnings,
         timings: {
           lexicalMs: searchResult.timings.keywordMs,
@@ -2385,7 +1547,16 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
         : 'single-page';
 
     const window = detachPageWindow(
-      windowOf<Record<string, any>>(ranked, 0, topK, searchId),
+      // Stated rather than defaulted. windowOf falls back to exactly this
+      // identity, so hybrid_search was correct only by coincidence — and that
+      // coincidence is what hid the bug in the tools whose identity differs.
+      windowOf<Record<string, any>>(
+        ranked,
+        0,
+        topK,
+        searchId,
+        HYBRID_PAGE_IDENTITY,
+      ),
     );
     const fullTextCoverage = await this.enrichHybridResults(
       window.rows,
@@ -2857,42 +2028,121 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
     return result;
   }
 
+  /**
+   * `get_item_details`: bibliographic metadata, and deliberately nothing else.
+   *
+   * This used to hand back the abstract and every note's full HTML body,
+   * because `formatItem`'s default field list included `abstractNote` and
+   * `notes` and nothing filtered them out. A model asking "what is this paper,
+   * so I can cite it" was therefore given the paper's abstract and the user's
+   * private reading notes in the same object, with no marker saying which was
+   * whose. Both now have tools that return them on purpose — get_item_abstract
+   * and get_annotations — and this one reports only whether they exist.
+   */
+  /**
+   * Refuse a key that names something other than a document.
+   *
+   * Every Zotero key looks alike, so a caller holding an attachment key or a
+   * note key has no way to know it is the wrong kind until a tool tells them.
+   * Both failures observed live were silent: get_item_details returned the PDF
+   * as though it were a paper, and get_document_chunks blamed a missing index
+   * for a note that has no attachment to index. Saying what the key actually
+   * names, and naming the document above it, turns a dead end into one more
+   * call.
+   */
+  private async assertDocumentKey(
+    itemKey: string,
+    libraryID: number | undefined,
+    tool: string,
+  ): Promise<void> {
+    if (!itemKey) return;
+    const resolvedLibraryID = libraryID ?? Zotero.Libraries.userLibraryID;
+    let item: any = null;
+    try {
+      item = await Zotero.Items.getByLibraryAndKeyAsync(
+        resolvedLibraryID,
+        itemKey,
+      );
+    } catch {
+      return; // Missing keys are the existing handlers' error to report.
+    }
+    if (!item) return;
+
+    let kind: ItemKeyKind = 'regular';
+    if (item.isAnnotation?.()) kind = 'annotation';
+    else if (item.isNote?.()) kind = 'note';
+    else if (item.isAttachment?.()) kind = 'attachment';
+    if (kind === 'regular') return;
+
+    const refusal = describeNonDocumentKey(
+      { key: itemKey, kind, parentItemKey: item.parentKey || undefined },
+      tool,
+    );
+    if (refusal) throw new Error(refusal);
+  }
+
   private async callGetItemDetails(args: any): Promise<any> {
-    const { itemKey, mode, libraryID } = args;
-    
-    // Import the specific handler for item details
+    const { itemKey, libraryID } = args;
+    // An attachment key used to sail straight through here and come back as a
+    // record whose title was the PDF's filename.
+    await this.assertDocumentKey(itemKey, libraryID, 'get_item_details');
     const { handleGetItem } = await import('./apiHandlers');
-    
-    // Get effective mode
-    const effectiveMode = mode || MCPSettingsService.get('content.mode');
-    
-    // Create query params with mode-based field selection
+
+    const effectiveMode = this.resolveItemDetailsMode(
+      args.mode ?? args.detail,
+    );
+    const modeConfig = this.getItemDetailsModeConfiguration(effectiveMode);
+
     const queryParams = new URLSearchParams();
     if (libraryID !== undefined && libraryID !== null) {
       queryParams.append('libraryID', String(libraryID));
     }
-    if (effectiveMode !== 'complete') {
-      // Apply field filtering based on mode (this could be enhanced in apiHandlers)
-      const modeConfig = this.getItemDetailsModeConfiguration(effectiveMode);
-      if (modeConfig.fields) {
-        queryParams.append('fields', modeConfig.fields.join(','));
-      }
-    }
-    
-    // Call the dedicated item details handler
+    queryParams.append('fields', modeConfig.fields.join(','));
+
     const response = await handleGetItem({ 1: itemKey }, queryParams);
-    let result = response.body ? JSON.parse(response.body) : response;
-    
-    // Add mode information to metadata
-    if (result && typeof result === 'object') {
-      result.metadata = {
-        ...result.metadata,
-        mode: effectiveMode,
-        appliedModeConfig: this.getItemDetailsModeConfiguration(effectiveMode)
-      };
+    const result = response.body ? JSON.parse(response.body) : response;
+
+    if (!result || typeof result !== 'object' || result.error) {
+      return result;
     }
-    
+
+    // The unified five-value status, not the per-attachment extension guess.
+    // `hasFulltext` claimed full text for any file whose name ended in .pdf,
+    // including PDFs that had never parsed, so a caller could not tell a
+    // readable paper from an unreadable one.
+    const resolvedLibraryID =
+      typeof result.libraryID === 'number'
+        ? result.libraryID
+        : (libraryID ?? Zotero.Libraries.userLibraryID);
+    const probe: Array<Record<string, any>> = [
+      { itemKey: result.key ?? itemKey, libraryID: resolvedLibraryID },
+    ];
+    await this.annotateFullTextAvailability(probe, resolvedLibraryID);
+    result.fullText = probe[0].fullText;
+    if (probe[0].fullTextNote) result.fullTextNote = probe[0].fullTextNote;
+
+    result.metadata = {
+      ...result.metadata,
+      mode: effectiveMode,
+      returnedFields: modeConfig.fields,
+      contentPolicy:
+        'Metadata only. Abstract text, note bodies, annotation text, attachment text and chunks are never returned here: use get_item_abstract, get_annotations, get_attachment_text and get_document_chunks respectively. hasAbstract/abstractChars say what get_item_abstract would return without returning it.',
+      extractedAt: new Date().toISOString(),
+    };
+
     return result;
+  }
+
+  /**
+   * Older callers wrote `preview`; it means the same thing as `standard` now
+   * that no mode returns content, so it is folded in rather than rejected.
+   */
+  private resolveItemDetailsMode(requested: unknown): string {
+    const raw = typeof requested === 'string' && requested.trim()
+      ? requested.trim()
+      : String(MCPSettingsService.get('content.mode') || 'standard');
+    if (raw === 'preview') return 'standard';
+    return raw === 'minimal' || raw === 'complete' ? raw : 'standard';
   }
 
   private async callGetAnnotations(args: any): Promise<any> {
@@ -2901,35 +2151,300 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
     return result;
   }
 
-  private async callGetContent(args: any): Promise<any> {
-    const { itemKey, attachmentKey, include, format, mode, contentControl, libraryID } = args;
-    const extractor = new UnifiedContentExtractor();
-    
+  /**
+   * `get_attachment_text`: one attachment, one window, one named source.
+   *
+   * The Zotero-facing half of the tool. Attachment selection, window slicing
+   * and the source vocabulary all live in `attachmentText.ts` so they can be
+   * tested without Zotero; what happens here is the part that needs a real
+   * library: enumerating attachments and pulling the text out of one.
+   */
+  private async callGetAttachmentText(args: any): Promise<any> {
+    const libraryID = args.libraryID ?? Zotero.Libraries.userLibraryID;
+    const item = await Zotero.Items.getByLibraryAndKeyAsync(
+      libraryID,
+      args.itemKey,
+    );
+    if (!item) {
+      throw new Error(
+        `Item ${args.itemKey} not found in library ${libraryID}.`,
+      );
+    }
+    if (item.isAttachment?.()) {
+      throw new Error(
+        `${args.itemKey} is itself an attachment. Pass the parent item as itemKey and this key as attachmentKey.`,
+      );
+    }
+
+    const { isGeneratedMarkdownAttachment } = await import('./pdfTextSource');
+    const summaries: AttachmentSummary[] = [];
+    for (const attachmentID of item.getAttachments?.(false) ?? []) {
+      try {
+        const attachment = Zotero.Items.get(attachmentID);
+        if (!attachment?.isAttachment?.()) continue;
+        summaries.push({
+          attachmentKey: attachment.key,
+          title: String(attachment.getField?.('title') || '') || undefined,
+          filename: attachment.attachmentFilename || undefined,
+          contentType: attachment.attachmentContentType || undefined,
+          sizeBytes: undefined,
+          hasExtractableText: this.attachmentCanYieldText(attachment),
+          isGeneratedMarkdown: isGeneratedMarkdownAttachment(attachment),
+        });
+      } catch (error) {
+        ztoolkit.log(
+          `[StreamableMCP] Could not inspect attachment ${attachmentID}: ${error}`,
+          'warn',
+        );
+      }
+    }
+
+    const selection = selectAttachment(summaries, args.attachmentKey);
+    const identity = {
+      itemKey: item.key,
+      libraryID,
+      title: item.getDisplayTitle?.() || item.getField?.('title') || '',
+    };
+
+    if (selection.kind === 'not_found') {
+      throw new Error(
+        `Attachment ${selection.requestedKey} does not belong to item ${item.key}. Call get_attachment_text with itemKey alone to list this item's attachments.`,
+      );
+    }
+    if (selection.kind === 'none') {
+      return {
+        ...identity,
+        attachments: summaries,
+        text: null,
+        textSource: {
+          method: 'no_text' as AttachmentTextMethod,
+          description: describeTextMethod('no_text'),
+        },
+        metadata: {
+          extractedAt: new Date().toISOString(),
+          nextStep: summaries.length
+            ? 'None of this item\'s attachments can yield text (they are images, or unsupported file types). Read the abstract with get_item_abstract instead, and tell the user the full text is not readable from their library.'
+            : 'This item has no attachments at all, so there is no text to read. Use get_item_details and get_item_abstract, and tell the user the full text is not in their library.',
+        },
+      };
+    }
+    if (selection.kind === 'choose') {
+      return {
+        ...identity,
+        attachments: summaries,
+        text: null,
+        metadata: {
+          extractedAt: new Date().toISOString(),
+          nextStep: `This item has ${selection.candidates.length} attachments that could yield text, so none was chosen for you — reading the wrong one returns text that looks entirely valid and belongs to a different document. Call get_attachment_text again with the attachmentKey you want: ${selection.candidates
+            .map((candidate) => `${candidate.attachmentKey} (${candidate.filename || candidate.title || 'untitled'})`)
+            .join(', ')}.`,
+        },
+      };
+    }
+
+    const attachment: any = await Zotero.Items.getByLibraryAndKeyAsync(
+      libraryID,
+      selection.attachment.attachmentKey,
+    );
+    if (!attachment) {
+      throw new Error(
+        `Attachment ${selection.attachment.attachmentKey} could not be loaded from library ${libraryID}.`,
+      );
+    }
+    const extracted = await this.extractAttachmentText(attachment);
+    const window = takeTextWindow(extracted.text, args.offset, args.limit);
+    const empty = isEmptyTextMethod(extracted.method);
+
+    return {
+      ...identity,
+      attachment: {
+        ...selection.attachment,
+        selectedAutomatically: selection.automatic,
+      },
+      attachments: summaries,
+      textSource: {
+        method: extracted.method,
+        description: describeTextMethod(extracted.method),
+      },
+      pagination: {
+        totalChars: window.totalChars,
+        returnedChars: window.returnedChars,
+        offset: window.offset,
+        hasMore: window.hasMore,
+        ...(window.nextOffset !== undefined
+          ? { nextOffset: window.nextOffset }
+          : {}),
+        endsOnBoundary: window.endsOnBoundary,
+      },
+      text: empty ? null : window.text,
+      metadata: {
+        extractedAt: new Date().toISOString(),
+        nextStep: empty
+          ? `${describeTextMethod(extracted.method)} No text was returned. Do not retry this call unchanged.`
+          : window.hasMore
+            ? `Characters ${window.offset}-${window.offset + window.returnedChars} of ${window.totalChars}. Continue with offset=${window.nextOffset}. Stop as soon as the text stops answering the question. To search inside this paper instead of reading on, call search_fulltext with itemKey "${item.key}"; to read the indexed body with stable chunk ids, call get_document_chunks.`
+            : `That is the end of this attachment's text (${window.totalChars} characters total).`,
+      },
+    };
+  }
+
+  /** Whether this file type could yield text at all. Not a claim we have it. */
+  private attachmentCanYieldText(attachment: any): boolean {
     try {
-      let result;
-      
-      if (itemKey) {
-        // Get content from item with unified mode control and content control parameters
-        result = await extractor.getItemContent(itemKey, include || {}, mode, contentControl, libraryID);
-      } else if (attachmentKey) {
-        // Get content from specific attachment with unified mode control and content control parameters
-        result = await extractor.getAttachmentContent(attachmentKey, mode, contentControl, libraryID);
-      } else {
-        throw new Error('Either itemKey or attachmentKey must be provided');
+      const contentType = String(attachment.attachmentContentType || '');
+      const filename = String(attachment.attachmentFilename || '').toLowerCase();
+      if (contentType.includes('pdf') || filename.endsWith('.pdf')) return true;
+      if (contentType.includes('html') || contentType.startsWith('text/')) {
+        return true;
       }
-      
-      // Apply format conversion if requested
-      if (format === 'text' && itemKey) {
-        return extractor.convertToText(result);
-      } else if (format === 'text' && attachmentKey) {
-        return result.content || '';
+      return ['.txt', '.md', '.markdown', '.htm', '.html', '.xml'].some((ext) =>
+        filename.endsWith(ext),
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Pull text out of one attachment and say which path produced it.
+   *
+   * The order is the same one search_fulltext's indexer uses, so the two tools
+   * never disagree about what a document's text is: Doc2X/MinerU Markdown
+   * first, then Zotero's own flat extract, then the bundled PDF worker.
+   */
+  private async extractAttachmentText(
+    attachment: any,
+  ): Promise<{ text: string; method: AttachmentTextMethod }> {
+    const contentType = String(attachment?.attachmentContentType || '');
+    const filename = String(attachment?.attachmentFilename || '').toLowerCase();
+    const isPDF = contentType.includes('pdf') || filename.endsWith('.pdf');
+
+    if (isPDF) {
+      const { getPDFTextFromMarkdown } = await import('./pdfTextSource');
+      const markdown = await getPDFTextFromMarkdown(attachment);
+      if (markdown.text) {
+        return {
+          text: markdown.text,
+          method: markdown.method as AttachmentTextMethod,
+        };
       }
-      
-      return result;
+
+      try {
+        // Not in zotero-types, but present at runtime — the same call
+        // UnifiedContentExtractor has always used for this fallback.
+        const fulltext = Zotero.Fulltext as any;
+        if (fulltext?.getItemContent) {
+          const cached = await fulltext.getItemContent(attachment.id);
+          if (cached?.content && String(cached.content).trim()) {
+            const { TextFormatter } = await import('./textFormatter');
+            return {
+              text: TextFormatter.formatPDFText(String(cached.content)),
+              method: 'zotero_fulltext_cache',
+            };
+          }
+        }
+      } catch (error) {
+        ztoolkit.log(
+          `[StreamableMCP] Zotero full-text cache unavailable for ${attachment.key}: ${error}`,
+          'warn',
+        );
+      }
+
+      // Nothing produced text. The MinerU method already says why (disabled,
+      // on-demand disabled, failed), which is more useful than a generic
+      // "no text", so it is carried through rather than flattened.
+      return { text: '', method: markdown.method as AttachmentTextMethod };
+    }
+
+    const extractor = new UnifiedContentExtractor();
+    const processed = await extractor.getAttachmentContent(
+      attachment.key,
+      'complete',
+      { preserveOriginal: true },
+      attachment.libraryID,
+    );
+    const text = String(processed?.content || '');
+    if (!text.trim()) return { text: '', method: 'no_text' };
+    const method = String(processed?.extractionMethod || '');
+    if (method === 'html_parsing') return { text, method: 'html_parsing' };
+    if (filename.endsWith('.md') || filename.endsWith('.markdown')) {
+      return { text, method: 'markdown_attachment' };
+    }
+    return { text, method: 'text_reading' };
+  }
+
+  /**
+   * `get_document_chunks`: one page of a document's indexed body, in order.
+   */
+  private async callGetDocumentChunks(args: any): Promise<any> {
+    const defaultLibraryID = Zotero.Libraries.userLibraryID;
+    const deps: DocumentChunksDeps = {
+      getChunks: async (itemKey, libraryID) => {
+        const { getVectorStore } = await import('./semantic/vectorStore');
+        return getVectorStore().getChunksForItem(itemKey, libraryID);
+      },
+      getFullTextAvailability: async (itemKey, libraryID) => {
+        const rows: Array<Record<string, any>> = [{ itemKey, libraryID }];
+        await this.annotateFullTextAvailability(rows, libraryID);
+        return rows[0].fullText as FullTextAvailability;
+      },
+      getTitle: async (itemKey, libraryID) => {
+        try {
+          const item = await Zotero.Items.getByLibraryAndKeyAsync(
+            libraryID,
+            itemKey,
+          );
+          return item
+            ? item.getDisplayTitle?.() || item.getField?.('title') || undefined
+            : undefined;
+        } catch {
+          return undefined;
+        }
+      },
+    };
+
+    // The five-state availability vocabulary describes documents, so for a
+    // note it produced `not_indexed` and a message about a text attachment
+    // that does not exist. Rule the wrong KIND of key out before asking about
+    // its index state.
+    await this.assertDocumentKey(
+      typeof args?.itemKey === 'string' ? args.itemKey.trim() : '',
+      args?.libraryID,
+      'get_document_chunks',
+    );
+
+    try {
+      return await readDocumentChunks(args ?? {}, deps, defaultLibraryID);
     } catch (error) {
-      ztoolkit.log(`[StreamableMCP] Error in callGetContent: ${error}`, 'error');
+      if (error instanceof DocumentChunksError) {
+        throw new Error(error.message);
+      }
       throw error;
     }
+  }
+
+  /**
+   * Turn a handler's error status into a real tool error.
+   *
+   * These wrappers parsed the body and returned it whatever the status was, so
+   * a refusal came back as a SUCCESSFUL tool result that happened to contain an
+   * `error` string. Over MCP that is a protocol-level lie: the client sees a
+   * completed call. Every other refusal in this server throws -- removed tool
+   * names, get_document_chunks on an unindexed document -- and these now do
+   * too.
+   */
+  private unwrapHandlerResult(response: any, result: any): any {
+    const status = typeof response?.status === 'number' ? response.status : 200;
+    if (status >= 400) {
+      throw new Error(
+        (result && typeof result === 'object' && result.error) ||
+          `Request failed with status ${status}`,
+      );
+    }
+    if (result && typeof result === 'object' && !Array.isArray(result) && result.error) {
+      throw new Error(result.error);
+    }
+    return result;
   }
 
   private async callGetCollections(args: any): Promise<any> {
@@ -2953,17 +2468,23 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
     }
     
     const response = await handleGetCollections(collectionParams);
-    let result = response.body ? JSON.parse(response.body) : response;
-    
-    // Add mode information to metadata
-    if (result && typeof result === 'object') {
+    const result = this.unwrapHandlerResult(
+      response,
+      response.body ? JSON.parse(response.body) : response,
+    );
+
+    // The handler now answers with { results, pagination, metadata }. It used
+    // to answer with a bare array, and this same assignment silently vanished
+    // at JSON.stringify time, taking the total count and the paging state with
+    // it. An error body has no metadata block and must be passed through as is.
+    if (result && typeof result === 'object' && Array.isArray(result.results)) {
       result.metadata = {
         ...result.metadata,
         mode: effectiveMode,
         appliedModeConfig: modeConfig
       };
     }
-    
+
     return result;
   }
 
@@ -2975,8 +2496,10 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
       }
     }
     const response = await handleSearchCollections(searchParams);
-    const result = response.body ? JSON.parse(response.body) : response;
-    return result;
+    return this.unwrapHandlerResult(
+      response,
+      response.body ? JSON.parse(response.body) : response,
+    );
   }
 
   private async callGetCollectionDetails(args: any): Promise<any> {
@@ -2988,34 +2511,185 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
       }
     }
     const response = await handleGetCollectionDetails({ 1: collectionKey }, detailParams);
-    const result = response.body ? JSON.parse(response.body) : response;
-    return result;
+    return this.unwrapHandlerResult(
+      response,
+      response.body ? JSON.parse(response.body) : response,
+    );
   }
 
+  /**
+   * `get_collection_items`: one level of the library, like a file manager.
+   *
+   * The walking, counting, path resolution and paging live in
+   * `collectionBrowser.ts` behind injected accessors; this method is the
+   * Zotero adapter for them, plus a small cache so a level with twenty
+   * subcollections does not re-read the same nodes while counting descendants.
+   */
   private async callGetCollectionItems(args: any): Promise<any> {
-    const { collectionKey, ...otherArgs } = args;
-    const itemParams = new URLSearchParams();
-    for (const [key, value] of Object.entries(otherArgs)) {
-      if (value !== undefined && value !== null) {
-        itemParams.append(key, String(value));
-      }
-    }
-    const response = await handleGetCollectionItems({ 1: collectionKey }, itemParams);
-    const result = response.body ? JSON.parse(response.body) : response;
-    return result;
-  }
+    const libraryID = args?.libraryID ?? Zotero.Libraries.userLibraryID;
+    const nodes = new Map<string, CollectionNode | null>();
 
-  private async callGetSubcollections(args: any): Promise<any> {
-    const { collectionKey, ...otherArgs } = args;
-    const subcollectionParams = new URLSearchParams();
-    for (const [key, value] of Object.entries(otherArgs)) {
-      if (value !== undefined && value !== null) {
-        subcollectionParams.append(key, String(value));
+    const loadNode = (key: string): CollectionNode | null => {
+      if (nodes.has(key)) return nodes.get(key) ?? null;
+      let node: CollectionNode | null = null;
+      try {
+        const collection = Zotero.Collections.getByLibraryAndKey(
+          libraryID,
+          key,
+        );
+        if (collection) {
+          let childCollectionKeys: string[] = [];
+          let itemKeys: string[] = [];
+          try {
+            const childIDs = collection.getChildCollections(true, false) || [];
+            childCollectionKeys = (
+              Zotero.Collections.get(childIDs) as unknown as any[]
+            )
+              .map((child: any) => child?.key)
+              .filter(Boolean);
+          } catch {
+            // Some Zotero versions throw on a leaf collection rather than
+            // returning an empty list. A leaf is a valid answer, not a failure.
+          }
+          try {
+            // getChildItems(false) is DIRECT children only, which is the whole
+            // point of browsing one level at a time.
+            const childItems = (collection.getChildItems(false) ||
+              []) as any[];
+            itemKeys = childItems
+              .filter(
+                (item: any) =>
+                  item && !item.deleted && !item.isNote?.() && !item.isAttachment?.(),
+              )
+              .map((item: any) => item.key)
+              .filter(Boolean);
+          } catch (error) {
+            ztoolkit.log(
+              `[StreamableMCP] Could not read items of collection ${key}: ${error}`,
+              'warn',
+            );
+          }
+          node = {
+            key: collection.key,
+            name: collection.name || collection.key,
+            parentKey: collection.parentKey || null,
+            childCollectionKeys,
+            itemKeys,
+          };
+        }
+      } catch (error) {
+        ztoolkit.log(
+          `[StreamableMCP] Could not load collection ${key}: ${error}`,
+          'warn',
+        );
       }
+      nodes.set(key, node);
+      return node;
+    };
+
+    const deps: CollectionBrowserDeps = {
+      getCollection: loadNode,
+      getTopLevelCollectionKeys: () => {
+        try {
+          return (
+            Zotero.Collections.getByLibrary(libraryID) as unknown as any[]
+          )
+            .map((collection: any) => collection?.key)
+            .filter(Boolean);
+        } catch (error) {
+          ztoolkit.log(
+            `[StreamableMCP] Could not list top-level collections: ${error}`,
+            'warn',
+          );
+          return [];
+        }
+      },
+      getUnfiledItemKeys: () => {
+        try {
+          const search = new Zotero.Search();
+          (search as any).libraryID = libraryID;
+          search.addCondition('unfiled', 'true');
+          search.addCondition('noChildren', 'true');
+          const ids = (search as any).search?.() ?? [];
+          const resolved = Array.isArray(ids) ? ids : [];
+          return (Zotero.Items.get(resolved) as unknown as any[])
+            .filter((item: any) => item && !item.deleted)
+            .map((item: any) => item.key)
+            .filter(Boolean);
+        } catch (error) {
+          // Unfiled items are a convenience at the root, not the point of the
+          // call: a library whose search condition is unavailable still gets a
+          // usable listing of its top-level folders.
+          ztoolkit.log(
+            `[StreamableMCP] Could not resolve unfiled items: ${error}`,
+            'warn',
+          );
+          return [];
+        }
+      },
+      describeItems: async (itemKeys) => {
+        const rows: BrowsedItem[] = [];
+        for (const itemKey of itemKeys) {
+          try {
+            const item = await Zotero.Items.getByLibraryAndKeyAsync(
+              libraryID,
+              itemKey,
+            );
+            if (!item) continue;
+            rows.push({
+              itemKey: item.key,
+              title:
+                item.getDisplayTitle?.() ||
+                item.getField?.('title') ||
+                '(no title)',
+              creators:
+                item
+                  .getCreators?.()
+                  .map((creator: any) =>
+                    `${creator.firstName || ''} ${creator.lastName || ''}`.trim(),
+                  )
+                  .filter(Boolean)
+                  .join(', ') || undefined,
+              year:
+                String(item.getField?.('date') || '').match(/\d{4}/)?.[0] ||
+                undefined,
+              itemType: item.itemType,
+              publicationTitle:
+                String(item.getField?.('publicationTitle') || '') || undefined,
+              DOI: String(item.getField?.('DOI') || '') || undefined,
+            });
+          } catch (error) {
+            ztoolkit.log(
+              `[StreamableMCP] Could not describe item ${itemKey}: ${error}`,
+              'warn',
+            );
+          }
+        }
+        return rows;
+      },
+      getLibraryName: () => {
+        try {
+          const library = Zotero.Libraries.get(libraryID) as any;
+          return library?.name || 'My Library';
+        } catch {
+          return 'My Library';
+        }
+      },
+    };
+
+    try {
+      return await browseCollection(args ?? {}, deps, libraryID);
+    } catch (error) {
+      if (error instanceof CollectionBrowserError) {
+        const detail = error.candidates
+          ? ` Candidates: ${error.candidates
+              .map((candidate) => `${candidate.collectionKey} (${candidate.path})`)
+              .join('; ')}.`
+          : '';
+        throw new Error(`${error.message}${detail}`);
+      }
+      throw error;
     }
-    const response = await handleGetSubcollections({ 1: collectionKey }, subcollectionParams);
-    const result = response.body ? JSON.parse(response.body) : response;
-    return result;
   }
 
   private async callCreateCollection(args: any): Promise<any> {
@@ -3147,62 +2821,633 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
     return result;
   }
 
-  // ============ Semantic Search Methods ============
+  // ============ Single-branch retrieval (semantic_search, keyword_search) ==
 
-  private async callSemanticSearch(args: any): Promise<any> {
-    try {
-      const topK = args.topK ?? 10;
-      const minScore = args.minScore ?? 0.3;
-      const language = args.language ?? 'all';
-      const libraryID =
-        args.libraryID ?? Zotero.Libraries.userLibraryID;
-      // The caller does not get to choose its own deadline: the user's
-      // vector-scan setting is the single source of truth for how long a scan
-      // may run, exactly as it is for hybrid_search.
-      const settings = getHybridSearchSettings();
-      const vectorScanTimeoutMs = settings.vectorScanTimeoutMs;
-      this.validateSearchParameters({
-        query: args.query,
-        topK,
-        minScore,
+  /**
+   * `semantic_search` and `keyword_search` are ONE pipeline with one branch
+   * swapped out.
+   *
+   * Before this, `semantic_search` was the last tool still on the pre-funnel
+   * architecture: hard-coded `topK = 10` and `minScore = 0.3` that ignored the
+   * user's own relevance threshold and page size, no cursor, no collection or
+   * item scoping, and rows that shipped raw untruncated chunk text — in a real
+   * library that meant whole reference lists came back as "evidence". A model
+   * could not tell a semantic hit on a paper's body from a hit on its title,
+   * because the unified `fullText` status was never attached.
+   *
+   * Writing `keyword_search` as a third copy of all that would have been the
+   * obvious mistake, so instead both tools resolve the same scope, run ONE
+   * branch, fuse through the same normaliser, apply the same threshold, cache
+   * the same ranking and project the same rows. `hybrid_search` still owns the
+   * two-branch path; what it shares with these two is the layer below —
+   * `runLexicalSearch`, `SemanticSearchService.search`, `HybridSearchPageStore`
+   * and `projectHybridCandidate` — so there is exactly one implementation of
+   * each retrieval algorithm in the plugin, not three.
+   */
+  private async runSingleBranchSearch(
+    branch: 'semantic' | 'keyword',
+    args: any,
+  ): Promise<any> {
+    const toolName = branch === 'semantic' ? 'semantic_search' : 'keyword_search';
+    const settings = getHybridSearchSettings();
+    const documentCap = resolveResultCap(args.topK, settings.maxDocuments);
+    const scoreFloor = resolveScoreFloor(args.minScore, settings.minScore);
+    const topK = documentCap.value;
+    const language = branch === 'semantic' ? (args.language ?? 'all') : 'all';
+    const libraryID = args.libraryID ?? Zotero.Libraries.userLibraryID;
+    const store =
+      branch === 'semantic' ? this.semanticPages : this.keywordPages;
+    const pageIdentity =
+      branch === 'semantic' ? SEMANTIC_PAGE_IDENTITY : KEYWORD_PAGE_IDENTITY;
+
+    const cursor =
+      typeof args.cursor === 'string' && args.cursor.trim()
+        ? args.cursor.trim()
+        : null;
+    if (cursor) {
+      return await this.continueSingleBranchSearch(branch, args, cursor, {
+        requestedPageSize: args.topK === undefined ? undefined : topK,
+        scoreFloor: scoreFloor.value,
         language,
         libraryID,
       });
-      const semanticService = getSemanticSearchService();
-
-      const results = await runWithTimeout(
-        () =>
-          semanticService.search(args.query, {
-            topK,
-            minScore,
-            language,
-            libraryID,
-            vectorScanTimeoutMs,
-          }),
-        // Backstop only; embedding and scanning are each bounded inside.
-        vectorScanTimeoutMs + DEFAULT_EMBEDDING_TIMEOUT_MS,
-        'Semantic search',
-      );
-
-      const response = {
-        mode: 'semantic',
-        query: args.query,
-        data: results,
-        metadata: {
-          extractedAt: new Date().toISOString(),
-          searchMode: 'semantic',
-          resultCount: results.length,
-          fallbackMode: semanticService.getIndexProgress().status === 'idle'
-            ? (await semanticService.getStats()).serviceStatus.fallbackMode
-            : false
-        }
-      };
-
-      return response;
-    } catch (error) {
-      ztoolkit.log(`[StreamableMCP] Semantic search error: ${error}`, 'error');
-      throw error;
     }
+
+    // Two scopes, intersected. collectionKeys answers "which part of the
+    // library", itemKeys answers "which shortlist" — the coarse-filter output
+    // of a previous keyword_search — and a caller may reasonably want both.
+    const scope = this.resolveHybridScope(args.collectionKeys, libraryID);
+    const explicitItemKeys = this.coerceStringArray(args.itemKeys);
+    const scopeItemKeys = this.intersectScopes(scope, explicitItemKeys);
+
+    const {
+      keywords: lexicalKeywords,
+      entries: lexicalKeywordEntries,
+      source: probeSource,
+    } = resolveHybridKeywords(
+      typeof args.query === 'string' ? args.query : '',
+      args.keywords,
+    );
+    const provenance = resolveKeywordProvenance({
+      probeSource,
+      keywordsArgumentPresent:
+        args.keywords !== undefined && args.keywords !== null,
+      domain: args.domain,
+      expertRole: args.expertRole,
+    });
+
+    this.validateSearchParameters({
+      query: branch === 'semantic' ? args.query : undefined,
+      topK,
+      minScore: scoreFloor.value,
+      language,
+      libraryID,
+    });
+
+    const warnings: string[] = [];
+    const semanticScanStats: {
+      chunksScanned?: number;
+      chunksMatched?: number;
+    } = {};
+    let branchFailed = false;
+    let semanticIndexIncompatible = false;
+    let timedOut = false;
+    let keywordSearchUnavailable = false;
+    let retryAfterMs = 0;
+    let lexicalDiagnostics:
+      | Awaited<ReturnType<typeof runLexicalSearch>>['diagnostics']
+      | null = null;
+    let rows: Array<Record<string, any>> = [];
+    const startedAt = Date.now();
+
+    try {
+      if (branch === 'semantic') {
+        const semanticService = getSemanticSearchService();
+        const abort =
+          typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const matches = await runWithTimeout(
+          () =>
+            semanticService.search(args.query, {
+              exhaustive: true,
+              includeChunkText: false,
+              // The fused threshold below is the only relevance filter, exactly
+              // as in hybrid_search. Filtering twice, at two different scales,
+              // is how a document could clear the user's threshold and still be
+              // dropped before it ever reached it.
+              minScore: -1,
+              language,
+              libraryID,
+              itemKeys: scopeItemKeys,
+              vectorScanTimeoutMs: settings.vectorScanTimeoutMs,
+              signal: abort?.signal,
+              stats: semanticScanStats,
+            }),
+          settings.vectorScanTimeoutMs + DEFAULT_EMBEDDING_TIMEOUT_MS,
+          'Semantic search',
+        ).finally(() => abort?.abort());
+        rows = this.normaliseSingleBranchRows(matches, 'semantic');
+      } else {
+        // The user's setting is a promise about when THIS request ends, so it
+        // is enforced twice over. runLexicalSearch now races Zotero's own
+        // (uncancellable) query against the inner deadline, and runWithTimeout
+        // is the outer guarantee that covers everything else in the branch.
+        // Previously neither existed on this path: the deadline was only ever
+        // consulted between chunks, AFTER `Zotero.Search.search()` had already
+        // returned, so keyword_search had no upper bound at all.
+        const deadlineAt =
+          startedAt +
+          Math.max(1, Math.floor(settings.keywordSearchTimeoutMs * 0.9));
+        let keywordCancelled = false;
+        const outcome = await runWithTimeout(
+          () =>
+            runLexicalSearch({
+              keywords: lexicalKeywordEntries,
+              libraryID,
+              scopeItemKeys: scopeItemKeys ? new Set(scopeItemKeys) : undefined,
+              deadlineAt,
+              isCancelled: () => keywordCancelled,
+              // No second branch to make up the difference here: past the
+              // deadline the caller gets a timeout, not a silent subset that
+              // reads like a complete answer.
+              onDeadline: 'throw',
+            }),
+          settings.keywordSearchTimeoutMs,
+          'Keyword search',
+          () => {
+            keywordCancelled = true;
+          },
+        );
+        lexicalDiagnostics = outcome.diagnostics;
+        rows = this.normaliseSingleBranchRows(outcome.items, 'keyword');
+        if (outcome.diagnostics.failedKeywords.length) {
+          warnings.push(
+            `Keyword probes failed and were skipped: ${outcome.diagnostics.failedKeywords.join(', ')}`,
+          );
+        }
+        if (outcome.diagnostics.truncated) {
+          warnings.push(
+            'The lexical scan was cancelled before every matching item could be scored, so this ranking is incomplete.',
+          );
+        }
+      }
+    } catch (error) {
+      // A failed branch is not an empty library, and the two must never look
+      // the same: reporting "nothing relevant" after a timeout is a false
+      // negative delivered with full confidence.
+      branchFailed = true;
+      if (isKeywordSearchUnavailableError(error)) {
+        // A distinct state from a timeout: Zotero's database stopped answering
+        // an EARLIER query, and because its search API cannot be cancelled the
+        // gate is refusing to create more until a probe proves it recovered.
+        // Saying "timed out" here would invite the client to retry immediately,
+        // which is exactly what must not happen.
+        timedOut = true;
+        keywordSearchUnavailable = true;
+        retryAfterMs = error.retryAfterMs;
+        warnings.push(
+          `Keyword retrieval is temporarily unavailable: ${error.message} Do NOT read this as an empty library — retry after about ${Math.ceil(error.retryAfterMs / 1000)}s, or use semantic_search in the meantime.`,
+        );
+      } else if (
+        isLexicalSearchTimeoutError(error) ||
+        isKeywordSearchGateError(error)
+      ) {
+        // Named explicitly so a client can tell "we ran out of time" from "we
+        // looked and found nothing" — the two used to be the same response.
+        timedOut = true;
+        warnings.push(
+          `Keyword retrieval timed out after ${settings.keywordSearchTimeoutMs}ms and was ended at the deadline; any late result was discarded. This is NOT evidence that the library lacks matching work — narrow the scope, use fewer keywords, or raise the keyword search timeout, then retry. Detail: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      } else if (isVectorDimensionMismatchError(error)) {
+        // semantic_search has no second branch to fall back to, so this is a
+        // total failure of the tool, not a partial degradation. Say so in the
+        // shared wording rather than letting it read as "no matches".
+        semanticIndexIncompatible = true;
+        warnings.push(
+          `Semantic retrieval failed: ${error.message} ${DIMENSION_MISMATCH_HINT}`,
+        );
+      } else {
+        warnings.push(
+          `${branch === 'semantic' ? 'Semantic' : 'Keyword'} retrieval failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      ztoolkit.log(`[StreamableMCP] ${toolName} branch failed: ${error}`, 'error');
+    }
+
+    const beforeThreshold = rows.length;
+    const ranked = rows
+      .filter((row) => row.score >= scoreFloor.value)
+      .sort((a, b) => b.score - a.score || String(a.itemKey).localeCompare(String(b.itemKey)));
+    const discardedBelowThreshold = beforeThreshold - ranked.length;
+
+    if (documentCap.clamped) {
+      warnings.push(
+        `Requested topK exceeded the user's maximum page size of ${settings.maxDocuments}; capped at ${topK}. Documents past this page are not lost — page on with nextCursor.`,
+      );
+    }
+    if (scoreFloor.clamped) {
+      warnings.push(
+        `Requested minScore was below the user's relevance threshold; raised to ${scoreFloor.value}.`,
+      );
+    }
+    if (scope.fellBackToLibrary) {
+      warnings.push(
+        `Collection scope was not applied: ${scope.fallbackReason} Results below cover the whole library, which is wider than requested — never narrower.`,
+      );
+    } else if (scope.missing.length > 0) {
+      warnings.push(
+        `Ignored ${scope.missing.length} unknown collection key(s): ${scope.missing.join(', ')}.`,
+      );
+    }
+
+    const keywordOrigin =
+      branch === 'keyword' ? provenance.keywordSource : 'n/a';
+    const fallbackWarning =
+      branch === 'keyword' && keywordOrigin === 'fallback'
+        ? `warning: ${provenance.reason} Redo this search once with a domain-expert keyword set — bilingual Chinese and English terms of art, translations, synonyms and abbreviations — together with domain and expertRole. Retry at most once; if you have already retried, use these results as they are.`
+        : null;
+    if (fallbackWarning) warnings.unshift(fallbackWarning);
+
+    const degraded =
+      branchFailed ||
+      (branch === 'keyword' && keywordOrigin === 'fallback') ||
+      Boolean(lexicalDiagnostics?.truncated) ||
+      Boolean(lexicalDiagnostics?.failedKeywords.length);
+
+    const snapshot: HybridSearchSnapshot = {
+      query: branch === 'semantic' ? String(args.query ?? '') : '',
+      keywords: branch === 'keyword' ? lexicalKeywords : [],
+      keywordSource: keywordOrigin,
+      degraded,
+      warning: fallbackWarning,
+      fallbackReason: provenance.reason ?? undefined,
+      retryBudgetNote:
+        'Retry at most once: if you have already retried this search, use these results as they are.',
+      appliedMinScore: scoreFloor.value,
+      libraryID,
+      branchFailed,
+      semanticIndexIncompatible,
+      metadata: {
+        timedOut,
+        keywordSearchUnavailable,
+        retryAfterMs: retryAfterMs || undefined,
+        semanticIndexIncompatible,
+        semanticStatus:
+          branch !== 'semantic' ? 'n/a' : branchFailed ? 'error' : 'ok',
+        searchMode: branch,
+        tool: toolName,
+        fusion: 'single_branch',
+        keywordSource: keywordOrigin,
+        declaredDomain: provenance.domain ?? undefined,
+        declaredExpertRole: provenance.expertRole ?? undefined,
+        ...(branch === 'keyword'
+          ? {
+              keywordCount: lexicalKeywords.length,
+              lexicalStrategy: lexicalDiagnostics?.strategy,
+              lexicalCandidateCount: lexicalDiagnostics?.candidateIDs ?? 0,
+              lexicalScannedCount: lexicalDiagnostics?.scannedItems ?? 0,
+              lexicalTruncated: lexicalDiagnostics?.truncated ?? false,
+              failedKeywords: lexicalDiagnostics?.failedKeywords ?? [],
+              lexicalFieldWeights: LEXICAL_FIELD_WEIGHTS,
+            }
+          : {
+              language,
+              chunksScanned: semanticScanStats.chunksScanned ?? null,
+            }),
+        searchScope: scope.searchScope,
+        scopeCollections: scope.collections,
+        scopeItemCount: scopeItemKeys ? scopeItemKeys.length : null,
+        scopeMissingCollections: scope.missing,
+        scopeSubcollectionsIncluded: scope.subcollectionsIncluded,
+        scopeFellBackToLibrary: scope.fellBackToLibrary,
+        scopeRestrictedToItemKeys: Boolean(explicitItemKeys?.length),
+        appliedMinScore: scoreFloor.value,
+        userMinScore: settings.minScore,
+        appliedPageSize: topK,
+        userMaxDocuments: settings.maxDocuments,
+        discardedBelowThreshold,
+        degraded,
+        warnings,
+        timings: { totalMs: Date.now() - startedAt },
+        fulltextScanned: false,
+      },
+    };
+
+    const fingerprint: SearchFingerprint = {
+      query: snapshot.query,
+      keywords: snapshot.keywords,
+      domain: args.domain,
+      expertRole: args.expertRole,
+      appliedMinScore: scoreFloor.value,
+      language,
+      libraryID,
+      rrfK: 0,
+      keywordWeight: branch === 'keyword' ? 1 : 0,
+      semanticWeight: branch === 'semantic' ? 1 : 0,
+      pageSize: topK,
+      scope: this.describeSingleBranchScope(scope, explicitItemKeys),
+    };
+    const searchId =
+      ranked.length > topK
+        ? store.create(fingerprint, ranked, snapshot)
+        : 'single-page';
+
+    const window = detachPageWindow(
+      // windowOf defaults to the hybrid cursor prefix, so the identity has to
+      // be passed explicitly or page 1 emits a cursor this tool's own store
+      // will refuse on page 2.
+      windowOf<Record<string, any>>(ranked, 0, topK, searchId, pageIdentity),
+    );
+    const fullTextCoverage = await this.enrichHybridResults(
+      window.rows,
+      libraryID,
+    );
+
+    ztoolkit.log(
+      `[StreamableMCP][${toolName}] scope=${scope.searchScope} scopeItems=${scopeItemKeys?.length ?? 'all'} candidates=${beforeThreshold} relevant=${ranked.length} returned=${window.returned} degraded=${degraded} ${Date.now() - startedAt}ms`,
+    );
+
+    return this.buildSingleBranchResponse(
+      branch,
+      snapshot,
+      window,
+      topK,
+      false,
+      fullTextCoverage,
+    );
+  }
+
+  /** Serve the next window of a stored single-branch ranking. */
+  private async continueSingleBranchSearch(
+    branch: 'semantic' | 'keyword',
+    args: any,
+    cursor: string,
+    request: {
+      requestedPageSize: number | undefined;
+      scoreFloor: number;
+      language: string;
+      libraryID: number;
+    },
+  ): Promise<any> {
+    const store =
+      branch === 'semantic' ? this.semanticPages : this.keywordPages;
+
+    // Only what the caller actually re-sent is checked. Omitting an argument
+    // means "unchanged"; re-sending a different one means this is a different
+    // question, and answering it from the old ranking would be wrong quietly.
+    const claim: FingerprintClaim = {};
+    if (branch === 'semantic') {
+      if (typeof args.query === 'string' && args.query.trim()) {
+        claim.query = args.query;
+      }
+      if (args.language !== undefined) claim.language = request.language;
+    } else if (Array.isArray(args.keywords) && args.keywords.length > 0) {
+      claim.keywords = resolveHybridKeywords(
+        typeof args.query === 'string' ? args.query : '',
+        args.keywords,
+      ).keywords;
+    }
+    if (args.domain !== undefined) claim.domain = String(args.domain);
+    if (args.expertRole !== undefined) {
+      claim.expertRole = String(args.expertRole);
+    }
+    if (args.minScore !== undefined) claim.appliedMinScore = request.scoreFloor;
+    if (args.libraryID !== undefined) claim.libraryID = request.libraryID;
+    if (args.collectionKeys !== undefined || args.itemKeys !== undefined) {
+      claim.scope = this.describeSingleBranchScope(
+        this.resolveHybridScope(args.collectionKeys, request.libraryID),
+        this.coerceStringArray(args.itemKeys),
+      );
+    }
+
+    const { state, window: cachedWindow } = store.read(
+      cursor,
+      claim,
+      request.requestedPageSize,
+    );
+    const window = detachPageWindow(cachedWindow);
+    const pageSize = request.requestedPageSize ?? state.fingerprint.pageSize;
+    const fullTextCoverage = await this.enrichHybridResults(
+      window.rows,
+      state.fingerprint.libraryID,
+    );
+
+    return this.buildSingleBranchResponse(
+      branch,
+      state.meta,
+      window,
+      pageSize,
+      true,
+      fullTextCoverage,
+    );
+  }
+
+  /**
+   * Put both branches' hits on one 0-1 scale and one row shape.
+   *
+   * The lexical branch scores on an unbounded relevance scale and the semantic
+   * branch on cosine similarity; `normalizeLexicalScore` / `computeFusedScore`
+   * are the same functions hybrid_search uses, so a 0.62 from keyword_search
+   * means what a 0.62 from hybrid_search means. Without this a caller could
+   * not carry the user's single relevance threshold across the three tools.
+   */
+  private normaliseSingleBranchRows(
+    matches: any[],
+    branch: 'semantic' | 'keyword',
+  ): Array<Record<string, any>> {
+    return (matches ?? []).map((match: any) => {
+      if (branch === 'semantic') {
+        const normalized = normalizeSemanticScore(match.score);
+        // Single branch, so the fusion collapses to "the semantic score" —
+        // but it is computed through the same function hybrid_search uses so
+        // the two tools can never drift onto different 0-1 scales, which is
+        // what would make the user's one relevance threshold mean two things.
+        const score = computeFusedScore({
+          normalizedSemanticScore: normalized,
+          keywordWeight: 0,
+          semanticWeight: 1,
+        });
+        return {
+          itemKey: match.itemKey,
+          libraryID: match.libraryID,
+          title: match.title,
+          creators: match.creators,
+          date: match.year ?? match.date,
+          itemType: match.itemType,
+          publicationTitle: match.publicationTitle,
+          DOI: match.DOI,
+          score,
+          normalizedSemanticScore: normalized,
+          semanticScore: match.score,
+          semanticRank: 0,
+          matchedChunks: match.matchedChunks,
+        };
+      }
+      const normalized = normalizeLexicalScore(match.relevanceScore);
+      return {
+        itemKey: match.key ?? match.itemKey,
+        libraryID: match.libraryID,
+        title: match.title,
+        creators: match.creators,
+        date: match.date ?? match.year,
+        itemType: match.itemType,
+        publicationTitle: match.publicationTitle,
+        DOI: match.DOI,
+        score: computeFusedScore({
+          normalizedKeywordScore: normalized,
+          keywordWeight: 1,
+          semanticWeight: 0,
+        }),
+        normalizedKeywordScore: normalized,
+        keywordScore: match.relevanceScore,
+        keywordRank: 0,
+        matchedKeywords: match.matchedKeywords,
+        matchedFields: match.matchedFields,
+      };
+    });
+  }
+
+  /**
+   * Intersect the collection scope with an explicit itemKeys shortlist.
+   *
+   * Returns undefined for "the whole library". An explicit shortlist that
+   * shares nothing with the collection scope yields an EMPTY array rather than
+   * undefined, because the honest answer to "search these five papers inside
+   * that folder, which contains none of them" is no results — falling back to
+   * the whole library there would answer a question nobody asked.
+   */
+  private intersectScopes(
+    scope: CollectionScope,
+    explicitItemKeys: string[] | undefined,
+  ): string[] | undefined {
+    const scoped =
+      scope.searchScope === 'collections' ? scope.itemKeys : undefined;
+    if (!explicitItemKeys || explicitItemKeys.length === 0) return scoped;
+    if (!scoped) return explicitItemKeys;
+    const allowed = new Set(scoped);
+    return explicitItemKeys.filter((key) => allowed.has(key));
+  }
+
+  private describeSingleBranchScope(
+    scope: CollectionScope,
+    explicitItemKeys: string[] | undefined,
+  ): string {
+    const base = describeScope(scope);
+    if (!explicitItemKeys || explicitItemKeys.length === 0) return base;
+    return `${base}|items:${[...explicitItemKeys].sort().join(',')}`;
+  }
+
+  private buildSingleBranchResponse(
+    branch: 'semantic' | 'keyword',
+    snapshot: HybridSearchSnapshot,
+    window: PageWindow<Record<string, any>>,
+    pageSize: number,
+    fromCursor: boolean,
+    fullTextCoverage?: FullTextCoverage,
+  ): any {
+    const first = window.totalRelevant === 0 ? 0 : window.offset + 1;
+    const last = window.offset + window.returned;
+    const range = window.totalRelevant === 0 ? 'none' : `${first}-${last}`;
+    const fullTextWarning = fullTextCoverage
+      ? describePageFullTextGaps(fullTextCoverage)
+      : undefined;
+    const warnings = fullTextWarning
+      ? [...(snapshot.metadata.warnings ?? []), fullTextWarning]
+      : snapshot.metadata.warnings;
+    const toolName =
+      branch === 'semantic' ? 'semantic_search' : 'keyword_search';
+
+    return {
+      mode: branch,
+      ...(branch === 'semantic'
+        ? { query: snapshot.query }
+        : { keywords: snapshot.keywords, keywordSource: snapshot.keywordSource }),
+      degraded: snapshot.degraded,
+      ...(snapshot.warning ? { warning: snapshot.warning } : {}),
+      pagination: {
+        appliedMinScore: snapshot.appliedMinScore,
+        totalRelevant: window.totalRelevant,
+        totalRelevantIsLowerBound: snapshot.branchFailed,
+        degradedRetrieval: snapshot.branchFailed,
+        returned: window.returned,
+        offset: window.offset,
+        range,
+        pageSize,
+        hasMore: window.hasMore,
+        ...(window.nextCursor ? { nextCursor: window.nextCursor } : {}),
+        servedFromCursor: fromCursor,
+      },
+      data: window.rows.map(projectHybridCandidate),
+      metadata: {
+        ...snapshot.metadata,
+        warnings,
+        fullTextCoverage,
+        extractedAt: new Date().toISOString(),
+        resultCount: window.returned,
+        totalRelevant: window.totalRelevant,
+        servedFromCursor: fromCursor,
+        nextStep: this.singleBranchNextStep(
+          toolName,
+          branch,
+          snapshot,
+          window,
+          range,
+          fullTextWarning,
+        ),
+      },
+    };
+  }
+
+  private singleBranchNextStep(
+    toolName: string,
+    branch: 'semantic' | 'keyword',
+    snapshot: HybridSearchSnapshot,
+    window: PageWindow<Record<string, any>>,
+    range: string,
+    fullTextWarning?: string,
+  ): string {
+    if (window.totalRelevant === 0) {
+      if (snapshot.branchFailed) {
+        return `NO RESULTS, BUT THIS SEARCH WAS DEGRADED: retrieval failed or was cancelled (see metadata.warnings), so this is NOT evidence that the library lacks relevant work. Retry before reporting an empty library.`;
+      }
+      return `Nothing reached the relevance threshold of ${snapshot.appliedMinScore}. ${
+        branch === 'keyword'
+          ? 'A keyword-only search fails when the library uses different surface terms than you did — try hybrid_search, whose semantic branch does not depend on matching the exact words.'
+          : 'A semantic-only search can miss a paper that names the concept in unusual words — try hybrid_search, whose keyword branch matches surface terms directly.'
+      } Do not lower minScore to force results; the threshold is the user's setting.`;
+    }
+
+    const rows =
+      branch === 'keyword'
+        ? 'These rows come from LEXICAL matching only: nothing here was judged semantically, so a paper about the same idea in different words is absent by construction.'
+        : 'These rows come from EMBEDDING similarity only: nothing here was matched on your literal terms, so a paper that names your exact keyword may rank below one that never uses it.';
+
+    const chain =
+      branch === 'keyword'
+        ? ' To ask a conceptual question of exactly this shortlist, pass these itemKeys to semantic_search as itemKeys.'
+        : '';
+
+    const funnel =
+      ' Read fullText on each row before you read its evidence snippets: "indexed" is the only value whose snippets are confirmed body text; for "parse_failed", "no_source" and "not_indexed" the document was indexed from its title and abstract alone, so the snippets are that metadata rather than passages from the paper. Abstracts are NOT included — fetch one with get_item_abstract only for a candidate you are seriously considering, then dig into that single paper with search_fulltext.';
+
+    const paging = window.hasMore
+      ? ` PAGING: ${window.totalRelevant} documents cleared the threshold and you are seeing ${range}. Call ${toolName} again with cursor set to "${window.nextCursor}" and nothing else changed for the next page of the SAME ranking.`
+      : ` PAGING: ${range} of ${window.totalRelevant} — this is the last page.`;
+
+    const degradedNote = snapshot.branchFailed
+      ? ' DEGRADED: retrieval failed or timed out during this search, so treat a thin result list as a retrieval problem, not as a fact about the library.'
+      : '';
+
+    const fullTextNote = fullTextWarning ? ` FULL TEXT: ${fullTextWarning}` : '';
+
+    return rows + chain + funnel + paging + degradedNote + fullTextNote;
+  }
+
+  private async callSemanticSearch(args: any): Promise<any> {
+    return await this.runSingleBranchSearch('semantic', args);
+  }
+
+  private async callKeywordSearch(args: any): Promise<any> {
+    return await this.runSingleBranchSearch('keyword', args);
   }
 
   /**
@@ -3366,7 +3611,17 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
           : 'single-page';
 
       const window = detachPageWindow(
-        windowOf<Record<string, any>>(ranked, 0, pageCap.value, searchId),
+        // The identity is REQUIRED here. windowOf defaults to the hybrid
+        // prefix, so omitting it made page 1 hand back an "hs1_..." cursor
+        // that similarPages.read() — which decodes with "fs1_" — then rejected
+        // as malformed. Page 1 looked perfect and page 2 was unreachable.
+        windowOf<Record<string, any>>(
+          ranked,
+          0,
+          pageCap.value,
+          searchId,
+          SIMILAR_PAGE_IDENTITY,
+        ),
       );
       await this.enrichSimilarResults(window.rows, outcome.libraryID);
 
@@ -3378,6 +3633,13 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
       );
     } catch (error) {
       ztoolkit.log(`[StreamableMCP] Find similar error: ${error}`, 'error');
+      // find_similar is pure semantic — there is no second branch to degrade
+      // into, so an index/model mismatch fails the call outright. It is
+      // re-thrown with the shared hint so the remedy reads the same here as it
+      // does from hybrid_search and semantic_search.
+      if (isVectorDimensionMismatchError(error)) {
+        throw new Error(`${error.message} ${DIMENSION_MISMATCH_HINT}`);
+      }
       throw error;
     }
   }
@@ -3596,21 +3858,13 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
     }
   }
 
-  private async callFulltextDatabase(args: any): Promise<any> {
-    try {
-      const { createFulltextDatabaseService } = await import(
-        './fulltextDatabaseService'
-      );
-      const service = await createFulltextDatabaseService();
-      return await service.execute(args);
-    } catch (error) {
-      ztoolkit.log(`[StreamableMCP] Fulltext database error: ${error}`, 'error');
-      return {
-        success: false,
-        error: String(error)
-      };
-    }
-  }
+  // callFulltextDatabase used to live here, dispatching the `fulltext_database`
+  // tool's four actions. Two of them (list, stats) were index administration
+  // and had no place in a retrieval interface; a third (get) returned an
+  // entire document in one unpaginated response, which is the one thing this
+  // server's whole funnel exists to prevent. The reading half now lives in
+  // `get_document_chunks`, and FulltextDatabaseService remains available to
+  // the preferences UI, which is where index maintenance belongs.
 
   /**
    * Convert Markdown content to HTML suitable for Zotero notes.
@@ -4496,22 +4750,56 @@ Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accep
   /**
    * Get item details mode configuration
    */
-  private getItemDetailsModeConfiguration(mode: string): any {
-    const modeConfigs = {
-      'minimal': {
-        fields: ['key', 'title', 'creators', 'date', 'itemType']
+  /**
+   * Which METADATA fields each mode returns.
+   *
+   * Every list here is metadata. `standard` and `complete` used to be `fields:
+   * null`, meaning "whatever formatItem defaults to" — which included
+   * `abstractNote` and `notes`, so the two most-used modes returned the
+   * abstract and every note body from a tool documented as returning
+   * bibliographic details. Naming the fields explicitly is what stops that
+   * from happening again by default: adding a content field to formatItem can
+   * no longer leak into this tool without someone typing it here.
+   */
+  private getItemDetailsModeConfiguration(mode: string): { fields: string[] } {
+    const identity = ['key', 'title', 'creators', 'date', 'itemType'];
+    const citation = [
+      ...identity,
+      'publicationTitle',
+      'volume',
+      'issue',
+      'pages',
+      'DOI',
+      'url',
+      'language',
+      'tags',
+      'hasAbstract',
+      'noteCount',
+      'attachments',
+    ];
+    const modeConfigs: Record<string, { fields: string[] }> = {
+      minimal: { fields: identity },
+      standard: { fields: citation },
+      complete: {
+        fields: [
+          ...citation,
+          'collections',
+          'ISSN',
+          'ISBN',
+          'publisher',
+          'place',
+          'series',
+          'edition',
+          'archive',
+          'callNumber',
+          'rights',
+          'extra',
+          'dateAdded',
+          'dateModified',
+        ],
       },
-      'preview': {
-        fields: ['key', 'title', 'creators', 'date', 'itemType', 'abstractNote', 'tags', 'collections']
-      },
-      'standard': {
-        fields: null // Include most fields (default behavior)
-      },
-      'complete': {
-        fields: null // Include all fields
-      }
     };
 
-    return modeConfigs[mode as keyof typeof modeConfigs] || modeConfigs['standard'];
+    return modeConfigs[mode] ?? modeConfigs.standard;
   }
 }

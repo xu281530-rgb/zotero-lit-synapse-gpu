@@ -12,6 +12,10 @@ declare let IOUtils: any;
 
 import { bodyIndexStateFromSourceKind } from './bodyIndexState';
 import {
+  VectorDimensionMismatchError,
+  isVectorDimensionMismatchError,
+} from './dimensionMismatch';
+import {
   runVectorScanBenchmark,
   type VectorScanBenchmarkResult,
 } from './vectorScanBenchmark';
@@ -181,6 +185,12 @@ export interface IndexStatus {
   attachmentModified?: string; // Latest attachment dateModified
   contentLength: number;
   sourceKind: string;
+  /**
+   * The body-extraction configuration in force at the last attempt. Read by
+   * decideBodyRetry so that changing MinerU's settings re-opens items whose
+   * body could not be parsed. NULL for rows predating the column.
+   */
+  bodyRetrySignature?: string | null;
 }
 
 export interface FailedIndexItem {
@@ -486,7 +496,9 @@ export class VectorStore {
 
       // Try the same backup-and-recreate approach
       try {
-        try { await this.db.closeDatabase(); } catch (_) {}
+        try { await this.db.closeDatabase(); } catch (_) {
+          // DB may not be open; closing is best effort before the file is moved.
+        }
 
         const backupPath = this.dbPath + '.corrupt.' + Date.now();
         try {
@@ -497,7 +509,9 @@ export class VectorStore {
         }
 
         for (const suffix of ['-wal', '-shm']) {
-          try { await IOUtils.remove(this.dbPath + suffix); } catch (_) {}
+          try { await IOUtils.remove(this.dbPath + suffix); } catch (_) {
+            // -wal/-shm may not exist; removal is best effort.
+          }
         }
 
         this.db = new Zotero.DBConnection(this.dbPath);
@@ -510,7 +524,9 @@ export class VectorStore {
               type: "default",
             })
             .show();
-        } catch (_) {}
+        } catch (_) {
+          // The rebuild notice is cosmetic; never let it mask the recovery result.
+        }
 
         return false;
       } catch (recreateError) {
@@ -561,7 +577,8 @@ export class VectorStore {
         item_modified TEXT,
         attachment_modified TEXT,
         content_length INTEGER NOT NULL DEFAULT 0,
-        source_kind TEXT NOT NULL DEFAULT 'on-demand'
+        source_kind TEXT NOT NULL DEFAULT 'on-demand',
+        body_retry_signature TEXT
       )
     `);
 
@@ -632,6 +649,16 @@ export class VectorStore {
     try {
       await this.db.queryAsync(
         `ALTER TABLE index_status ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'on-demand'`,
+      );
+    } catch {
+      // Column already exists.
+    }
+    // The extraction configuration in force when this row's body text was last
+    // attempted. NULL on rows written before the column existed, which
+    // decideBodyRetry reads as "unknown, so allow one retry".
+    try {
+      await this.db.queryAsync(
+        `ALTER TABLE index_status ADD COLUMN body_retry_signature TEXT`,
       );
     } catch {
       // Column already exists.
@@ -764,7 +791,9 @@ export class VectorStore {
           type: "default",
         })
         .show();
-    } catch (_) {}
+    } catch (_) {
+      // The progress window is cosmetic; migration must proceed regardless.
+    }
 
     // Use pure SQL to migrate blobs - avoids JS blob binding issues (NS_ERROR_UNEXPECTED)
     // INSERT OR IGNORE ensures idempotency for partial re-runs
@@ -901,6 +930,8 @@ export class VectorStore {
     sourceKind: string;
     itemModified?: string;
     attachmentModified?: string;
+    /** Extraction settings this attempt ran under; see bodyRetryPolicy. */
+    bodyRetrySignature?: string;
     buildID?: string;
   }): Promise<void> {
     await this.ensureInitialized();
@@ -934,7 +965,7 @@ export class VectorStore {
       }
 
       await this.db.queryAsync(
-        `INSERT OR REPLACE INTO index_status (item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified, content_length, source_kind) VALUES (?, strftime('%s', 'now'), 2, ?, ?, ?, ?, ?, ?)`,
+        `INSERT OR REPLACE INTO index_status (item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified, content_length, source_kind, body_retry_signature) VALUES (?, strftime('%s', 'now'), 2, ?, ?, ?, ?, ?, ?, ?)`,
         [
           storageKey,
           options.records.length,
@@ -943,6 +974,7 @@ export class VectorStore {
           options.attachmentModified || null,
           options.contentLength,
           options.sourceKind,
+          options.bodyRetrySignature ?? null,
         ],
       );
       await this.db.queryAsync(
@@ -1142,6 +1174,13 @@ export class VectorStore {
       if (options.signal?.aborted) {
         throw new Error('Vector scan cancelled');
       }
+      // An index that no longer matches the embedding model is a
+      // configuration problem, not a broken GPU backend. Retrying it on the
+      // CPU would only reach the identical check one layer down, and marking
+      // the GPU path as failed would disable acceleration for the rest of the
+      // session over something the GPU did nothing wrong in. So it propagates
+      // unchanged — CPU and GPU report this condition identically.
+      if (isVectorDimensionMismatchError(error)) throw error;
       const fallbackPrecision = this.gpuBackend.getEffectivePrecision();
       this.gpuBackend.fallback(error);
       return this.searchCpu(queryVector, options, fallbackPrecision);
@@ -1229,12 +1268,17 @@ export class VectorStore {
       return [];
     }
 
-    // Check stored vector dimensions - if they don't match query dimensions, search will fail
-    const storedDims = metadataRows[0].dimensions;
+    // Vectors of different dimensions cannot be compared, so there is no
+    // ranking to produce. Returning [] here made that indistinguishable from
+    // "nothing matched" and let hybrid_search pass off a keyword-only ranking
+    // as a normal hybrid result. It throws so the branch fails visibly.
+    const storedDims = Number(metadataRows[0].dimensions);
     if (storedDims !== queryVector.length) {
-      ztoolkit.log(`[VectorStore] CRITICAL: Dimension mismatch! Query=${queryVector.length}, Stored=${storedDims}. You need to re-index with the current embedding model.`, 'error');
-      // Return empty results with a clear error - vectors of different dimensions cannot be compared
-      return [];
+      ztoolkit.log(
+        `[VectorStore] CRITICAL: Dimension mismatch! Query=${queryVector.length}, Stored=${storedDims}. You need to re-index with the current embedding model.`,
+        'error',
+      );
+      throw new VectorDimensionMismatchError(queryVector.length, storedDims);
     }
 
     // New databases have Int8 data for every row. If the first row is from a
@@ -1592,6 +1636,10 @@ export class VectorStore {
       if (options.signal?.aborted) {
         throw new Error('Vector scan cancelled');
       }
+      // As on the single-query path: an index that predates the current
+      // embedding model is a configuration error, identical on both backends,
+      // and must not be mistaken for a GPU malfunction.
+      if (isVectorDimensionMismatchError(error)) throw error;
       const fallbackPrecision = this.gpuBackend.getEffectivePrecision();
       this.gpuBackend.fallback(error);
       return this.searchMultiQueryCpu(
@@ -1741,6 +1789,9 @@ export class VectorStore {
     );
     if (metadataRows.length === 0) return [];
 
+    // Same contract as the single-query scan: find_similar must not report
+    // "no similar documents" when what actually happened is that the index and
+    // the embedding model no longer agree on a vector length.
     const storedDims = Number(metadataRows[0].dimensions);
     const mismatched = queryVectors.filter(
       (vector) => vector.length !== storedDims,
@@ -1750,7 +1801,10 @@ export class VectorStore {
         `[VectorStore] searchMultiQuery(): dimension mismatch, query=${mismatched[0].length}, stored=${storedDims}`,
         'error',
       );
-      return [];
+      throw new VectorDimensionMismatchError(
+        mismatched[0].length,
+        storedDims,
+      );
     }
 
     const useInt8 =
@@ -2547,7 +2601,7 @@ export class VectorStore {
 
     // IMPORTANT: Single-line query to avoid Zotero queryAsync bug with multi-line SQL
     const storageKey = this.toStorageKey(itemKey, libraryID);
-    const rows = await this.db.queryAsync(`SELECT item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified, content_length, source_kind FROM index_status WHERE item_key = ?`, [storageKey]);
+    const rows = await this.db.queryAsync(`SELECT item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified, content_length, source_kind, body_retry_signature FROM index_status WHERE item_key = ?`, [storageKey]);
 
     // Zotero's queryAsync returns undefined when no rows found
     if (!rows || rows.length === 0) return null;
@@ -2563,6 +2617,11 @@ export class VectorStore {
       attachmentModified: row.attachment_modified,
       contentLength: Number(row.content_length || 0),
       sourceKind: String(row.source_kind || 'on-demand'),
+      bodyRetrySignature:
+        row.body_retry_signature === undefined ||
+        row.body_retry_signature === null
+          ? null
+          : String(row.body_retry_signature),
     };
   }
 
@@ -2578,13 +2637,14 @@ export class VectorStore {
     libraryID?: number,
     contentLength?: number,
     sourceKind?: string,
+    bodyRetrySignature?: string,
   ): Promise<void> {
     await this.ensureInitialized();
 
     await this.db.queryAsync(`
       INSERT INTO index_status
-      (item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified, content_length, source_kind)
-      VALUES (?, strftime('%s', 'now'), 2, ?, ?, ?, ?, COALESCE(?, 0), COALESCE(?, 'on-demand'))
+      (item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified, content_length, source_kind, body_retry_signature)
+      VALUES (?, strftime('%s', 'now'), 2, ?, ?, ?, ?, COALESCE(?, 0), COALESCE(?, 'on-demand'), ?)
       ON CONFLICT(item_key) DO UPDATE SET
         indexed_at = excluded.indexed_at,
         version = excluded.version,
@@ -2593,7 +2653,8 @@ export class VectorStore {
         item_modified = excluded.item_modified,
         attachment_modified = excluded.attachment_modified,
         content_length = COALESCE(?, index_status.content_length),
-        source_kind = COALESCE(?, index_status.source_kind)
+        source_kind = COALESCE(?, index_status.source_kind),
+        body_retry_signature = COALESCE(?, index_status.body_retry_signature)
     `, [
       this.toStorageKey(itemKey, libraryID),
       chunkCount,
@@ -2602,8 +2663,10 @@ export class VectorStore {
       attachmentModified || null,
       contentLength ?? null,
       sourceKind ?? null,
+      bodyRetrySignature ?? null,
       contentLength ?? null,
       sourceKind ?? null,
+      bodyRetrySignature ?? null,
     ]);
   }
 

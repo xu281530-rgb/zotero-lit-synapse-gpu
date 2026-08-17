@@ -5,7 +5,7 @@ _This README is also available in: [:gb: English](./README.md) | :cn: 简体中�
 [![zotero target version](https://img.shields.io/badge/Zotero-7-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-1.8.1-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-1.9.2-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -319,9 +319,13 @@ MCP 服务器已集成在插件内，位于 `src/modules/streamableMCPServer.ts`
 
 ## 🔧 API 参考（MCP 工具列表）
 
-插件集成的 MCP 服务器提供以下 **20 个工具**，分为 5 大类：
+所有工具定义只写在一处——`src/modules/toolCatalog.ts`——MCP 的 `tools/list`
+响应与 HTTP `/capabilities` 文档都由它投影得到。**不存在需要人工同步的第二份
+清单**，`npm run test:tool-catalog` 会在两份投影出现分歧时让构建失败。
 
-### 一、搜索与查询（7 个）
+插件集成的 MCP 服务器提供以下 **28 个工具**，分为 4 大类：
+
+### 一、搜索与查询（12 个）
 
 #### `hybrid_search`
 
@@ -353,13 +357,11 @@ RRF（Reciprocal Rank Fusion）也会计算，但**只用于融合分数相同�
 会被拒绝：那是另一次检索，应该重新发起。分页状态保留 15 分钟、最近 5 次检索；
 cursor 过期会明确报错，而不是悄悄重新搜一遍。
 
-**检索深度**。`candidateK` 决定每一路检索在融合前考察多少条候选——它约束的是
-「往库里挖多深」，不是「返回多少条」。默认取设置面板里的**每路检索深度**（240），
-并且是唯一允许调用方超过用户设置值的混合检索参数：候选池被挖满时，响应本身就会
-要求调用方把它调大。`pagination.totalRelevantIsLowerBound` 与
-`metadata.candidatePoolSaturated` 标识这种情况；且只有当池中最弱的候选**仍然
-高于阈值**时才会置位——若池尾已低于阈值，池外可证明不存在合格文献，此时计数是
-精确值。
+**检索深度**。两路召回都是**穷尽**的：融合层拿到的是全部候选，`ranked` 里是所有
+通过阈值的文献，`results` 只是它上面的一扇窗口，所以不存在「候选池被挖满、池外
+还有合格文献」这回事，也没有 `candidateK` 这个参数。`totalRelevant` 是精确值，
+只有在某一路检索失败或超时时才降级为下界，此时 `pagination.degradedRetrieval`
+与 `pagination.totalRelevantIsLowerBound` 会同时置位。
 
 #### `search_library`
 
@@ -391,6 +393,27 @@ cursor 过期会明确报错，而不是悄悄重新搜一遍。
 | `tags`     | string[] | 按标签过滤                                                        |
 | `mode`     | string   | 内容处理模式                                                      |
 
+每条命中带三个互不相同的 key，其中只有一个是文献级 key：`sourceItemKey` 是
+**文献条目**，`attachmentKey` 是批注所在的 PDF/附件，`annotationKey` 是批注
+本身。继续往下查一律用 `sourceItemKey`——`get_annotations(itemKeys)`、
+`get_item_details`、`search_fulltext`、`get_document_chunks` 认的都是它。
+
+> 1.9.1 之前每行只有一个 `parentKey`，它对高亮是附件 key、对笔记是文献 key。
+> 把高亮的 `parentKey` 交给 `get_annotations` 会一条都匹配不到，返回一个空页，
+> 看上去像「这篇没有标记」而不像「你传错了 key 的种类」。这个字段是直接删除
+> 而不是标记弃用：一个名字两种含义本身就是缺陷，留着就等于把故障留着。
+
+当这条标记上面根本没有文献时——用户自己写的顶层笔记，或者挂在未归档附件上的
+标记——`sourceItemKey` 是 **null**，并由 `noSourceItemReason` 说明是哪一种。
+它绝不会用替代值填上：独立笔记的自身 key 一度充当过这个角色，而在真实库里实测，
+拿它调 `get_annotations` 返回 0 条，调 `get_document_chunks` 则报「它有一个文本
+附件但未建索引」——笔记根本没有附件。**所有文献级工具都拒收的 key，就不是文献
+级 key。**
+
+把附件 key、笔记 key 或批注 key 交给 `get_item_details`、`get_document_chunks`、
+`search_fulltext`，现在会被明确拒绝，并告诉你该用哪个 key。此前
+`get_item_details` 传附件 key 会「成功」返回，标题是 PDF 文件名。
+
 #### `search_fulltext`
 
 检索漏斗的第三段：对 `hybrid_search` 定位到的**单篇**文献做正文级混合检索
@@ -415,11 +438,55 @@ cursor 过期会明确报错，而不是悄悄重新搜一遍。
 
 #### `search_collections`
 
-按名称搜索分类。参数：`q`（搜索词）、`limit`（最大结果数）。
+按名称查找分类，用于「用户提到某个文件夹名、你需要它的 `collectionKey`」。
+返回的是身份与路径，不是内容。参数：`q`、`limit`、`libraryID`。
+
+#### `get_libraries`
+
+列出当前 Zotero 客户端里的所有文献库。参数：`limit`、`offset`。
+
+#### `search_libraries`
+
+按名称查找文献库，用于用户提到某个群组库、你需要它的 `libraryID` 时。
+参数：`q`（必需）、`limit`、`offset`。
+
+#### `get_annotations`
+
+读取**你自己在指定文献上留下的标记**：PDF 高亮、批注、图片/墨迹批注，以及你在
+Zotero 里手写的笔记。**笔记正文从这里读**——`get_item_details` 不再返回笔记
+正文，因为元数据查询顺带把用户的私人笔记发回去时，没有任何标记说明哪些话是
+谁写的。
+
+`itemKeys`、`itemKey`、`annotationId`、`annotationIds` 四者传其一。`itemKeys`
+支持**多篇**，而且每一篇都会真的读到——这正是「对比我在这五篇上的标记」能一次
+调用完成的原因。`itemKeys` 收的是**文献条目 key**——即 `search_annotations`
+命中行里的 `sourceItemKey`，而不是它的 `attachmentKey`；返回的每一行也都带着
+自己的 `sourceItemKey`，多篇混在一页时仍然各归各的来源。
+
+结果始终分页：一篇读透的 PDF 有几百条高亮，而 `complete` 以前的含义是「一次
+全部返回」。
+
+- `itemKeys`、`itemKey`、`annotationId`、`annotationIds`、`types`、`colors`、
+  `tags`、`detail`（minimal/preview/standard/complete）、`maxTokens`、`limit`、
+  `offset`、`libraryID`
 
 #### `get_item_details`
 
-获取单个文献的完整元数据（作者、日期、DOI、标签、附件、笔记等）。参数：`itemKey`（必需）、`mode`。
+**文献元数据详情工具**，用于引用与著录。返回标题、作者、日期、类型、期刊、
+卷期页、DOI、URL、语言、标签、所属分类（含路径），以及每个附件一行的基本信息。
+
+**不返回任何正文内容**：没有摘要正文、没有 Notes 正文、没有批注正文、没有 PDF
+正文、没有 chunks——这四类各有专门的工具按需返回并正确分页。这里给出的是
+**可用性**：`hasAbstract` / `abstractChars` 告诉你 `get_item_abstract` 会返回
+什么而不返回它，`noteCount` 告诉你 `get_annotations` 能找到几条笔记。
+
+`fullText` 使用与全部检索结果**同一套五态全文状态**（`indexed` / `parse_failed`
+/ `no_source` / `not_indexed` / `unknown`），取代了原先按附件给的
+`hasFulltext` 布尔值——那个值只看文件扩展名，因此对从未解析成功的 PDF 也报
+「有全文」。按附件的判断仍在，改名为 `hasExtractableText`，含义是「这种文件类型
+可能能抽出文本」。
+
+参数：`itemKey`（必需）、`mode`（minimal/standard/complete）、`libraryID`。
 
 #### `get_item_abstract`
 
@@ -427,49 +494,123 @@ cursor 过期会明确报错，而不是悄悄重新搜一遍。
 一次一个 `itemKey`；它不是 `hybrid_search` 之后的批处理步骤——20 篇候选不等于
 20 次摘要读取。参数：`itemKey`（必需）、`format`（json/text）。
 
-#### `get_content`
+#### `get_attachment_text`
 
-统一内容提取工具：从条目或附件中获取 PDF 全文、笔记、摘要、网页快照等。
+**获取指定文献条目下某一个附件的文本内容**——PDF、Markdown/HTML/纯文本文件——
+除此之外什么都不返回。它取代了 `get_content`：后者把摘要、Notes、每个附件的
+正文和网页快照混在一个对象里返回，既无法只要其中一路，也完全没有分页。
 
-| 参数             | 类型   | 描述                                                               |
-| ---------------- | ------ | ------------------------------------------------------------------ |
-| `itemKey`        | string | 条目 Key（获取该条目下所有内容）                                   |
-| `attachmentKey`  | string | 附件 Key（获取特定附件内容）                                       |
-| `mode`           | string | minimal(500字符)/preview(1.5K)/standard(3K)/complete(无限制)       |
-| `include`        | object | 控制包含哪些内容：pdf/attachments/notes/abstract/webpage           |
-| `contentControl` | object | 高级内容控制（preserveOriginal/allowExtended/maxContentLength 等） |
-| `format`         | string | 输出格式：json（结构化）或 text（纯文本）                          |
+**选择附件**。只传 `itemKey` 会返回该条目的附件清单而不返回正文；再带上你要的
+`attachmentKey` 调用一次即可。条目下只有一个可出文本的附件时会自动选中
+（`selectedAutomatically: true`）；有两个时**绝不猜**——读错附件返回的文本看起来
+完全正常，却属于另一篇文档。
 
-### 二、分类管理（4 个）
+**明确文本来源**。每次响应都在 `textSource.method` 里说明文本是哪条路径产出的，
+并附一句 `description` 说明可以据此主张什么：`doc2x`（保留出版结构，最好）、
+`mineru_cache` / `mineru_attachment`（复用已有 MinerU Markdown，版面是重建的）、
+`mineru`（本次调用现场解析）、`markdown_attachment`、`zotero_fulltext_cache`
+（Zotero 自带全文索引，**无版面、无表格**）、`pdf_processor`、`html_parsing`、
+`text_reading`。取不到文本时，method 会说明原因：`mineru_disabled`、
+`mineru_on_demand_disabled`、`mineru_failed`、`mineru_error`、`no_text`。
+
+**分页**。文本按字符窗口返回，并在附近有段落或句子边界时切在边界上，所以一个
+窗口不会断在词中间。`pagination` 里有 `totalChars`、`offset`、`returnedChars`、
+`hasMore`、`nextOffset`。
+
+它**不承担全文检索职责**：定位文献用 `hybrid_search` / `keyword_search`，在单篇
+内部查找用 `search_fulltext`。
+
+- `itemKey`（必需）、`attachmentKey`、`offset`、`limit`、`libraryID`
+
+### 二、分类管理（3 个）
 
 #### `get_collections`
 
-获取文献库中所有分类列表。参数：`mode`、`limit`、`offset`。
+列出分类，主要用途是让你读到用户真实的文件夹名，再把相关的作为 `collectionKeys`
+传给 `hybrid_search` 限定范围。扁平分页列表：默认列顶层分类，或者
+`parentCollection` 的直接子级。
+
+响应结构是 `{ results, pagination, metadata }`。1.9.1 之前它返回的是一个裸
+JSON 数组、总数只放在 `X-Total-Count` 响应头里，而 MCP 只转发 body，所以总数
+和服务端挂上去的 `metadata` 都被 `JSON.stringify` 静默丢弃了——300 条里的第
+一页 100 条，和一共就 100 条的完整库，返回的东西一模一样。`search_collections`
+用同一个信封。
+
+参数：`parentCollection`、`mode`、`limit`、`offset`、`libraryID`。
+
+> `recursive` 已在 1.9.1 删除。它一次返回所有层级且不分页，和
+> `get_collection_items` 重复，等于把逐级浏览刚取代掉的整体倾倒又放了回来。
+> 现在传它会直接报错而不是被忽略。想知道某个子树里有什么，用
+> `get_collection_items`——它按文件夹给出 `directItemCount`、`totalItemCount`
+> 和 `hasChildren`，不需要把整棵树拉下来。
+
+> `get_subcollections` 已在 1.9.0 删除：它就是本工具把 `parentCollection` 改名成
+> `collectionKey`，最终进的是同一个 handler、走同一段递归。改用
+> `get_collections` 并传 `parentCollection`。
 
 #### `get_collection_details`
 
-获取特定分类的详细信息。参数：`collectionKey`（必需）。
+单个分类的元数据：名称、父级、含多少条目与子分类。它**不列出**这些内容。
+参数：`collectionKey`（必需）。
 
 #### `get_collection_items`
 
-获取指定分类中的条目列表。参数：`collectionKey`（必需）、`limit`、`offset`。
+**像文件浏览器一样逐级浏览文献库**。每次调用只返回当前这一层的子目录，加上当前
+层**直属**文献的一页——绝不返回整棵树。
 
-#### `get_subcollections`
+不传 `collectionKey` 就从文献库顶层开始（顶层分类，以及不属于任何分类的文献），
+然后传入想进入的目录的 `collectionKey` 逐级下探。每次响应都会重复当前位置
+（`location`：`libraryID`、`collectionKey`、`name`、`path`）和你来时的 `parent`，
+所以随时能往回走。
 
-获取子分类列表。参数：`collectionKey`（必需）、`limit`、`offset`、`recursive`（是否递归）。
+每个子目录行带 `directItemCount`、`totalItemCount`、`hasChildren`——这正是「不打开
+就能决定往哪下探」的依据：`directItemCount` 为 0 而 `totalItemCount` 有 300 的
+目录是个容器，不是死胡同。`totalItemCount` 会去重，同时归在父目录和子目录下的
+一篇文献只算一篇。
 
-### 三、语义搜索（3 个，可在偏好设置中禁用）
+文献行刻意做得很轻：`itemKey`、标题、作者、年份、期刊、DOI、类型。**没有摘要、
+Notes、批注、附件正文或 chunks**——旧版本直接用 `formatItem` 的默认字段表，两条
+就有 4.5 KB，列一个 200 篇的目录要吃掉大半个上下文窗口。
+
+- `collectionKey`、`path`（如 `"材料/凝固/柱状晶"`，会解析成 key；路径有歧义时
+  **报错并列出候选 key**，绝不猜）、`limit`、`offset`、`libraryID`
+- 返回 `location`、`parent`、`subcollections`、`items`、`itemPagination`
+
+### 三、语义检索与阅读（5 个，可在偏好设置中禁用）
+
+`hybrid_search`、`keyword_search`、`semantic_search` 返回**完全相同的轻量候选
+行**，共用同一套范围限定、同一个用户阈值和同一套 cursor 分页，所以三者之间切换
+没有额外学习成本。它们在实现上也是共用的：一份词法检索服务
+（`runLexicalSearch`）、一份语义检索服务（`SemanticSearchService.search`）、
+一份分页存储、一份候选行投影——**不存在三套检索算法**。
+
+#### `keyword_search`
+
+**独立关键词检索**，只在 Zotero 元数据（标题、摘要、作者、期刊名、标签）上做
+词法匹配。不涉及任何 embedding，也不扫描正文。
+
+两种用途：一是用户点名的精确术语、缩写、牌号、标准号，必须一条不漏；二是——也是
+设计意图——**关键词粗筛**，把它返回的 `itemKeys` 交给 `semantic_search` 作为
+`itemKeys`，让语义精查只在这份短名单上打分。日常文献发现仍应首选
+`hybrid_search`，因为它同时跑这一路和语义那一路并做融合。
+
+- `keywords`（新检索时必需；中英双语，1–16 个，推荐 5–12）、`query`（只用于
+  缺省时生成机械回退探针，**永远不会被 embedding**）、`domain`、`expertRole`、
+  `collectionKeys`、`itemKeys`、`topK`、`cursor`、`minScore`、`libraryID`
 
 #### `semantic_search`
 
-基于 AI 向量嵌入的语义搜索，即使没有精确关键词匹配也能找到概念相关的内容。
+**纯语义检索**：把一句自然语言查询做 embedding，与全部已索引段落比对。适合概念或
+机理明确、但用词无法确定的问题，也适合作为 `keyword_search` 粗筛之后的精查。
 
-| 参数       | 类型   | 描述                                                  |
-| ---------- | ------ | ----------------------------------------------------- |
-| `query`    | string | **必需**，自然语言查询（如 "机器学习在医疗中的应用"） |
-| `topK`     | number | 返回结果数量（默认 10）                               |
-| `minScore` | number | 最低相似度（0-1，默认 0.3）                           |
-| `language` | string | 语言过滤：zh/en/all                                   |
+1.9.0 之前，这是全插件最后一个还停在旧架构上的工具：`topK` 硬编码 10、`minScore`
+硬编码 0.3，完全无视用户自己的阈值与页大小；没有 cursor；不支持 collection 或
+itemKeys 限定；返回的行里带**未截断的原始 chunk 正文**（在真实文献库里，整段参考
+文献列表被当作「证据」发回来）；也没有统一全文状态——因此语义命中一篇论文的**摘要**
+和命中它的正文，在返回结果里长得一模一样。现在这些全部与 `hybrid_search` 对齐。
+
+- `query`（新检索时必需）、`domain`、`expertRole`、`collectionKeys`、`itemKeys`、
+  `topK`、`cursor`、`minScore`、`language`、`libraryID`
 
 #### `find_similar`
 
@@ -496,20 +637,42 @@ cursor 过期会明确报错，而不是悄悄重新搜一遍。
 
 查看语义搜索服务的状态、索引统计和覆盖率。无需参数。
 
-### 四、全文数据库（1 个）
+#### `get_document_chunks`
 
-#### `fulltext_database`
+**按文献原始 chunk 顺序分页读整篇正文**。`search_fulltext` 回答的是「这篇论文在
+哪里说了 X」，本工具回答的是「让我把这篇读一遍」。
 
-访问缓存的全文内容数据库（只读）。
+每个 chunk 带 `chunkIndex`（阅读顺序上的位置）和 `chunkId`（索引分配的稳定 id，
+也是 `search_fulltext`、`find_similar` 接受的那个）。两者**不可互相推算**——凡是
+有 chunk 被丢弃的文档，它们就会错开。
 
-| 参数       | 类型     | 描述                                                            |
-| ---------- | -------- | --------------------------------------------------------------- |
-| `action`   | string   | **必需**：list（列表）/search（搜索）/get（获取）/stats（统计） |
-| `query`    | string   | 搜索关键词（search 操作必需）                                   |
-| `itemKeys` | string[] | 指定条目（get 操作）                                            |
-| `limit`    | number   | 最大结果数                                                      |
+**禁止一次性返回整篇**：一页最多 20 个 chunk，没有任何参数能要来全文。PDF 从未
+解析成功、或根本没有文本附件的文献会被**拒绝**，并说明是四种情况中的哪一种，
+而不是把标题和摘要伪装成正文交回去。
 
-### 五、写入操作（4 个，可在偏好设置中禁用）
+- `itemKey`（新阅读时必需）、`cursor`、`offset`、`limit`、`libraryID`
+- 返回 `fullText`、`pagination`（`totalChunks`、`returned`、`offset`、`range`、
+  `hasMore`、`nextCursor`）和 `data`
+
+> `fulltext_database` 已在 1.9.0 删除。它四个 action 里有两个（`list`、`stats`）
+> 是把索引库管理能力直接暴露给 AI，第三个（`get`）会**一次性、无分页**地返回整篇
+> 正文——那是全服务器唯一一条绕开检索漏斗的旁路。数据库维护能力保留在插件设置
+> 界面内部，不再对外暴露。
+
+### 四、写入操作（9 个，可在偏好设置中禁用）
+
+写入默认关闭。关闭时这 9 个工具在 `tools/list` 与 `/capabilities` 中都不出现——
+服务器绝不声明一个自己会拒绝执行的能力。
+
+#### 分类增删改
+
+- `create_collection` —— `name`（必需）、`parentCollection`、`libraryID`
+- `update_collection` —— `collectionKey`（必需）、`name`、`parentCollection`
+- `delete_collection` —— `collectionKey`（必需）、`deleteItems`
+- `add_items_to_collection` —— `collectionKey`、`itemKeys`（均必需）
+- `remove_items_from_collection` —— `collectionKey`、`itemKeys`（均必需）
+
+#### 条目与笔记写入
 
 #### `write_note`
 

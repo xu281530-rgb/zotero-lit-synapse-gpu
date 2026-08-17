@@ -2,6 +2,15 @@ var { FilePicker } = ChromeUtils.importESModule(
   "chrome://zotero/content/modules/filePicker.mjs",
 );
 
+// Entry point for translation-task.xhtml, which is opened with openDialog from
+// zotero-mark-reader.js and calls in through three window attributes:
+//   onload="ZMRTranslationTaskWindow.init()"
+//   onclose="return ZMRTranslationTaskWindow.onClose(event)"
+//   onunload="ZMRTranslationTaskWindow.destroy()"
+// Those live in markup ESLint never parses, so the binding looks unused here.
+// `exported` is the narrowest way to say so: it applies to this one name in
+// this one file, and every other unused binding in the file still fails.
+/* exported ZMRTranslationTaskWindow */
 var ZMRTranslationTaskWindow = {
   task: null,
   snapshot: null,

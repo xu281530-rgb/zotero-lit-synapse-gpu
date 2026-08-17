@@ -313,7 +313,7 @@ try {
     ],
     "int8",
   );
-  await client.request(
+  const upserted = await client.request(
     "index.upsert",
     {
       dimensions: replacement.dimensions,
@@ -323,6 +323,14 @@ try {
     },
     replacement.payload,
   );
+  // The settings panel renders these figures; without them an incremental
+  // update leaves the panel showing the counts from snapshot commit time.
+  assert.equal(
+    upserted.header.vectors,
+    vectors.length - 1,
+    "upsert reports the resident count after replacing the item's rows",
+  );
+  assert.ok(upserted.header.deviceBytes > 0);
   const replaced = await client.request(
     "search",
     {
@@ -344,10 +352,16 @@ try {
     [[9, -1]],
   );
 
-  await client.request("index.delete", {
+  const deleted = await client.request("index.delete", {
     precision: "int8",
     items: [{ libraryID: 1, itemKey: "DUP" }],
   });
+  assert.equal(
+    deleted.header.vectors,
+    upserted.header.vectors - 1,
+    "delete reports the resident count after the rows are erased",
+  );
+  assert.ok(deleted.header.deviceBytes > 0);
   const otherLibrary = await client.request(
     "search",
     {
@@ -370,7 +384,15 @@ try {
     "deleting one library must preserve an identical item key in another",
   );
 
-  await client.request("index.clear", { precision: "int8", libraryID: 1 });
+  const libraryCleared = await client.request("index.clear", {
+    precision: "int8",
+    libraryID: 1,
+  });
+  assert.equal(
+    libraryCleared.header.vectors,
+    1,
+    "clearing one library leaves only the other library's row resident",
+  );
   const cleared = await client.request(
     "search",
     {

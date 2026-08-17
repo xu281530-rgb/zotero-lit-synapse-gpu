@@ -182,9 +182,10 @@ export class EmbeddingAPIError extends Error {
     switch (this.type) {
       case 'network':
         return '网络连接失败，请检查网络后点击继续 / Network connection failed, please check network and click Resume';
-      case 'rate_limit':
+      case 'rate_limit': {
         const waitSec = this.retryAfterMs ? Math.ceil(this.retryAfterMs / 1000) : 60;
         return `API 频率超限，请等待 ${waitSec} 秒后点击继续 / Rate limit exceeded, please wait ${waitSec}s and click Resume`;
+      }
       case 'auth':
         if (this.statusCode === 403) {
           return 'API 访问被拒绝 (403)，可能原因：1) API Key 无效 2) 账户配额用尽 3) 账户余额不足。请检查 API 服务商后台 / Access denied (403): Invalid API Key, quota exceeded, or insufficient balance. Please check your API provider dashboard';
@@ -516,12 +517,13 @@ export class EmbeddingService {
     let endpoint: string;
 
     switch (provider) {
-      case 'ollama':
+      case 'ollama': {
         // Ollama native API: /api/embed (recommended, supports batch input)
         // Remove /v1 if present
         const ollamaBase = baseUrl.replace(/\/v1$/, '');
         endpoint = `${ollamaBase}/api/embed`;
         break;
+      }
 
       case 'ollama-openai':
         // Ollama OpenAI-compatible: /v1/embeddings

@@ -1046,9 +1046,17 @@ const SIMILAR_FINGERPRINT = {
     path.join(rootDir, "src/modules/streamableMCPServer.ts"),
     "utf8",
   );
-  const toolBlock = serverSource.slice(
-    serverSource.indexOf("name: 'find_similar'"),
-    serverSource.indexOf("name: 'semantic_status'"),
+  // The tool definitions moved to toolCatalog.ts (the single source both
+  // tools/list and /capabilities project from); the handler stayed in the
+  // server. The contract assertions follow the definitions, the behaviour
+  // assertions below follow the handler.
+  const catalogSource = fs.readFileSync(
+    path.join(rootDir, "src/modules/toolCatalog.ts"),
+    "utf8",
+  );
+  const toolBlock = catalogSource.slice(
+    catalogSource.indexOf("name: 'find_similar'"),
+    catalogSource.indexOf("name: 'semantic_status'"),
   );
 
   // The call chain the AI is told to follow.
@@ -1108,13 +1116,16 @@ const SIMILAR_FINGERPRINT = {
   // semantic_status must not send the AI after a tool that does not exist.
   // "Run migrate_int8 to optimize" named an MCP tool this server has never
   // exposed; the only possible outcome was a failed call and a retry loop.
+  // Names come from the catalog now. `\s+` rather than a literal newline so a
+  // CRLF checkout does not change the answer.
   const toolNames = [
-    ...serverSource.matchAll(/name:\s*'([a-z_]+)',\s*\n\s*description/g),
+    ...catalogSource.matchAll(/name:\s*'([a-z_]+)',\s+category:/g),
   ].map((match) => match[1]);
   assert.ok(toolNames.includes("semantic_status"));
   assert.ok(!toolNames.includes("migrate_int8"));
   for (const file of [
     "src/modules/streamableMCPServer.ts",
+    "src/modules/toolCatalog.ts",
     "src/modules/apiHandlers.ts",
     "src/modules/httpServer.ts",
   ]) {
@@ -1125,9 +1136,11 @@ const SIMILAR_FINGERPRINT = {
       `${file} still advertises a migrate_int8 tool`,
     );
   }
+  // callFulltextDatabase was removed with the fulltext_database tool, so the
+  // slice now ends at the next method that survives it.
   const statusBlock = serverSource.slice(
     serverSource.indexOf("private async callSemanticStatus"),
-    serverSource.indexOf("private async callFulltextDatabase"),
+    serverSource.indexOf("private markdownToNoteHtml"),
   );
   assert.match(statusBlock, /int8Status\?\.needed/);
   // What replaces it has to be something that actually exists.

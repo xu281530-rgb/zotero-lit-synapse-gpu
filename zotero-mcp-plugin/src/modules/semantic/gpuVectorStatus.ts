@@ -30,6 +30,12 @@ export type GpuVectorStatus =
       device: string;
       precision: GpuVectorPrecision;
       deviceBytes: number;
+      /**
+       * When the resident index last accepted an incremental mutation, as an
+       * epoch milliseconds value. Absent until the first upsert/delete/clear
+       * lands, so a freshly loaded snapshot does not claim a sync it never did.
+       */
+      lastSyncedAt?: number;
     }
   | {
       phase: "fallback";

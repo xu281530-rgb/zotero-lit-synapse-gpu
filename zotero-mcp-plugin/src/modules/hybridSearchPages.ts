@@ -50,6 +50,16 @@ export const SIMILAR_PAGE_IDENTITY: PageStoreIdentity = {
   cursorPrefix: "fs1",
 };
 
+export const SEMANTIC_PAGE_IDENTITY: PageStoreIdentity = {
+  toolName: "semantic_search",
+  cursorPrefix: "ss1",
+};
+
+export const KEYWORD_PAGE_IDENTITY: PageStoreIdentity = {
+  toolName: "keyword_search",
+  cursorPrefix: "kw1",
+};
+
 /**
  * 决定「这是不是同一次检索」的参数。
  *

@@ -285,7 +285,7 @@ export class UnifiedContentExtractor {
 
       // Convert HTML to well-formatted text using user settings
       const settings = MCPSettingsService.getEffectiveSettings();
-      let plainText = TextFormatter.htmlToText(noteText, {
+      const plainText = TextFormatter.htmlToText(noteText, {
         preserveParagraphs: settings.preserveFormatting,
         preserveHeadings: settings.preserveHeadings,
         preserveLists: settings.preserveLists,

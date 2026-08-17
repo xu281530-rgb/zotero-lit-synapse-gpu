@@ -439,17 +439,27 @@ function bindHybridSearchSettings(doc: Document) {
           },
         );
       } else if (status.phase === "available") {
-        gpuStatus.textContent = getString(
-          "pref-hybrid-gpu-status-available" as any,
-          {
+        // The resident-vector count only tells the user what is on the GPU
+        // right now; the sync suffix tells them it got there because of the
+        // index update they just ran, which is the thing they came to check.
+        const synced =
+          typeof status.lastSyncedAt === "number"
+            ? " " +
+              getString("pref-hybrid-gpu-status-synced" as any, {
+                args: {
+                  time: new Date(status.lastSyncedAt).toLocaleTimeString(),
+                },
+              })
+            : "";
+        gpuStatus.textContent =
+          getString("pref-hybrid-gpu-status-available" as any, {
             args: {
               backend,
               precision,
               device: status.device,
               vectors: status.vectors,
             },
-          },
-        );
+          }) + synced;
         gpuStatus.style.color = "var(--color-ok)";
       } else if (status.phase === "fallback") {
         gpuStatus.textContent = getString(
@@ -633,40 +643,6 @@ function bindHybridSearchSettings(doc: Document) {
       if (keywordTimeoutInput)
         keywordTimeoutInput.value = String(keywordTimeout);
 
-      const vectorLine =
-        getString("pref-hybrid-scan-benchmark-result-vector" as any, {
-          args: {
-            runs: vectorResult.runs,
-            min: vectorResult.minMs.toFixed(1),
-            average: vectorResult.averageMs.toFixed(1),
-            max: vectorResult.maxMs.toFixed(1),
-            recommended: vectorTimeout,
-            chunks: indexedChunks,
-          },
-        }) || "";
-      const keywordLine =
-        getString("pref-hybrid-scan-benchmark-result-keyword" as any, {
-          args: {
-            runs: keywordResult.runsPerProfile,
-            min: keywordResult.worst.minMs.toFixed(1),
-            average: keywordResult.worst.averageMs.toFixed(1),
-            max: keywordResult.worst.maxMs.toFixed(1),
-            recommended: keywordTimeout,
-            profile: keywordResult.worstProfile,
-          },
-        }) || "";
-      const profileLines = keywordResult.profiles.map(
-        (profile) =>
-          getString("pref-hybrid-scan-benchmark-result-profile" as any, {
-            args: {
-              profile: profile.name,
-              min: profile.minMs.toFixed(1),
-              average: profile.averageMs.toFixed(1),
-              max: profile.maxMs.toFixed(1),
-              candidates: profile.candidateItems,
-            },
-          }) || "",
-      );
       // The measurement is only as complete as the index behind it. Say so
       // rather than quietly recommending a timeout sized for a partial index.
       const coverageLine =
@@ -674,11 +650,29 @@ function bindHybridSearchSettings(doc: Document) {
           args: { chunks: indexedChunks, items: sampledItems },
         }) || "";
 
-      report(
-        [vectorLine, keywordLine, ...profileLines, coverageLine]
-          .filter(Boolean)
-          .join("\n"),
-      );
+      // Same numbers, laid out as a borderless table: four summary columns,
+      // with the coverage note underneath as a small caption.
+      renderScanBenchmarkResult(doc, benchmarkResult, {
+        rows: [
+          {
+            label:
+              getString("pref-hybrid-scan-benchmark-row-vector" as any) ||
+              "Vector scan",
+            minMs: vectorResult.minMs,
+            averageMs: vectorResult.averageMs,
+            maxMs: vectorResult.maxMs,
+          },
+          {
+            label:
+              getString("pref-hybrid-scan-benchmark-row-keyword" as any) ||
+              "Keyword search",
+            minMs: keywordResult.worst.minMs,
+            averageMs: keywordResult.worst.averageMs,
+            maxMs: keywordResult.worst.maxMs,
+          },
+        ],
+        scope: coverageLine,
+      });
     } catch (error) {
       report(
         getString("pref-hybrid-scan-benchmark-error" as any, {
@@ -692,6 +686,104 @@ function bindHybridSearchSettings(doc: Document) {
 
   updateChunkStaleWarning(doc);
   updateHybridAdvancedSummary(doc);
+}
+
+/** One measured branch of the scan test, as the result block presents it. */
+interface ScanBenchmarkRow {
+  label: string;
+  minMs: number;
+  averageMs: number;
+  maxMs: number;
+}
+
+interface ScanBenchmarkView {
+  rows: ScanBenchmarkRow[];
+  /** Coverage note: what the numbers above were actually measured against. */
+  scope: string;
+}
+
+/**
+ * Render the scan-test outcome as a borderless, table-like block.
+ *
+ * This is presentation only — the measurement, the statistics and the timeout
+ * recommendation all happen before we get here and are unchanged. What the
+ * layout does is drop the run-by-run prose entirely: four aligned columns
+ * (test / shortest / average / longest), with the coverage note underneath as
+ * a small left-aligned caption.
+ *
+ * The grid is drawn with `minmax(0, ...)` columns and no rules or vertical
+ * dividers, so a long label wraps inside its own cell instead of pushing the
+ * block wider than the setting rows above it.
+ */
+function renderScanBenchmarkResult(
+  doc: Document,
+  container: HTMLElement | null,
+  view: ScanBenchmarkView,
+): void {
+  if (!container) return;
+  container.textContent = "";
+
+  const table = doc.createElement("div");
+  table.className = "zmp-rt";
+
+  const appendRow = (cells: string[], isHeader: boolean) => {
+    const row = doc.createElement("div");
+    row.className = isHeader ? "zmp-rt-r zmp-rt-h" : "zmp-rt-r";
+    cells.forEach((text, column) => {
+      const cell = doc.createElement("div");
+      // Every cell is centred; the class only picks weight for the label
+      // column and tabular digits for the three measurement columns.
+      cell.className = isHeader
+        ? "zmp-rt-c"
+        : `zmp-rt-c ${column === 0 ? "zmp-rt-k" : "zmp-rt-n"}`;
+      cell.textContent = text;
+      row.appendChild(cell);
+    });
+    table.appendChild(row);
+  };
+
+  appendRow(
+    [
+      getString("pref-hybrid-scan-benchmark-col-item" as any) || "Test",
+      getString("pref-hybrid-scan-benchmark-col-min" as any) || "Shortest (ms)",
+      getString("pref-hybrid-scan-benchmark-col-average" as any) ||
+        "Average (ms)",
+      getString("pref-hybrid-scan-benchmark-col-max" as any) || "Longest (ms)",
+    ],
+    true,
+  );
+  for (const row of view.rows) {
+    appendRow(
+      [
+        row.label,
+        row.minMs.toFixed(1),
+        row.averageMs.toFixed(1),
+        row.maxMs.toFixed(1),
+      ],
+      false,
+    );
+  }
+  container.appendChild(table);
+
+  if (view.scope) {
+    const scope = doc.createElement("div");
+    scope.className = "zmp-rt-scope";
+    const labelText = getString(
+      "pref-hybrid-scan-benchmark-scope-label" as any,
+    );
+    if (labelText) {
+      // A separate line rather than "label: text" — the two would need a
+      // different separator in CJK than in the Latin locales.
+      const label = doc.createElement("div");
+      label.className = "zmp-rt-scope-l";
+      label.textContent = labelText;
+      scope.appendChild(label);
+    }
+    const body = doc.createElement("div");
+    body.textContent = view.scope;
+    scope.appendChild(body);
+    container.appendChild(scope);
+  }
 }
 
 /**

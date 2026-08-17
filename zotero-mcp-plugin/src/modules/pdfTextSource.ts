@@ -23,8 +23,16 @@ const SEMANTIC_ENABLED_PREF =
  * two text sources never get silently mixed up in a result.
  */
 export type PDFTextMethod =
-  /** Reused an existing Doc2X / MinerU Markdown, no parsing. */
+  /**
+   * Reused lossless source Markdown recovered from a Doc2X note. Structurally
+   * the best text this plugin can produce, and worth distinguishing from a
+   * MinerU reconstruction when the caller reports its source to a model.
+   */
+  | "doc2x"
+  /** Reused a MinerU parse result from the shared cache, no parsing. */
   | "mineru_cache"
+  /** Reused a Markdown file an earlier parse attached to the item. */
+  | "mineru_attachment"
   /** Parsed on demand during this request. */
   | "mineru"
   /** No Markdown and MinerU is switched off. */
@@ -83,17 +91,26 @@ export async function getPDFTextFromMarkdown(
 
     // 1) 已有 Markdown 直接复用，绝不触发解析（allowParse:false）。
     //    ignoreEnabled:true 让「MinerU 开关关掉但缓存/附件还在」时依然能复用。
+    //
+    //    onOrigin 把「是哪一路复用命中的」带出来。三条复用路径的文本质量并不
+    //    等价（Doc2X 保留出版结构，MinerU 是重建），get_attachment_text 要向
+    //    模型如实报告来源，就不能把它们都叫 mineru_cache。
+    let reuseOrigin: "doc2x" | "mineru_cache" | "mineru_attachment" | null =
+      null;
     const existing = await minerUService.getMarkdownForAttachment(attachment, {
       allowParse: false,
       ignoreEnabled: true,
+      onOrigin: (origin) => {
+        if (origin !== "mineru_parsed") reuseOrigin = origin;
+      },
     });
     if (existing) {
       const reused = markdownToIndexText(existing).trim();
       if (reused) {
         ztoolkit.log(
-          `[PDFTextSource] Reusing existing Markdown for ${attachment.key} (${reused.length} chars)`,
+          `[PDFTextSource] Reusing existing Markdown for ${attachment.key} via ${reuseOrigin ?? "mineru_cache"} (${reused.length} chars)`,
         );
-        return { text: reused, method: "mineru_cache" };
+        return { text: reused, method: reuseOrigin ?? "mineru_cache" };
       }
     }
 

@@ -398,4 +398,99 @@ const selectViaOnRow = (rows, options) => {
   assert.equal(completedInBackground, false);
 }
 
+// The deadline is a WALL-CLOCK promise, not a promise to check the clock.
+//
+// The keyword branch used to get this wrong — it awaited Zotero's item query
+// with no deadline at all and only looked at `deadlineAt` afterwards, so the
+// configured timeout described when the code next glanced at the clock rather
+// than when the caller got an answer. The semantic scan must not have the same
+// hole: a query whose rows keep arriving well past the budget has to be ended
+// AT the budget, with the SQLite query cancelled rather than left streaming.
+{
+  const scanBudgetMs = 120;
+  let cancelled = false;
+  let rowsAfterDeadline = 0;
+  const db = {
+    valueQueryAsync: async (sql) => {
+      if (sql.includes("vector_int8 IS NOT NULL")) return 0;
+      if (sql.includes("COUNT(*) FROM embeddings")) return 500;
+      throw new Error(`Unexpected value query: ${sql}`);
+    },
+    queryAsync: async (sql, _params = [], options = {}) => {
+      void _params;
+      if (sql.includes("SELECT dimensions, vector_int8 IS NOT NULL")) {
+        return selectViaOnRow(
+          [storageRow({ dimensions: 2, has_int8: 0 })],
+          options,
+        );
+      }
+      if (!sql.includes("ORDER BY id LIMIT ? OFFSET ?")) {
+        throw new Error(`Unexpected query: ${sql}`);
+      }
+      // A query that would take a full second to stream its rows.
+      return new Promise((resolve) => {
+        const startedAt = Date.now();
+        const cancel = () => {
+          cancelled = true;
+          clearInterval(timer);
+          resolve([]);
+        };
+        let id = 0;
+        const timer = setInterval(() => {
+          if (cancelled) return;
+          if (Date.now() - startedAt > scanBudgetMs) rowsAfterDeadline += 1;
+          options.onRow?.(
+            storageRow({
+              id: ++id,
+              item_key: `ITEM${id}`,
+              chunk_id: 0,
+              language: "en",
+              dimensions: 2,
+              vector_f32: new Uint8Array(new Float32Array([1, 0]).buffer),
+            }),
+            cancel,
+          );
+          if (id >= 100) {
+            clearInterval(timer);
+            resolve([]);
+          }
+        }, 10);
+      });
+    },
+  };
+  const store = new VectorStore();
+  store.initialized = true;
+  store.db = db;
+
+  const startedAt = Date.now();
+  await assert.rejects(
+    store.search(new Float32Array([1, 0]), {
+      groupByItem: true,
+      includeChunkText: false,
+      minScore: -1,
+      deadlineAt: Date.now() + scanBudgetMs,
+    }),
+    /timed out|cancelled/i,
+    "past its deadline the scan must fail, not return a partial ranking that " +
+      "reads like a complete one",
+  );
+  const elapsed = Date.now() - startedAt;
+  assert.ok(
+    elapsed < scanBudgetMs + 200,
+    `the scan must return at ~${scanBudgetMs}ms, not after the full second of ` +
+      `streaming (took ${elapsed}ms)`,
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.ok(
+    cancelled,
+    "the underlying SQLite query must be cancelled, or every timed-out search " +
+      "would leave one streaming in the background",
+  );
+  assert.ok(
+    rowsAfterDeadline <= 2,
+    `no meaningful work may continue past the deadline (saw ${rowsAfterDeadline} late rows)`,
+  );
+}
+
 console.log("Vector scan timeout and benchmark regression tests passed");

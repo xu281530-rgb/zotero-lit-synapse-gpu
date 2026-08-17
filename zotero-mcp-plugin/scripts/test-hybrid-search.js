@@ -4,8 +4,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { register } from "node:module";
 
-import {
+register("./ts-ext-hooks.mjs", import.meta.url);
+
+// Dynamic imports, after the resolver hook: hybridSearch.ts now pulls in a
+// sibling module by extensionless specifier, which Node cannot resolve on its
+// own. This is the same shape every other suite in scripts/ uses.
+const {
   CHUNK_FIELD_WEIGHTS,
   FALLBACK_NGRAM_WEIGHT,
   FALLBACK_OFFSET_NGRAM_WEIGHT,
@@ -24,12 +30,13 @@ import {
   resolveHybridKeywords,
   resolveKeywordProvenance,
   runHybridSearch,
-} from "../src/modules/hybridSearch.ts";
-import { groupItemKeysByLibrary } from "../src/modules/libraryScope.ts";
-import {
-  MCP_PROTOCOL_VERSION,
-  getMCPMethodResponse,
-} from "../src/modules/mcpTransport.ts";
+} = await import("../src/modules/hybridSearch.ts");
+const { groupItemKeysByLibrary } = await import(
+  "../src/modules/libraryScope.ts"
+);
+const { MCP_PROTOCOL_VERSION, getMCPMethodResponse } = await import(
+  "../src/modules/mcpTransport.ts"
+);
 
 const rootDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -621,29 +628,40 @@ const serverSource = fs.readFileSync(
   path.join(rootDir, "src/modules/streamableMCPServer.ts"),
   "utf8",
 );
-assert.match(serverSource, /name:\s*['"]hybrid_search['"]/);
+// The tool DEFINITIONS moved to toolCatalog.ts, which is now the single source
+// both tools/list and /capabilities project from; the DISPATCH stayed here.
+// These assertions follow that split rather than being dropped — what they
+// protect (the contract hybrid_search advertises to a calling AI) is exactly
+// the part that must not silently rot, wherever the file boundary falls.
+const catalogSource = fs.readFileSync(
+  path.join(rootDir, "src/modules/toolCatalog.ts"),
+  "utf8",
+);
+assert.match(catalogSource, /name:\s*['"]hybrid_search['"]/);
 assert.match(serverSource, /case\s+['"]hybrid_search['"]/);
 assert.match(serverSource, /callHybridSearch\(/);
 assert.ok(
-  serverSource.indexOf("name: 'hybrid_search'") <
-    serverSource.indexOf("name: 'get_libraries'"),
+  catalogSource.indexOf("name: 'hybrid_search'") <
+    catalogSource.indexOf("name: 'get_libraries'"),
   "hybrid_search should be listed before other tools",
 );
 // search_fulltext is now a single-document deep dive: one itemKey, its own
 // query and keywords, and an explicit context-expansion mode.
-assert.match(serverSource, /required:\s*\[['"]itemKey['"]\]/);
+assert.match(catalogSource, /required:\s*\[['"]itemKey['"]\]/);
 assert.match(serverSource, /runDocumentDeepDive\(/);
 assert.match(serverSource, /expandChunkContext\(/);
 assert.doesNotMatch(
-  serverSource,
+  catalogSource,
   /contextLength:\s*\{\s*type:\s*'number'/,
   "the old keyword-context parameters must not survive on search_fulltext",
 );
 // hybrid_search must advertise the bilingual keyword contract to calling AIs.
-assert.match(serverSource, /keywords:\s*\{\s*\n\s*type:\s*'array'/);
+assert.match(catalogSource, /keywords:\s*\{\s*\n\s*type:\s*'array'/);
 assert.match(serverSource, /resolveHybridKeywords\(args\.query,\s*args\.keywords\)/);
-assert.match(serverSource, /Chinese AND English/);
-assert.match(serverSource, /columnar-to-equiaxed transition/);
+assert.match(catalogSource, /Chinese AND English/);
+assert.match(catalogSource, /columnar-to-equiaxed transition/);
+// Reported in the response metadata by the handler, not advertised in the
+// schema, so this one stays on the server file.
 assert.match(serverSource, /HYBRID_KEYWORD_COVERAGE_BONUS/);
 // language must stay unfiltered by default so retrieval remains cross-lingual.
 assert.match(serverSource, /const language = args\.language \?\? 'all';/);
@@ -1079,7 +1097,10 @@ assert.match(
   /HybridTiming\] lexical=\$\{searchResult\.timings\.keywordMs\}ms semantic=\$\{searchResult\.timings\.semanticMs\}ms rrf=\$\{searchResult\.timings\.rrfMs\}ms total=\$\{searchResult\.timings\.totalMs\}ms/,
 );
 assert.match(hybridBranch, /Lexical\] strategy=/);
-assert.match(hybridBranch, /language,\n\s+libraryID,/);
+// `\s+` rather than a literal `\n`: the repo stores LF but core.autocrlf
+// checks out CRLF on Windows, so a hard-coded newline makes this assertion
+// pass or fail based on the developer's git config rather than on the code.
+assert.match(hybridBranch, /language,\s+libraryID,/);
 
 // ---- embedding cancellation reaches the HTTP layer ----
 

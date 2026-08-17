@@ -97,7 +97,28 @@ export interface GetMarkdownOptions {
   ignoreEnabled?: boolean;
   /** Ignore all reusable results and force a new parse. */
   force?: boolean;
+  /**
+   * Called with which of the four reuse paths actually produced the Markdown.
+   *
+   * The four are not interchangeable and a caller that reports its text source
+   * to a model has to be able to tell them apart: Doc2X source Markdown keeps
+   * the publisher's structure, a MinerU parse reconstructs it, and a cache hit
+   * says no parsing happened on this call. Returning only the string made all
+   * four look identical, so `get_attachment_text` could not name its source.
+   */
+  onOrigin?: (origin: MarkdownOrigin) => void;
 }
+
+/** Which reuse path in {@link MinerUService.getMarkdownForAttachment} won. */
+export type MarkdownOrigin =
+  /** Lossless source Markdown recovered from a Doc2X note. */
+  | "doc2x"
+  /** A MinerU parse result that was already in the shared cache. */
+  | "mineru_cache"
+  /** A Markdown file already attached to the item by an earlier parse. */
+  | "mineru_attachment"
+  /** MinerU parsed the PDF during this call. */
+  | "mineru_parsed";
 
 /** Prevent local health checks from hanging on silently dropped connections. */
 const LOCAL_PROBE_TIMEOUT_MS = 8000;
@@ -546,6 +567,7 @@ export class MinerUService {
           ? null
           : await this.readFreshDoc2XMarkdown(attachment, stat);
       if (doc2x?.markdown) {
+        options.onOrigin?.("doc2x");
         return doc2x.markdown;
       }
 
@@ -566,6 +588,7 @@ export class MinerUService {
             { replaceExisting: false },
           );
         }
+        options.onOrigin?.("mineru_cache");
         return cached.markdown;
       }
       const attachedMinerU =
@@ -573,6 +596,7 @@ export class MinerUService {
           ? null
           : await this.readFreshMinerUMarkdownAttachment(attachment, stat);
       if (attachedMinerU?.markdown) {
+        options.onOrigin?.("mineru_attachment");
         return attachedMinerU.markdown;
       }
       if (cached?.skipReason) {
@@ -603,6 +627,7 @@ export class MinerUService {
       const existing = this.inFlight.get(attachment.key);
       if (existing) {
         ztoolkit.log(`[MinerU] ${attachment.key} 已在解析中，复用同一任务`);
+        options.onOrigin?.("mineru_parsed");
         return existing;
       }
 
@@ -615,6 +640,7 @@ export class MinerUService {
         this.inFlight.delete(attachment.key);
       });
       this.inFlight.set(attachment.key, task);
+      options.onOrigin?.("mineru_parsed");
       return await task;
     } catch (error) {
       ztoolkit.log(

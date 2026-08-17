@@ -438,4 +438,199 @@ assert.ok(
   assert.equal(notifications, 1);
 }
 
+// Incremental mutations must republish the resident-index status. Before this,
+// the panel kept rendering the counts captured at snapshot commit, so an
+// update, a delete or a rebuild looked like it never reached the GPU.
+{
+  const commands = [];
+  const observed = [];
+  let residentVectors = 10;
+  const service = new GpuVectorService({
+    readPreference: () => true,
+    writePreference: () => {},
+    readPrecision: () => "int8",
+    writePrecision: () => {},
+    assertPlatform: () => {},
+    extractAssets: async () => ({
+      directory: "C:\\gpu",
+      executable: "C:\\gpu\\vector-gpu.exe",
+      manifest: {},
+    }),
+    launchProcess: async () => ({
+      request: async (type, fields) => {
+        commands.push(type);
+        if (type === "hello") {
+          return response({
+            device: "RTX Test",
+            totalMemoryBytes: 8 * 1024 ** 3,
+            freeMemoryBytes: 7 * 1024 ** 3,
+          });
+        }
+        if (type === "snapshot.commit") {
+          return response({ vectors: residentVectors, deviceBytes: 4096 });
+        }
+        if (type === "index.upsert") {
+          residentVectors += 3;
+          return response({ vectors: residentVectors, deviceBytes: 8192 });
+        }
+        if (type === "index.delete") {
+          residentVectors -= 4;
+          return response({ vectors: residentVectors, deviceBytes: 6144 });
+        }
+        if (type === "index.clear") {
+          residentVectors = fields.all ? 0 : 1;
+          return response({ vectors: residentVectors, deviceBytes: 512 });
+        }
+        return response();
+      },
+      stop: async () => {},
+    }),
+    notifyFallback: () => {},
+  });
+  service.registerProvider({
+    getSnapshotInfo: async () => ({
+      total: 10,
+      dimensions: 4,
+      float32Count: 10,
+      int8Count: 10,
+    }),
+    readSnapshotBatch: async (afterRowId) => (afterRowId === 0 ? int8Rows : []),
+    readItems: async () => int8Rows,
+  });
+  service.subscribe((status) => observed.push({ ...status }));
+
+  await service.startIfEnabled();
+  assert.equal(service.getStatus().phase, "available");
+  assert.equal(service.getStatus().vectors, 10);
+  assert.equal(
+    service.getStatus().lastSyncedAt,
+    undefined,
+    "a plain snapshot load is not an incremental sync",
+  );
+
+  const beforeUpsert = observed.length;
+  await service.publishMutation({
+    kind: "itemChanged",
+    libraryID: 1,
+    itemKey: "ITEM",
+  });
+  assert.equal(service.getStatus().vectors, 13, "upsert republishes the count");
+  assert.equal(service.getStatus().deviceBytes, 8192);
+  assert.ok(
+    typeof service.getStatus().lastSyncedAt === "number",
+    "upsert stamps a sync time the panel can render",
+  );
+  assert.ok(
+    observed.length > beforeUpsert,
+    "subscribers are notified so the panel refreshes without being reopened",
+  );
+
+  await service.publishMutation({
+    kind: "itemsDeleted",
+    items: [{ libraryID: 1, itemKey: "ITEM" }],
+  });
+  assert.equal(service.getStatus().vectors, 9, "delete republishes the count");
+  assert.equal(service.getStatus().deviceBytes, 6144);
+
+  await service.publishMutation({ kind: "libraryCleared", libraryID: 1 });
+  assert.equal(
+    service.getStatus().vectors,
+    1,
+    "clearing one library republishes the count",
+  );
+
+  const syncedBeforeRebuild = service.getStatus().lastSyncedAt;
+  await service.publishMutation({ kind: "allCleared" });
+  assert.equal(
+    service.getStatus().vectors,
+    0,
+    "a full rebuild republishes the emptied count",
+  );
+  assert.ok(
+    service.getStatus().lastSyncedAt >= syncedBeforeRebuild,
+    "every mutation advances the sync time",
+  );
+  assert.equal(service.getStatus().phase, "available");
+  assert.equal(
+    commands.filter((type) => type === "index.clear").length,
+    2,
+    "library and full clears both go to the worker",
+  );
+
+  await service.shutdown();
+  assert.equal(service.getStatus().phase, "disabled");
+}
+
+// A worker that predates count reporting must not blank out a real count, and
+// a restarted session must not inherit the previous session's sync time.
+{
+  let residentReported = true;
+  const service = new GpuVectorService({
+    readPreference: () => true,
+    writePreference: () => {},
+    readPrecision: () => "int8",
+    writePrecision: () => {},
+    assertPlatform: () => {},
+    extractAssets: async () => ({
+      directory: "C:\\gpu",
+      executable: "C:\\gpu\\vector-gpu.exe",
+      manifest: {},
+    }),
+    launchProcess: async () => ({
+      request: async (type) => {
+        if (type === "hello") {
+          return response({
+            device: "RTX Test",
+            totalMemoryBytes: 8 * 1024 ** 3,
+            freeMemoryBytes: 7 * 1024 ** 3,
+          });
+        }
+        if (type === "snapshot.commit") {
+          return response({ vectors: 7, deviceBytes: 2048 });
+        }
+        if (type === "index.upsert" && !residentReported) return response();
+        return response({ vectors: 7, deviceBytes: 2048 });
+      },
+      stop: async () => {},
+    }),
+    notifyFallback: () => {},
+  });
+  service.registerProvider({
+    getSnapshotInfo: async () => ({
+      total: 7,
+      dimensions: 4,
+      float32Count: 7,
+      int8Count: 7,
+    }),
+    readSnapshotBatch: async (afterRowId) => (afterRowId === 0 ? int8Rows : []),
+    readItems: async () => int8Rows,
+  });
+
+  residentReported = false;
+  await service.startIfEnabled();
+  await service.publishMutation({
+    kind: "itemChanged",
+    libraryID: 1,
+    itemKey: "ITEM",
+  });
+  assert.equal(
+    service.getStatus().vectors,
+    7,
+    "an unreported count keeps the last known value instead of dropping to zero",
+  );
+  assert.ok(
+    typeof service.getStatus().lastSyncedAt === "number",
+    "the sync still completed, so the timestamp still advances",
+  );
+
+  await service.shutdown();
+  await service.startIfEnabled();
+  assert.equal(
+    service.getStatus().lastSyncedAt,
+    undefined,
+    "a reloaded session reports a load, not a stale sync",
+  );
+  await service.shutdown();
+}
+
 console.log("GPU vector service tests passed");

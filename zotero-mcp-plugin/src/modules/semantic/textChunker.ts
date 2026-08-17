@@ -108,6 +108,11 @@ export class TextQualityPreprocessor {
       .replace(/ {3,}/g, '  ');
 
     // 2. Remove control characters (keep newlines)
+    // The control characters are the point of this regex: PDF text extraction
+    // leaves NUL/backspace/vertical-tab noise that must be stripped before the
+    // text is chunked and embedded. \x09 (tab) and \x0A/\x0D (newlines) are
+    // deliberately excluded from the class.
+    // eslint-disable-next-line no-control-regex
     processed = processed.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
 
     // 3. Blank-line cleanup: a whitespace-only line becomes empty, and a run
@@ -154,7 +159,7 @@ export class TextQualityPreprocessor {
     }
 
     // 2. Punctuation ratio
-    const punct = (text.match(/[，。、；：""''！？…—,.;:!?"'\-\(\)\[\]]/g) || []).length;
+    const punct = (text.match(/[，。、；：""''！？…—,.;:!?"'\-()[\]]/g) || []).length;
     const punctRatio = punct / text.length;
     if (punctRatio > 0.25) {
       score -= 30;
@@ -529,7 +534,7 @@ export class TextChunker {
 
     // Detect abstract (Chinese and English)
     const abstractPatterns = [
-      /^(摘\s*要|Abstract|ABSTRACT)[：:\s]*\n?([\s\S]*?)(?=\n\s*\n|关键词|Keywords|Key\s*words|1\s*[\.、]|一[、．.]|Introduction|引言)/im,
+      /^(摘\s*要|Abstract|ABSTRACT)[：:\s]*\n?([\s\S]*?)(?=\n\s*\n|关键词|Keywords|Key\s*words|1\s*[.、]|一[、．.]|Introduction|引言)/im,
       /(摘\s*要|Abstract)[：:\s]*([\s\S]{50,800}?)(?=\n\s*\n)/im
     ];
 
@@ -560,11 +565,11 @@ export class TextChunker {
         levelFn: () => 1
       },
       {
-        pattern: /^(\d+)[\.．]\s*(.{2,50})$/gm,
+        pattern: /^(\d+)[.．]\s*(.{2,50})$/gm,
         levelFn: (m) => m.length === 1 ? 1 : 2
       },
       {
-        pattern: /^(\d+\.\d+)[\.．]?\s*(.{2,50})$/gm,
+        pattern: /^(\d+\.\d+)[.．]?\s*(.{2,50})$/gm,
         levelFn: () => 2
       },
       {

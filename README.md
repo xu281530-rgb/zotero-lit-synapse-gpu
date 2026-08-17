@@ -5,7 +5,7 @@ _This README is also available in: [:cn: 简体中文](./README-zh.md) | :gb: En
 [![zotero target version](https://img.shields.io/badge/Zotero-7-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-1.8.1-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-1.9.2-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -198,9 +198,14 @@ Here are some screenshots demonstrating the functionality of Zotero MCP:
 
 ## 🔧 API Reference (MCP Tools)
 
-The integrated MCP server provides tools in 5 categories:
+All tool definitions live in one place — `src/modules/toolCatalog.ts` — and both
+the MCP `tools/list` response and the HTTP `/capabilities` document are projected
+from it. There is no second list to keep in sync, and
+`npm run test:tool-catalog` fails the build if the two projections ever disagree.
 
-### 1. Search & Query (8 tools)
+The server provides tools in 5 categories:
+
+### 1. Search & Query (12 tools)
 
 #### `hybrid_search`
 
@@ -217,7 +222,7 @@ only to break ties between candidates whose fused scores are equal; `rrfK` tunes
 that tie-break, not the ranking.
 
 - `query` (required unless `cursor` is given), `keywords`, `domain`,
-  `expertRole`, `topK`, `cursor`, `candidateK`, `minScore`, `language`,
+  `expertRole`, `topK`, `cursor`, `minScore`, `language`,
   `rrfK`, `keywordWeight`, `semanticWeight`, `libraryID`
 - Returns a lightweight candidate row per document: `itemKey`, `title`,
   `creators`, `year`, `publicationTitle`, `language`, fused `score`,
@@ -244,15 +249,13 @@ alongside a cursor is rejected — that is a new search. Pagination state lives 
 minutes and covers the 5 most recent searches; an expired cursor fails with a
 clear message rather than silently restarting.
 
-**Retrieval depth.** `candidateK` decides how many candidates each branch
-considers before fusion — how far down the library is examined, not how much
-comes back. It defaults to the *Retrieval depth per branch* preference (240) and
-is the one hybrid setting a caller may raise above the user's value, because the
-response asks it to do exactly that when the candidate pool came back full.
-`pagination.totalRelevantIsLowerBound` and `metadata.candidatePoolSaturated` say
-when that happened, and they are only set when the pool's weakest candidate
-still cleared the threshold — if it did not, nothing beyond the pool could have
-qualified and the count is exact.
+**Retrieval depth.** Both branches are *exhaustive*: fusion sees every
+candidate, `ranked` holds every document that cleared the threshold, and
+`results` is just a window onto it. There is therefore no candidate pool to
+saturate and no `candidateK` parameter. `totalRelevant` is exact, and degrades
+to a lower bound only when a branch failed or timed out — in which case
+`pagination.degradedRetrieval` and `pagination.totalRelevantIsLowerBound` are
+both set.
 
 #### `search_library`
 
@@ -263,9 +266,48 @@ field constraints. Use `hybrid_search` first for general literature discovery.
 
 #### `search_annotations`
 
-Search annotations by query, colors, or tags with intelligent ranking.
+Search **your own marks** across the library — PDF highlights and comments, and
+the notes you typed into Zotero — when you do not yet know which document holds
+them. Everything it returns is the user's reading, not the literature: quote it
+verbatim and attribute it to the user.
 
-- `q`, `itemKeys`, `types` (note/highlight/annotation/ink/text/image), `colors`, `tags`, `mode`, `limit`, `offset`
+At least one of `q`, `colors` or `tags` is required; an unfiltered sweep of every
+mark in the library is not a question. Every mark matching the filters is scored
+and ranked *before* one page is served — the previous implementation ranked an
+arbitrary first 100 candidates, so in a library with more matches than that the
+best one was routinely outside the window it ranked.
+
+Each hit carries three separate keys, and only one of them is a document key:
+`sourceItemKey` is the **paper**, `attachmentKey` is the PDF the mark sits on,
+and `annotationKey` is the mark itself. Continue with `sourceItemKey` — it is
+what `get_annotations(itemKeys)`, `get_item_details`, `search_fulltext` and
+`get_document_chunks` all expect.
+
+> Before 1.9.1 a row carried one field named `parentKey`, which held the
+> attachment key for a highlight and the item key for a note. Feeding a
+> highlight's `parentKey` to `get_annotations` matched nothing and returned an
+> empty page, which reads as "this paper has no marks" rather than as a wrong
+> key. The field is gone rather than deprecated: one name with two meanings is
+> the defect, so keeping it would keep the failure.
+
+- `q`, `itemKeys` (document keys; all of them are searched), `types`, `colors`,
+  `tags`, `detail` (minimal/preview/standard/complete), `maxTokens`,
+  `minRelevance`, `limit`, `offset`
+- Returns `pagination` with `total`, `offset`, `limit`, `hasMore`, `nextOffset`
+- Each row returns `sourceItemKey`, `attachmentKey` (absent for notes) and
+  `annotationKey`
+- `sourceItemKey` is **null** when the mark has no document above it — a
+  top-level note, or a mark on an unfiled attachment — with
+  `noSourceItemReason` saying which. It is never filled in with a substitute:
+  a standalone note's own key briefly stood in here, and against a real library
+  `get_annotations` on it returned 0 marks while `get_document_chunks` blamed a
+  missing index for a note that has no attachment. A key every document-level
+  tool rejects is not a document key.
+- Handing an attachment, note or annotation key to `get_item_details`,
+  `get_document_chunks` or `search_fulltext` is now refused by name, and the
+  refusal gives you the document key to use instead. `get_item_details`
+  previously *succeeded* on an attachment key and returned the PDF's filename
+  as the title.
 
 #### `search_fulltext`
 
@@ -284,11 +326,61 @@ cannot match a single document's passages.
 
 #### `search_collections`
 
-Search collections by name. Params: `q`, `limit`.
+Find collections whose name matches a query, when the user refers to a folder by
+name and you need its `collectionKey`. Returns identity and path, not contents.
+Params: `q`, `limit`, `libraryID`.
+
+#### `get_libraries`
+
+List every Zotero library available in this client. Params: `limit`, `offset`.
+
+#### `search_libraries`
+
+Find a library by name, when the user names a group library and you need its
+`libraryID`. Params: `q` (required), `limit`, `offset`.
+
+#### `get_annotations`
+
+Read **your own marks** on documents you already name: PDF highlights, comments,
+image and ink annotations, and the notes you typed into Zotero. This is where
+note bodies come from — `get_item_details` no longer returns them, because a
+metadata lookup shipping the user's private notes gave no marker saying whose
+words were whose.
+
+Pass exactly one of `itemKeys` (one or **many** documents — all of them are read,
+which is what makes "compare my marks across these five papers" a single call),
+`itemKey`, `annotationId`, or `annotationIds`. `itemKeys` takes **document**
+keys — the `sourceItemKey` of a `search_annotations` hit, never its
+`attachmentKey`. Each row carries the `sourceItemKey` it came from, so marks
+stay attributable when several documents are read at once.
+
+Results always page: a well-read PDF holds hundreds of highlights, and `complete`
+used to mean "all of them in one response".
+
+- `itemKeys`, `itemKey`, `annotationId`, `annotationIds`, `types`, `colors`,
+  `tags`, `detail` (minimal/preview/standard/complete), `maxTokens`, `limit`,
+  `offset`, `libraryID`
 
 #### `get_item_details`
 
-Get complete metadata for a single item. Params: `itemKey` (required), `mode`.
+Bibliographic metadata for one item — the citation tool. Returns title, creators,
+date, item type, venue, volume/issue/pages, DOI, URL, language, tags, the
+collections the item belongs to (with paths), and one row per attachment.
+
+**It returns no content, by design.** No abstract text, no note bodies, no
+annotation text, no PDF text, no chunks — each of those has a tool that returns
+it on purpose and pages it properly. What you get instead is availability:
+`hasAbstract` / `abstractChars` say what `get_item_abstract` would return without
+returning it, and `noteCount` says how many notes `get_annotations` would find.
+
+`fullText` reports what the semantic index actually holds, on the same five-value
+scale every search result uses (`indexed` / `parse_failed` / `no_source` /
+`not_indexed` / `unknown`). This replaces the old per-attachment `hasFulltext`
+boolean, which only looked at the file extension and therefore claimed full text
+for PDFs that had never parsed; the per-attachment flag is still there as
+`hasExtractableText`, meaning "this file type could yield text".
+
+Params: `itemKey` (required), `mode` (minimal/standard/complete), `libraryID`.
 
 #### `get_item_abstract`
 
@@ -298,37 +390,136 @@ batch step after `hybrid_search`, so 20 candidates does not mean 20 abstracts.
 
 Params: `itemKey` (required), `format` (json/text).
 
-#### `get_content`
+#### `get_attachment_text`
 
-Unified content extraction: PDF full-text, notes, abstracts, webpage snapshots from items or specific attachments.
+The text of **one attachment** — a PDF, a Markdown/HTML/plain-text file — and
+nothing else. Replaces `get_content`, which merged the abstract, the notes, every
+attachment's text and a webpage snapshot into one object with no way to ask for
+just one of them, and no paging at all.
 
-- `itemKey`, `attachmentKey`, `mode`, `include` (pdf/attachments/notes/abstract/webpage), `contentControl`, `format` (json/text)
+**Choosing the attachment.** Call with `itemKey` alone to get the attachment list
+and no text; call again with the `attachmentKey` you want. An item with exactly
+one text-bearing attachment is selected automatically (`selectedAutomatically:
+true`); an item with two is never guessed between, because reading the wrong one
+returns text that looks entirely valid and belongs to a different document.
 
-### 2. Collection Management (4 tools)
+**Where the text came from.** Every response names its source in
+`textSource.method`, with a `description` saying what may be relied on:
+`doc2x` (publisher structure preserved), `mineru_cache` / `mineru_attachment`
+(reused MinerU Markdown, reconstructed layout), `mineru` (parsed during this
+call), `markdown_attachment`, `zotero_fulltext_cache` (Zotero's flat index — **no
+layout, no tables**), `pdf_processor`, `html_parsing`, `text_reading`. When no
+text could be produced, the method says why (`mineru_disabled`,
+`mineru_on_demand_disabled`, `mineru_failed`, `mineru_error`, `no_text`).
+
+**Paging.** Text comes back in character windows, cut at a paragraph or sentence
+boundary where one is nearby so a window never ends mid-word. `pagination`
+carries `totalChars`, `offset`, `returnedChars`, `hasMore`, `nextOffset`.
+
+- `itemKey` (required), `attachmentKey`, `offset`, `limit`, `libraryID`
+
+### 2. Collection Management (3 tools)
 
 #### `get_collections`
 
-Get all collections. Params: `mode`, `limit`, `offset`.
+List collections, mainly so you can read the user's real folder names and pass
+the relevant ones to `hybrid_search` as `collectionKeys`. Flat and paginated:
+top-level collections by default, or `parentCollection`'s direct children.
+
+The response is `{ results, pagination, metadata }`. Until 1.9.1 it was a bare
+JSON array with the total in an `X-Total-Count` header, so over MCP — which
+forwards only the body — the total and the `metadata` block the server attached
+were both silently dropped by `JSON.stringify`, and a page of 100 out of 300 was
+indistinguishable from a complete library of 100. `search_collections` returns
+the same envelope.
+
+Params: `parentCollection`, `mode`, `limit`, `offset`, `libraryID`.
+
+> `recursive` was removed in 1.9.1. It returned every level in one unpaginated
+> response, duplicating `get_collection_items` and reintroducing the bulk dump
+> the level-by-level browser replaced. Passing it is an error, not a no-op.
+> `get_collection_items` reports `directItemCount`, `totalItemCount` and
+> `hasChildren` per folder, so you can see what a subtree holds without
+> downloading it.
+
+> `get_subcollections` was removed in 1.9.0 as a duplicate: it was this tool with
+> `parentCollection` renamed to `collectionKey`, ending in the same handler with
+> the same recursive walk. Use `get_collections` with `parentCollection`.
 
 #### `get_collection_details`
 
-Get details of a specific collection. Params: `collectionKey` (required).
+Metadata about one collection: name, parent, how many items and subcollections it
+holds. It does not list them. Params: `collectionKey` (required).
 
 #### `get_collection_items`
 
-Get items in a collection. Params: `collectionKey` (required), `limit`, `offset`.
+**Browse the library one level at a time, like a file manager.** Each call
+returns the subfolders at the current level plus one page of the documents filed
+directly there — never the whole tree.
 
-#### `get_subcollections`
+Call it with no `collectionKey` to start at the library root (its top-level
+collections, plus any documents in no collection at all), then descend by passing
+the `collectionKey` of the folder you want to open. Every response repeats the
+current `location` (`libraryID`, `collectionKey`, `name`, `path`) and the
+`parent` you came from.
 
-Get subcollections. Params: `collectionKey` (required), `limit`, `offset`, `recursive`.
+Each subfolder row carries `directItemCount`, `totalItemCount` and `hasChildren`,
+which is how you choose where to descend without opening anything: a folder with
+`directItemCount: 0` and `totalItemCount: 300` is a container, not a dead end.
+`totalItemCount` de-duplicates, so a paper filed in both a parent and its child
+counts once.
 
-### 3. Semantic Search (3 tools, can be disabled in preferences)
+Document rows are deliberately thin — `itemKey`, title, creators, year, venue,
+DOI, item type. No abstracts, notes, annotations, attachment text or chunks: the
+old version returned `formatItem`'s full default field list, so two rows measured
+4.5 KB and listing a 200-item folder was most of a context window.
+
+- `collectionKey`, `path` (e.g. `"Materials/Solidification/CET"`, resolved to a
+  key; an ambiguous path fails and lists the candidate keys rather than
+  guessing), `limit`, `offset`, `libraryID`
+- Returns `location`, `parent`, `subcollections`, `items`, `itemPagination`
+
+### 3. Semantic & Reading (5 tools, can be disabled in preferences)
+
+`hybrid_search`, `keyword_search` and `semantic_search` return **the same
+lightweight candidate row** and share the same scoping, threshold and cursor
+paging, so switching between them costs nothing. They also share their
+implementation: one lexical service (`runLexicalSearch`), one semantic service
+(`SemanticSearchService.search`), one page store and one row projection. There is
+no second copy of either retrieval algorithm.
+
+#### `keyword_search`
+
+Lexical-only retrieval over Zotero metadata (title, abstract, creators,
+publication title, tags). No embeddings; body text is not scanned.
+
+Two uses: an exact term you must not miss, and — the intended one — a **coarse
+filter** whose `itemKeys` you hand to `semantic_search` so the semantic pass only
+scores that shortlist. For ordinary discovery `hybrid_search` is still the
+default first step, since it runs this branch *and* the semantic one and fuses
+them.
+
+- `keywords` (required unless following a cursor; bilingual, 1–16, ~5–12
+  recommended), `query` (fallback probes only — never embedded), `domain`,
+  `expertRole`, `collectionKeys`, `itemKeys`, `topK`, `cursor`, `minScore`,
+  `libraryID`
 
 #### `semantic_search`
 
-AI-powered semantic search using embedding vectors. Finds conceptually related content even without exact keyword matches.
+Pure embedding-similarity retrieval: one natural-language query is embedded and
+compared against every indexed passage. Use it for a concept whose vocabulary you
+cannot pin down, or as the fine pass over a `keyword_search` shortlist.
 
-- `query` (required), `topK`, `minScore`, `language` (zh/en/all)
+Before 1.9.0 this tool was the last one still on the pre-funnel architecture:
+hard-coded `topK = 10` and `minScore = 0.3` that ignored the user's own settings,
+no cursor, no collection or item scoping, rows shipping raw untruncated chunk
+text (in a real library, whole reference lists as "evidence"), and no `fullText`
+status — so a semantic hit on a paper's *abstract* was indistinguishable from a
+hit on its body. All of that now matches `hybrid_search` exactly.
+
+- `query` (required unless following a cursor), `domain`, `expertRole`,
+  `collectionKeys`, `itemKeys`, `topK`, `cursor`, `minScore`, `language`,
+  `libraryID`
 
 #### `find_similar`
 
@@ -346,15 +537,48 @@ Timeout: no separate setting. The scan deadline is the user's single-scan `vecto
 
 Get semantic search service status and index statistics. No parameters required.
 
-### 4. Full-text Database (1 tool)
+#### `get_document_chunks`
 
-#### `fulltext_database`
+Read **one paper's body straight through**, in the order the semantic index
+stored it, a few chunks per page. `search_fulltext` answers "where in this paper
+does it say X"; this answers "let me read this paper".
 
-Access cached full-text content database (read-only).
+Every chunk carries `chunkIndex` (position in reading order) and `chunkId` (the
+stable id `search_fulltext` and `find_similar` accept). The two are *not*
+interchangeable — they diverge wherever a chunk was dropped — so never compute
+one from the other.
 
-- `action` (required: list/search/get/stats), `query`, `itemKeys`, `limit`
+Paging is mandatory: a page is at most 20 chunks and there is no way to ask for
+the whole document. A document whose PDF never parsed, or which has no text
+attachment, is **refused** with a message naming which case it is, rather than
+being answered with its title and abstract dressed up as body text.
 
-### 5. Write Operations (4 tools, can be disabled in preferences)
+- `itemKey` (required unless following a cursor), `cursor`, `offset`, `limit`,
+  `libraryID`
+- Returns `fullText`, `pagination` (`totalChunks`, `returned`, `offset`, `range`,
+  `hasMore`, `nextCursor`) and `data`
+
+> `fulltext_database` was removed in 1.9.0. Two of its four actions (`list`,
+> `stats`) were index administration exposed to callers, and a third (`get`)
+> returned an entire document in one unpaginated response — the single standing
+> bypass around the retrieval funnel every other tool enforces. Index
+> maintenance now lives only in the plugin's preferences UI.
+
+### 4. Write Operations (9 tools, can be disabled in preferences)
+
+All nine are hidden from `tools/list` and from `/capabilities` when write
+operations are disabled, which is the default — the server never advertises a
+capability it would refuse.
+
+#### Collection mutation
+
+- `create_collection` — `name` (required), `parentCollection`, `libraryID`
+- `update_collection` — `collectionKey` (required), `name`, `parentCollection`
+- `delete_collection` — `collectionKey` (required), `deleteItems`
+- `add_items_to_collection` — `collectionKey`, `itemKeys` (both required)
+- `remove_items_from_collection` — `collectionKey`, `itemKeys` (both required)
+
+#### Item and note mutation
 
 #### `write_note`
 

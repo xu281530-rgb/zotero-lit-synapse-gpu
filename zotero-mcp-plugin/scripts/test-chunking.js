@@ -21,6 +21,11 @@ register("./ts-ext-hooks.mjs", import.meta.url);
 
 // The chunker logs through ztoolkit and reads the user's preferences through
 // Zotero.Prefs, so both have to exist before the module is imported.
+// This file creates the Zotero global itself a few lines down, so it is
+// declared here rather than in eslint.config.mjs — a scripts/**-wide global
+// would stop `no-undef` from catching a stray Zotero reference in the ~40
+// other test scripts, which have no such stub.
+/* global Zotero */
 const prefs = new Map();
 globalThis.Zotero = {
   Prefs: {

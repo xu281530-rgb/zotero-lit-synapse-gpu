@@ -258,9 +258,13 @@ export class GpuVectorProcess {
     }
     try {
       await this.process.stdin.close(true);
-    } catch {}
+    } catch {
+      // Best effort: the pipe is already gone if the child exited on shutdown.
+    }
     try {
       await this.process.kill(0);
-    } catch {}
+    } catch {
+      // Best effort: the child may have exited already.
+    }
   }
 }

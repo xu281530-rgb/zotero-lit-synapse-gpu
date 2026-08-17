@@ -1,3 +1,9 @@
+import {
+  DIMENSION_MISMATCH_HINT,
+  isVectorDimensionMismatchError,
+} from "./semantic/dimensionMismatch";
+import { isKeywordSearchUnavailableError } from "./keywordSearchGate";
+
 export interface KeywordSearchItem extends Record<string, unknown> {
   key: string;
   libraryID?: number;
@@ -91,6 +97,28 @@ export interface HybridSearchRunResult {
    */
   ranked: HybridSearchResult[];
   degraded: boolean;
+  /**
+   * The semantic branch could not run because the stored vectors and the
+   * current embedding model disagree on dimensionality.
+   *
+   * Broken out as its own flag rather than left inside the warning prose,
+   * because it is the one degradation a caller can act on mechanically: every
+   * semantic result is missing and will stay missing until the index is
+   * rebuilt. Without it, `hybrid_search` returned a keyword-only ranking that
+   * was indistinguishable from a healthy hybrid run.
+   */
+  semanticIndexIncompatible: boolean;
+  /**
+   * The keyword branch was refused because Zotero's database stopped
+   * answering an earlier query and the gate is waiting before it risks
+   * creating another uncancellable one.
+   *
+   * Distinct from a plain keyword timeout: retrying immediately cannot help,
+   * and — unlike a timeout — the semantic half of this search is completely
+   * healthy. The rows below are semantic-only, and that is a temporary,
+   * self-healing state rather than a fact about the library.
+   */
+  keywordSearchUnavailable: boolean;
   warnings: string[];
   keywordResultCount: number;
   semanticResultCount: number;
@@ -1224,14 +1252,39 @@ export async function runHybridSearch(
   const semanticResults =
     semanticOutcome.status === "fulfilled" ? semanticOutcome.value : [];
 
+  const keywordSearchUnavailable =
+    keywordOutcome.status === "rejected" &&
+    isKeywordSearchUnavailableError(keywordOutcome.reason);
   if (keywordOutcome.status === "rejected") {
     warnings.push(
       `Keyword metadata search unavailable: ${errorMessage(keywordOutcome.reason)}`,
     );
   }
+  if (keywordSearchUnavailable) {
+    // Stated separately from the branch error so the two facts a client needs
+    // are both explicit: these rows are semantic-only, and this is temporary.
+    warnings.push(
+      "These results come from the SEMANTIC branch ALONE: Zotero's database " +
+        "stopped answering an earlier keyword query, and its search API " +
+        "cannot be cancelled, so the plugin is waiting before it starts " +
+        "another. Do NOT read a small or empty result set as evidence that " +
+        "the library lacks relevant work, and do not retry immediately — the " +
+        "keyword branch restores itself as soon as Zotero answers.",
+    );
+  }
+  const semanticIndexIncompatible =
+    semanticOutcome.status === "rejected" &&
+    isVectorDimensionMismatchError(semanticOutcome.reason);
   if (semanticOutcome.status === "rejected") {
     warnings.push(
       `Semantic search unavailable: ${errorMessage(semanticOutcome.reason)}`,
+    );
+  }
+  if (semanticIndexIncompatible) {
+    // Stated separately from the branch error, and in the shared wording, so
+    // the remedy is legible whichever tool the caller reached this through.
+    warnings.push(
+      `${DIMENSION_MISMATCH_HINT} These results come from the keyword branch ALONE — treat them as a keyword search, not as a hybrid one, and do not read a small or empty result set as evidence that the library lacks relevant work.`,
     );
   }
 
@@ -1247,6 +1300,8 @@ export async function runHybridSearch(
     results: fusion.results,
     ranked: fusion.ranked,
     degraded: warnings.length > 0,
+    semanticIndexIncompatible,
+    keywordSearchUnavailable,
     warnings,
     keywordResultCount: keywordResults.length,
     semanticResultCount: semanticResults.length,

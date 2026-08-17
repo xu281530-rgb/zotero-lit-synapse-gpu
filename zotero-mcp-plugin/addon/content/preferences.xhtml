@@ -497,7 +497,79 @@
     .zmp-b-sm { min-height: 26px; padding: 0 10px; font-size: 11px; }
     .zmp-bg { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; }
     /* Inline result text next to a button */
-    .zmp-res { font-size: 12px; color: var(--text-2); line-height: 1.4; }
+    .zmp-res {
+      font-size: 12px;
+      color: var(--text-2);
+      line-height: 1.4;
+      /* Never wider than the setting rows above: a long measurement line has
+         to wrap inside the section, not push the pane sideways. */
+      box-sizing: border-box;
+      max-width: 100%;
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    /* ------------------------------------------------------------
+       Borderless result grid (scan test)
+       Reads as a table — aligned columns, centred cells — without any
+       rules or vertical dividers. Columns are minmax(0, ...) so a long
+       label wraps instead of widening the grid past its container.
+       ------------------------------------------------------------ */
+    .zmp-rt {
+      box-sizing: border-box;
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
+      margin-top: 10px;
+      /* Small inset so the outermost column never renders flush against the
+         edge of the setting cards above — the block stays strictly inside
+         their width. */
+      padding: 0 4px;
+    }
+    .zmp-rt-r {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) repeat(3, minmax(0, 1fr));
+      gap: 0 8px;
+      align-items: center;
+    }
+    .zmp-rt-c {
+      box-sizing: border-box;
+      min-width: 0;
+      padding: 5px 2px;
+      text-align: center;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      line-height: 1.4;
+    }
+    .zmp-rt-h .zmp-rt-c {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-3);
+      letter-spacing: 0.02em;
+      padding-bottom: 3px;
+    }
+    .zmp-rt-k { font-size: 12px; font-weight: 550; color: var(--text); }
+    .zmp-rt-n {
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      color: var(--text);
+    }
+    /* Coverage caption under the grid. Left-aligned and a step smaller than
+       the cells: it qualifies the numbers, it is not one of them. */
+    .zmp-rt-scope {
+      box-sizing: border-box;
+      max-width: 100%;
+      padding: 0 4px;
+      margin-top: 8px;
+      font-size: 10.5px;
+      color: var(--text-3);
+      line-height: 1.5;
+      text-align: left;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .zmp-rt-scope-l { font-weight: 600; }
 
     /* ============================================================
        Collapsible panel

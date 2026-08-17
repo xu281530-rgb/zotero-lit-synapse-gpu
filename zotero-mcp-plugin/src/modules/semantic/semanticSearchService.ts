@@ -60,6 +60,14 @@ import {
   type ChunkTooLargeDecisionRequest,
 } from './chunkOversizePolicy';
 import { groupFailedIndexItems } from './failedIndexRetry';
+import {
+  enumerateLibraryItems,
+  isItemEnumerationError,
+} from './libraryEnumeration';
+import {
+  computeBodyExtractionSignature,
+  decideBodyRetry,
+} from './bodyRetryPolicy';
 
 declare let Zotero: any;
 declare let ztoolkit: ZToolkit;
@@ -1069,7 +1077,31 @@ export class SemanticSearchService {
           items.push(item ?? { key, libraryID, __missing: true });
         }
       } else {
-        items = await this.getItemsWithContent(libraryID);
+        // The destructive steps of a full-library rebuild (createBuildSession
+        // with the target snapshot, then clearLibraryForBuild) are all
+        // downstream of this line, and every one of them is validated against
+        // `items`. So enumeration failing has to stop the run HERE, before any
+        // of them runs — an unusable answer must never be allowed to present
+        // itself as an empty library.
+        try {
+          items = await this.getItemsWithContent(libraryID);
+        } catch (error) {
+          if (!isItemEnumerationError(error)) throw error;
+          ztoolkit.log(
+            `[SemanticSearch] Aborting build: ${error.message}`,
+            'error',
+          );
+          this.indexProgress.status = 'error';
+          this.indexProgress.error = error.message;
+          this.indexProgress.errorType = 'unknown';
+          // Retryable: nothing was destroyed, and the query may well answer
+          // next time. This is the whole point of stopping this early.
+          this.indexProgress.errorRetryable = true;
+          this.indexProgress.total = 0;
+          this.indexProgress.processed = 0;
+          onProgress?.(this.indexProgress);
+          return this.indexProgress;
+        }
       }
 
       const totalLibraryItems = items.length;
@@ -1496,6 +1528,43 @@ export class SemanticSearchService {
    *   again, so both fast paths must be off, otherwise the build reports
    *   "finished N/N" without ever opening a single PDF.
    */
+  /**
+   * The extraction configuration in force right now, as a comparable string.
+   *
+   * Stamped onto every index_status row the build writes, so a later run can
+   * distinguish "already attempted under these exact settings" from "the
+   * settings have changed, so the outcome may differ now".
+   */
+  private getBodyExtractionSignature(): string {
+    try {
+      const config = getMinerUService().getConfig();
+      return computeBodyExtractionSignature({
+        minerUEnabled: config.enabled,
+        minerUMode: config.mode,
+        minerUBaseURL: config.baseURL,
+        minerUModelVersion: config.modelVersion,
+        minerULanguage: config.language,
+        minerUEnableOCR: config.enableOCR,
+        minerUEnableFormula: config.enableFormula,
+        minerUEnableTable: config.enableTable,
+        minerUTimeoutSeconds: config.timeoutSeconds,
+        minerUMaxFileSizeMB: config.maxFileSizeMB,
+        minerUApiToken: config.apiToken,
+      });
+    } catch (error) {
+      // A signature we cannot compute must not pin items to "never retry".
+      // Falling back to a constant leaves the backoff as the only pacing rule,
+      // which still bounds the cost while keeping failed items reachable —
+      // the safe direction, since the alternative is an item that silently
+      // stays body-less forever.
+      ztoolkit.log(
+        `[SemanticSearch] Could not compute body extraction signature: ${error}`,
+        'warn',
+      );
+      return '';
+    }
+  }
+
   async indexItemWithProcessor(
     item: any,
     sharedProcessor: PDFProcessor | null,
@@ -1531,7 +1600,40 @@ export class SemanticSearchService {
     const needsCheckByTimestamp = await this.vectorStore.needsReindexByTimestamp(
       item.key, itemModified, attachmentModified, item.libraryID
     );
+    // ...unless the stored row says this item has NO body text. `getItemsToSkip`
+    // keeps 'metadata-only' and 'empty' rows eligible for another attempt
+    // precisely so a repaired PDF or a MinerU settings change can be picked up
+    // — but a PDF's mtime does not change when either of those happens, so the
+    // timestamp shortcut used to swallow every one of those items and made the
+    // exemption above unreachable outside an explicit forced retry.
+    //
+    // Paced rather than unconditional: re-extracting every permanently broken
+    // PDF on every incremental pass would spend real time and MinerU quota for
+    // an answer that cannot have changed. Items with a healthy body index are
+    // not retry candidates at all, so nothing that is already indexed is
+    // re-processed and the cost of a routine incremental build is unchanged.
+    const bodyRetrySignature = this.getBodyExtractionSignature();
+    let bodyRetry = false;
     if (!needsCheckByTimestamp && !force) {
+      const storedStatusForRetry = await this.vectorStore.getIndexStatus(
+        item.key,
+        item.libraryID,
+      );
+      const decision = decideBodyRetry({
+        status: storedStatusForRetry,
+        currentSignature: bodyRetrySignature,
+        now: Date.now(),
+      });
+      bodyRetry = decision.retry;
+      if (bodyRetry) {
+        ztoolkit.log(
+          `[SemanticSearch] indexItem() ${item.key}: timestamps unchanged but the stored row has no body text ` +
+            `(sourceKind=${storedStatusForRetry?.sourceKind}, hash=${storedStatusForRetry?.contentHash}); ` +
+            `re-attempting extraction (${decision.reason})`,
+        );
+      }
+    }
+    if (!needsCheckByTimestamp && !force && !bodyRetry) {
       this.indexProgress.unchanged = (this.indexProgress.unchanged || 0) + 1;
       ztoolkit.log(`[SemanticSearch] indexItem() skip: timestamps unchanged for ${item.key}`);
       return { status: 'succeeded' };
@@ -1571,6 +1673,7 @@ export class SemanticSearchService {
         sourceKind,
         itemModified,
         attachmentModified,
+        bodyRetrySignature,
         buildID: this._activeBuildID ?? undefined,
       });
       ztoolkit.log(`[SemanticSearch] indexItem() skip: no content for ${item.key}, marked in index_status to avoid retry loop`);
@@ -1629,6 +1732,10 @@ export class SemanticSearchService {
             item.libraryID,
             content.length,
             sourceKind,
+            // Records that this configuration has now been tried, so a
+            // still-failing item waits out the backoff instead of being
+            // re-extracted on every single incremental pass.
+            bodyRetrySignature,
         );
       }
       this.indexProgress.unchanged = (this.indexProgress.unchanged || 0) + 1;
@@ -1687,6 +1794,7 @@ export class SemanticSearchService {
       sourceKind,
       itemModified,
       attachmentModified,
+      bodyRetrySignature,
       buildID: this._activeBuildID ?? undefined,
     });
 
@@ -2692,23 +2800,15 @@ export class SemanticSearchService {
   /**
    * Get all items with content (regular items with attachments)
    */
+  /**
+   * @throws {ItemEnumerationError} Never returns `[]` to mean "could not ask".
+   *   buildIndex clears the library against this list, so a failed enumeration
+   *   must abort the run rather than present itself as an empty library.
+   */
   private async getItemsWithContent(
     libraryID: number = Zotero.Libraries.userLibraryID,
   ): Promise<any[]> {
-    try {
-      // Get all regular items
-      const search = new Zotero.Search();
-      search.libraryID = libraryID;
-      search.addCondition('itemType', 'isNot', 'attachment');
-      search.addCondition('itemType', 'isNot', 'note');
-      search.addCondition('itemType', 'isNot', 'annotation');
-
-      const ids = await search.search();
-      return Zotero.Items.getAsync(ids);
-    } catch (error) {
-      ztoolkit.log(`[SemanticSearch] Error getting items: ${error}`, 'warn');
-      return [];
-    }
+    return enumerateLibraryItems(libraryID);
   }
 
   /**

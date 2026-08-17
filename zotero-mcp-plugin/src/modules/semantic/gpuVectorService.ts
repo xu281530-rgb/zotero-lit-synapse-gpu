@@ -9,6 +9,7 @@ import type {
   GpuVectorSnapshotInfo,
   GpuVectorSnapshotRow,
 } from "./gpuVectorBackend";
+import { VectorDimensionMismatchError } from "./dimensionMismatch";
 import {
   GpuVectorStatusController,
   type GpuVectorFailureCode,
@@ -286,6 +287,16 @@ export class GpuVectorService implements GpuVectorSearchBackend {
   private queuedMutations: GpuVectorMutation[] = [];
   private syncQueue: Promise<void> = Promise.resolve();
   private effectivePrecision: GpuVectorPrecision = "int8";
+  /**
+   * The vector length of the index currently resident on the GPU.
+   *
+   * Checked before dispatch so an index that no longer matches the embedding
+   * model is reported identically on the GPU and CPU paths, as a typed
+   * configuration error rather than as an empty result or as a generic worker
+   * failure that would wrongly disable acceleration for the session.
+   */
+  private residentDimensions: number | null = null;
+  private lastSyncedAt: number | undefined;
   private readonly dependencies: GpuVectorServiceDependencies;
 
   constructor(
@@ -371,6 +382,9 @@ export class GpuVectorService implements GpuVectorSearchBackend {
 
   private async start(): Promise<void> {
     try {
+      // A new session loads the index from scratch; carrying the previous
+      // session's sync timestamp forward would date a load as an update.
+      this.lastSyncedAt = undefined;
       this.status.set({ phase: "preparing" });
       const preference = this.dependencies.readPrecision();
       if (preference !== "auto") this.effectivePrecision = preference;
@@ -447,6 +461,7 @@ export class GpuVectorService implements GpuVectorSearchBackend {
       new Uint8Array(0),
       10000,
     );
+    this.residentDimensions = info.total > 0 ? info.dimensions : null;
     let afterRowId = 0;
     let loaded = 0;
     this.status.set({ phase: "loading", loaded, total: info.total, precision });
@@ -480,18 +495,33 @@ export class GpuVectorService implements GpuVectorSearchBackend {
       30000,
     );
 
+    // Mutations that arrived while the snapshot was streaming are replayed
+    // here, so the counts reported at commit time are already stale by the
+    // time the single `available` transition below announces them. Each reply
+    // that carries counts supersedes the commit's; one that does not (an older
+    // worker) leaves the commit's figures standing rather than zeroing them.
+    let vectors = Number(committed.header.vectors ?? loaded);
+    let deviceBytes = Number(committed.header.deviceBytes ?? 0);
     while (this.queuedMutations.length > 0) {
       const pending = this.queuedMutations.splice(0);
-      for (const mutation of pending) await this.syncMutation(mutation);
+      for (const mutation of pending) {
+        const frame = await this.syncMutation(mutation);
+        if (!frame) continue;
+        this.lastSyncedAt = Date.now();
+        const syncedVectors = Number(frame.header.vectors);
+        const syncedBytes = Number(frame.header.deviceBytes);
+        if (Number.isFinite(syncedVectors)) vectors = syncedVectors;
+        if (Number.isFinite(syncedBytes)) deviceBytes = syncedBytes;
+      }
     }
-    const vectors = Number(committed.header.vectors ?? loaded);
     this.status.set({
       phase: "available",
       backend: "gpu",
       vectors,
       device,
       precision,
-      deviceBytes: Number(committed.header.deviceBytes ?? 0),
+      deviceBytes,
+      lastSyncedAt: this.lastSyncedAt,
     });
   }
 
@@ -508,6 +538,17 @@ export class GpuVectorService implements GpuVectorSearchBackend {
       const precision = this.effectivePrecision;
       const query =
         precision === "float32" ? request.query : quantizeQuery(request.query);
+      // Same contract as the CPU scan: incomparable vector lengths are a
+      // configuration error, never an empty result set.
+      if (
+        this.residentDimensions !== null &&
+        this.residentDimensions !== request.query.length
+      ) {
+        throw new VectorDimensionMismatchError(
+          request.query.length,
+          this.residentDimensions,
+        );
+      }
       let queryNormSquared = 0;
       for (const value of query) queryNormSquared += value * value;
       if (!(queryNormSquared > 0)) return [];
@@ -588,9 +629,12 @@ export class GpuVectorService implements GpuVectorSearchBackend {
     if (phase !== "available") return;
 
     const operation = this.syncQueue.then(() => this.syncMutation(mutation));
-    this.syncQueue = operation.catch(() => undefined);
+    this.syncQueue = operation.then(
+      () => undefined,
+      () => undefined,
+    );
     try {
-      await operation;
+      this.publishSyncedStatus(await operation);
     } catch (error) {
       if (
         this.dependencies.readPrecision() === "auto" &&
@@ -599,6 +643,10 @@ export class GpuVectorService implements GpuVectorSearchBackend {
       ) {
         try {
           await this.reloadSnapshotAsInt8();
+          // The reload rebuilds the snapshot from the same rows the mutation
+          // had already committed, so the sync did land — the panel should say
+          // so, with the counts the fresh Int8 index just reported.
+          this.publishSyncedStatus(null);
           return;
         } catch (retryError) {
           this.fallback(retryError);
@@ -622,15 +670,25 @@ export class GpuVectorService implements GpuVectorSearchBackend {
     await this.launchAndLoad(assets, snapshot, "int8");
   }
 
-  private async syncMutation(mutation: GpuVectorMutation): Promise<void> {
-    if (!this.process || !this.provider) return;
+  /**
+   * Apply one mutation to the resident index and hand back the worker's reply.
+   *
+   * The reply carries the post-mutation vector count and device footprint, so
+   * the caller — not this method — decides when the observable status is
+   * republished. That keeps the snapshot replay (which finishes with a single
+   * `available` transition) and ordinary incremental syncs on one code path.
+   */
+  private async syncMutation(
+    mutation: GpuVectorMutation,
+  ): Promise<GpuFrame | null> {
+    if (!this.process || !this.provider) return null;
     if (mutation.kind === "itemChanged") {
       const rows = await this.provider.readItems(
         [mutation],
         this.effectivePrecision,
       );
       const encoded = encodeRows(rows, this.effectivePrecision);
-      await this.process.request(
+      return this.process.request(
         "index.upsert",
         {
           ...encoded.fields,
@@ -642,34 +700,54 @@ export class GpuVectorService implements GpuVectorSearchBackend {
         encoded.payload,
         30000,
       );
-      return;
     }
     if (mutation.kind === "itemsDeleted") {
-      await this.process.request("index.delete", {
+      return this.process.request("index.delete", {
         precision: this.effectivePrecision,
         items: mutation.items,
       });
-      return;
     }
     if (mutation.kind === "libraryCleared") {
-      await this.process.request("index.clear", {
+      return this.process.request("index.clear", {
         precision: this.effectivePrecision,
         libraryID: mutation.libraryID,
       });
-      return;
     }
-    const cleared = await this.process.request("index.clear", {
+    return this.process.request("index.clear", {
       precision: this.effectivePrecision,
       all: true,
     });
+  }
+
+  /**
+   * Republish the resident-index status after a mutation landed on the GPU.
+   *
+   * Without this the settings panel keeps rendering the counts captured at
+   * snapshot commit, so an incremental update, a delete or a rebuild looked
+   * like it never reached the GPU even though the vectors were already there.
+   *
+   * A worker that predates the count-reporting frames leaves `vectors` and
+   * `deviceBytes` absent; the previous values are kept in that case rather
+   * than clobbering a real count with a zero, and the sync timestamp still
+   * advances so the panel can show that the sync completed.
+   */
+  private publishSyncedStatus(frame: GpuFrame | null): void {
     const status = this.status.get();
-    if (status.phase === "available") {
-      this.status.set({
-        ...status,
-        vectors: Number(cleared.header.vectors ?? 0),
-        deviceBytes: Number(cleared.header.deviceBytes ?? 0),
-      });
-    }
+    // A session that has already fallen back or been torn down has no resident
+    // index to describe, and must not leave a sync time behind for a later
+    // load to surface as if it were this session's.
+    if (status.phase !== "available") return;
+    this.lastSyncedAt = Date.now();
+    const vectors = Number(frame?.header.vectors);
+    const deviceBytes = Number(frame?.header.deviceBytes);
+    this.status.set({
+      ...status,
+      vectors: Number.isFinite(vectors) ? vectors : status.vectors,
+      deviceBytes: Number.isFinite(deviceBytes)
+        ? deviceBytes
+        : status.deviceBytes,
+      lastSyncedAt: this.lastSyncedAt,
+    });
   }
 
   fallback(error: unknown): void {
@@ -711,6 +789,7 @@ export class GpuVectorService implements GpuVectorSearchBackend {
     this.stopping = true;
     const process = this.process;
     this.process = null;
+    this.residentDimensions = null;
     try {
       await process?.stop();
     } finally {

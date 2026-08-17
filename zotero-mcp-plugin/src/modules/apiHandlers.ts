@@ -9,8 +9,8 @@ import {
   formatCollectionBrief,
   formatCollectionList,
   formatCollectionDetails,
-  formatCollectionTree,
 } from "./collectionFormatter";
+import { buildCollectionListEnvelope } from "./collectionListEnvelope";
 import { handleSearchRequest, MCPError } from "./searchEngine";
 import { FulltextService } from "./fulltextService";
 import {
@@ -319,6 +319,41 @@ export async function handleSearch(
  * @param query - URL query parameters.
  * @returns A promise that resolves to an HttpResponse.
  */
+/**
+ * The envelope every collection listing returns.
+ *
+ * These handlers used to answer with a bare JSON array and put the total in an
+ * `X-Total-Count` header. That works over HTTP and is invisible over MCP,
+ * which sees only the body: `callGetCollections` set `result.metadata` on the
+ * parsed array and `JSON.stringify` dropped it, because array properties are
+ * not serialised. The count and the paging state were simply gone.
+ *
+ * An object has somewhere to put them, and matches the shape
+ * `get_collection_items` already returns.
+ */
+function collectionListResponse(
+  collections: Zotero.Collection[],
+  paging: { total: number; offset: number; limit: number },
+  metadata: Record<string, any> = {},
+): HttpResponse {
+  return {
+    status: 200,
+    statusText: "OK",
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      // Kept for existing REST callers; the body is now the source of truth.
+      "X-Total-Count": paging.total.toString(),
+    },
+    body: JSON.stringify(
+      buildCollectionListEnvelope(
+        formatCollectionList(collections),
+        paging,
+        metadata,
+      ),
+    ),
+  };
+}
+
 export async function handleGetCollections(
   query: URLSearchParams,
 ): Promise<HttpResponse> {
@@ -328,8 +363,24 @@ export async function handleGetCollections(
     const offset = parseInt(query.get("offset") || "0", 10);
     const sort = query.get("sort") || "name";
     const direction = query.get("direction") || "asc";
-    const recursive = query.get("recursive") === "true";
     const parentCollection = query.get("parentCollection");
+
+    // `recursive` returned the whole nested tree in one unpaginated response,
+    // duplicating get_collection_items and reintroducing the bulk-dump path
+    // the level-by-level browser replaced. Refuse rather than silently ignore:
+    // a caller who asked for the subtree must not be handed page one of the
+    // top level and told it succeeded.
+    if (query.has("recursive") && query.get("recursive") !== "false") {
+      return {
+        status: 400,
+        statusText: "Bad Request",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({
+          error:
+            "recursive was removed: it returned the entire collection tree in one unpaginated response. Browse one level at a time with get_collection_items (no collectionKey starts at the top of the library), which reports directItemCount, totalItemCount and hasChildren per folder so you can see what a subtree holds without downloading it.",
+        }),
+      };
+    }
 
     let collections: Zotero.Collection[] = [];
     if (parentCollection) {
@@ -363,32 +414,20 @@ export async function handleGetCollections(
       return 0;
     });
 
-    // When recursive, return the full nested tree (pagination does not apply)
-    if (recursive) {
-      const tree = collections.map(formatCollectionTree);
-      return {
-        status: 200,
-        statusText: "OK",
-        headers: {
-          "Content-Type": "application/json; charset=utf-8",
-          "X-Total-Count": collections.length.toString(),
-        },
-        body: JSON.stringify(tree),
-      };
-    }
-
     const total = collections.length;
     const paginated = collections.slice(offset, offset + limit);
 
-    return {
-      status: 200,
-      statusText: "OK",
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-        "X-Total-Count": total.toString(),
+    return collectionListResponse(
+      paginated,
+      { total, offset, limit },
+      {
+        scope: parentCollection
+          ? { level: "children", parentCollection }
+          : { level: "top" },
+        sort,
+        direction,
       },
-      body: JSON.stringify(formatCollectionList(paginated)),
-    };
+    );
   } catch (e) {
     const error = e instanceof Error ? e : new Error(String(e));
     const status = (error as any).status || 500;
@@ -436,15 +475,10 @@ export async function handleSearchCollections(
     const total = collections.length;
     const paginated = collections.slice(offset, offset + limit);
 
-    return {
-      status: 200,
-      statusText: "OK",
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-        "X-Total-Count": total.toString(),
-      },
-      body: JSON.stringify(formatCollectionList(paginated)),
-    };
+    return collectionListResponse(paginated, { total, offset, limit }, {
+      query: q,
+      matchedOn: "name",
+    });
   } catch (e) {
     const error = e instanceof Error ? e : new Error(String(e));
     const status = (error as any).status || 500;
@@ -611,113 +645,10 @@ export async function handleGetCollectionItems(
   }
 }
 
-/**
- * Handles GET /collections/:collectionKey/subcollections endpoint.
- * @param params - URL parameters.
- * @param query - URL query parameters.
- * @returns A promise that resolves to an HttpResponse.
- */
-export async function handleGetSubcollections(
-  params: Record<string, string>,
-  query: URLSearchParams,
-): Promise<HttpResponse> {
-  try {
-    const collectionKey = params[1];
-    ztoolkit.log(`[ApiHandlers] Getting subcollections for key: ${collectionKey}`);
-    
-    if (!collectionKey) {
-      return {
-        status: 400,
-        statusText: "Bad Request",
-        headers: { "Content-Type": "application/json; charset=utf-8" },
-        body: JSON.stringify({ error: "Missing collectionKey parameter" }),
-      };
-    }
-    
-    const libraryID = resolveLibraryID(query);
-
-    ztoolkit.log(`[ApiHandlers] Using libraryID: ${libraryID}`);
-
-    const collection = await Zotero.Collections.getByLibraryAndKeyAsync(
-      libraryID,
-      collectionKey,
-    );
-
-    if (!collection) {
-      ztoolkit.log(`[ApiHandlers] Collection not found: ${collectionKey} in library ${libraryID}`, "error");
-      return {
-        status: 404,
-        statusText: "Not Found",
-        headers: { "Content-Type": "application/json; charset=utf-8" },
-        body: JSON.stringify({
-          error: `Collection with key ${collectionKey} not found`,
-        }),
-      };
-    }
-
-    ztoolkit.log(`[ApiHandlers] Found collection: ${collection.name}`);
-
-    const limit = parseInt(query.get("limit") || "100", 10);
-    const offset = parseInt(query.get("offset") || "0", 10);
-    const includeRecursive = query.get("recursive") === "true";
-
-    ztoolkit.log(`[ApiHandlers] Pagination: limit=${limit}, offset=${offset}, recursive=${includeRecursive}`);
-
-    // Get subcollections IDs (second parameter is includeTrashed)
-    const subcollectionIDs = collection.getChildCollections(true, false);
-    const total = subcollectionIDs.length;
-    ztoolkit.log(`[ApiHandlers] Collection contains ${total} subcollections, IDs: [${subcollectionIDs.slice(0, 5).join(", ")}${subcollectionIDs.length > 5 ? "..." : ""}]`);
-
-    // If recursive is enabled, build the full nested tree (pagination does not apply)
-    if (includeRecursive) {
-      const subcollections = Zotero.Collections.get(subcollectionIDs) as Zotero.Collection[];
-      const tree = subcollections.map(formatCollectionTree);
-      ztoolkit.log(`[ApiHandlers] Returning recursive tree with ${tree.length} top-level subcollections`);
-      return {
-        status: 200,
-        statusText: "OK",
-        headers: {
-          "Content-Type": "application/json; charset=utf-8",
-          "X-Total-Count": total.toString(),
-        },
-        body: JSON.stringify(tree),
-      };
-    }
-
-    const paginatedIDs = subcollectionIDs.slice(offset, offset + limit);
-    ztoolkit.log(`[ApiHandlers] Paginated IDs: [${paginatedIDs.join(", ")}]`);
-
-    const subcollections = Zotero.Collections.get(paginatedIDs) as Zotero.Collection[];
-    ztoolkit.log(`[ApiHandlers] Retrieved ${subcollections.length} subcollection objects from Zotero`);
-
-    // Format subcollections
-    const formattedSubcollections = formatCollectionList(subcollections);
-
-    ztoolkit.log(`[ApiHandlers] Formatted ${formattedSubcollections.length} subcollections`);
-
-    return {
-      status: 200,
-      statusText: "OK",
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-        "X-Total-Count": total.toString(),
-      },
-      body: JSON.stringify(formattedSubcollections),
-    };
-  } catch (e) {
-    const error = e instanceof Error ? e : new Error(String(e));
-    const status = (error as any).status || 500;
-    ztoolkit.log(`[ApiHandlers] Error in handleGetSubcollections: ${error.message}`, "error");
-    ztoolkit.log(`[ApiHandlers] Error stack: ${error.stack}`, "error");
-    Zotero.logError(error);
-    return {
-      status,
-      statusText: status === 400 ? "Bad Request" : "Internal Server Error",
-      headers: { "Content-Type": "application/json; charset=utf-8" },
-      body: JSON.stringify({ error: status === 400 ? error.message : "An unexpected error occurred" }),
-    };
-  }
-}
+// REMOVED: handleGetSubcollections - it was handleGetCollections with
+// parentCollection renamed, and became unreachable when the get_subcollections
+// tool was removed. Use get_collections(parentCollection) or, to walk the
+// library a level at a time, get_collection_items.
 
 // REMOVED: handleGetPDFContent - replaced by unified get_content tool
 

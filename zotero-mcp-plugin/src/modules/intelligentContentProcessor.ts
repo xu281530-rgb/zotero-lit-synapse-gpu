@@ -366,7 +366,7 @@ export class IntelligentContentProcessor {
     // Sort by importance (descending)
     const sortedSentences = [...sentences].sort((a, b) => b.importance - a.importance);
     
-    let selectedSentences: ProcessedSentence[] = [];
+    const selectedSentences: ProcessedSentence[] = [];
     let currentLength = 0;
     
     // Select sentences based on importance and length constraints
@@ -420,7 +420,7 @@ export class IntelligentContentProcessor {
     // Sort main content by importance (descending)
     const sortedMainContent = [...mainContent].sort((a, b) => b.importance - a.importance);
     
-    let selectedSentences: ProcessedSentence[] = [];
+    const selectedSentences: ProcessedSentence[] = [];
     let currentLength = 0;
     
     // First, try to fill the limit with main content
@@ -570,10 +570,10 @@ export class IntelligentContentProcessor {
     
     // Common reference patterns
     const referencePatterns = [
-      /^\d+\.\s+[A-Z][a-z]+,?\s+[A-Z][\.\w]*/, // "1. Smith, J." or "1. Smith, John"
+      /^\d+\.\s+[A-Z][a-z]+,?\s+[A-Z][.\w]*/, // "1. Smith, J." or "1. Smith, John"
       /^\[\d+\]\s*/, // "[1]" style citations
-      /^[A-Z][a-z]+,\s*[A-Z][\.\w]*.*\(\d{4}[a-z]?\)/, // "Smith, J. (2020)" 
-      /^[A-Z][a-z]+,\s*[A-Z][\.\w]*,?\s+.*\d{4}[a-z]?[\.,]/, // "Smith, J., Title, 2020."
+      /^[A-Z][a-z]+,\s*[A-Z][.\w]*.*\(\d{4}[a-z]?\)/, // "Smith, J. (2020)" 
+      /^[A-Z][a-z]+,\s*[A-Z][.\w]*,?\s+.*\d{4}[a-z]?[.,]/, // "Smith, J., Title, 2020."
       /et\s+al\..*\(\d{4}\)/, // "Smith et al. (2020)"
       /doi\s*:\s*10\.\d+/, // DOI patterns
       /https?:\/\/[^\s]+/, // URLs
@@ -595,7 +595,7 @@ export class IntelligentContentProcessor {
     );
     
     // Additional heuristics
-    const hasYear = /\(\d{4}[a-z]?\)|\b\d{4}[a-z]?[\.,]/.test(content);
+    const hasYear = /\(\d{4}[a-z]?\)|\b\d{4}[a-z]?[.,]/.test(content);
     const hasAuthorPattern = /^[A-Z][a-z]+,\s*[A-Z]/.test(content);
     const startsWithNumber = /^\d+\./.test(content);
     const hasMultipleAuthors = /,\s*[A-Z]\./g.test(content) || /&|and\s+[A-Z][a-z]+,/.test(content);
