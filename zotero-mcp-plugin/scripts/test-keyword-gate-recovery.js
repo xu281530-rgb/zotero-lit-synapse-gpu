@@ -392,9 +392,13 @@ function hangingQuery(state) {
   // A query that FAILS is an answer, so it must not open the circuit.
   const gate3 = newGate();
   const failed = await outcome(
-    gate3.run(1, async () => {
-      throw new Error("Zotero said no");
-    }, { graceMs: GRACE }),
+    gate3.run(
+      1,
+      async () => {
+        throw new Error("Zotero said no");
+      },
+      { graceMs: GRACE },
+    ),
   );
   assert.equal(failed.kind, "error");
   assert.equal(
@@ -402,14 +406,20 @@ function hangingQuery(state) {
     "closed",
     "an error is proof the database is responding — only silence is not",
   );
-  assert.equal(await gate3.run(1, async () => "next", { graceMs: GRACE }), "next");
+  assert.equal(
+    await gate3.run(1, async () => "next", { graceMs: GRACE }),
+    "next",
+  );
 
   // Libraries are independent: one wedged library must not stop the others.
   const gate4 = newGate();
   await outcome(gate4.run(1, () => new Promise(() => {}), { graceMs: GRACE }));
   assert.equal(gate4.inspect(1).circuit, "open");
   assert.equal(gate4.inspect(2).circuit, "closed");
-  assert.equal(await gate4.run(2, async () => "other", { graceMs: GRACE }), "other");
+  assert.equal(
+    await gate4.run(2, async () => "other", { graceMs: GRACE }),
+    "other",
+  );
 }
 
 // ============================================================================

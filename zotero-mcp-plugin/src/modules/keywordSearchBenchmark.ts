@@ -34,9 +34,29 @@ export interface KeywordProfile {
   keywords: string[];
 }
 
+/**
+ * What the BODY half of the keyword branch did during a benchmarked run.
+ *
+ * Reported because the timeout this benchmark recommends now has to cover both
+ * halves. Without it, a recommendation measured on a library with an empty body
+ * index would look identical to one measured with the index full — and would be
+ * far too small once the user finished indexing.
+ */
+export interface KeywordBodyCoverage {
+  /** Documents with a body-keyword index, i.e. how much of the branch was real. */
+  indexedDocuments: number;
+  postingsRead: number;
+  /** Wall-clock time inside the body half. */
+  ms: number;
+  /** Set when the body half could not run at all. */
+  error?: string;
+}
+
 export interface KeywordProfileTiming extends TimingSample {
   name: KeywordProfileName;
   keywords: string[];
+  /** Body-half coverage for this profile, absent when it was switched off. */
+  body?: KeywordBodyCoverage;
   /** Candidate items the probes selected, from the last run's diagnostics. */
   candidateItems: number;
 }
@@ -212,7 +232,9 @@ export async function runKeywordSearchBenchmark(
   profiles: KeywordProfile[],
   search: (
     keywords: string[],
-  ) => Promise<{ candidateItems: number } | undefined | void>,
+  ) => Promise<
+    { candidateItems: number; body?: KeywordBodyCoverage } | undefined | void
+  >,
   sampledItems: number,
   now: () => number = () => globalThis.performance?.now() ?? Date.now(),
 ): Promise<KeywordSearchBenchmarkResult> {
@@ -221,6 +243,7 @@ export async function runKeywordSearchBenchmark(
   for (const profile of profiles) {
     const durationsMs: number[] = [];
     let candidateItems = 0;
+    let body: KeywordBodyCoverage | undefined;
     for (let run = 0; run < KEYWORD_BENCHMARK_RUNS; run += 1) {
       const startedAt = now();
       const outcome = await search(profile.keywords);
@@ -228,11 +251,13 @@ export async function runKeywordSearchBenchmark(
       if (outcome && typeof outcome.candidateItems === "number") {
         candidateItems = outcome.candidateItems;
       }
+      if (outcome && outcome.body) body = outcome.body;
     }
     timings.push({
       name: profile.name,
       keywords: profile.keywords,
       candidateItems,
+      body,
       ...summarizeDurations(durationsMs),
     });
   }

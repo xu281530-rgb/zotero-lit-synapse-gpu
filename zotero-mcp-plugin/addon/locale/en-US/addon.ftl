@@ -279,7 +279,7 @@ config-guide-troubleshooting-list =
     4. Verify configuration file format is correct
 config-guide-generated-time = Generated at: { $time }
 # Context menu for semantic indexing
-menu-semantic-index = Update Semantic Index
+menu-semantic-index = Update Index
 menu-semantic-index-selected = Index Selected Items
 menu-semantic-index-all = Index All Items
 menu-semantic-clear-selected = Clear Selected Items Index
@@ -293,7 +293,7 @@ menu-semantic-index-error = Semantic indexing failed
 menu-semantic-index-no-collection = Please select a collection
 menu-semantic-index-no-items = No indexable items
 # Collection context menu
-menu-collection-semantic-index = Semantic Index
+menu-collection-semantic-index = Index
 menu-collection-build-index = Build Index
 menu-collection-rebuild-index = Rebuild Index
 menu-collection-clear-index = Clear Index

@@ -237,7 +237,11 @@ function tracker() {
   await sleep(20);
   const after = gate.inspect(1);
 
-  assert.equal(after.inFlight, 0, "inFlight must not drift below zero or above");
+  assert.equal(
+    after.inFlight,
+    0,
+    "inFlight must not drift below zero or above",
+  );
   assert.equal(after.abandoned, before.abandoned - 1);
   assert.equal(
     after.circuit,
@@ -258,7 +262,10 @@ function tracker() {
   const gate = newGate();
   const queries = tracker();
 
-  assert.equal((await outcome(gate.run(1, queries.hang, { graceMs: GRACE }))).kind, "abandoned");
+  assert.equal(
+    (await outcome(gate.run(1, queries.hang, { graceMs: GRACE }))).kind,
+    "abandoned",
+  );
   queries.noteAbandoned();
   assert.equal(queries.started, 1);
   assert.equal(gate.inspect(1).circuit, "open");
@@ -325,7 +332,10 @@ function tracker() {
 {
   const gate = newGate();
   const queries = tracker();
-  assert.equal((await outcome(gate.run(1, queries.hang, { graceMs: GRACE }))).kind, "abandoned");
+  assert.equal(
+    (await outcome(gate.run(1, queries.hang, { graceMs: GRACE }))).kind,
+    "abandoned",
+  );
   queries.noteAbandoned();
   await sleep(COOLDOWN + 40);
 
@@ -336,7 +346,9 @@ function tracker() {
   // Spread across ticks this time, so the probe is genuinely mid-flight.
   for (let i = 0; i < 4; i++) {
     await sleep(10);
-    const attempt = await outcome(gate.run(1, queries.hang, { graceMs: GRACE }));
+    const attempt = await outcome(
+      gate.run(1, queries.hang, { graceMs: GRACE }),
+    );
     assert.equal(
       attempt.kind,
       "unavailable",
@@ -366,7 +378,10 @@ function tracker() {
 {
   const gate = newGate();
   const queries = tracker();
-  assert.equal((await outcome(gate.run(1, queries.hang, { graceMs: GRACE }))).kind, "abandoned");
+  assert.equal(
+    (await outcome(gate.run(1, queries.hang, { graceMs: GRACE }))).kind,
+    "abandoned",
+  );
   queries.noteAbandoned();
   await sleep(COOLDOWN + 40);
 
@@ -401,8 +416,11 @@ function tracker() {
   // And recovery still works.
   await sleep(afterBoom.retryAfterMs + 40);
   assert.equal(
-    (await outcome(gate.run(1, queries.instant("recovered"), { graceMs: GRACE })))
-      .kind,
+    (
+      await outcome(
+        gate.run(1, queries.instant("recovered"), { graceMs: GRACE }),
+      )
+    ).kind,
     "resolved",
     "the library must become usable again once the cool-down elapses",
   );
@@ -465,7 +483,11 @@ function tracker() {
     1,
     "exactly one zombie is accounted for — B is still out there",
   );
-  assert.equal(afterLate.inFlight, 0, "and no slot may be leaked or duplicated");
+  assert.equal(
+    afterLate.inFlight,
+    0,
+    "and no slot may be leaked or duplicated",
+  );
   assert.equal(
     afterLate.consecutiveAbandonments,
     0,

@@ -1,7 +1,7 @@
 {
   "name": "zotero-mcp-plugin",
   "type": "module",
-  "version": "1.9.2",
+  "version": "1.10.0",
   "description": "Zotero MCP Plugin for Zotero 9.0.x: one tool catalog behind MCP and HTTP, three interchangeable retrieval tools (hybrid / keyword / semantic) sharing collection+item scoping, a user threshold and cursor pagination, paged reading of attachments and indexed chunks, level-by-level collection browsing, and MCP 2025-06-18 Streamable HTTP",
   "config": {
     "addonName": "Zotero MCP Plugin",
@@ -9,7 +9,7 @@
     "addonRef": "zotero-mcp-plugin",
     "addonInstance": "ZoteroMCP",
     "prefsPrefix": "extensions.zotero.zotero-mcp-plugin",
-    "addonVersion": "1.9.2"
+    "addonVersion": "1.10.0"
   },
   "repository": {
     "type": "git",
@@ -37,6 +37,13 @@
     "test:item-key-kind": "node --experimental-strip-types scripts/test-item-key-kind.js",
     "test:collection-envelope": "node --experimental-strip-types scripts/test-collection-envelope.js",
     "test:hybrid-search": "node --experimental-strip-types scripts/test-hybrid-search.js",
+    "test:keyword-tokenizer": "node --experimental-strip-types scripts/test-keyword-tokenizer.js",
+    "test:keyword-index-store": "node --experimental-strip-types --experimental-sqlite scripts/test-keyword-index-store.js",
+    "test:body-keyword-search": "node --experimental-strip-types --experimental-sqlite scripts/test-body-keyword-search.js",
+    "test:keyword-ranker": "node --experimental-strip-types scripts/test-keyword-ranker.js",
+    "calibrate:bm25f": "node --experimental-strip-types --experimental-sqlite scripts/calibrate-bm25f-threshold.js",
+    "compare:keyword-scoring": "node --experimental-strip-types scripts/compare-keyword-scoring.js",
+    "benchmark:keyword-index": "node --experimental-strip-types --experimental-sqlite scripts/benchmark-keyword-index.js",
     "test:chunking": "node --experimental-strip-types scripts/test-chunking.js",
     "test:natural-language": "node scripts/test-natural-language.js",
     "test:body-index": "node --experimental-strip-types scripts/test-body-index.js",

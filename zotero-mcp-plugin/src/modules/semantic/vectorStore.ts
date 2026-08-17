@@ -10,6 +10,7 @@ declare let ztoolkit: ZToolkit;
 declare let PathUtils: any;
 declare let IOUtils: any;
 
+import { KeywordIndexStore } from "../keyword/keywordIndexStore";
 import { bodyIndexStateFromSourceKind } from './bodyIndexState';
 import {
   VectorDimensionMismatchError,
@@ -343,6 +344,106 @@ export class VectorStore {
     ztoolkit.log(`[VectorStore] Constructor called, instanceId=${this.instanceId}, total instances=${vectorStoreInstanceCounter}`);
   }
 
+  /**
+   * The body-keyword inverted index, over this same database connection.
+   *
+   * One file, one connection: the keyword tables live beside the embeddings so a
+   * single "index" is one thing on disk, backed up and reset as a unit, and a
+   * keyword write can never be talking to a different database than the vector
+   * write it accompanies.
+   */
+  private keywordStore: KeywordIndexStore | null = null;
+
+  getKeywordIndexStore(): KeywordIndexStore {
+    if (!this.keywordStore) {
+      // Forwards to `this.db` at CALL time rather than capturing it. The
+      // corruption-recovery path replaces the connection object outright, and a
+      // captured reference would leave the keyword store writing into a database
+      // that has been moved aside — silently, because the handle still works.
+      this.keywordStore = new KeywordIndexStore({
+        queryAsync: (sql, params) => this.db.queryAsync(sql, params),
+        executeTransaction: (fn) => this.db.executeTransaction(fn),
+      });
+    }
+    return this.keywordStore;
+  }
+
+  /**
+   * Forget the cached keyword store so the next call re-creates its schema.
+   *
+   * Called after the database file is replaced: the store remembers that the
+   * tables exist, and that memory is wrong once the file underneath is new.
+   */
+  private resetKeywordStore(): void {
+    this.keywordStore = null;
+  }
+
+  /**
+   * Write one item's keyword index, reporting failure instead of throwing.
+   *
+   * Deliberately OUTSIDE the vector transaction. The two indexes are recorded
+   * separately and must fail separately: a keyword write that fails must not
+   * roll back vectors that were embedded successfully — those cost API quota and
+   * would have to be paid for again.
+   */
+  async writeKeywordIndex(options: {
+    itemKey: string;
+    libraryID: number;
+    title?: string;
+    abstract?: string;
+    tags?: string[];
+    publicationTitle?: string;
+    creator?: string;
+    extra?: string;
+    chunks: string[];
+  }): Promise<{ ok: boolean; error?: string; indexedChunks?: number }> {
+    try {
+      await this.ensureInitialized();
+      const result = await this.getKeywordIndexStore().writeItem(options);
+      return { ok: true, indexedChunks: result.indexedChunks };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      ztoolkit.log(
+        `[VectorStore] keyword index write failed for ${options.itemKey}: ${message}`,
+        'warn',
+      );
+      return { ok: false, error: message };
+    }
+  }
+
+  /** Drop one item from the keyword index; never throws. */
+  async removeKeywordIndex(itemKey: string, libraryID: number): Promise<void> {
+    try {
+      await this.ensureInitialized();
+      await this.getKeywordIndexStore().removeItem(libraryID, itemKey);
+    } catch (error) {
+      ztoolkit.log(
+        `[VectorStore] keyword index removal failed for ${itemKey}: ${error}`,
+        'warn',
+      );
+    }
+  }
+
+  /** Drop a library (or everything) from the keyword index; never throws. */
+  async clearKeywordIndex(libraryID?: number): Promise<void> {
+    try {
+      await this.ensureInitialized();
+      await this.getKeywordIndexStore().clear(libraryID);
+    } catch (error) {
+      ztoolkit.log(`[VectorStore] keyword index clear failed: ${error}`, 'warn');
+    }
+  }
+
+  /** Reclaim tombstoned keyword postings; never throws. */
+  async compactKeywordIndex(): Promise<void> {
+    try {
+      await this.ensureInitialized();
+      await this.getKeywordIndexStore().compact();
+    } catch (error) {
+      ztoolkit.log(`[VectorStore] keyword index compaction failed: ${error}`, 'warn');
+    }
+  }
+
   private toStorageKey(itemKey: string, libraryID?: number): string {
     const effectiveLibraryID =
       libraryID ?? Zotero.Libraries.userLibraryID;
@@ -382,6 +483,7 @@ export class VectorStore {
 
       // Create database connection
       this.db = new Zotero.DBConnection(this.dbPath);
+        this.resetKeywordStore();
 
       // Create tables
       await this.createTables();
@@ -475,6 +577,7 @@ export class VectorStore {
 
       // Create fresh connection
       this.db = new Zotero.DBConnection(this.dbPath);
+        this.resetKeywordStore();
       ztoolkit.log('[VectorStore] Fresh database created after corruption recovery');
 
       // Notify user
@@ -515,6 +618,7 @@ export class VectorStore {
         }
 
         this.db = new Zotero.DBConnection(this.dbPath);
+        this.resetKeywordStore();
         ztoolkit.log('[VectorStore] Fresh database created after severe corruption');
 
         try {
@@ -625,6 +729,11 @@ export class VectorStore {
         PRIMARY KEY (build_id, library_id, item_key)
       )
     `);
+
+    // The keyword tables are created alongside the vector ones so that an
+    // existing vector-only database gains them on first open, and can then be
+    // topped up with a keyword index instead of rebuilt from scratch.
+    await this.getKeywordIndexStore().ensureSchema();
 
     await this.migrateLegacyFailureMarkers();
 

@@ -278,7 +278,7 @@ config-guide-troubleshooting-list =
     4. 設定ファイルの形式が正しいことを確認してください
 config-guide-generated-time = 生成日時: { $time }
 # Context menu for semantic indexing
-menu-semantic-index = セマンティックインデックスを更新
+menu-semantic-index = インデックスを更新
 menu-semantic-index-selected = 選択したアイテムをインデックス
 menu-semantic-index-all = すべてのアイテムをインデックス
 menu-semantic-clear-selected = 選択したアイテムのインデックスをクリア
@@ -292,7 +292,7 @@ menu-semantic-index-error = セマンティックインデックスに失敗し�
 menu-semantic-index-no-collection = コレクションを選択してください
 menu-semantic-index-no-items = インデックス可能なアイテムがありません
 # Collection context menu
-menu-collection-semantic-index = セマンティックインデックス
+menu-collection-semantic-index = インデックス
 menu-collection-build-index = インデックスを構築
 menu-collection-rebuild-index = インデックスを再構築
 menu-collection-clear-index = インデックスをクリア

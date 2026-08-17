@@ -278,7 +278,7 @@ config-guide-troubleshooting-list =
     4. Verifica que el formato del archivo de configuración sea correcto
 config-guide-generated-time = Generado el: { $time }
 # Menú contextual para indexación semántica
-menu-semantic-index = Actualizar índice semántico
+menu-semantic-index = Actualizar índice
 menu-semantic-index-selected = Indexar elementos seleccionados
 menu-semantic-index-all = Indexar todos los elementos
 menu-semantic-clear-selected = Limpiar índice de elementos seleccionados
@@ -292,7 +292,7 @@ menu-semantic-index-error = La indexación semántica falló
 menu-semantic-index-no-collection = Por favor, selecciona una colección
 menu-semantic-index-no-items = No hay elementos indexables
 # Menú contextual de colección
-menu-collection-semantic-index = Índice semántico
+menu-collection-semantic-index = Índice
 menu-collection-build-index = Construir índice
 menu-collection-rebuild-index = Reconstruir índice
 menu-collection-clear-index = Limpiar índice

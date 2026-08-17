@@ -1334,7 +1334,7 @@ function registerSemanticIndexMenu(win: _ZoteroTypes.MainWindow) {
     // Create parent menu
     const parentMenu = doc.createXULElement("menu");
     parentMenu.id = "zotero-mcp-semantic-menu";
-    parentMenu.setAttribute("label", getString("menu-semantic-index" as any) || "Update Semantic Index");
+    parentMenu.setAttribute("label", getString("menu-semantic-index" as any) || "Update Index");
 
     // Create popup for submenu
     const popup = doc.createXULElement("menupopup");
@@ -1404,7 +1404,7 @@ function registerCollectionSemanticIndexMenu(win: _ZoteroTypes.MainWindow) {
     // Create parent menu
     const parentMenu = doc.createXULElement("menu");
     parentMenu.id = "zotero-mcp-collection-semantic-menu";
-    parentMenu.setAttribute("label", getString("menu-collection-semantic-index" as any) || "Semantic Index");
+    parentMenu.setAttribute("label", getString("menu-collection-semantic-index" as any) || "Index");
 
     // Create popup for submenu
     const popup = doc.createXULElement("menupopup");
@@ -1529,7 +1529,7 @@ async function handleIndexCollection(win: _ZoteroTypes.MainWindow, rebuild: bool
     // Live progress popup for the whole run
     const live = createLiveIndexProgress(
       win,
-      `${getString("menu-semantic-index-started" as any) || "Semantic indexing started"}: ${collection.name}`,
+      `${getString("menu-semantic-index-started" as any) || "Indexing started"}: ${collection.name}`,
     );
 
     // Build index for collection items ("build" forces the selected items;
@@ -1866,7 +1866,7 @@ async function handleIndexSelected(win: _ZoteroTypes.MainWindow) {
     // Live progress popup for the whole run
     const live = createLiveIndexProgress(
       win,
-      getString("menu-semantic-index-started" as any) || "Semantic indexing started",
+      getString("menu-semantic-index-started" as any) || "Indexing started",
     );
 
     // Build index for selected items. force: the user explicitly asked for
@@ -1930,7 +1930,7 @@ async function handleIndexAll(win: _ZoteroTypes.MainWindow) {
     // Live progress popup for the whole run
     const live = createLiveIndexProgress(
       win,
-      getString("menu-semantic-index-started" as any) || "Semantic indexing started",
+      getString("menu-semantic-index-started" as any) || "Indexing started",
     );
 
     // Build index for all items in the selected library

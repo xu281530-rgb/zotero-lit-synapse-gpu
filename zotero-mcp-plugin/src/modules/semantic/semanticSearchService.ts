@@ -1506,6 +1506,12 @@ export class SemanticSearchService {
       this._forceRun = false;
       this._activeBuildID = null;
       this._activeFullLibraryRebuild = false;
+      // Reclaim the keyword postings of superseded revisions, in one pass at the
+      // END of the build rather than per item. Deferring this is precisely what
+      // makes a single-item update cheap, so doing it eagerly would give back
+      // the saving it was designed to produce. Runs even after a failed or
+      // aborted build: the tombstones exist either way.
+      await this.vectorStore.compactKeywordIndex();
     }
   }
 
@@ -1676,6 +1682,9 @@ export class SemanticSearchService {
         bodyRetrySignature,
         buildID: this._activeBuildID ?? undefined,
       });
+      // Recorded with no chunks: the item IS keyword-indexed, it simply has no
+      // body. Leaving it absent would make every later pass treat it as pending.
+      await this.writeKeywordIndexForItem(item, []);
       ztoolkit.log(`[SemanticSearch] indexItem() skip: no content for ${item.key}, marked in index_status to avoid retry loop`);
       return this.noteBodyExtractionOutcome(item, bodyState, extracted, { status: 'succeeded' });
     }
@@ -1798,11 +1807,79 @@ export class SemanticSearchService {
       buildID: this._activeBuildID ?? undefined,
     });
 
+    // After the vectors, and outside their transaction: a keyword failure must
+    // leave the successfully embedded vectors in place.
+    await this.writeKeywordIndexForItem(item, chunks);
+
     this.indexProgress.indexed = (this.indexProgress.indexed || 0) + 1;
 
     const elapsed = Date.now() - startTime;
     ztoolkit.log(`[SemanticSearch] indexItem() completed: ${item.key} (${records.length} vectors, source=${sourceKind}) in ${elapsed}ms`);
     return this.noteBodyExtractionOutcome(item, bodyState, extracted, { status: 'succeeded' });
+  }
+
+  /**
+   * Write this item's body-keyword index from the SAME chunks the vectors used.
+   *
+   * One parse, one chunking, both indexes — which is why this takes the chunk
+   * array rather than re-deriving anything. Chunk numbers therefore agree with
+   * the vector index, so a keyword hit in passage 12 is the same passage 12 that
+   * `search_fulltext` and `get_document_chunks` return.
+   *
+   * Never throws. The two indexes are recorded separately and fail separately:
+   * a keyword failure must not discard vectors that already cost embedding quota.
+   */
+  private async writeKeywordIndexForItem(
+    item: any,
+    chunks: string[],
+  ): Promise<void> {
+    try {
+      let tags: string[] = [];
+      try {
+        tags = (item.getTags?.() ?? []).map((tag: any) => tag.tag).filter(Boolean);
+      } catch {
+        tags = [];
+      }
+      let creator = '';
+      try {
+        creator = (item.getCreators?.() ?? [])
+          .map((entry: any) => `${entry.firstName || ''} ${entry.lastName || ''}`.trim())
+          .filter(Boolean)
+          .join(', ');
+      } catch {
+        creator = '';
+      }
+      const field = (name: string): string => {
+        try {
+          const value = item.getField?.(name);
+          return typeof value === 'string' ? value : '';
+        } catch {
+          return '';
+        }
+      };
+      const outcome = await this.vectorStore.writeKeywordIndex({
+        itemKey: item.key,
+        libraryID: item.libraryID,
+        title: item.getDisplayTitle?.() || field('title'),
+        abstract: TextFormatter.htmlToText(field('abstractNote')),
+        tags,
+        publicationTitle: field('publicationTitle'),
+        creator,
+        extra: field('extra'),
+        chunks,
+      });
+      if (!outcome.ok) {
+        ztoolkit.log(
+          `[SemanticSearch] keyword index NOT updated for ${item.key}: ${outcome.error}`,
+          'warn',
+        );
+      }
+    } catch (error) {
+      ztoolkit.log(
+        `[SemanticSearch] keyword index step threw for ${item.key}: ${error}`,
+        'warn',
+      );
+    }
   }
 
   /**
@@ -1899,6 +1976,12 @@ export class SemanticSearchService {
   async deleteItemIndex(itemKey: string, libraryID?: number): Promise<void> {
     await this.initialize();
     await this.vectorStore.deleteItemVectors(itemKey, libraryID);
+    // Both indexes, or the keyword side keeps answering for a document whose
+    // vectors are gone — a result row nothing else in the plugin can explain.
+    await this.vectorStore.removeKeywordIndex(
+      itemKey,
+      libraryID ?? Zotero.Libraries.userLibraryID,
+    );
     ztoolkit.log(`[SemanticSearch] Deleted index for item: ${itemKey} (libraryID=${libraryID ?? 'user'})`);
   }
 
@@ -1908,6 +1991,7 @@ export class SemanticSearchService {
   async clearIndex(libraryID?: number): Promise<void> {
     await this.initialize();
     await this.vectorStore.clear(libraryID);
+    await this.vectorStore.clearKeywordIndex(libraryID);
     ztoolkit.log(`[SemanticSearch] Index cleared (libraryID=${libraryID ?? 'all'})`);
   }
 
@@ -2490,6 +2574,31 @@ export class SemanticSearchService {
     sharedProcessor?: PDFProcessor | null,
   ): Promise<ExtractedItemContent> {
     const parts: string[] = [];
+    /**
+     * Body texts already collected, so the same body cannot be added twice.
+     *
+     * The title-based de-duplication only recognises Markdown that MinerU named
+     * `MinerU Markdown (KEY).md`; an attachment that lost that title — this
+     * library has one called simply `full.md` — would still slip through. This is
+     * the backstop, and it is content-based, so it holds whatever the attachment
+     * is called and whatever MIME type it claims.
+     */
+    const bodyFingerprints = new Set<string>();
+    /**
+     * Add body text unless the identical text is already in `parts`.
+     *
+     * Returns whether it was added, so a caller can still record its source
+     * honestly: "this attachment produced text" and "that text was new" are
+     * different facts.
+     */
+    const addBodyPart = (text: string): boolean => {
+      const fingerprint = text.trim();
+      if (!fingerprint) return false;
+      if (bodyFingerprints.has(fingerprint)) return false;
+      bodyFingerprints.add(fingerprint);
+      parts.push(text);
+      return true;
+    };
     /** Sources that could have produced body text, whether or not they did. */
     const attemptedSources: string[] = [];
     /** Sources that actually produced body text. */
@@ -2541,7 +2650,28 @@ export class SemanticSearchService {
               }
               continue;
             }
-            if (attachment.attachmentContentType === 'text/markdown') {
+            /*
+             * Classify by extension as well as by MIME type.
+             *
+             * MinerU writes its Markdown as `full.md` with contentType
+             * `text/plain`, so a MIME-only test dropped it into the plain-text
+             * branch — which has no de-duplication against the PDF it was
+             * generated from. The result was that every MinerU-processed paper
+             * had its body indexed TWICE: measured on this library, one item held
+             * 157 chunks of which only 91 were distinct, doubling both its term
+             * frequencies and its document length and so distorting every
+             * length-normalised score, on top of doubling the embedding spend.
+             */
+            const filename = String(
+              attachment.attachmentFilename ||
+                attachment.getFilePath?.() ||
+                '',
+            ).toLowerCase();
+            const looksMarkdown =
+              attachment.attachmentContentType === 'text/markdown' ||
+              filename.endsWith('.md') ||
+              filename.endsWith('.markdown');
+            if (looksMarkdown) {
               markdownAttachments.push(attachment);
               continue;
             }
@@ -2600,7 +2730,7 @@ export class SemanticSearchService {
               // 50k characters, which silently made everything past
               // roughly the middle of a long paper unsearchable.
               warnIfHugeDocument(item.key, minerUText.length, 'MinerU');
-              parts.push(minerUText);
+              addBodyPart(minerUText);
               pdfKeysWithText.add(attachment.key);
               bodySources.push(`${label} (MinerU)`);
               ztoolkit.log(`[SemanticSearch] extractItemContent() got MinerU text: ${minerUText.length} chars`);
@@ -2616,7 +2746,7 @@ export class SemanticSearchService {
               if (textContent && textContent.length > 0) {
                 // Complete body text, same as the MinerU branch above.
                 warnIfHugeDocument(item.key, textContent.length, 'pdfWorker');
-                parts.push(textContent);
+                addBodyPart(textContent);
                 pdfKeysWithText.add(attachment.key);
                 bodySources.push(`${label} (pdfWorker)`);
                 ztoolkit.log(`[SemanticSearch] extractItemContent() got PDF text: ${textContent.length} chars`);
@@ -2666,7 +2796,7 @@ export class SemanticSearchService {
             const text = raw ? markdownToIndexText(String(raw)).trim() : '';
             if (text) {
               warnIfHugeDocument(item.key, text.length, 'Markdown attachment');
-              parts.push(text);
+              addBodyPart(text);
               bodySources.push(label);
               ztoolkit.log(`[SemanticSearch] extractItemContent() got Markdown attachment text: ${text.length} chars`);
             } else {
@@ -2689,7 +2819,7 @@ export class SemanticSearchService {
             }
             const textContent = await Zotero.File.getContentsAsync(filePath);
             if (textContent && textContent.length > 0) {
-              parts.push(textContent);
+              addBodyPart(textContent);
               bodySources.push(label);
               ztoolkit.log(`[SemanticSearch] extractItemContent() got plain text: ${textContent.length} chars`);
             } else {
@@ -2710,7 +2840,7 @@ export class SemanticSearchService {
         const noteText = item.getNote?.();
         const text = noteText ? TextFormatter.htmlToText(noteText) : '';
         if (text.trim()) {
-          parts.push(text);
+          addBodyPart(text);
           bodySources.push(`note:${item.key}`);
         } else {
           failedSources.push(`note:${item.key} (empty)`);

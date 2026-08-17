@@ -243,7 +243,9 @@ function installZotero({ searchMs, ids = [1, 2, 3] }) {
   const outcomes = await Promise.all(attempts);
 
   assert.ok(
-    outcomes.every((outcome) => outcome === "timeout" || outcome === "overloaded"),
+    outcomes.every(
+      (outcome) => outcome === "timeout" || outcome === "overloaded",
+    ),
     `every caller must get a clear answer, got ${JSON.stringify(outcomes)}`,
   );
   assert.ok(
@@ -328,7 +330,10 @@ function installZotero({ searchMs, ids = [1, 2, 3] }) {
 {
   const gate = new KeywordSearchGate(2);
   await assert.rejects(
-    () => gate.run(1, async () => { throw new Error("query blew up"); }),
+    () =>
+      gate.run(1, async () => {
+        throw new Error("query blew up");
+      }),
     /query blew up/,
   );
   assert.equal(gate.pending(1), 0);

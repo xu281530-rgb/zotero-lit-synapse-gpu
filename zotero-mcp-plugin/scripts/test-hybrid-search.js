@@ -1048,7 +1048,14 @@ const lexicalSource = fs.readFileSync(
 );
 // One OR-ed Zotero search for all keywords, not one search per keyword.
 assert.match(lexicalSource, /addCondition\("joinMode", "any"\)/);
-assert.match(lexicalSource, /rankLexicalCandidates\(/);
+// Candidates are selected once and ranked in ONE pass. The ranker is now
+// rankKeywordCandidates (BM25F over metadata AND body); what this guards is
+// unchanged — that there is a single ranking call, not one search per keyword.
+assert.match(lexicalSource, /rankKeywordCandidates\(/);
+// And the body half runs inside this branch, so it inherits the branch's
+// deadline, cancellation and gate rather than adding a timeout of its own.
+assert.match(lexicalSource, /runBodyKeywordSearch\(/);
+assert.doesNotMatch(lexicalSource, /setTimeout\(\s*\(\)\s*=>[^)]*bodyKeyword/i);
 assert.match(lexicalSource, /deadlineAt/);
 assert.match(lexicalSource, /isCancelled\?\.\(\)/);
 assert.doesNotMatch(lexicalSource, /slice\(0,\s*4000\)/);

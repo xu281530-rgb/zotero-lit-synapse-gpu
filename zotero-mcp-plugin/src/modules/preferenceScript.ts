@@ -627,7 +627,17 @@ function bindHybridSearchSettings(doc: Document) {
             })),
             libraryID,
           });
-          return { candidateItems: outcome.diagnostics.candidateIDs };
+          // Body coverage travels with the timing so the recommendation can be
+          // read together with how much of the branch was actually exercised.
+          return {
+            candidateItems: outcome.diagnostics.candidateIDs,
+            body: {
+              indexedDocuments: outcome.diagnostics.body.indexedDocuments,
+              postingsRead: outcome.diagnostics.body.postingsRead,
+              ms: outcome.diagnostics.body.ms,
+              error: outcome.diagnostics.body.error,
+            },
+          };
         },
         sampledItems,
       );

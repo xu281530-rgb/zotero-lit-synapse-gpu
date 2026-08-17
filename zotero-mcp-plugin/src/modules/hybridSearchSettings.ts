@@ -259,7 +259,13 @@ export function resolveNeighborRadius(
 export function getChunkingSignature(
   settings: HybridSearchSettings = getHybridSearchSettings(),
 ): string {
-  return `paragraph-v2:${settings.chunkTargetChars}:${settings.chunkAppendToleranceChars}`;
+  // v3: the references list is finally actually excluded (the v2 detector
+  // required the heading alone on a line and so never matched the `## References`
+  // that MinerU Markdown produces). Chunk boundaries therefore differ from v2,
+  // which is what this string exists to announce — an index built under v2 stays
+  // usable and simply gets the "consider rebuilding" notice, rather than being
+  // rebuilt behind the user's back.
+  return `paragraph-v3:${settings.chunkTargetChars}:${settings.chunkAppendToleranceChars}`;
 }
 
 export const INDEX_CHUNK_SIGNATURE_PREF = `${PREF_PREFIX}semantic.indexChunkSignature`;

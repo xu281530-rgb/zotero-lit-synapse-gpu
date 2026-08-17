@@ -18,6 +18,7 @@ import {
   describeNonDocumentKey,
   type ItemKeyKind,
 } from './itemKeyKind';
+import { DEFAULT_FIELD_PARAMETERS } from './keyword/bm25f';
 import { UnifiedContentExtractor } from './unifiedContentExtractor';
 import { SmartAnnotationExtractor } from './smartAnnotationExtractor';
 import {
@@ -1484,7 +1485,11 @@ Nothing in this server returns a whole document in one response. Every reading t
         lexicalTruncated: diagnostics?.truncated ?? false,
         failedKeywords: diagnostics?.failedKeywords ?? [],
         keywordCoverageBonus: HYBRID_KEYWORD_COVERAGE_BONUS,
-        lexicalFieldWeights: LEXICAL_FIELD_WEIGHTS,
+        // BM25F per-field weights and length-normalisation strengths, which is
+        // what the keyword branch now scores with. Reported so a caller can see
+        // why a title hit outranks a body hit rather than having to guess.
+        keywordFieldParameters: DEFAULT_FIELD_PARAMETERS,
+        bodyKeywords: diagnostics?.body ?? null,
         language,
         rrfK: options.rrfK,
         keywordWeight: options.keywordWeight,
@@ -3107,7 +3112,8 @@ Nothing in this server returns a whole document in one response. Every reading t
               lexicalScannedCount: lexicalDiagnostics?.scannedItems ?? 0,
               lexicalTruncated: lexicalDiagnostics?.truncated ?? false,
               failedKeywords: lexicalDiagnostics?.failedKeywords ?? [],
-              lexicalFieldWeights: LEXICAL_FIELD_WEIGHTS,
+              keywordFieldParameters: DEFAULT_FIELD_PARAMETERS,
+              bodyKeywords: lexicalDiagnostics?.body ?? null,
             }
           : {
               language,

@@ -54,3 +54,8 @@ zotero-mcp-plugin/.cuda-toolkit/
 zotero-mcp-plugin/native/vector-gpu/build/
 zotero-mcp-plugin/native/vector-gpu/.build/
 zotero-mcp-plugin/native/vector-gpu/*.probe.obj
+
+# Keyword-scoring fixtures: generated from the user's own Zotero library, so
+# they contain real titles, abstracts and author lists. Reproduce them locally
+# with scripts/build-keyword-fixture.js rather than committing library content.
+zotero-mcp-plugin/scripts/fixtures/

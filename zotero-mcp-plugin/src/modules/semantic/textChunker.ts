@@ -16,6 +16,8 @@ import { getHybridSearchSettings } from '../hybridSearchSettings';
 
 // ============== Interfaces ==============
 
+import { findReferencesBoundary } from "../keyword/contentFilters";
+
 export interface ChunkerOptions {
   maxChunkSize: number;      // Maximum chunk size (characters)
   minChunkSize: number;      // Minimum chunk size
@@ -266,11 +268,19 @@ export class TextChunker {
       ztoolkit.log(`[TextChunker] Low quality warning: ${quality.score}, issues: ${quality.issues.join(', ')}`);
     }
 
-    // 2. Drop the references list, which is citations rather than body text
+    // 2. Drop the references list, which is citations rather than body text.
+    //
+    // The boundary now comes from the shared detector. detectStructure's own
+    // pattern required the heading to be alone on a line, but body text arrives
+    // as MinerU Markdown where it is written `## References` — so this switch was
+    // on by default and had never once fired. Every paper's bibliography was
+    // being chunked, embedded and returned as evidence.
     const structure = this.detectStructure(cleanText);
+    const referencesAt =
+      findReferencesBoundary(cleanText) ?? structure.referencesStart;
     const bodyText =
-      this.options.skipReferences && structure.referencesStart
-        ? cleanText.substring(0, structure.referencesStart)
+      this.options.skipReferences && referencesAt
+        ? cleanText.substring(0, referencesAt)
         : cleanText;
     ztoolkit.log(`[TextChunker] Structure: abstract=${structure.hasAbstract}, sections=${structure.sections.length}, refs=${structure.referencesStart !== null}, bodyChars=${bodyText.length}`);
 

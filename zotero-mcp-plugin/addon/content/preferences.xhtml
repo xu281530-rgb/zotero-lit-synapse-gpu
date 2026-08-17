@@ -1372,20 +1372,6 @@
           <!-- Index sub-section -->
           <html:div class="zmp-sl" data-l10n-id="pref-section-index-label"></html:div>
 
-          <html:div class="zmp-sw">
-            <html:div>
-              <html:div class="zmp-sw-text" data-l10n-id="pref-semantic-auto-update-text"></html:div>
-              <html:div class="zmp-sw-sub" data-l10n-id="pref-semantic-auto-update-sub"></html:div>
-            </html:div>
-            <html:label class="zmp-tog">
-              <html:input type="checkbox"
-                id="zotero-prefpane-__addonRef__-semantic-auto-update"
-                preference="extensions.zotero.__addonRef__.semantic.autoUpdate"
-              />
-              <html:span class="zmp-tog-track"></html:span>
-            </html:label>
-          </html:div>
-
           <!-- Stats loading -->
           <html:div class="zmp-loading" id="semantic-stats-loading" data-l10n-id="pref-semantic-stats-loading"></html:div>
 
@@ -1595,6 +1581,24 @@
           </html:select>
         </html:div>
         <html:div class="zmp-res" id="hybrid-gpu-status" aria-live="polite"></html:div>
+
+        <!-- Auto update, moved here from the semantic pane: it now governs BOTH
+             indexes (vectors and body keywords), which are built in one pass from
+             one parse, so it belongs with the hybrid retrieval settings rather
+             than under "semantic". -->
+        <html:div class="zmp-sw">
+          <html:div>
+            <html:div class="zmp-sw-text" data-l10n-id="pref-semantic-auto-update-text"></html:div>
+            <html:div class="zmp-sw-sub" data-l10n-id="pref-semantic-auto-update-sub"></html:div>
+          </html:div>
+          <html:label class="zmp-tog">
+            <html:input type="checkbox"
+              id="zotero-prefpane-__addonRef__-semantic-auto-update"
+              preference="extensions.zotero.__addonRef__.semantic.autoUpdate"
+            />
+            <html:span class="zmp-tog-track"></html:span>
+          </html:label>
+        </html:div>
 
         <html:div class="zmp-sl" data-l10n-id="pref-hybrid-retrieval-label"></html:div>
 

@@ -2,8 +2,12 @@ import {
   type KeywordSearchItem,
   type LexicalCandidate,
   type LexicalKeyword,
-  rankLexicalCandidates,
 } from "./hybridSearch";
+import { runBodyKeywordSearch } from "./keyword/bodyKeywordSearch";
+import {
+  rankKeywordCandidates,
+  type BodyContribution,
+} from "./keyword/keywordRanker";
 import {
   keywordSearchGate,
   resolveQueryGraceMs,
@@ -97,6 +101,42 @@ export interface LexicalSearchOptions {
    * onto a database that is not answering.
    */
   queryGraceMs?: number;
+  /**
+   * Whether to consult the body-keyword index.
+   *
+   * On by default. Turned off only where body text would be wrong or
+   * unavailable — and it degrades rather than fails: if the index is missing,
+   * empty or unreadable, the metadata half of the branch still answers, and the
+   * diagnostics say so instead of the result set quietly shrinking.
+   */
+  bodyKeywords?: boolean;
+  /** Injectable for tests; defaults to the shared vector store's keyword index. */
+  bodyKeywordDependencies?: BodyKeywordDependencies;
+}
+
+/** The two things the body half needs, injected so tests can drive them. */
+export interface BodyKeywordDependencies {
+  store: Parameters<typeof runBodyKeywordSearch>[0];
+  resolver: Parameters<typeof runBodyKeywordSearch>[1];
+  /** Documents in the library, BM25F's N. */
+  libraryDocumentCount: () => Promise<number>;
+  averageBodyLength: () => Promise<number>;
+}
+
+/** What the body-keyword half of the branch did, or why it did nothing. */
+export interface BodyKeywordDiagnosticsSummary {
+  enabled: boolean;
+  /** Documents with a body-keyword index in this library. */
+  indexedDocuments: number;
+  candidateDocuments: number;
+  /** Documents that ONLY the body index found — pure added recall. */
+  bodyOnlyDocuments: number;
+  postingsRead: number;
+  rejectedByVerification: number;
+  truncated: boolean;
+  ms: number;
+  /** Present when the body half could not run; the metadata half still did. */
+  error?: string;
 }
 
 export interface LexicalSearchDiagnostics {
@@ -111,6 +151,9 @@ export interface LexicalSearchDiagnostics {
   rankMs: number;
   totalMs: number;
   failedKeywords: string[];
+  /** BM25F ranking time, distinct from the candidate scan. */
+  scoreMs: number;
+  body: BodyKeywordDiagnosticsSummary;
 }
 
 export interface LexicalSearchOutcome {
@@ -248,6 +291,198 @@ async function findCandidateIDs(
 }
 
 /**
+ * Read one Zotero item into the shape the ranker scores.
+ *
+ * Extracted so that a document found ONLY by the body index goes through exactly
+ * the same construction. That matters for identity rather than tidiness: the
+ * fusion downstream keys candidates on `libraryID:itemKey`, so a body-only row
+ * assembled by hand — without a libraryID, without a title — would fail to merge
+ * with the same document coming from the semantic branch and the caller would
+ * see one paper twice.
+ */
+function buildLexicalCandidate(
+  item: any,
+  libraryID: number,
+): LexicalCandidate | null {
+  try {
+    if (!item?.isRegularItem?.()) return null;
+    if (item.deleted) return null;
+
+    const fields: Record<string, string> = {};
+    for (const field of CANDIDATE_FIELDS) {
+      const value = safeField(item, field);
+      if (value) fields[field] = value;
+    }
+
+    let creators = "";
+    try {
+      creators = item
+        .getCreators()
+        .map((creator: any) =>
+          `${creator.firstName || ""} ${creator.lastName || ""}`.trim(),
+        )
+        .filter(Boolean)
+        .join(", ");
+    } catch {
+      creators = "";
+    }
+    if (creators) fields.creator = creators;
+
+    let tags: string[] = [];
+    try {
+      tags = item.getTags().map((tag: any) => tag.tag);
+    } catch {
+      tags = [];
+    }
+    if (tags.length > 0) fields.tags = tags.join(", ");
+
+    return {
+      key: item.key,
+      libraryID: item.libraryID ?? libraryID,
+      title: fields.title || "",
+      fields,
+      metadata: {
+        itemType: item.itemType,
+        creators,
+        date: safeField(item, "date").match(/\d{4}/)?.[0] || "",
+        publicationTitle: fields.publicationTitle || "",
+        DOI: safeField(item, "DOI"),
+      },
+    };
+  } catch (error) {
+    ztoolkit.log(
+      `[LexicalSearch] skipped candidate: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      "warn",
+    );
+    return null;
+  }
+}
+
+/**
+ * The production body-keyword dependencies: the shared vector store's index.
+ *
+ * Loaded lazily so that a metadata-only keyword search never pulls the semantic
+ * modules into the import graph, which is a startup-cost rule this codebase
+ * already follows elsewhere.
+ */
+async function defaultBodyKeywordDependencies(
+  libraryID: number,
+): Promise<BodyKeywordDependencies> {
+  const { getVectorStore } = await import("./semantic/vectorStore");
+  const vectorStore = getVectorStore();
+  const store = vectorStore.getKeywordIndexStore();
+
+  return {
+    store,
+    resolver: {
+      async chunkTexts(_libraryID, pairs) {
+        const wanted = new Map<string, Set<number>>();
+        for (const pair of pairs) {
+          const set = wanted.get(pair.itemKey) ?? new Set<number>();
+          set.add(pair.chunkId);
+          wanted.set(pair.itemKey, set);
+        }
+        const texts = new Map<string, string>();
+        // Batched per item, because the stored chunks are addressed per item and
+        // one query per passage would dominate a search that touches hundreds.
+        const itemKeys = Array.from(wanted.keys());
+        const BATCH = 100;
+        for (let offset = 0; offset < itemKeys.length; offset += BATCH) {
+          const slice = itemKeys.slice(offset, offset + BATCH);
+          const chunks = await vectorStore.getItemChunks(slice);
+          for (const [itemKey, list] of chunks) {
+            const bare = itemKey.includes(":")
+              ? itemKey.slice(itemKey.indexOf(":") + 1)
+              : itemKey;
+            const need = wanted.get(bare) ?? wanted.get(itemKey);
+            if (!need) continue;
+            for (const chunk of list) {
+              if (!need.has(chunk.chunkId)) continue;
+              texts.set(`${bare}:${chunk.chunkId}`, chunk.text ?? "");
+            }
+          }
+        }
+        return texts;
+      },
+      async metadataTexts(_libraryID, itemKeys) {
+        const out = new Map<string, Record<string, string>>();
+        const items = await Promise.all(
+          itemKeys.map(async (key) => {
+            try {
+              return await Zotero.Items.getByLibraryAndKeyAsync(libraryID, key);
+            } catch {
+              return null;
+            }
+          }),
+        );
+        for (const item of items) {
+          // getByLibraryAndKeyAsync answers `false` for a key the library does
+          // not have, so this is a type narrowing and not a redundant check.
+          if (!item || typeof item !== "object") continue;
+          const field = (name: string): string => {
+            try {
+              const value = (item as any).getField?.(name);
+              return typeof value === "string" ? value : "";
+            } catch {
+              return "";
+            }
+          };
+          let tags = "";
+          try {
+            tags = ((item as any).getTags?.() ?? [])
+              .map((tag: any) => tag.tag)
+              .filter(Boolean)
+              .join("\n");
+          } catch {
+            tags = "";
+          }
+          let creator = "";
+          try {
+            creator = ((item as any).getCreators?.() ?? [])
+              .map((entry: any) =>
+                `${entry.firstName || ""} ${entry.lastName || ""}`.trim(),
+              )
+              .filter(Boolean)
+              .join(", ");
+          } catch {
+            creator = "";
+          }
+          out.set(item.key, {
+            title: (item as any).getDisplayTitle?.() || field("title"),
+            abstract: field("abstractNote"),
+            tags,
+            publicationTitle: field("publicationTitle"),
+            creator,
+            extra: field("extra"),
+          });
+        }
+        return out as any;
+      },
+    },
+    async libraryDocumentCount() {
+      try {
+        const items = (await Zotero.Items.getAll(libraryID, true)) ?? [];
+        return items.length || 1;
+      } catch {
+        // A count we cannot read must not become a zero: N=0 would flatten every
+        // idf to nothing and make the whole ranking uniform.
+        return 1;
+      }
+    },
+    async averageBodyLength() {
+      try {
+        const stats = await store.statistics(libraryID);
+        return stats.averageLengths.body;
+      } catch {
+        return 0;
+      }
+    },
+  };
+}
+
+/**
  * Rank a library against every keyword in one traversal.
  *
  * The previous implementation issued one full `search_library` call per
@@ -281,8 +516,19 @@ export async function runLexicalSearch(
         searchMs: 0,
         scanMs: 0,
         rankMs: 0,
+        scoreMs: 0,
         totalMs: Date.now() - startedAt,
         failedKeywords: [],
+        body: {
+          enabled: false,
+          indexedDocuments: 0,
+          candidateDocuments: 0,
+          bodyOnlyDocuments: 0,
+          postingsRead: 0,
+          rejectedByVerification: 0,
+          truncated: false,
+          ms: 0,
+        },
       },
     };
   }
@@ -362,67 +608,133 @@ export async function runLexicalSearch(
     const chunk = candidateIDs.slice(offset, offset + CANDIDATE_CHUNK_SIZE);
     const items = await Zotero.Items.getAsync(chunk);
     for (const item of items as any[]) {
-      try {
-        if (!item?.isRegularItem?.()) continue;
-        if (item.deleted) continue;
-
-        const fields: Record<string, string> = {};
-        for (const field of CANDIDATE_FIELDS) {
-          const value = safeField(item, field);
-          if (value) fields[field] = value;
-        }
-
-        let creators = "";
-        try {
-          creators = item
-            .getCreators()
-            .map((creator: any) =>
-              `${creator.firstName || ""} ${creator.lastName || ""}`.trim(),
-            )
-            .filter(Boolean)
-            .join(", ");
-        } catch {
-          creators = "";
-        }
-        if (creators) fields.creator = creators;
-
-        let tags: string[] = [];
-        try {
-          tags = item.getTags().map((tag: any) => tag.tag);
-        } catch {
-          tags = [];
-        }
-        if (tags.length > 0) fields.tags = tags.join(", ");
-
-        candidates.push({
-          key: item.key,
-          libraryID: item.libraryID ?? libraryID,
-          title: fields.title || "",
-          fields,
-          metadata: {
-            itemType: item.itemType,
-            creators,
-            date: safeField(item, "date").match(/\d{4}/)?.[0] || "",
-            publicationTitle: fields.publicationTitle || "",
-            DOI: safeField(item, "DOI"),
-          },
-        });
-      } catch (error) {
-        ztoolkit.log(
-          `[LexicalSearch] skipped candidate: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-          "warn",
-        );
-      }
+      const candidate = buildLexicalCandidate(item, libraryID);
+      if (candidate) candidates.push(candidate);
     }
     // Yield so a long scan cannot freeze the Zotero UI thread.
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
   const scanMs = Date.now() - scanStartedAt;
 
+  // ---------------------------------------------------------------- body half
+  //
+  // Runs INSIDE this branch rather than as a third parallel one, so it inherits
+  // the deadline, the cancellation hook and the gate's overload protection that
+  // already bound the keyword branch. No new timeout was added anywhere.
+  const bodyStartedAt = Date.now();
+  const bodyDiagnostics: BodyKeywordDiagnosticsSummary = {
+    enabled: options.bodyKeywords !== false,
+    indexedDocuments: 0,
+    candidateDocuments: 0,
+    bodyOnlyDocuments: 0,
+    postingsRead: 0,
+    rejectedByVerification: 0,
+    truncated: false,
+    ms: 0,
+  };
+  let bodyContributions = new Map<string, BodyContribution>();
+  let libraryDocumentCount = Math.max(candidates.length, 1);
+  let averageBodyLength = 0;
+
+  if (bodyDiagnostics.enabled) {
+    try {
+      const dependencies =
+        options.bodyKeywordDependencies ??
+        (await defaultBodyKeywordDependencies(libraryID));
+      const outcome = await runBodyKeywordSearch(
+        dependencies.store,
+        dependencies.resolver,
+        {
+          libraryID,
+          probes: keywords.map((keyword) => ({
+            text: keyword.text,
+            weight: keyword.weight,
+          })),
+          scopeItemKeys,
+          deadlineAt,
+          isCancelled,
+          // Only the body. The metadata fields are scored from the live items
+          // below, which covers the WHOLE library; the index covers only what the
+          // user has indexed, so taking metadata from it would drop the rest.
+          includeFields: ["body"],
+        },
+      );
+      bodyDiagnostics.indexedDocuments = outcome.diagnostics.indexedDocuments;
+      bodyDiagnostics.candidateDocuments =
+        outcome.diagnostics.candidateDocuments;
+      bodyDiagnostics.postingsRead = outcome.diagnostics.postingsRead;
+      bodyDiagnostics.rejectedByVerification =
+        outcome.diagnostics.rejectedByVerification;
+      if (outcome.diagnostics.truncated) {
+        bodyDiagnostics.truncated = true;
+        truncated = true;
+      }
+      const metadataKeys = new Set(
+        candidates.map((candidate) => candidate.key),
+      );
+      const bodyOnlyKeys: string[] = [];
+      for (const result of outcome.results) {
+        bodyContributions.set(result.itemKey, {
+          itemKey: result.itemKey,
+          frequencies: result.bodyFrequencies,
+          bodyLength: result.bodyLength,
+          evidence: result.evidence,
+        });
+        if (!metadataKeys.has(result.itemKey)) {
+          bodyDiagnostics.bodyOnlyDocuments += 1;
+          bodyOnlyKeys.push(result.itemKey);
+        }
+      }
+
+      // A document whose match is ONLY in its body was never a metadata
+      // candidate, so it has to be admitted here — as a full candidate, read the
+      // same way as any other, so that its identity, title and citation fields
+      // are the ones every downstream stage expects.
+      for (const itemKey of bodyOnlyKeys) {
+        try {
+          const item = await Zotero.Items.getByLibraryAndKeyAsync(
+            libraryID,
+            itemKey,
+          );
+          if (!item || typeof item !== "object") continue;
+          const candidate = buildLexicalCandidate(item, libraryID);
+          if (candidate) candidates.push(candidate);
+        } catch (error) {
+          ztoolkit.log(
+            `[LexicalSearch] body-only candidate ${itemKey} could not be read: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            "warn",
+          );
+        }
+      }
+      libraryDocumentCount = await dependencies.libraryDocumentCount();
+      averageBodyLength = await dependencies.averageBodyLength();
+    } catch (error) {
+      // The body half is additive. Losing it must degrade the answer, never
+      // fail the branch: metadata retrieval is what the caller had before.
+      bodyContributions = new Map();
+      bodyDiagnostics.error =
+        error instanceof Error ? error.message : String(error);
+      ztoolkit.log(
+        `[LexicalSearch] body-keyword retrieval unavailable: ${bodyDiagnostics.error}`,
+        "warn",
+      );
+    }
+  }
+  bodyDiagnostics.ms = Date.now() - bodyStartedAt;
+
   const rankStartedAt = Date.now();
-  const items = rankLexicalCandidates(candidates, keywords, {});
+  const items = rankKeywordCandidates({
+    probes: keywords.map((keyword) => ({
+      text: keyword.text,
+      weight: keyword.weight,
+    })),
+    candidates,
+    bodyContributions,
+    libraryDocumentCount,
+    averageBodyLength,
+  }) as unknown as KeywordSearchItem[];
   const rankMs = Date.now() - rankStartedAt;
 
   return {
@@ -436,8 +748,10 @@ export async function runLexicalSearch(
       searchMs,
       scanMs,
       rankMs,
+      scoreMs: rankMs,
       totalMs: Date.now() - startedAt,
       failedKeywords,
+      body: bodyDiagnostics,
     },
   };
 }
