@@ -41,6 +41,7 @@
     "test:keyword-index-store": "node --experimental-strip-types --experimental-sqlite scripts/test-keyword-index-store.js",
     "test:body-keyword-search": "node --experimental-strip-types --experimental-sqlite scripts/test-body-keyword-search.js",
     "test:keyword-ranker": "node --experimental-strip-types scripts/test-keyword-ranker.js",
+    "test:keyword-statistics": "node --experimental-strip-types --experimental-sqlite scripts/test-keyword-statistics.js",
     "calibrate:bm25f": "node --experimental-strip-types --experimental-sqlite scripts/calibrate-bm25f-threshold.js",
     "compare:keyword-scoring": "node --experimental-strip-types scripts/compare-keyword-scoring.js",
     "benchmark:keyword-index": "node --experimental-strip-types --experimental-sqlite scripts/benchmark-keyword-index.js",

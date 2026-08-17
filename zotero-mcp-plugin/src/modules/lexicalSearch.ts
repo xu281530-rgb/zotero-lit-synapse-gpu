@@ -8,6 +8,7 @@ import {
   rankKeywordCandidates,
   type BodyContribution,
 } from "./keyword/keywordRanker";
+import type { Bm25Field } from "./keyword/bm25f";
 import {
   keywordSearchGate,
   resolveQueryGraceMs,
@@ -120,7 +121,23 @@ export interface BodyKeywordDependencies {
   resolver: Parameters<typeof runBodyKeywordSearch>[1];
   /** Documents in the library, BM25F's N. */
   libraryDocumentCount: () => Promise<number>;
-  averageBodyLength: () => Promise<number>;
+  /**
+   * The body index's own statistics: how many documents it covers and their mean
+   * body length.
+   *
+   * The document count is what BODY document frequencies are divided by. It is
+   * NOT the library count: the bodies the index does not cover are unknown, and
+   * treating them as non-containing inflated IDF by 3.76x to 4.39x on real
+   * body-only terms.
+   */
+  bodyStatistics: () => Promise<{
+    documentCount: number;
+    averageBodyLength: number;
+  }>;
+  /** Library-wide mean metadata field lengths, stable across queries. */
+  libraryFieldAverages: () => Promise<Record<string, number>>;
+  /** Item keys that have a body index, for sizing a scoped body collection. */
+  indexedItemKeys: () => Promise<Set<string>>;
 }
 
 /** What the body-keyword half of the branch did, or why it did nothing. */
@@ -128,6 +145,15 @@ export interface BodyKeywordDiagnosticsSummary {
   enabled: boolean;
   /** Documents with a body-keyword index in this library. */
   indexedDocuments: number;
+  /**
+   * The two collections the two document frequencies were counted over.
+   *
+   * Reported so the IDF arithmetic is auditable from a search response: a body
+   * frequency divided by the metadata collection would be the exact defect these
+   * numbers exist to make visible.
+   */
+  metadataCollectionSize: number;
+  bodyCollectionSize: number;
   candidateDocuments: number;
   /** Documents that ONLY the body index found — pure added recall. */
   bodyOnlyDocuments: number;
@@ -490,12 +516,32 @@ async function defaultBodyKeywordDependencies(
         return 1;
       }
     },
-    async averageBodyLength() {
+    async bodyStatistics() {
       try {
         const stats = await store.statistics(libraryID);
-        return stats.averageLengths.body;
+        return {
+          documentCount: stats.documentCount,
+          averageBodyLength: stats.averageLengths.body,
+        };
       } catch {
-        return 0;
+        // No readable body statistics means no body collection to score against,
+        // so body evidence contributes nothing rather than being scored against a
+        // collection size we guessed.
+        return { documentCount: 0, averageBodyLength: 0 };
+      }
+    },
+    async libraryFieldAverages() {
+      const { getLibraryFieldStats } = await import(
+        "./keyword/libraryFieldStats"
+      );
+      const averages = await getLibraryFieldStats().get(libraryID);
+      return averages.averageLengths;
+    },
+    async indexedItemKeys() {
+      try {
+        return await store.indexedItemKeys(libraryID);
+      } catch {
+        return new Set<string>();
       }
     },
   };
@@ -541,6 +587,8 @@ export async function runLexicalSearch(
         body: {
           enabled: false,
           indexedDocuments: 0,
+          metadataCollectionSize: 0,
+          bodyCollectionSize: 0,
           candidateDocuments: 0,
           bodyOnlyDocuments: 0,
           postingsRead: 0,
@@ -644,6 +692,8 @@ export async function runLexicalSearch(
   const bodyDiagnostics: BodyKeywordDiagnosticsSummary = {
     enabled: options.bodyKeywords !== false,
     indexedDocuments: 0,
+    metadataCollectionSize: 0,
+    bodyCollectionSize: 0,
     candidateDocuments: 0,
     bodyOnlyDocuments: 0,
     postingsRead: 0,
@@ -653,7 +703,10 @@ export async function runLexicalSearch(
   };
   let bodyContributions = new Map<string, BodyContribution>();
   let libraryDocumentCount = Math.max(candidates.length, 1);
+  let bodyDocumentCount = 0;
   let averageBodyLength = 0;
+  let averageFieldLengths: Record<string, number> | undefined;
+  let scopeBodyDocumentCount: number | undefined;
 
   if (bodyDiagnostics.enabled) {
     try {
@@ -728,7 +781,21 @@ export async function runLexicalSearch(
         }
       }
       libraryDocumentCount = await dependencies.libraryDocumentCount();
-      averageBodyLength = await dependencies.averageBodyLength();
+      const bodyStats = await dependencies.bodyStatistics();
+      bodyDocumentCount = bodyStats.documentCount;
+      averageBodyLength = bodyStats.averageBodyLength;
+      averageFieldLengths = await dependencies.libraryFieldAverages();
+      if (scopeItemKeys) {
+        // A scope narrows the collection the body frequencies were counted in, so
+        // it has to narrow that collection's size too: how many of the indexed
+        // documents are actually inside the scope.
+        const indexed = await dependencies.indexedItemKeys();
+        let inScope = 0;
+        for (const key of indexed) {
+          if (scopeItemKeys.has(key)) inScope += 1;
+        }
+        scopeBodyDocumentCount = inScope;
+      }
     } catch (error) {
       // The body half is additive. Losing it must degrade the answer, never
       // fail the branch: metadata retrieval is what the caller had before.
@@ -743,6 +810,11 @@ export async function runLexicalSearch(
   }
   bodyDiagnostics.ms = Date.now() - bodyStartedAt;
 
+  bodyDiagnostics.metadataCollectionSize =
+    scopeItemKeys?.size ?? libraryDocumentCount;
+  bodyDiagnostics.bodyCollectionSize =
+    scopeBodyDocumentCount ?? bodyDocumentCount;
+
   const rankStartedAt = Date.now();
   const items = rankKeywordCandidates({
     probes: keywords.map((keyword) => ({
@@ -752,6 +824,12 @@ export async function runLexicalSearch(
     candidates,
     bodyContributions,
     libraryDocumentCount,
+    bodyDocumentCount,
+    scopeDocumentCount: scopeItemKeys?.size,
+    scopeBodyDocumentCount,
+    averageFieldLengths: averageFieldLengths as
+      | Record<Bm25Field, number>
+      | undefined,
     averageBodyLength,
   }) as unknown as KeywordSearchItem[];
   const rankMs = Date.now() - rankStartedAt;

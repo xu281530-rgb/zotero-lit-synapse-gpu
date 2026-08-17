@@ -445,8 +445,16 @@ export async function runBodyKeywordSearch(
   // ------------------------------------------------------------------ score
   const scoreStartedAt = Date.now();
   const storeStats = await store.statistics(options.libraryID);
+  /*
+   * In THIS path every field is read from the keyword index, so both observation
+   * regimes cover exactly the same documents — the indexed ones — and both
+   * collection sizes are that count. (The combined ranker is the asymmetric case:
+   * there metadata comes from the whole library and only the body comes from the
+   * index, so the two sizes differ and must be reported separately.)
+   */
   const statistics: CorpusStatistics = {
     documentCount: storeStats.documentCount,
+    bodyDocumentCount: storeStats.documentCount,
     fields: {} as CorpusStatistics["fields"],
   };
   for (const field of BM25_FIELDS) {
@@ -464,10 +472,20 @@ export async function runBodyKeywordSearch(
    * in hand.
    */
   const documentFrequency = new Map<string, number>();
+  const bodyDocumentFrequency = new Map<string, number>();
   for (const [probeText, hits] of hitsByProbe) {
-    const documents = new Set<number>();
-    for (const hit of hits) documents.add(hit.docId);
-    documentFrequency.set(probeText, documents.size);
+    // Split by regime, because IDF is applied per regime: a metadata hit and a
+    // body hit are evidence about different fields even when they land in the
+    // same document, and pooling them would let one regime's count weight the
+    // other's saturation.
+    const metadataDocuments = new Set<number>();
+    const bodyDocuments = new Set<number>();
+    for (const hit of hits) {
+      if (hit.field === "body") bodyDocuments.add(hit.docId);
+      else metadataDocuments.add(hit.docId);
+    }
+    documentFrequency.set(probeText, metadataDocuments.size);
+    bodyDocumentFrequency.set(probeText, bodyDocuments.size);
   }
 
   interface Accumulator {
@@ -522,6 +540,7 @@ export async function runBodyKeywordSearch(
       contributions.push({
         term: probeText,
         documentFrequency: documentFrequency.get(probeText) ?? 0,
+        bodyDocumentFrequency: bodyDocumentFrequency.get(probeText) ?? 0,
         frequencies,
         weight: probeWeights.get(probeText) ?? 1,
       });

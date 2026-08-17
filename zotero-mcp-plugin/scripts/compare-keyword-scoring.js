@@ -55,6 +55,25 @@ if (!fs.existsSync(fixturePath)) {
 
 const candidates = JSON.parse(fs.readFileSync(fixturePath, "utf8"));
 
+/*
+ * Library-level average field lengths, produced by the SAME provider production
+ * uses, over the WHOLE fixture — which is the whole library. Deriving them from
+ * the matching subset instead is the defect this measurement now guards against.
+ */
+const { LibraryFieldStats } = await import(
+  "../src/modules/keyword/libraryFieldStats.ts"
+);
+const libraryAverages = (
+  await new LibraryFieldStats({
+    async signature() {
+      return `fixture:${candidates.length}`;
+    },
+    async readFields() {
+      return candidates.map((candidate) => candidate.fields ?? {});
+    },
+  }).get(1)
+).averageLengths;
+
 /**
  * Query set spanning what the feature has to get right: Chinese and English
  * terms, a rare term of art, exact material grades, symbol-bearing phase names,
@@ -83,6 +102,8 @@ function scoreQuery(keywords) {
     candidates,
     bodyContributions: new Map(),
     libraryDocumentCount: candidates.length,
+    bodyDocumentCount: 0,
+    averageFieldLengths: libraryAverages,
   });
   const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
   const rows = ranked.map((item) => ({

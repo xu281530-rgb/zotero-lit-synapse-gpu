@@ -46,6 +46,25 @@ const fixturePath = path.join(
   "scripts/fixtures/keyword-scoring-candidates.json",
 );
 const candidates = JSON.parse(fs.readFileSync(fixturePath, "utf8"));
+
+/*
+ * Library-level average field lengths, produced by the SAME provider production
+ * uses, over the WHOLE fixture — which is the whole library. Deriving them from
+ * the matching subset instead is the defect this measurement now guards against.
+ */
+const { LibraryFieldStats } = await import(
+  "../src/modules/keyword/libraryFieldStats.ts"
+);
+const libraryAverages = (
+  await new LibraryFieldStats({
+    async signature() {
+      return `fixture:${candidates.length}`;
+    },
+    async readFields() {
+      return candidates.map((candidate) => candidate.fields ?? {});
+    },
+  }).get(1)
+).averageLengths;
 const THRESHOLD = 0.6;
 const LIBRARY = 1;
 
@@ -165,6 +184,8 @@ for (const [name, keywords] of Object.entries(QUERIES)) {
     candidates,
     bodyContributions: new Map(),
     libraryDocumentCount: candidates.length,
+    bodyDocumentCount: 0,
+    averageFieldLengths: libraryAverages,
   });
   const elapsedMs = Date.now() - startedAt;
   const rawByKey = new Map(

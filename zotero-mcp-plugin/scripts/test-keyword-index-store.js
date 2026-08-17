@@ -299,6 +299,79 @@ test("statistics report per-field averages, which is what BM25F normalises by", 
   );
 });
 
+test("the body collection size and avgdl track the index as it changes", async () => {
+  /*
+   * These two numbers are what BODY document frequencies are divided by and what
+   * body lengths are normalised against, so they have to follow the index exactly:
+   * an N that lags behind means df/N describes a collection that no longer exists.
+   */
+  const { store } = freshStore();
+  assert.equal((await store.statistics(LIBRARY)).documentCount, 0);
+
+  const english = await store.writeItem(PAPER_EN);
+  const one = await store.statistics(LIBRARY);
+  assert.equal(one.documentCount, 1);
+  assert.equal(one.averageLengths.body, english.lengths.body);
+
+  const chinese = await store.writeItem(PAPER_ZH);
+  const two = await store.statistics(LIBRARY);
+  assert.equal(two.documentCount, 2, "a new indexed document grows N_body");
+  // Asserted as exact arithmetic rather than as a direction: a Chinese body
+  // yields MORE tokens than a comparable English one, because Han text is indexed
+  // as overlapping bigrams, so guessing which way the mean moves gets it wrong.
+  assert.equal(
+    two.averageLengths.body,
+    (english.lengths.body + chinese.lengths.body) / 2,
+    "avgdl_body must be the exact mean over indexed documents",
+  );
+
+  // Re-indexing replaces rather than accumulating: the tombstoned revision must
+  // not keep counting towards N_body, or the collection would grow on every edit.
+  const shortened = await store.writeItem({
+    ...PAPER_EN,
+    chunks: ["A much shorter body now."],
+  });
+  const replaced = await store.statistics(LIBRARY);
+  assert.equal(replaced.documentCount, 2, "still two documents, not three");
+  assert.equal(
+    replaced.averageLengths.body,
+    (shortened.lengths.body + chinese.lengths.body) / 2,
+    "the superseded revision must not count towards the mean",
+  );
+
+  await store.removeItem(LIBRARY, PAPER_ZH.itemKey);
+  const removed = await store.statistics(LIBRARY);
+  assert.equal(removed.documentCount, 1, "removal shrinks N_body immediately");
+  assert.equal(removed.averageLengths.body, shortened.lengths.body);
+
+  await store.compact();
+  const compacted = await store.statistics(LIBRARY);
+  assert.equal(compacted.documentCount, 1, "compaction changes nothing live");
+  assert.equal(
+    compacted.averageLengths.body.toFixed(6),
+    removed.averageLengths.body.toFixed(6),
+  );
+});
+
+test("df_body counts indexed documents, and only those", async () => {
+  // The premise of the IDF fix: a body term's frequency is a count within the
+  // indexed subset, so it can never exceed the number of indexed documents.
+  const { store } = freshStore();
+  await store.writeItem(PAPER_EN);
+  await store.writeItem(PAPER_ZH);
+  const stats = await store.statistics(LIBRARY);
+  const postings = await store.lookup(LIBRARY, "superalloy");
+  const documents = new Set(
+    postings
+      .filter((posting) => posting.field === "body")
+      .map((posting) => posting.docId),
+  );
+  assert.ok(
+    documents.size <= stats.documentCount,
+    `df_body ${documents.size} exceeds N_body ${stats.documentCount}`,
+  );
+});
+
 test("statistics on an empty index are zero, not NaN", async () => {
   const { store } = freshStore();
   const stats = await store.statistics(LIBRARY);

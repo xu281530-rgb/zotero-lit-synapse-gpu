@@ -44,6 +44,17 @@ function filler(count, prefix = "F") {
 
 const LIBRARY_SIZE = 931;
 
+/** Library-level field averages, as the statistics provider supplies them. */
+const LIBRARY_AVERAGES = {
+  title: 14.2,
+  abstract: 199.2,
+  tags: 8.4,
+  publicationTitle: 3.0,
+  creator: 8.7,
+  extra: 18.1,
+  body: 7700,
+};
+
 // -------------------------------------------------------------------------
 
 test("a metadata-only match still scores, exactly as before the body existed", () => {
@@ -54,6 +65,7 @@ test("a metadata-only match still scores, exactly as before the body existed", (
       ...filler(50),
     ],
     libraryDocumentCount: LIBRARY_SIZE,
+    averageFieldLengths: LIBRARY_AVERAGES,
   });
   assert.equal(ranked.length, 1);
   assert.equal(ranked[0].key, "A");
@@ -81,6 +93,8 @@ test("a document with ONLY a body hit enters the ranking", () => {
       ],
     ]),
     libraryDocumentCount: LIBRARY_SIZE,
+    bodyDocumentCount: 26,
+    averageFieldLengths: LIBRARY_AVERAGES,
     averageBodyLength: 7700,
   });
   assert.equal(ranked.length, 1);
@@ -110,50 +124,75 @@ test("at EQUAL occurrence counts, a title hit outranks a body hit", () => {
       ],
     ]),
     libraryDocumentCount: LIBRARY_SIZE,
+    bodyDocumentCount: 26,
+    averageFieldLengths: LIBRARY_AVERAGES,
     averageBodyLength: 7700,
   });
   assert.equal(ranked[0].key, "TITLED");
   assert.ok(ranked[1].relevanceScore > 0, "the body hit still counts");
 });
 
-test("sustained body evidence CAN outrank a single title mention", () => {
+test("how far body evidence can carry depends on how much has been READ", () => {
   /*
-   * Pinned deliberately, because it is a judgement rather than a law.
+   * This replaces an earlier expectation that sustained body evidence always
+   * outranks a single title mention. That was true only because body IDF was
+   * being computed against the library count while the body index covered 26 of
+   * 931 documents — an inflation of about 4x. With N and df drawn from the same
+   * observed corpus, the honest picture is:
    *
-   * BM25F sums occurrences across fields before saturating, and a title can
-   * physically only hold a term once or twice while a body can hold it fifty
-   * times. So a paper that discusses the alloy throughout outranks a paper that
-   * names it once in a title about something else — which is the behaviour the
-   * feature exists to produce. Field WEIGHT decides ties at equal evidence (see
-   * the test above); it is not a veto over weight of evidence.
+   *   partial coverage (26 of 931 bodies read)
+   *     a title mention wins, because idf over a 26-document corpus tops out at
+   *     2.89 while idf over the library reaches 6.43 — we simply know much less
+   *     about the body corpus, and the score says so.
    *
-   * If this ordering is ever unwanted, the lever is DEFAULT_FIELD_PARAMETERS.body
-   * (boost and b), not a special case here.
+   *   complete coverage (all 931 bodies read)
+   *     the same eight body occurrences win, because now the body corpus IS the
+   *     library and the two IDFs are on the same scale.
+   *
+   * So the ranking's trust in body evidence grows as the user indexes more, with
+   * no parameter to retune. That is the property worth pinning, and it is not a
+   * preference — it falls out of requiring N and df to describe one corpus.
    */
-  const ranked = rankKeywordCandidates({
-    probes: [probe("FGH4096")],
-    candidates: [
-      candidate("TITLED", { title: "Hot deformation of FGH4096 superalloy" }),
-      ...filler(50),
-    ],
-    bodyContributions: new Map([
-      [
-        "DISCUSSED",
-        {
-          itemKey: "DISCUSSED",
-          frequencies: new Map([["FGH4096", 8]]),
-          bodyLength: 7000,
-          evidence: [],
-        },
+  const ranked = (bodyDocumentCount) =>
+    rankKeywordCandidates({
+      probes: [probe("FGH4096")],
+      candidates: [
+        candidate("TITLED", { title: "Hot deformation of FGH4096 superalloy" }),
+        ...filler(50),
       ],
-    ]),
-    libraryDocumentCount: LIBRARY_SIZE,
-    averageBodyLength: 7700,
-  });
-  assert.equal(ranked[0].key, "DISCUSSED");
+      bodyContributions: new Map([
+        [
+          "DISCUSSED",
+          {
+            itemKey: "DISCUSSED",
+            frequencies: new Map([["FGH4096", 8]]),
+            bodyLength: 7000,
+            evidence: [],
+          },
+        ],
+      ]),
+      libraryDocumentCount: LIBRARY_SIZE,
+      bodyDocumentCount,
+      averageFieldLengths: LIBRARY_AVERAGES,
+      averageBodyLength: 7700,
+    });
+
+  const partial = ranked(26);
+  assert.equal(
+    partial[0].key,
+    "TITLED",
+    "with 26 of 931 bodies read, a title mention must win",
+  );
   assert.ok(
-    ranked.find((item) => item.key === "TITLED").relevanceScore > 0,
-    "and the titled paper is not dropped",
+    partial.find((item) => item.key === "DISCUSSED").relevanceScore > 0,
+    "the body evidence still counts, it just counts less",
+  );
+
+  const complete = ranked(LIBRARY_SIZE);
+  assert.equal(
+    complete[0].key,
+    "DISCUSSED",
+    "with every body read, sustained body evidence must win",
   );
 });
 
@@ -167,6 +206,7 @@ test("a title hit PLUS a body hit beats the title hit alone", () => {
       ...filler(50),
     ],
     libraryDocumentCount: LIBRARY_SIZE,
+    averageFieldLengths: LIBRARY_AVERAGES,
   });
   const withBody = rankKeywordCandidates({
     probes: [probe("FGH4096")],
@@ -186,6 +226,8 @@ test("a title hit PLUS a body hit beats the title hit alone", () => {
       ],
     ]),
     libraryDocumentCount: LIBRARY_SIZE,
+    bodyDocumentCount: 26,
+    averageFieldLengths: LIBRARY_AVERAGES,
     averageBodyLength: 7700,
   });
   assert.ok(
@@ -213,6 +255,8 @@ test("body evidence merges onto the SAME row, never a second row", () => {
       ],
     ]),
     libraryDocumentCount: LIBRARY_SIZE,
+    bodyDocumentCount: 26,
+    averageFieldLengths: LIBRARY_AVERAGES,
     averageBodyLength: 7700,
   });
   assert.equal(ranked.filter((item) => item.key === "A").length, 1);
@@ -237,6 +281,8 @@ test("a long body dilutes a body hit; the title contribution is untouched", () =
         ],
       ]),
       libraryDocumentCount: LIBRARY_SIZE,
+      bodyDocumentCount: 26,
+      averageFieldLengths: LIBRARY_AVERAGES,
       averageBodyLength: 7700,
     })[0].relevanceScore;
   assert.ok(score(2000) > score(30000), "independent per-field normalisation");
@@ -261,6 +307,7 @@ test("more distinct keywords matched outranks one keyword repeated", () => {
       ...filler(60),
     ],
     libraryDocumentCount: LIBRARY_SIZE,
+    averageFieldLengths: LIBRARY_AVERAGES,
   });
   assert.equal(ranked[0].key, "BROAD");
   assert.equal(ranked[0].keywordCoverage, 1);
@@ -276,6 +323,7 @@ test("a Chinese term is matched in metadata by the same rule as in the body", ()
       ...filler(40),
     ],
     libraryDocumentCount: LIBRARY_SIZE,
+    averageFieldLengths: LIBRARY_AVERAGES,
   });
   assert.deepEqual(
     ranked.map((item) => item.key),
@@ -292,6 +340,7 @@ test("an en-dashed grade in a title is found by the hyphenated query", () => {
       ...filler(30),
     ],
     libraryDocumentCount: LIBRARY_SIZE,
+    averageFieldLengths: LIBRARY_AVERAGES,
   });
   assert.deepEqual(
     ranked.map((item) => item.key),
@@ -307,6 +356,7 @@ test("searching for a word inside a hyphenated term does not match it", () => {
       ...filler(30),
     ],
     libraryDocumentCount: LIBRARY_SIZE,
+    averageFieldLengths: LIBRARY_AVERAGES,
   });
   assert.deepEqual(ranked, []);
 });
@@ -324,6 +374,7 @@ test("every metadata field the previous ranker scored is still scored", () => {
       probes: [probe("columnar solidification")],
       candidates: [candidate("A", fields), ...filler(30)],
       libraryDocumentCount: LIBRARY_SIZE,
+      averageFieldLengths: LIBRARY_AVERAGES,
     });
     assert.equal(ranked.length, 1, `${sourceField} produced no match`);
     assert.ok(
@@ -345,6 +396,7 @@ test("a rare term outranks a common one, using the LIBRARY's document count", ()
       ...common,
     ],
     libraryDocumentCount: LIBRARY_SIZE,
+    averageFieldLengths: LIBRARY_AVERAGES,
   });
   assert.equal(ranked[0].key, "RARE");
   assert.ok(
@@ -399,6 +451,7 @@ test("an unindexable probe does not make everything match", () => {
       ...filler(20),
     ],
     libraryDocumentCount: LIBRARY_SIZE,
+    averageFieldLengths: LIBRARY_AVERAGES,
   });
   assert.deepEqual(ranked, []);
 });
@@ -412,6 +465,7 @@ test("a zero-weight probe is ignored without affecting the others", () => {
       ...filler(30),
     ],
     libraryDocumentCount: LIBRARY_SIZE,
+    averageFieldLengths: LIBRARY_AVERAGES,
   });
   assert.deepEqual(
     ranked.map((item) => item.key),
@@ -433,6 +487,7 @@ test("the limit caps output without changing the order", () => {
       ...filler(30),
     ],
     libraryDocumentCount: LIBRARY_SIZE,
+    averageFieldLengths: LIBRARY_AVERAGES,
   });
   const capped = rankKeywordCandidates({
     probes: [probe("superalloy")],
@@ -446,6 +501,7 @@ test("the limit caps output without changing the order", () => {
       ...filler(30),
     ],
     libraryDocumentCount: LIBRARY_SIZE,
+    averageFieldLengths: LIBRARY_AVERAGES,
     limit: 2,
   });
   assert.equal(capped.length, 2);
@@ -465,6 +521,7 @@ test("ordering is stable for identical scores", () => {
         ...filler(20),
       ],
       libraryDocumentCount: LIBRARY_SIZE,
+      averageFieldLengths: LIBRARY_AVERAGES,
     });
   assert.deepEqual(
     build().map((item) => item.key),

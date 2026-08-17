@@ -346,6 +346,21 @@ const candidatesForRanking = JSON.parse(
 }));
 const libraryDocumentCount = candidatesForRanking.length;
 
+// Library-level metadata averages, from the same provider production uses.
+const { LibraryFieldStats } = await import(
+  "../src/modules/keyword/libraryFieldStats.ts"
+);
+const libraryAverages = (
+  await new LibraryFieldStats({
+    async signature() {
+      return `fixture:${libraryDocumentCount}`;
+    },
+    async readFields() {
+      return candidatesForRanking.map((candidate) => candidate.fields ?? {});
+    },
+  }).get(LIBRARY)
+).averageLengths;
+
 console.log(
   `
 === combined ranker, as hybrid_search runs it ` +
@@ -379,6 +394,10 @@ for (const [label, keywords] of BATTERY) {
     candidates: candidatesForRanking,
     bodyContributions,
     libraryDocumentCount,
+    // The body collection is the indexed subset, not the library: that is the
+    // whole point of the per-regime IDF.
+    bodyDocumentCount: stats.documentCount,
+    averageFieldLengths: libraryAverages,
     averageBodyLength: stats.averageLengths.body,
   });
   const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;

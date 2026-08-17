@@ -44,6 +44,56 @@ export const BM25_FIELDS: readonly Bm25Field[] = [
   "extra",
 ];
 
+/**
+ * Which collection a field's evidence was observed in.
+ *
+ * This exists because IDF is only meaningful when N and df are counted over the
+ * SAME set of documents whose contents are known. The metadata fields are read
+ * from the live Zotero items, so every document in the library is observed. The
+ * body field is read from the keyword index, which covers only what the user has
+ * indexed — 26 of 931 documents here — and says nothing about the rest.
+ *
+ * Pooling the two and scoring the sum against the library count was the defect
+ * this replaces: a term found in 8 indexed bodies and no metadata was scored as
+ * df=8 against N=931, which asserts that the 905 bodies nobody has read do NOT
+ * contain it. Measured on the real library, that inflated IDF by 3.76x to 4.39x.
+ */
+export type Bm25Regime = "metadata" | "body";
+
+export const FIELD_REGIME: Readonly<Record<Bm25Field, Bm25Regime>> = {
+  title: "metadata",
+  abstract: "metadata",
+  tags: "metadata",
+  body: "body",
+  publicationTitle: "metadata",
+  creator: "metadata",
+  extra: "metadata",
+};
+
+export const METADATA_REGIME_FIELDS: readonly Bm25Field[] = BM25_FIELDS.filter(
+  (field) => FIELD_REGIME[field] === "metadata",
+);
+
+export const BODY_REGIME_FIELDS: readonly Bm25Field[] = BM25_FIELDS.filter(
+  (field) => FIELD_REGIME[field] === "body",
+);
+
+/**
+ * Zotero's field names, mapped to the fields this scorer knows.
+ *
+ * `abstractNote` is Zotero's name for the abstract; the rest already agree. Kept
+ * here rather than beside the ranker so that the statistics provider and the
+ * ranker cannot drift apart about what counts as which field.
+ */
+export const METADATA_FIELD_MAP: Readonly<Record<string, Bm25Field>> = {
+  title: "title",
+  abstractNote: "abstract",
+  tags: "tags",
+  publicationTitle: "publicationTitle",
+  creator: "creator",
+  extra: "extra",
+};
+
 export interface FieldParameters {
   /**
    * Field weight. Relative magnitudes are what matter, not absolute values.
@@ -105,8 +155,20 @@ export interface FieldStatistics {
 }
 
 export interface CorpusStatistics {
-  /** Documents in the index for this library. */
+  /**
+   * Documents observed in the METADATA regime.
+   *
+   * The whole library, or the collection scope when one is applied — whichever
+   * set the metadata document frequencies were counted over.
+   */
   documentCount: number;
+  /**
+   * Documents observed in the BODY regime, i.e. those with a body-keyword index.
+   *
+   * Absent or zero means no body corpus exists, and body evidence then cannot be
+   * scored at all: there is no collection to measure its rarity against.
+   */
+  bodyDocumentCount?: number;
   fields: Record<Bm25Field, FieldStatistics>;
 }
 
@@ -146,10 +208,18 @@ export function weightedFrequency(params: {
   lengths: FieldLengths;
   statistics: CorpusStatistics;
   fieldParameters?: Readonly<Record<Bm25Field, FieldParameters>>;
+  /**
+   * Restrict the accumulation to these fields. Defaults to all of them.
+   *
+   * Used to accumulate one regime at a time: fields whose df was counted in
+   * different collections cannot share a saturation, because the saturated value
+   * is what a single IDF gets multiplied by.
+   */
+  fields?: readonly Bm25Field[];
 }): number {
   const fieldParameters = params.fieldParameters ?? DEFAULT_FIELD_PARAMETERS;
   let total = 0;
-  for (const field of BM25_FIELDS) {
+  for (const field of params.fields ?? BM25_FIELDS) {
     const frequency = params.frequencies[field] ?? 0;
     if (frequency <= 0) continue;
     const { boost, b } = fieldParameters[field];
@@ -168,8 +238,20 @@ export function weightedFrequency(params: {
 /** One term's contribution to a document's score. */
 export interface TermContribution {
   term: string;
-  /** Documents containing the term, across all fields. */
+  /**
+   * Documents whose METADATA contains the term, out of
+   * {@link CorpusStatistics.documentCount}.
+   */
   documentFrequency: number;
+  /**
+   * Documents whose BODY contains the term, out of
+   * {@link CorpusStatistics.bodyDocumentCount}.
+   *
+   * Separate from {@link documentFrequency} because the two are counted over
+   * different collections. Pooling them forces one of the two to be divided by
+   * the other's N.
+   */
+  bodyDocumentFrequency?: number;
   frequencies: FieldFrequencies;
   /**
    * Caller-supplied trust in the probe itself, mirroring the existing lexical
@@ -211,28 +293,73 @@ export function scoreDocument(params: ScoreDocumentParams): DocumentScore {
   let score = 0;
 
   for (const contribution of params.contributions) {
-    const weighted = weightedFrequency({
-      frequencies: contribution.frequencies,
-      lengths: params.lengths,
-      statistics: params.statistics,
-      fieldParameters,
-    });
-    if (weighted <= 0) continue;
-
-    const idf = inverseDocumentFrequency(
-      params.statistics.documentCount,
-      contribution.documentFrequency,
-    );
-    if (idf <= 0) continue;
-
     const probeWeight = contribution.weight ?? 1;
     if (probeWeight <= 0) continue;
 
-    score += probeWeight * idf * (weighted / (k1 + weighted));
-    matchedTerms.push(contribution.term);
-    for (const field of BM25_FIELDS) {
-      if ((contribution.frequencies[field] ?? 0) > 0) matchedFields.add(field);
+    /*
+     * One saturation per observation regime, each multiplied by the IDF of the
+     * collection its own document frequency was counted in.
+     *
+     * Within the metadata regime all six fields still accumulate BEFORE
+     * saturating — that is BM25F's defining property, and it is exactly right
+     * there, because those six counts come from one collection in which every
+     * document was observed. Across regimes the two parts are added instead,
+     * because there is no single IDF that could legitimately multiply a sum of
+     * evidence drawn from a 931-document collection and a 26-document one.
+     *
+     * As the user indexes more papers the body collection grows toward the
+     * library and idf_body converges on idf_meta, so the split closes itself
+     * rather than needing to be revisited.
+     */
+    let termScore = 0;
+    const regimes: Array<{
+      fields: readonly Bm25Field[];
+      documentCount: number;
+      documentFrequency: number;
+    }> = [
+      {
+        fields: METADATA_REGIME_FIELDS,
+        documentCount: params.statistics.documentCount,
+        documentFrequency: contribution.documentFrequency,
+      },
+      {
+        fields: BODY_REGIME_FIELDS,
+        documentCount: params.statistics.bodyDocumentCount ?? 0,
+        documentFrequency: contribution.bodyDocumentFrequency ?? 0,
+      },
+    ];
+
+    for (const regime of regimes) {
+      const weighted = weightedFrequency({
+        frequencies: contribution.frequencies,
+        lengths: params.lengths,
+        statistics: params.statistics,
+        fieldParameters,
+        fields: regime.fields,
+      });
+      if (weighted <= 0) continue;
+
+      // This document contains the term in this regime, so it is itself one of
+      // the documents the frequency counts. A caller that passed 0 has a
+      // bookkeeping error, and df=0 would produce a wildly inflated IDF rather
+      // than a small one, so the floor is applied here instead of trusted.
+      const documentFrequency = Math.max(1, regime.documentFrequency);
+      const idf = inverseDocumentFrequency(
+        regime.documentCount,
+        documentFrequency,
+      );
+      if (idf <= 0) continue;
+
+      termScore += idf * (weighted / (k1 + weighted));
+      for (const field of regime.fields) {
+        if ((contribution.frequencies[field] ?? 0) > 0)
+          matchedFields.add(field);
+      }
     }
+
+    if (termScore <= 0) continue;
+    score += probeWeight * termScore;
+    matchedTerms.push(contribution.term);
   }
 
   return {

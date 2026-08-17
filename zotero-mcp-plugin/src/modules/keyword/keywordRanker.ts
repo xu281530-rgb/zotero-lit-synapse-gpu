@@ -24,6 +24,8 @@ import {
   BM25_FIELDS,
   DEFAULT_FIELD_PARAMETERS,
   DEFAULT_K1,
+  FIELD_REGIME,
+  METADATA_FIELD_MAP,
   keywordCoverage,
   normalizeBm25fScore,
   scoreDocument,
@@ -44,20 +46,11 @@ import {
 import type { EvidenceChunk, KeywordProbe } from "./bodyKeywordSearch";
 
 /**
- * Field names as the metadata scan supplies them, mapped to BM25F fields.
- *
- * `abstractNote` is Zotero's name for the abstract; the rest already agree. The
- * mapping is explicit so a renamed field fails loudly instead of silently
- * contributing nothing.
+ * Re-exported so callers keep one import. The definition lives with the scorer,
+ * because the statistics provider and the ranker must agree about which Zotero
+ * field is which BM25F field or their averages describe different things.
  */
-export const METADATA_FIELD_MAP: Readonly<Record<string, Bm25Field>> = {
-  title: "title",
-  abstractNote: "abstract",
-  tags: "tags",
-  publicationTitle: "publicationTitle",
-  creator: "creator",
-  extra: "extra",
-};
+export { METADATA_FIELD_MAP };
 
 /** One document as the metadata scan produced it. */
 export interface MetadataCandidate {
@@ -86,15 +79,46 @@ export interface KeywordRankingOptions {
   /** Body-side contributions, keyed by item key. Empty when nothing is indexed. */
   bodyContributions?: Map<string, BodyContribution>;
   /**
-   * Documents in the library, used as BM25F's N.
+   * Documents in the library — the collection the METADATA document frequencies
+   * were counted over, and therefore the N their IDF must use.
    *
-   * The library count rather than the candidate count, and rather than the
-   * indexed count. Candidate pools vary in size from query to query, so using
-   * one would make the same document score differently depending on how broad
-   * the query happened to be; and the indexed count is 26 where the library is
-   * 931, which collapses idf far enough that nothing clears the user's floor.
+   * Sound because the metadata candidate scan asks Zotero for every item
+   * containing any keyword: a document absent from the pool provably has no
+   * metadata hit, so "not in the pool" really does mean "does not contain it".
    */
   libraryDocumentCount: number;
+  /**
+   * Documents with a body-keyword index — the collection the BODY document
+   * frequencies were counted over.
+   *
+   * Not the library count. The body index covers only what the user indexed, and
+   * the bodies it does not cover are UNKNOWN rather than known-absent. Scoring
+   * df_body against the library count asserts absence for documents nobody has
+   * read, which measured 3.76x to 4.39x too much IDF on real body-only terms.
+   */
+  bodyDocumentCount?: number;
+  /**
+   * When a collection scope is applied: documents inside it, and of those, how
+   * many have a body index.
+   *
+   * The frequencies are counted inside the scope, so N has to be the scope too —
+   * otherwise the same mismatch reappears at a smaller scale.
+   */
+  scopeDocumentCount?: number;
+  scopeBodyDocumentCount?: number;
+  /**
+   * Library-wide mean field lengths, for length normalisation.
+   *
+   * Deliberately NOT derived from the documents being scored. The pool mean moved
+   * a document's own score by -15.8% to +4.9% depending on which other documents
+   * happened to match, and collapsed normalisation entirely when only one did
+   * (the mean was then that document's own length, so the ratio was always 1).
+   * The reference has to be a property of the library, not of the query.
+   *
+   * Scope-independent on purpose: a stable length reference is the point, and a
+   * per-collection reference would reintroduce the same drift between scopes.
+   */
+  averageFieldLengths?: Record<Bm25Field, number>;
   /** Mean body length over indexed documents, from the index's own statistics. */
   averageBodyLength?: number;
   fieldParameters?: Readonly<Record<Bm25Field, FieldParameters>>;
@@ -136,16 +160,43 @@ function totalTokens(counts: Map<string, number>): number {
   return total;
 }
 
+/** The collection sizes and frequencies one ranking actually used. */
+export interface KeywordRankingStatistics {
+  /** Documents the metadata frequencies were counted over. */
+  documentCount: number;
+  /** Documents the body frequencies were counted over. */
+  bodyDocumentCount: number;
+  /** Probe -> documents with a metadata hit. */
+  documentFrequency: Map<string, number>;
+  /** Probe -> documents with a body hit. */
+  bodyDocumentFrequency: Map<string, number>;
+  /** The per-field length references used, for diagnostics. */
+  averageLengths: Record<Bm25Field, number>;
+}
+
+export interface KeywordRankingOutcome {
+  items: RankedKeywordItem[];
+  statistics: KeywordRankingStatistics;
+}
+
 /**
  * Score every candidate against every probe, metadata and body together.
  *
  * Returns rows shaped like the existing lexical ranker's, so the fusion, the
  * pagination and the relevance floor downstream need no knowledge that the
- * scorer changed.
+ * scorer changed. Use {@link rankKeywordCandidatesDetailed} when the collection
+ * sizes and frequencies themselves matter — the statistics are the thing most
+ * worth asserting about, and they were previously unobservable.
  */
 export function rankKeywordCandidates(
   options: KeywordRankingOptions,
 ): RankedKeywordItem[] {
+  return rankKeywordCandidatesDetailed(options).items;
+}
+
+export function rankKeywordCandidatesDetailed(
+  options: KeywordRankingOptions,
+): KeywordRankingOutcome {
   const planned: Array<{ probe: KeywordProbe; plan: QueryPlan }> = [];
   for (const probe of options.probes) {
     if (probe.weight <= 0) continue;
@@ -153,7 +204,18 @@ export function rankKeywordCandidates(
     if (plan.terms.length === 0) continue;
     planned.push({ probe, plan });
   }
-  if (planned.length === 0) return [];
+  const emptyStatistics = (): KeywordRankingStatistics => ({
+    documentCount: options.scopeDocumentCount ?? options.libraryDocumentCount,
+    bodyDocumentCount:
+      options.scopeBodyDocumentCount ?? options.bodyDocumentCount ?? 0,
+    documentFrequency: new Map(),
+    bodyDocumentFrequency: new Map(),
+    averageLengths:
+      options.averageFieldLengths ?? ({} as Record<Bm25Field, number>),
+  });
+  if (planned.length === 0) {
+    return { items: [], statistics: emptyStatistics() };
+  }
 
   const bodyContributions =
     options.bodyContributions ?? new Map<string, BodyContribution>();
@@ -227,51 +289,84 @@ export function rankKeywordCandidates(
     }
   }
 
-  if (prepared.size === 0) return [];
+  if (prepared.size === 0) {
+    return { items: [], statistics: emptyStatistics() };
+  }
 
   // -------------------------------------------------------------- statistics
   /*
-   * Document frequency is counted over the candidate pool plus the body index,
-   * which IS the library-wide count for these probes: the metadata scan asks
-   * Zotero for every item containing any keyword, so a document missing from
-   * the pool provably does not contain the term in its metadata.
+   * Two document frequencies, counted separately, because they are counted over
+   * two different collections.
+   *
+   * df_meta: documents with a hit in any METADATA field, out of the library (or
+   *   the scope). Sound because Zotero's candidate query returns every item whose
+   *   metadata contains any keyword, so absence from the pool is real absence.
+   *
+   * df_body: documents with a hit in the BODY field, out of the documents whose
+   *   bodies are indexed. The bodies that are NOT indexed are unknown, and must
+   *   not be counted as non-containing — that was the defect.
    */
   const documentFrequency = new Map<string, number>();
+  const bodyDocumentFrequency = new Map<string, number>();
   for (const entry of prepared.values()) {
-    for (const probeText of entry.frequencies.keys()) {
-      documentFrequency.set(
-        probeText,
-        (documentFrequency.get(probeText) ?? 0) + 1,
-      );
+    for (const [probeText, frequencies] of entry.frequencies) {
+      let metadataHit = false;
+      let bodyHit = false;
+      for (const field of BM25_FIELDS) {
+        if ((frequencies[field] ?? 0) <= 0) continue;
+        if (FIELD_REGIME[field] === "body") bodyHit = true;
+        else metadataHit = true;
+      }
+      if (metadataHit) {
+        documentFrequency.set(
+          probeText,
+          (documentFrequency.get(probeText) ?? 0) + 1,
+        );
+      }
+      if (bodyHit) {
+        bodyDocumentFrequency.set(
+          probeText,
+          (bodyDocumentFrequency.get(probeText) ?? 0) + 1,
+        );
+      }
     }
   }
 
-  const totals = emptyLengths();
-  let counted = 0;
-  for (const entry of prepared.values()) {
-    counted += 1;
-    for (const field of BM25_FIELDS) totals[field] += entry.lengths[field];
-  }
+  /*
+   * Collection sizes. A scope narrows the collection the frequencies were counted
+   * in, so it narrows N as well; without a scope the collections are the whole
+   * library and the whole body index.
+   *
+   * The `Math.max` floors are not cosmetic: a df can never exceed the collection
+   * it was counted in, and if a caller reports a smaller N than the df it just
+   * supplied, the arithmetic would say a term occurs in more documents than exist.
+   */
+  const metadataCollectionSize = Math.max(
+    options.scopeDocumentCount ?? options.libraryDocumentCount,
+    documentFrequency.size > 0 ? Math.max(...documentFrequency.values()) : 0,
+  );
+  const bodyCollectionSize = Math.max(
+    options.scopeBodyDocumentCount ?? options.bodyDocumentCount ?? 0,
+    bodyDocumentFrequency.size > 0
+      ? Math.max(...bodyDocumentFrequency.values())
+      : 0,
+  );
 
   const statistics: CorpusStatistics = {
-    documentCount: Math.max(
-      options.libraryDocumentCount,
-      documentFrequency.size > 0 ? Math.max(...documentFrequency.values()) : 0,
-    ),
+    documentCount: metadataCollectionSize,
+    bodyDocumentCount: bodyCollectionSize,
     fields: {} as CorpusStatistics["fields"],
   };
+  const libraryAverages = options.averageFieldLengths;
   for (const field of BM25_FIELDS) {
-    // Metadata averages come from the pool being scored, which is the only
-    // sample available without reading the whole library. The body average
-    // comes from the index, where it is exact over every indexed document.
+    // Metadata averages are a library-wide property supplied by the caller; the
+    // body average comes from the keyword index, where it is exact over every
+    // indexed document. Neither is derived from the documents being scored.
     statistics.fields[field] = {
       averageLength:
         field === "body"
-          ? (options.averageBodyLength ??
-            (counted > 0 ? totals.body / counted : 0))
-          : counted > 0
-            ? totals[field] / counted
-            : 0,
+          ? (options.averageBodyLength ?? 0)
+          : (libraryAverages?.[field] ?? 0),
     };
   }
 
@@ -284,6 +379,7 @@ export function rankKeywordCandidates(
       contributions.push({
         term: probeText,
         documentFrequency: documentFrequency.get(probeText) ?? 0,
+        bodyDocumentFrequency: bodyDocumentFrequency.get(probeText) ?? 0,
         frequencies,
         weight: probe?.probe.weight ?? 1,
       });
@@ -325,5 +421,20 @@ export function rankKeywordCandidates(
     return a.key.localeCompare(b.key);
   });
 
-  return options.limit === undefined ? ranked : ranked.slice(0, options.limit);
+  return {
+    items:
+      options.limit === undefined ? ranked : ranked.slice(0, options.limit),
+    statistics: {
+      documentCount: statistics.documentCount,
+      bodyDocumentCount: statistics.bodyDocumentCount ?? 0,
+      documentFrequency,
+      bodyDocumentFrequency,
+      averageLengths: Object.fromEntries(
+        BM25_FIELDS.map((field) => [
+          field,
+          statistics.fields[field].averageLength,
+        ]),
+      ) as Record<Bm25Field, number>,
+    },
+  };
 }

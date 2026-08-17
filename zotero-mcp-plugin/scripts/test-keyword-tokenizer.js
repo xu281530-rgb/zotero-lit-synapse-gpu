@@ -324,6 +324,13 @@ test("an empty or image-only chunk is skipped", () => {
 
 const statistics = {
   documentCount: 900,
+  // The body collection has to be stated: body document frequencies are counted
+  // over the documents whose bodies were actually indexed, so with no body
+  // collection there is nothing to measure a body term's rarity against and body
+  // evidence scores zero. (That behaviour has its own test in
+  // test-keyword-statistics.js.) These tests are about saturation, IDF and
+  // evidence reporting, so they need a body corpus to exercise.
+  bodyDocumentCount: 900,
   fields: {
     title: { averageLength: 12 },
     abstract: { averageLength: 180 },
@@ -416,7 +423,12 @@ test("repeated occurrences saturate instead of accumulating linearly", () => {
   const at = (frequency) =>
     scoreDocument({
       contributions: [
-        { term: "t", documentFrequency: 20, frequencies: { body: frequency } },
+        {
+          term: "t",
+          documentFrequency: 20,
+          bodyDocumentFrequency: 20,
+          frequencies: { body: frequency },
+        },
       ],
       lengths,
       statistics,
@@ -430,14 +442,24 @@ test("repeated occurrences saturate instead of accumulating linearly", () => {
 test("a rare term outweighs a common one at equal frequency", () => {
   const rare = scoreDocument({
     contributions: [
-      { term: "fgh4096", documentFrequency: 3, frequencies: { body: 5 } },
+      {
+        term: "fgh4096",
+        documentFrequency: 3,
+        bodyDocumentFrequency: 3,
+        frequencies: { body: 5 },
+      },
     ],
     lengths,
     statistics,
   }).score;
   const common = scoreDocument({
     contributions: [
-      { term: "alloy", documentFrequency: 700, frequencies: { body: 5 } },
+      {
+        term: "alloy",
+        documentFrequency: 700,
+        bodyDocumentFrequency: 700,
+        frequencies: { body: 5 },
+      },
     ],
     lengths,
     statistics,
@@ -460,7 +482,12 @@ test("a zero-weight probe contributes nothing", () => {
 test("matched fields and terms are reported for evidence", () => {
   const result = scoreDocument({
     contributions: [
-      { term: "a", documentFrequency: 10, frequencies: { title: 1, body: 2 } },
+      {
+        term: "a",
+        documentFrequency: 10,
+        bodyDocumentFrequency: 10,
+        frequencies: { title: 1, body: 2 },
+      },
       { term: "b", documentFrequency: 10, frequencies: { tags: 1 } },
       { term: "c", documentFrequency: 10, frequencies: {} },
     ],
