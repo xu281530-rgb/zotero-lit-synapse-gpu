@@ -1078,7 +1078,11 @@ const SIMILAR_FINGERPRINT = {
   );
   assert.match(
     handler,
-    /resolveScoreFloor\(args\.minScore, settings\.minScore\)/,
+    // find_similar ranks by cosine similarity between chunk vectors, so after
+    // the threshold split it must follow the SEMANTIC setting. Pointing it at
+    // the keyword one would judge the same document by a scale it was never
+    // scored on.
+    /resolveScoreFloor\(\s*args\.minScore,\s*settings\.semanticMinScore,?\s*\)/,
   );
   assert.match(
     handler,

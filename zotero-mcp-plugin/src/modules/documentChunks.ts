@@ -178,7 +178,7 @@ function refusalFor(
     case "no_source":
       return `${itemKey} has no PDF, Markdown or text attachment at all, so there is no body text anywhere for it — only the metadata Zotero stores. Use get_item_details and get_item_abstract, and tell the user the full text is not in their library.`;
     case "not_indexed":
-      return `${itemKey} has a text attachment but is not in the semantic index yet, so its chunks do not exist. Either read the attachment directly with get_attachment_text, or ask the user to build/refresh the semantic index in the plugin preferences.`;
+      return `${itemKey} has a text attachment but is not in the semantic index yet, so its chunks do not exist. Either read the attachment directly with get_attachment_text, or ask the user to build/refresh the search index in the plugin preferences.`;
     default:
       return null;
   }

@@ -209,25 +209,53 @@ The server provides tools in 5 categories:
 
 #### `hybrid_search`
 
-Stage 1 of the retrieval funnel. It searches Zotero metadata fields and the
-semantic index in parallel, then fuses them into a single normalized 0-1
-relevance score. It does not scan full document text.
+Stage 1 of the retrieval funnel. It runs keyword retrieval and semantic vector
+retrieval in parallel. The keyword branch covers the metadata of the whole
+library (title, abstract, creators, publication title, tags, extra) **and the
+body text of every document in the keyword index**; the semantic branch covers
+the indexed passages. Neither branch scans Zotero's full-text cache or parses a
+PDF on the fly, so body coverage on both sides is whatever has been indexed —
+`metadata.bodyKeywords` reports the keyword index's share, and each row's
+`fullText` field reports the semantic index's.
 
-**How the two branches combine.** Each branch is normalized on its own absolute
-scale, then the stronger branch sets the score and the weaker one adds a bounded
-agreement bonus. Corroboration can therefore only lift a document, never dilute
-it — a paper that clears the threshold on semantic evidence alone still clears it
-when a weak keyword hit is added. Reciprocal Rank Fusion is computed as well, but
-only to break ties between candidates whose fused scores are equal; `rrfK` tunes
-that tie-break, not the ranking.
+**How the two branches combine.** They are never compared against each other.
+Each is filtered on its OWN scale — normalised BM25F for keyword, cosine
+similarity for semantic — against its own user-configured threshold, and the
+survivors are **unioned**: clearing either threshold on its own is enough, so a
+branch can admit a document but can never veto one. A paper the keyword branch
+never found is still returned when the embedding rates it, and vice versa.
+
+Ranking is then **weighted Reciprocal Rank Fusion** over where each document
+placed *within each branch that admitted it*:
+
+```
+score = keywordWeight/(rrfK + keywordRank) + semanticWeight/(rrfK + semanticRank)
+```
+
+An absent branch contributes nothing rather than a penalty, so a document both
+branches admit collects two contributions and outranks single-branch documents
+at comparable ranks. Corroboration is expressed as position, not as a bonus.
+`rrfK` controls how quickly rank advantage flattens out; preferring a branch is
+what the two weights are for.
+
+**`score` is a position, not a relevance.** It is a small rank-consensus number
+(a document first in both branches lands near 0.033 at the default `rrfK = 60`),
+comparing it against 0.6 or against another search's scores is meaningless, and
+**no threshold is applied to it**. For how relevant a document actually is, read
+`normalizedKeywordScore` and `normalizedSemanticScore` — real 0-1 relevances on
+their own branch's scale, and exactly what the thresholds were applied to. A
+**missing** one means that branch did not admit the document, not that it scored
+zero. Do not re-sort the rows by anything else: re-sorting a rank fusion undoes
+it.
 
 - `query` (required unless `cursor` is given), `keywords`, `domain`,
-  `expertRole`, `topK`, `cursor`, `minScore`, `language`,
-  `rrfK`, `keywordWeight`, `semanticWeight`, `libraryID`
+  `expertRole`, `topK`, `cursor`, `minKeywordScore`, `minSemanticScore`,
+  `language`, `rrfK`, `keywordWeight`, `semanticWeight`, `libraryID`
 - Returns a lightweight candidate row per document: `itemKey`, `title`,
-  `creators`, `year`, `publicationTitle`, `language`, fused `score`,
-  `matchedBy`, `matchedKeywords`, `matchedFields`, `hasAbstract` and a short
-  evidence snippet from the best-matching passages.
+  `creators`, `year`, `publicationTitle`, `language`, the RRF `score`,
+  `normalizedKeywordScore`, `normalizedSemanticScore`, `matchedBy`,
+  `matchedKeywords`, `matchedFields`, `hasAbstract` and a short evidence
+  snippet from the best-matching passages.
 - **Abstracts are not returned.** They are still indexed and still searched by
   the keyword branch — they are just not shipped back, so a 20-candidate
   shortlist stays a shortlist. Fetch one with `get_item_abstract` only for a
@@ -236,21 +264,23 @@ that tie-break, not the ranking.
   relevant.
 
 **Paging.** `topK` is the size of one page, not the depth of the search. The
-response carries a `pagination` block — `appliedMinScore`, `totalRelevant`,
-`returned`, `offset`, `range`, `hasMore`, `nextCursor` — where `totalRelevant`
-is how many documents cleared the relevance threshold, which is usually more
-than one page. The order is **retrieve → rank → apply `minScore` → page**, so a
-later page can never contain a document below the threshold and a short final
-page is never padded out. Pass `nextCursor` back as `cursor` (with every other
+response carries a `pagination` block — `appliedKeywordMinScore`,
+`appliedSemanticMinScore`, `totalRelevant`, `returned`, `offset`, `range`,
+`hasMore`, `nextCursor` — where `totalRelevant` is how many documents at least
+one branch admitted, which is usually more than one page. The order is
+**retrieve → gate each branch on its own threshold → union → rank by RRF →
+page**, so a later page can never contain a document both branches rejected and
+a short final page is never padded out. Pass `nextCursor` back as `cursor` (with every other
 argument unchanged or omitted) to window further down the *same* ranking; it
 does not re-run retrieval, so pages cannot duplicate, drop or reorder
-documents. Changing `query`, `keywords`, `domain`, `expertRole` or `minScore`
-alongside a cursor is rejected — that is a new search. Pagination state lives 15
+documents. Changing `query`, `keywords`, `domain`, `expertRole`,
+`minKeywordScore` or `minSemanticScore` alongside a cursor is rejected — that is
+a new search. Pagination state lives 15
 minutes and covers the 5 most recent searches; an expired cursor fails with a
 clear message rather than silently restarting.
 
 **Retrieval depth.** Both branches are *exhaustive*: fusion sees every
-candidate, `ranked` holds every document that cleared the threshold, and
+candidate, `ranked` holds every document at least one branch admitted, and
 `results` is just a window onto it. There is therefore no candidate pool to
 saturate and no `candidateK` parameter. `totalRelevant` is exact, and degrades
 to a lower bound only when a branch failed or timed out — in which case
@@ -312,8 +342,13 @@ what `get_annotations(itemKeys)`, `get_item_details`, `search_fulltext` and
 #### `search_fulltext`
 
 Stage 3 of the retrieval funnel: hybrid keyword + semantic search over the
-passages of ONE document located by `hybrid_search`. Whole-library full-text
-scanning is disabled.
+passages of ONE document located by `hybrid_search`. The scoring rule is
+identical to `hybrid_search`, one level down — the candidates are this paper's
+passages instead of the library's documents. Both branches are gated on the
+SAME two user settings, the survivors are unioned (a passage only has to clear
+one of the two), and ranking is weighted RRF over each passage's within-branch
+rank, so `score` is a position rather than a relevance here too. Whole-library
+full-text scanning is disabled.
 
 Before calling it, read that paper's abstract with `get_item_abstract`, re-fit
 `domain` and `expertRole` to what the paper actually studies, and write `query`
@@ -322,7 +357,8 @@ written in**, one language rather than both, since probes in the other language
 cannot match a single document's passages.
 
 - `itemKey` (required), `query`, `keywords`, `domain`, `expertRole`,
-  `maxChunks`, `minScore`, `chunkIds`, `neighborRadius`, `libraryID`
+  `maxChunks`, `minKeywordScore`, `minSemanticScore`, `chunkIds`,
+  `neighborRadius`, `libraryID`
 
 #### `search_collections`
 
@@ -482,22 +518,50 @@ old version returned `formatItem`'s full default field list, so two rows measure
 ### 3. Semantic & Reading (5 tools, can be disabled in preferences)
 
 `hybrid_search`, `keyword_search` and `semantic_search` return **the same
-lightweight candidate row** and share the same scoping, threshold and cursor
-paging, so switching between them costs nothing. They also share their
+lightweight candidate row** and share the same scoping and cursor paging, so
+switching between them costs nothing. Two things do differ and must not be
+carried across: each tool applies the threshold of the branch it *is*
+(`keyword_search` the keyword floor, `semantic_search` and `find_similar` the
+semantic floor, `hybrid_search` both independently), and the `score` field means
+a 0–1 relevance on the single-branch tools but a rank-fusion **position** on
+`hybrid_search` and `search_fulltext`. They also share their
 implementation: one lexical service (`runLexicalSearch`), one semantic service
 (`SemanticSearchService.search`), one page store and one row projection. There is
 no second copy of either retrieval algorithm.
 
 #### `keyword_search`
 
-Lexical-only retrieval over Zotero metadata (title, abstract, creators,
-publication title, tags). No embeddings; body text is not scanned.
+Lexical-only retrieval — no embeddings, nothing scored semantically. It matches
+your terms against the metadata of the **whole library** (title, abstract,
+creators, publication title, tags, extra) **and against the body text of every
+document in the keyword index**, scored together in one BM25F pass.
+
+**Body coverage is partial.** Body matching reads the plugin's own keyword
+index; it never scans Zotero's full-text cache and never opens a PDF on the fly,
+so it reaches exactly the documents that have been indexed. A paper absent from
+the results may simply be unindexed rather than irrelevant —
+`metadata.bodyKeywords` reports `indexedDocuments` against
+`metadataCollectionSize` so you can tell the two apart.
+
+A body hit is a full hit: a document with none of your keywords in its title,
+abstract or tags still enters the ranking on its body alone. Such a row comes
+back with `matchedFields: ["body"]` and a **`bodyEvidence`** array — the
+passages that carried the terms, each with its `chunkId`, which keywords it
+contained, how many times, and the passage text. For a body-only row that is
+the only thing explaining why the document is there. `occurrences` is evidence
+strength for the reader; it takes no part in ranking.
+
+`score` here is a genuine 0–1 relevance: one branch means there is nothing to
+fuse, so it is the normalised BM25F score the threshold was applied to. That is
+**not** the same quantity as `hybrid_search`'s `score`, which is a rank-fusion
+position — never carry a number between the two. The floor applied is the user's
+**keyword** relevance threshold, the same setting that gates `hybrid_search`'s
+keyword branch.
 
 Two uses: an exact term you must not miss, and — the intended one — a **coarse
 filter** whose `itemKeys` you hand to `semantic_search` so the semantic pass only
 scores that shortlist. For ordinary discovery `hybrid_search` is still the
-default first step, since it runs this branch *and* the semantic one and fuses
-them.
+default first step, since it runs this branch *and* the semantic one.
 
 - `keywords` (required unless following a cursor; bilingual, 1–16, ~5–12
   recommended), `query` (fallback probes only — never embedded), `domain`,
@@ -527,11 +591,11 @@ Find DOCUMENTS semantically similar to one paper, using several of that paper's 
 
 The AI first picks representative chunks of the source paper with `search_fulltext`, then passes their `chunkId`s here. Every chunk is scanned against the whole index as its own query vector; chunk scores are aggregated into ONE score per candidate document (for each query chunk, the candidate's two best passages are averaged; those per-query scores are combined as 0.75 × mean + 0.25 × max), so a paper qualifies by relating to several of the facets supplied rather than by owning one lucky passage. The source paper is excluded from its own results.
 
-Every document above the user's relevance threshold is returned — there is no cap on how many qualify — ranked and paged 20 per page. Results carry identity, scores and matched `chunkId`s, not passage text; read a candidate with `search_fulltext`.
+Every document above the user's relevance threshold is returned — there is no cap on how many qualify — ranked and paged. **One page holds at most the user's configured maximum number of documents**; there is no fixed page count, and `topK` can only lower it. Results carry identity, scores and matched `chunkId`s, not passage text; read a candidate with `search_fulltext`.
 
 Timeout: no separate setting. The scan deadline is the user's single-scan `vectorScanTimeoutMs` scaled by the number of query chunks and the path that will run it — `0.8 + 0.35N` on the CPU (one shared pass over the index) and `0.5 + 1.1N` on the GPU (one resident-vector scan per query). Both multipliers come from measurements (`npm run benchmark:find-similar-scaling`) and the applied budget is reported in the response metadata.
 
-- `itemKey` (required for a new search), `chunkIds` (required for a new search, max 20, all from that one item), `minScore`, `topK` (page size), `libraryID`, `cursor` (page on without re-scanning)
+- `itemKey` (required for a new search), `chunkIds` (required for a new search, max 20, all from that one item), `minScore`, `topK` (page size, capped by the user's maximum number of documents), `libraryID`, `cursor` (page on without re-scanning)
 
 #### `semantic_status`
 

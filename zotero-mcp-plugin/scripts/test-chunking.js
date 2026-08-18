@@ -32,6 +32,7 @@ globalThis.Zotero = {
     get: (key) => prefs.get(key),
     set: (key, value) => prefs.set(key, value),
     clear: (key) => prefs.delete(key),
+    has: (key) => prefs.has(key),
   },
   Libraries: { userLibraryID: 1 },
 };
@@ -61,6 +62,8 @@ const {
   clearStoredChunkingSignatures,
   shouldShowChunkingWarning,
   shouldRecordFullLibraryChunkingSignature,
+  HYBRID_SETTING_RECOMMENDATIONS: RECOMMENDATIONS,
+  migrateFusedScoreThreshold,
 } = await import("../src/modules/hybridSearchSettings.ts");
 
 // ---- settings: defaults, clamping, and "the user's value is a ceiling" ----
@@ -73,7 +76,20 @@ assert.equal("candidateK" in defaults, false);
 assert.equal(defaults.maxChunksPerItem, 5);
 assert.equal(defaults.vectorScanTimeoutMs, 8000);
 assert.equal(defaults.keywordSearchTimeoutMs, 30000);
-assert.equal(defaults.minScore, 0.6);
+assert.equal(defaults.keywordMinScore, 0.52);
+assert.equal(defaults.semanticMinScore, 0.6);
+assert.equal(defaults.keywordRrfWeight, 1);
+assert.equal(defaults.semanticRrfWeight, 1);
+// The retired single floor must be gone from the settings object entirely, not
+// merely unused: leaving it readable is what would let a later change quietly
+// reintroduce a second filter on top of the RRF ranking.
+assert.equal("minScore" in defaults, false);
+// The pane's "推荐值" hints and the shipped defaults are the same table, so a
+// hint can never advertise a number the plugin does not actually start from.
+assert.equal(defaults.keywordMinScore, RECOMMENDATIONS.keywordMinScore);
+assert.equal(defaults.semanticMinScore, RECOMMENDATIONS.semanticMinScore);
+assert.equal(defaults.keywordRrfWeight, RECOMMENDATIONS.keywordRrfWeight);
+assert.equal(defaults.semanticRrfWeight, RECOMMENDATIONS.semanticRrfWeight);
 assert.equal(defaults.chunkTargetChars, 1000);
 assert.equal(defaults.chunkAppendToleranceChars, 500);
 assert.equal(defaults.neighborRadius, 1);
@@ -85,14 +101,77 @@ prefs.clear();
 
 // The threshold is stored as a string because preference files have no float
 // type; reading it must still yield a number.
-prefs.set(PREFIX + "hybrid.minScore", "0.75");
-assert.equal(getHybridSearchSettings().minScore, 0.75);
-prefs.set(PREFIX + "hybrid.minScore", "not a number");
+prefs.set(PREFIX + "hybrid.semanticMinScore", "0.75");
+assert.equal(getHybridSearchSettings().semanticMinScore, 0.75);
+prefs.set(PREFIX + "hybrid.semanticMinScore", "not a number");
 assert.equal(
-  getHybridSearchSettings().minScore,
+  getHybridSearchSettings().semanticMinScore,
   0.6,
   "a corrupt threshold must fall back to the default, not disable filtering",
 );
+prefs.clear();
+prefs.set(PREFIX + "hybrid.keywordMinScore", "0.4");
+assert.equal(getHybridSearchSettings().keywordMinScore, 0.4);
+assert.equal(
+  getHybridSearchSettings().semanticMinScore,
+  0.6,
+  "the two thresholds are independent settings, not one value read twice",
+);
+prefs.clear();
+prefs.set(PREFIX + "hybrid.keywordRrfWeight", "2.5");
+assert.equal(getHybridSearchSettings().keywordRrfWeight, 2.5);
+prefs.set(PREFIX + "hybrid.keywordRrfWeight", "9999");
+assert.equal(
+  getHybridSearchSettings().keywordRrfWeight,
+  10,
+  "an out-of-range weight is clamped, not accepted",
+);
+prefs.clear();
+// ---- the one-shot migration of the retired fused-score threshold ----
+
+// A user who never touched the old threshold has nothing to carry over, and
+// must be left entirely alone rather than have a value written on their behalf.
+prefs.clear();
+prefs.set(PREFIX + "hybrid.minScore", "0.6");
+let migration = migrateFusedScoreThreshold();
+assert.equal(migration.migrated, false);
+assert.equal(migration.reason, "left-at-default");
+assert.equal(
+  prefs.has(PREFIX + "hybrid.semanticMinScore"),
+  false,
+  "an untouched default must not be written through as a user value",
+);
+assert.equal(getHybridSearchSettings().semanticMinScore, 0.6);
+assert.equal(getHybridSearchSettings().keywordMinScore, 0.52);
+
+// A user who HAD tuned it keeps that tuning, on the semantic side — the side
+// where the number still means what it meant, because a semantic-only match's
+// old fused score was exactly its cosine similarity.
+prefs.clear();
+prefs.set(PREFIX + "hybrid.minScore", "0.75");
+migration = migrateFusedScoreThreshold();
+assert.equal(migration.migrated, true);
+assert.equal(migration.reason, "carried-over");
+assert.equal(migration.value, 0.75);
+assert.equal(getHybridSearchSettings().semanticMinScore, 0.75);
+// The keyword side starts from its own measured recommendation instead: the
+// old number was never a BM25F threshold, so reusing it there would invent a
+// calibration rather than migrate one.
+assert.equal(
+  getHybridSearchSettings().keywordMinScore,
+  RECOMMENDATIONS.keywordMinScore,
+  "the old fused floor must not be reused as a keyword floor",
+);
+
+// Once is once. A second run must not overwrite a value the user has since
+// changed in the new pane.
+prefs.set(PREFIX + "hybrid.semanticMinScore", "0.5");
+migration = migrateFusedScoreThreshold();
+assert.equal(migration.migrated, false);
+assert.equal(migration.reason, "already-migrated");
+assert.equal(getHybridSearchSettings().semanticMinScore, 0.5);
+prefs.clear();
+
 prefs.set(PREFIX + "hybrid.maxDocuments", 100000);
 assert.equal(
   getHybridSearchSettings().maxDocuments,

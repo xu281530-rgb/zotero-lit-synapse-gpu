@@ -65,7 +65,6 @@ import {
   SIMILAR_MEAN_WEIGHT,
 } from './semantic';
 import {
-  computeFusedScore,
   HYBRID_KEYWORD_COVERAGE_BONUS,
   LEXICAL_FIELD_WEIGHTS,
   MAX_HYBRID_KEYWORDS,
@@ -190,6 +189,22 @@ export const MUTATING_TOOL_NAMES = new Set<string>([
  * text in memory for the duration of a paging session.
  */
 function trimCachedEvidence(row: Record<string, any>): Record<string, any> {
+  // Body-keyword evidence is trimmed for the same reason semantic evidence is:
+  // a cached ranking can hold hundreds of rows for 15 minutes, and each raw
+  // passage is a full chunk. The projection would truncate these anyway, so
+  // storing them untrimmed only costs memory nobody reads.
+  if (Array.isArray(row.bodyEvidence)) {
+    row.bodyEvidence = row.bodyEvidence
+      .slice(0, HYBRID_EVIDENCE_CHUNKS)
+      .map((chunk: any) => ({
+        chunkId: chunk?.chunkId,
+        matchedKeywords: chunk?.matchedKeywords,
+        occurrences: chunk?.occurrences,
+        ...(chunk?.text
+          ? { text: truncateEvidence(String(chunk.text)) }
+          : {}),
+      }));
+  }
   if (!Array.isArray(row.matchedChunks)) return row;
   row.matchedChunks = row.matchedChunks
     .slice(0, HYBRID_EVIDENCE_CHUNKS)
@@ -237,7 +252,15 @@ interface HybridSearchSnapshot {
   warning: string | null;
   fallbackReason?: string;
   retryBudgetNote: string;
+  /**
+   * The single relevance floor of a single-branch tool (semantic_search,
+   * keyword_search, find_similar). hybrid_search and search_fulltext leave it
+   * at 0 and carry the two fields below instead: they gate two differently
+   * scaled branches independently, so there is no one number to put here.
+   */
   appliedMinScore: number;
+  appliedKeywordMinScore?: number;
+  appliedSemanticMinScore?: number;
   libraryID: number;
   /** True when a retrieval branch failed or timed out during this search. */
   branchFailed: boolean;
@@ -663,13 +686,13 @@ STAGE 0 - decide where to look (get_collections, only when it helps):
 STAGE 1 - find candidates (hybrid_search):
 1. Identify which discipline and sub-field the user's question belongs to, and adopt that field's expert role.
 2. From that expert perspective, write ONE natural-language semantic query stating the real research intent, plus professional keywords: terms of art, synonyms, abbreviations and mechanism words, in BOTH Chinese and English regardless of the language the user asked in - the library is bilingual and this stage searches all of it. Declare the field in the domain argument and the perspective in the expertRole argument - without both, the call is reported as keywordSource "fallback" even if your keywords were good.
-3. Call hybrid_search. It runs metadata keyword retrieval and vector semantic retrieval over the whole library and fuses them into one normalized 0-1 relevance score.
-4. Documents below the user's relevance threshold are discarded by the server. What survives is ranked, and the response carries ONE PAGE of that ranking - topK is the page size, a CEILING and never a target. If nothing comes back, say the library has nothing relevant.
-5. The pagination block tells you the whole picture: appliedMinScore (the floor that was applied), totalRelevant (how many documents cleared it), returned, hasMore, nextCursor. Filtering happens before paging, so no page can contain a document below the threshold and a short final page is never padded. When hasMore is true and the bottom of the page still looks relevant - or the user asked for a comprehensive sweep or a literature review - call hybrid_search again with cursor set to nextCursor and every other argument unchanged; that windows the SAME ranking instead of searching again, so pages never duplicate, drop or reorder documents. Changing query, keywords, domain, expertRole or minScore alongside a cursor is rejected: that is a new search, so start one. Never lower minScore to fill a page, and do not page through everything by reflex - stop when the question is answered.
-6. What comes back per document is a LIGHTWEIGHT candidate row: title, creators, year, venue, the language the document is written in, the fused score, which of your keywords and which fields matched, and a short snippet from its best-matching passages. Abstracts are deliberately NOT included - they are still searched server-side, they are just not shipped back, because most candidates never need to be read.
+3. Call hybrid_search. It runs keyword retrieval and vector semantic retrieval over the whole library, filters EACH on its own scale against its own user threshold (normalised BM25F for keyword, cosine for semantic), and unions the survivors. The keyword branch covers the metadata of the whole library AND the body text of every document in the keyword index, so a paper whose title and abstract say nothing can still be retrieved on its body; body coverage is only what has been indexed, and metadata.bodyKeywords reports how much that is. Clearing either threshold is enough: one branch can admit a document but never veto it, so a paper the keywords miss still comes back when the embedding rates it.
+4. The union is ranked by weighted Reciprocal Rank Fusion over each document's rank within each branch that admitted it. The score on each row IS that RRF value - a position, not a relevance, and not comparable to 0.6 or to another search's scores. For "how relevant is this", read normalizedKeywordScore and normalizedSemanticScore; a missing one means that branch did not admit the document, not that it scored zero. Never re-sort the rows. The response carries ONE PAGE of the ranking - topK is the page size, a CEILING and never a target. If nothing comes back, both thresholds rejected everything and the library has nothing relevant.
+5. The pagination block tells you the whole picture: appliedKeywordMinScore and appliedSemanticMinScore (the two floors that were applied), totalRelevant (how many documents at least one branch admitted), returned, hasMore, nextCursor. Gating happens before paging, so no page can contain a document both branches rejected and a short final page is never padded. When hasMore is true and the bottom of the page still looks relevant - or the user asked for a comprehensive sweep or a literature review - call hybrid_search again with cursor set to nextCursor and every other argument unchanged; that windows the SAME ranking instead of searching again, so pages never duplicate, drop or reorder documents. Changing query, keywords, domain, expertRole, minKeywordScore or minSemanticScore alongside a cursor is rejected: that is a new search, so start one. Never lower either floor to fill a page, and do not page through everything by reflex - stop when the question is answered.
+6. What comes back per document is a LIGHTWEIGHT candidate row: title, creators, year, venue, the language the document is written in, the RRF score plus each branch's own 0-1 relevance, which of your keywords and which fields matched, a short snippet from its best-matching passages, and — for a document matched in its body text — bodyEvidence naming the passages that carried your terms. When matchedFields is only ["body"], that evidence is the sole reason the row is there, so read it before judging. Abstracts are deliberately NOT included - they are still searched server-side, they are just not shipped back, because most candidates never need to be read.
 
 STAGE 2 - triage, and read an abstract only where you need one (get_item_abstract):
-7. Judge each candidate from its stage-1 row alone: title, rank, fused score, which keywords hit which fields, and the evidence snippet. When that is already enough to see a paper is off-topic, discard it and never fetch its abstract.
+7. Judge each candidate from its stage-1 row alone: title, rank, the two branch relevances, which keywords hit which fields, and the evidence snippet. When that is already enough to see a paper is off-topic, discard it and never fetch its abstract.
 8. Only for a candidate you are seriously considering going deeper on, call get_item_abstract with that ONE itemKey. It is an on-demand tool, NOT a batch step that follows hybrid_search: if 3 of 20 candidates are worth pursuing, you fetch 3 abstracts, not 20.
 9. If the user only asked which literature is relevant, answer from the stage-1 rows plus at most a few abstracts, and stop here.
 
@@ -677,12 +700,12 @@ STAGE 3 - dig into one paper (search_fulltext, one document per call):
 10. Having read that paper's abstract, redo the expert judgement FOR THAT PAPER from "user question + this paper's title + its abstract + its stage-1 evidence": identify its study object, material system, experimental method, variables, mechanism, terminology and abbreviations.
 11. Re-fit domain and expertRole to what THIS paper actually is. They may well differ from stage 1 and should: a library-level "materials science / solidification metallurgy" becomes "physical metallurgy / crystal plasticity and deformation mechanisms" once the abstract shows the paper is really about dislocations, stacking faults and micro-twinning. Decide that from the abstract you just read; never carry the stage-1 pair over out of inertia.
 12. Write query and keywords SPECIFIC TO THAT PAPER, and write the keywords in the LANGUAGE THAT PAPER IS WRITTEN IN - one language, not both. This stage searches inside a single document, so probes in the other language match nothing and only dilute the ranking. The candidate row carries a language hint and the abstract confirms it; a Chinese paper takes Chinese terms of art, an English paper takes English ones. Keep the query itself bilingual only if the paper itself mixes languages.
-13. Call search_fulltext with that one itemKey, plus the re-fitted domain and expertRole. It runs keyword matching and semantic retrieval across that paper's passages, fuses them with the same scoring, discards passages below the threshold and returns at most the user's configured number of passages.
+13. Call search_fulltext with that one itemKey, plus the re-fitted domain and expertRole. It runs keyword matching and semantic retrieval across that paper's passages and applies EXACTLY the same rule one level down - the same two user thresholds, each on its own branch, union of the survivors, weighted RRF over within-branch ranks - and returns at most the user's configured number of passages.
 14. Read those passages. If the evidence answers the question, STOP. Only if a passage is missing its cause, its consequence, its experimental conditions or its mechanism context, call search_fulltext again with chunkIds set to that passage's chunkId to pull in its immediate neighbours, within the user's radius limit. Never request neighbouring text by default.
 
 Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accepted, at both stage 1 and stage 3. If you omit keywords the server falls back to mechanical tokenization, returns keywordSource "fallback" with degraded: true, and you should redo that call ONCE with proper terms. Never perform unscoped whole-library full-text search.
 BEYOND THE FUNNEL - the other tools, and when each one is the right call:
-- keyword_search: lexical-only retrieval over metadata. Use it for an exact term you must not miss, or as a COARSE FILTER whose itemKeys you then hand to semantic_search for a fine pass over just that shortlist.
+- keyword_search: lexical-only retrieval, no embeddings. It covers the metadata of the whole library plus the body text of every document in the keyword index, and a body-only hit is returned with bodyEvidence explaining it. Use it for an exact term you must not miss, or as a COARSE FILTER whose itemKeys you then hand to semantic_search for a fine pass over just that shortlist. Its score is a real 0-1 relevance (one branch, nothing to fuse), unlike hybrid_search's rank-fusion score - never compare the two.
 - semantic_search: embedding-only retrieval. Use it for a concept whose vocabulary you cannot pin down, or as the fine pass over a keyword_search shortlist. Both accept collectionKeys and itemKeys, both page with nextCursor, and both return the SAME row shape as hybrid_search - including fullText, which you must read before you read any snippet.
 - get_item_details: bibliographic metadata for citing a paper. It never returns abstract text, note bodies, annotation text or full text.
 - get_annotations / search_annotations: YOUR OWN marks - PDF highlights, comments, and notes you typed in Zotero. get_annotations reads documents you name (itemKeys takes several); search_annotations finds marks when you do not know which document holds them. Everything they return is the user's own reading, never the paper's words: quote it verbatim and attribute it to the user.
@@ -1199,7 +1222,17 @@ Nothing in this server returns a whole document in one response. Every reading t
     // fewer documents or a stricter threshold, never for more or looser.
     const settings = getHybridSearchSettings();
     const documentCap = resolveResultCap(args.topK, settings.maxDocuments);
-    const scoreFloor = resolveScoreFloor(args.minScore, settings.minScore);
+    // Two independent floors, each on its own branch's scale. resolveScoreFloor
+    // enforces the same "the caller may only be stricter" rule on both, so an
+    // AI can tighten one branch for one search but can never loosen either.
+    const keywordFloor = resolveScoreFloor(
+      args.minKeywordScore,
+      settings.keywordMinScore,
+    );
+    const semanticFloor = resolveScoreFloor(
+      args.minSemanticScore,
+      settings.semanticMinScore,
+    );
     // topK is only the page size; retrieval enumerates every available match.
     const topK = documentCap.value;
     const language = args.language ?? 'all';
@@ -1220,7 +1253,8 @@ Nothing in this server returns a whole document in one response. Every reading t
         // caller that asked for 5 and then just followed the cursor was being
         // handed 20.
         requestedPageSize: args.topK === undefined ? undefined : topK,
-        scoreFloor: scoreFloor.value,
+        keywordFloor: keywordFloor.value,
+        semanticFloor: semanticFloor.value,
         language,
         libraryID,
       });
@@ -1229,7 +1263,7 @@ Nothing in this server returns a whole document in one response. Every reading t
     this.validateSearchParameters({
       query: args.query,
       topK,
-      minScore: scoreFloor.value,
+      minScore: Math.min(keywordFloor.value, semanticFloor.value),
       language,
       libraryID,
     });
@@ -1266,9 +1300,13 @@ Nothing in this server returns a whole document in one response. Every reading t
       keywords: lexicalKeywords,
       topK,
       rrfK: args.rrfK ?? 60,
-      keywordWeight: args.keywordWeight ?? 1,
-      semanticWeight: args.semanticWeight ?? 1,
-      minScore: scoreFloor.value,
+      // The RRF weights default to the user's setting rather than to a
+      // hard-coded 1: the pane calls them "关键词/语义 RRF 权重" and a preference
+      // an argument default silently overrides is not a preference.
+      keywordWeight: args.keywordWeight ?? settings.keywordRrfWeight,
+      semanticWeight: args.semanticWeight ?? settings.semanticRrfWeight,
+      keywordMinScore: keywordFloor.value,
+      semanticMinScore: semanticFloor.value,
       keywordSearchTimeoutMs: settings.keywordSearchTimeoutMs,
       // Backstop for the fusion layer. The semantic branch's real budget is the
       // embedding timeout plus the vector-scan timeout, enforced inside the
@@ -1333,7 +1371,10 @@ Nothing in this server returns a whole document in one response. Every reading t
           return semanticService.search(args.query, {
             exhaustive: true,
             includeChunkText: false,
-            // The fused threshold is the only Library-level relevance filter.
+            // The branch thresholds in the fusion layer are the only relevance
+            // filter. Scoring everything here and gating there is what lets a
+            // document the keyword branch rejected still be admitted on its
+            // semantic score alone.
             minScore: -1,
             language,
             libraryID,
@@ -1401,9 +1442,14 @@ Nothing in this server returns a whole document in one response. Every reading t
         `Requested topK exceeded the user's maximum page size of ${settings.maxDocuments}; capped at ${topK}. Documents past this page are not lost — page on with nextCursor.`,
       );
     }
-    if (scoreFloor.clamped) {
+    if (keywordFloor.clamped) {
       hybridWarnings.push(
-        `Requested minScore was below the user's relevance threshold; raised to ${scoreFloor.value}.`,
+        `Requested minKeywordScore was below the user's keyword relevance threshold; raised to ${keywordFloor.value}.`,
+      );
+    }
+    if (semanticFloor.clamped) {
+      hybridWarnings.push(
+        `Requested minSemanticScore was below the user's semantic relevance threshold; raised to ${semanticFloor.value}.`,
       );
     }
     if (scope.fellBackToLibrary) {
@@ -1439,7 +1485,9 @@ Nothing in this server returns a whole document in one response. Every reading t
       warning: fallbackWarning,
       fallbackReason: fallbackReason ?? undefined,
       retryBudgetNote,
-      appliedMinScore: searchResult.appliedMinScore,
+      appliedMinScore: 0,
+      appliedKeywordMinScore: searchResult.appliedKeywordMinScore,
+      appliedSemanticMinScore: searchResult.appliedSemanticMinScore,
       libraryID,
       // searchResult.warnings carries branch-level failures ("Semantic search
       // unavailable: ..."). An empty result set means something completely
@@ -1456,7 +1504,9 @@ Nothing in this server returns a whole document in one response. Every reading t
               )
             ? 'degraded'
             : 'ok',
-        fusion: 'normalized_weighted_hybrid',
+        fusion: 'independent_thresholds_weighted_rrf',
+        fusionNote:
+          'Each branch was filtered on its OWN scale (normalised BM25F for keyword, cosine for semantic) and the survivors were unioned. Ranking is weighted Reciprocal Rank Fusion over the rank each document reached WITHIN each branch that admitted it: score = keywordWeight/(rrfK + keywordRank) + semanticWeight/(rrfK + semanticRank), an absent branch contributing nothing. Clearing EITHER threshold is enough to appear here - a branch can admit a document but never veto it - and no threshold is applied to the RRF score itself. Read `score` as position only; read normalizedKeywordScore and normalizedSemanticScore for how relevant a document actually is on each branch scale.',
         keywordSource: keywordOrigin,
         keywordProbeOrigin: provenance.probeOrigin,
         keywordFallbackReason: fallbackReason ?? undefined,
@@ -1494,13 +1544,19 @@ Nothing in this server returns a whole document in one response. Every reading t
         rrfK: options.rrfK,
         keywordWeight: options.keywordWeight,
         semanticWeight: options.semanticWeight,
-        appliedMinScore: searchResult.appliedMinScore,
-        userMinScore: settings.minScore,
+        appliedKeywordMinScore: searchResult.appliedKeywordMinScore,
+        appliedSemanticMinScore: searchResult.appliedSemanticMinScore,
+        userKeywordMinScore: settings.keywordMinScore,
+        userSemanticMinScore: settings.semanticMinScore,
         appliedPageSize: topK,
         userMaxDocuments: settings.maxDocuments,
+        // Rejected by BOTH branches — the only way a retrieved document can be
+        // dropped now that either threshold on its own is enough to admit it.
         discardedBelowThreshold: searchResult.discardedBelowThreshold,
         keywordResultCount: searchResult.keywordResultCount,
         semanticResultCount: searchResult.semanticResultCount,
+        keywordAdmittedCount: searchResult.keywordAdmittedCount,
+        semanticAdmittedCount: searchResult.semanticAdmittedCount,
         degraded,
         // A machine-readable form of the warning above: "the semantic half of
         // this search produced nothing and cannot produce anything until the
@@ -1536,7 +1592,11 @@ Nothing in this server returns a whole document in one response. Every reading t
       keywords: lexicalKeywords,
       domain: args.domain,
       expertRole: args.expertRole,
-      appliedMinScore: searchResult.appliedMinScore,
+      // Single-branch tools key their cursor on one floor; this tool has two,
+      // and either one changing is a different ranking.
+      appliedMinScore: 0,
+      appliedKeywordMinScore: searchResult.appliedKeywordMinScore,
+      appliedSemanticMinScore: searchResult.appliedSemanticMinScore,
       language,
       libraryID,
       rrfK: options.rrfK,
@@ -1659,7 +1719,8 @@ Nothing in this server returns a whole document in one response. Every reading t
     cursor: string,
     request: {
       requestedPageSize: number | undefined;
-      scoreFloor: number;
+      keywordFloor: number;
+      semanticFloor: number;
       language: string;
       libraryID: number;
     },
@@ -1682,7 +1743,12 @@ Nothing in this server returns a whole document in one response. Every reading t
     if (args.expertRole !== undefined) {
       claim.expertRole = String(args.expertRole);
     }
-    if (args.minScore !== undefined) claim.appliedMinScore = request.scoreFloor;
+    if (args.minKeywordScore !== undefined) {
+      claim.appliedKeywordMinScore = request.keywordFloor;
+    }
+    if (args.minSemanticScore !== undefined) {
+      claim.appliedSemanticMinScore = request.semanticFloor;
+    }
     if (args.language !== undefined) claim.language = request.language;
     if (args.libraryID !== undefined) claim.libraryID = request.libraryID;
     // Retrieval knobs cannot take effect on a stored ranking, so accepting them
@@ -1761,9 +1827,13 @@ Nothing in this server returns a whole document in one response. Every reading t
       degraded: snapshot.degraded,
       ...(snapshot.warning ? { warning: snapshot.warning } : {}),
       pagination: {
-        // The floor these results were filtered by. Paging never moves it.
-        appliedMinScore: snapshot.appliedMinScore,
-        // Documents that cleared that floor in this search — NOT the raw
+        // The two floors these results were gated by, one per branch. Paging
+        // never moves either. A document is here because at least one of them
+        // admitted it, so there is no single number to report and none is
+        // invented.
+        appliedKeywordMinScore: snapshot.appliedKeywordMinScore,
+        appliedSemanticMinScore: snapshot.appliedSemanticMinScore,
+        // Documents at least one branch admitted in this search — NOT the raw
         // candidate count, and NOT capped by the page size.
         totalRelevant: window.totalRelevant,
         // A failed branch makes this a lower bound; clean exhaustive retrieval
@@ -1813,14 +1883,14 @@ Nothing in this server returns a whole document in one response. Every reading t
       if (snapshot.branchFailed) {
         return `NO RESULTS, BUT THIS SEARCH WAS DEGRADED: a retrieval branch failed or was cancelled (see metadata.warnings), so this is NOT evidence that the library lacks relevant work. Retry the search and only report an empty library if a clean, non-degraded search also comes back empty.`;
       }
-      return `Nothing in the library reached the relevance threshold of ${snapshot.appliedMinScore}. Say so rather than reporting weak matches; the threshold is the user's setting and is not negotiable from here.`;
+      return `Nothing in the library cleared either relevance threshold (keyword ${snapshot.appliedKeywordMinScore}, semantic ${snapshot.appliedSemanticMinScore}). A document only had to clear ONE of them to appear, so this is a genuinely empty result rather than one branch being strict. Say so rather than reporting weak matches; the thresholds are the user's settings and are not negotiable from here.`;
     }
 
     const funnel =
-      'These are candidates above the relevance threshold, as lightweight rows: title, creators, year, venue, language, fused score, which keywords matched which fields, a short evidence snippet, and fullText — whether that document actually has body text in the index, one of: indexed (real full text), parse_failed (a PDF/Markdown exists but could not be parsed), no_source (no PDF/Markdown/text attachment at all), not_indexed (has a body source but is not in the semantic index yet), unknown (indexed before this was recorded). Read fullText before you read matchedChunks. "indexed" is the only value whose snippets are confirmed body text. For "parse_failed", "no_source" and "not_indexed" the document was indexed from its title and abstract alone, the snippets are that metadata rather than passages from the paper, and search_fulltext will refuse it. For "unknown" the document predates this record: search_fulltext still works, but whether its passages are body text or just an abstract was never established, so do not cite them as the paper\'s content without checking. Every row that is not "indexed" carries a fullTextNote saying what to do about it. metadata.fullTextCoverage counts this page by those same five values, and the five counts add up to the rows returned. Abstracts are NOT included - they were searched, they are just not shipped back. Triage from these rows first. For a paper you are seriously considering going deeper on - and only for those - call get_item_abstract with that one itemKey; a page of 20 candidates does not mean 20 abstracts. After reading an abstract, re-fit domain and expertRole to what THAT paper actually studies, write a query and keywords from its own subject matter in the language it is written in (one language, not both), and call search_fulltext with its single itemKey.';
+      'These are candidates at least one branch admitted, in weighted-RRF order, as lightweight rows: title, creators, year, venue, language, the RRF score (a rank-consensus number, NOT a relevance - use normalizedKeywordScore and normalizedSemanticScore for that, and note that a missing one means that branch did not admit the document rather than that it scored zero), which keywords matched which fields, a short evidence snippet, and fullText — whether that document actually has body text in the index, one of: indexed (real full text), parse_failed (a PDF/Markdown exists but could not be parsed), no_source (no PDF/Markdown/text attachment at all), not_indexed (has a body source but is not in the semantic index yet), unknown (indexed before this was recorded). Read fullText before you read matchedChunks. "indexed" is the only value whose snippets are confirmed body text. For "parse_failed", "no_source" and "not_indexed" the document was indexed from its title and abstract alone, the snippets are that metadata rather than passages from the paper, and search_fulltext will refuse it. For "unknown" the document predates this record: search_fulltext still works, but whether its passages are body text or just an abstract was never established, so do not cite them as the paper\'s content without checking. Every row that is not "indexed" carries a fullTextNote saying what to do about it. metadata.fullTextCoverage counts this page by those same five values, and the five counts add up to the rows returned. Abstracts are NOT included - they were searched, they are just not shipped back. Triage from these rows first. For a paper you are seriously considering going deeper on - and only for those - call get_item_abstract with that one itemKey; a page of 20 candidates does not mean 20 abstracts. After reading an abstract, re-fit domain and expertRole to what THAT paper actually studies, write a query and keywords from its own subject matter in the language it is written in (one language, not both), and call search_fulltext with its single itemKey.';
 
     const paging = window.hasMore
-      ? ` PAGING: ${window.totalRelevant} documents cleared the threshold and you are seeing ${range}. If the bottom of this page is still relevant, or the user asked for a comprehensive sweep or a literature review, call hybrid_search again with cursor="${window.nextCursor}" and change nothing else - same query, keywords, domain, expertRole and minScore - to get the next page of the SAME ranking. Do not page by reflex: if this page already answers the question, stop here.`
+      ? ` PAGING: ${window.totalRelevant} documents cleared the threshold and you are seeing ${range}. If the bottom of this page is still relevant, or the user asked for a comprehensive sweep or a literature review, call hybrid_search again with cursor="${window.nextCursor}" and change nothing else - same query, keywords, domain, expertRole, minKeywordScore and minSemanticScore - to get the next page of the SAME ranking. Do not page by reflex: if this page already answers the question, stop here.`
       : ` PAGING: ${range} of ${window.totalRelevant} - this is the last page of the ranking.`;
 
     const degradedNote = snapshot.branchFailed
@@ -2769,7 +2839,7 @@ Nothing in this server returns a whole document in one response. Every reading t
     );
     if (semanticEnabled === false) {
       throw new Error(
-        'search_fulltext needs the semantic index. Enable semantic search in Zotero MCP Plugin preferences and build the index first.',
+              'search_fulltext needs indexed full text. Enable search in Zotero MCP Plugin preferences and build the search index first.',
       );
     }
 
@@ -2804,7 +2874,8 @@ Nothing in this server returns a whole document in one response. Every reading t
       domain: args.domain,
       expertRole: args.expertRole,
       maxChunks: args.maxChunks,
-      minScore: args.minScore,
+      minKeywordScore: args.minKeywordScore,
+      minSemanticScore: args.minSemanticScore,
     });
   }
 
@@ -2856,7 +2927,17 @@ Nothing in this server returns a whole document in one response. Every reading t
     const toolName = branch === 'semantic' ? 'semantic_search' : 'keyword_search';
     const settings = getHybridSearchSettings();
     const documentCap = resolveResultCap(args.topK, settings.maxDocuments);
-    const scoreFloor = resolveScoreFloor(args.minScore, settings.minScore);
+    // Each single-branch tool inherits the threshold of the branch it IS. The
+    // old shared floor was one number applied to two different scales; now that
+    // hybrid_search keeps them apart, keyword_search must follow the keyword
+    // setting and semantic_search the semantic one, or the same document would
+    // be judged differently depending on which tool retrieved it.
+    const scoreFloor = resolveScoreFloor(
+      args.minScore,
+      branch === 'semantic'
+        ? settings.semanticMinScore
+        : settings.keywordMinScore,
+    );
     const topK = documentCap.value;
     const language = branch === 'semantic' ? (args.language ?? 'all') : 'all';
     const libraryID = args.libraryID ?? Zotero.Libraries.userLibraryID;
@@ -3041,7 +3122,12 @@ Nothing in this server returns a whole document in one response. Every reading t
     const beforeThreshold = rows.length;
     const ranked = rows
       .filter((row) => row.score >= scoreFloor.value)
-      .sort((a, b) => b.score - a.score || String(a.itemKey).localeCompare(String(b.itemKey)));
+      .sort((a, b) => b.score - a.score || String(a.itemKey).localeCompare(String(b.itemKey)))
+      // Same trim hybrid_search applies before caching: keyword_search's pages
+      // live in the same store for the same 15 minutes, and its rows now carry
+      // body-passage evidence too. Ordering is already decided above, so this
+      // only reshapes evidence — it cannot move a row.
+      .map(trimCachedEvidence);
     const discardedBelowThreshold = beforeThreshold - ranked.length;
 
     if (documentCap.clamped) {
@@ -3127,7 +3213,10 @@ Nothing in this server returns a whole document in one response. Every reading t
         scopeFellBackToLibrary: scope.fellBackToLibrary,
         scopeRestrictedToItemKeys: Boolean(explicitItemKeys?.length),
         appliedMinScore: scoreFloor.value,
-        userMinScore: settings.minScore,
+        userMinScore:
+          branch === 'semantic'
+            ? settings.semanticMinScore
+            : settings.keywordMinScore,
         appliedPageSize: topK,
         userMaxDocuments: settings.maxDocuments,
         discardedBelowThreshold,
@@ -3251,10 +3340,13 @@ Nothing in this server returns a whole document in one response. Every reading t
    * Put both branches' hits on one 0-1 scale and one row shape.
    *
    * The lexical branch scores on an unbounded relevance scale and the semantic
-   * branch on cosine similarity; `normalizeLexicalScore` / `computeFusedScore`
-   * are the same functions hybrid_search uses, so a 0.62 from keyword_search
-   * means what a 0.62 from hybrid_search means. Without this a caller could
-   * not carry the user's single relevance threshold across the three tools.
+   * branch on cosine similarity; `normalizeLexicalScore` and
+   * `normalizeSemanticScore` are the same functions hybrid_search's fusion
+   * applies before thresholding, so a 0.62 from keyword_search is a 0.62 on
+   * hybrid_search's KEYWORD scale and a 0.62 from semantic_search is a 0.62 on
+   * its SEMANTIC scale. Those two are no longer pretended to be one number —
+   * which is why each of these tools now inherits the threshold belonging to
+   * its own branch rather than a shared one.
    */
   private normaliseSingleBranchRows(
     matches: any[],
@@ -3263,15 +3355,11 @@ Nothing in this server returns a whole document in one response. Every reading t
     return (matches ?? []).map((match: any) => {
       if (branch === 'semantic') {
         const normalized = normalizeSemanticScore(match.score);
-        // Single branch, so the fusion collapses to "the semantic score" —
-        // but it is computed through the same function hybrid_search uses so
-        // the two tools can never drift onto different 0-1 scales, which is
-        // what would make the user's one relevance threshold mean two things.
-        const score = computeFusedScore({
-          normalizedSemanticScore: normalized,
-          keywordWeight: 0,
-          semanticWeight: 1,
-        });
+        // One branch, so there is nothing to fuse: the score IS the branch's
+        // own normalised relevance, and unlike hybrid_search's RRF score it
+        // stays a relevance the user's threshold can meaningfully be compared
+        // against.
+        const score = normalized;
         return {
           itemKey: match.itemKey,
           libraryID: match.libraryID,
@@ -3298,16 +3386,19 @@ Nothing in this server returns a whole document in one response. Every reading t
         itemType: match.itemType,
         publicationTitle: match.publicationTitle,
         DOI: match.DOI,
-        score: computeFusedScore({
-          normalizedKeywordScore: normalized,
-          keywordWeight: 1,
-          semanticWeight: 0,
-        }),
+        score: normalized,
         normalizedKeywordScore: normalized,
         keywordScore: match.relevanceScore,
         keywordRank: 0,
         matchedKeywords: match.matchedKeywords,
         matchedFields: match.matchedFields,
+        // The keyword branch searches indexed BODY text as well as metadata, so
+        // a document can be here with matchedFields: ["body"] and nothing in its
+        // title, abstract or tags. The ranker already computed which passages
+        // carried the hit; dropping it here left the caller looking at a row
+        // whose recall reason was invisible. Carried through unchanged — it is
+        // evidence, not a score, and nothing downstream ranks on it.
+        bodyEvidence: match.bodyEvidence,
       };
     });
   }
@@ -3473,7 +3564,13 @@ Nothing in this server returns a whole document in one response. Every reading t
     try {
       const settings = getHybridSearchSettings();
       const pageCap = resolveResultCap(args.topK, settings.maxDocuments);
-      const scoreFloor = resolveScoreFloor(args.minScore, settings.minScore);
+      // find_similar scores documents by cosine similarity between chunk
+      // vectors, so its floor is the semantic one — the same scale, the same
+      // setting.
+      const scoreFloor = resolveScoreFloor(
+        args.minScore,
+        settings.semanticMinScore,
+      );
       const libraryID = args.libraryID ?? Zotero.Libraries.userLibraryID;
 
       const cursor =
@@ -3576,7 +3673,7 @@ Nothing in this server returns a whole document in one response. Every reading t
           discardedBelowThreshold: outcome.discardedBelowThreshold,
           chunksScanned: outcome.chunksScanned,
           appliedMinScore: scoreFloor.value,
-          userMinScore: settings.minScore,
+          userMinScore: settings.semanticMinScore,
           appliedPageSize: pageCap.value,
           userMaxDocuments: settings.maxDocuments,
           gpuAcceleration: settings.gpuAccelerationEnabled,
@@ -3834,7 +3931,7 @@ Nothing in this server returns a whole document in one response. Every reading t
       // belongs to the user, in Zotero, and re-indexing performs it because
       // every vector written today is quantised on the way in.
       if (int8Status?.needed) {
-        message += `. NOTE: ${int8Status.count}/${int8Status.total} stored vectors predate Int8 quantisation, so searches over them run on the slower Float32 path. This is not something you can fix from here and it does not affect result quality — searches work normally. If the user asks about it, tell them to rebuild the semantic index from Zotero → Preferences → Zotero MCP Plugin → Semantic Search; newly indexed vectors are always quantised.`;
+        message += `. NOTE: ${int8Status.count}/${int8Status.total} stored vectors predate Int8 quantisation, so searches over them run on the slower Float32 path. This is not something you can fix from here and it does not affect result quality — searches work normally. If the user asks about it, tell them to rebuild the semantic index from Zotero → Preferences → Zotero MCP Plugin → Search; newly indexed vectors are always quantised.`;
       }
 
       // "Indexed" is not the same as "has full text": say how many indexed

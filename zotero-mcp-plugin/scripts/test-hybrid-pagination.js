@@ -63,12 +63,14 @@ const FINGERPRINT = {
 }
 
 // ---------------------------------------------------------------------------
-// 1. THE CORE RULE: the threshold decides the population, paging only windows
-//    it. 100 candidates in, 47 above 0.70, so 47 is what can ever be paged.
+// 1. THE CORE RULE: the branch thresholds decide the population, paging only
+//    windows it. 100 semantic candidates in, 47 above the 0.70 semantic floor,
+//    so 47 is what can ever be paged.
 // ---------------------------------------------------------------------------
 {
   // Semantic scores are passed through unchanged by normalizeSemanticScore, so
-  // a document's fused score here is exactly its branch score.
+  // the value the semantic threshold is applied to here is exactly the score
+  // below. The keyword branch is empty, so this isolates one gate.
   const semanticResults = [];
   for (let i = 0; i < 100; i += 1) {
     // 47 documents at >= 0.70, the rest strictly below.
@@ -87,7 +89,8 @@ const FINGERPRINT = {
     rrfK: 60,
     keywordWeight: 1,
     semanticWeight: 1,
-    minScore: 0.7,
+    keywordMinScore: 0.7,
+    semanticMinScore: 0.7,
   });
 
   assert.equal(fusion.ranked.length, 47, "only documents above 0.70 may be paged");
@@ -99,12 +102,19 @@ const FINGERPRINT = {
     "page 1 must be the head of the ranked list, not a separate ranking",
   );
   assert.ok(
-    fusion.ranked.every((row) => row.score >= 0.7),
+    fusion.ranked.every((row) => (row.normalizedSemanticScore ?? 0) >= 0.7),
     "no sub-threshold document may appear anywhere in the paged population",
   );
   assert.ok(
     fusion.ranked.every((row, i, all) => i === 0 || all[i - 1].score >= row.score),
-    "the paged population must be in descending fused-score order",
+    "the paged population must be in descending RRF order",
+  );
+  // The RRF score is never re-thresholded: every one of these sits far below
+  // the 0.70 the semantic branch was gated on, and that is not a contradiction
+  // — it is the reason the old unified floor could not survive the change.
+  assert.ok(
+    fusion.ranked.every((row) => row.score < 0.7),
+    "the RRF score must not be mistaken for, or filtered by, a relevance floor",
   );
 
   // ------------------------------------------------------------------------

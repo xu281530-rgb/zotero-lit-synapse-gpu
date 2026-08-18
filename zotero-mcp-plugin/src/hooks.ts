@@ -5,6 +5,7 @@ import { getString, initLocale } from "./utils/locale";
 import { registerPrefsScripts } from "./modules/preferenceScript";
 import { createZToolkit } from "./utils/ztoolkit";
 import { MCPSettingsService } from "./modules/mcpSettingsService";
+import { migrateFusedScoreThreshold } from "./modules/hybridSearchSettings";
 import { registerSemanticIndexColumn, unregisterSemanticIndexColumn, refreshSemanticColumn } from "./modules/semanticIndexColumn";
 import { getMinerUService } from "./modules/mineru";
 import {
@@ -168,7 +169,7 @@ async function processPendingAutoUpdates() {
     (force ? forcedKeys : incrementalKeys).push(key);
   }
 
-  ztoolkit.log(`[MCP Plugin] Auto-updating semantic index for ${batch.size} items (forced=${forcedKeys.length}, incremental=${incrementalKeys.length})`);
+  ztoolkit.log(`[MCP Plugin] Auto-updating search index for ${batch.size} items (forced=${forcedKeys.length}, incremental=${incrementalKeys.length})`);
 
   // Set flag to prevent recursive calls during indexing
   isAutoIndexing = true;
@@ -926,6 +927,24 @@ async function onStartup() {
     ztoolkit.log(`[MCP Plugin] [STARTUP] Error initializing MCP settings: ${error}`, 'error');
   }
 
+  // The single fused-score threshold was split into a keyword floor and a
+  // semantic floor. A user who had tuned the old one keeps that tuning, on the
+  // semantic side — the side where the number still means what it meant. Runs
+  // once, guarded by its own flag, and does nothing at all to a user who never
+  // moved the old value off its default.
+  try {
+    const migration = migrateFusedScoreThreshold();
+    if (migration.migrated) {
+      ztoolkit.log(
+        `[MCP Plugin] [STARTUP] Carried the previous relevance threshold ${migration.value} over to hybrid.semanticMinScore; the keyword threshold starts at its measured recommendation.`,
+      );
+    }
+  } catch (error) {
+    // Never fatal: failing to migrate leaves both new thresholds at their
+    // defaults, which is a working search, not a broken one.
+    ztoolkit.log(`[MCP Plugin] [STARTUP] Threshold migration skipped: ${error}`, 'warn');
+  }
+
   // Check if this is first installation and show config prompt
   checkFirstInstallation();
 
@@ -969,7 +988,7 @@ async function onStartup() {
   );
   ztoolkit.log("[MCP Plugin] [STARTUP] Main windows loaded");
 
-  // Register item notifier for auto-update semantic index
+  // Register item notifier for automatic search-index updates
   registerItemNotifier();
   ztoolkit.log("[MCP Plugin] [STARTUP] Item notifier registered");
 
@@ -1009,10 +1028,10 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
     `${addon.data.config.addonRef}-preferences.ftl`,
   );
 
-  // Register context menu for semantic indexing
+  // Register context menu for search indexing
   registerSemanticIndexMenu(win);
 
-  // Register semantic index status column
+  // Register search index status column
   registerSemanticIndexColumn();
 }
 
@@ -1055,9 +1074,9 @@ function onShutdown(): void {
     ztoolkit.log(`[MCP Plugin] [SHUTDOWN 2/7] Error: ${err.message}`, "error");
   }
 
-  // 注销语义索引状态列
+    // 注销搜索索引状态列
   try {
-    ztoolkit.log("[MCP Plugin] [SHUTDOWN 3/7] Unregistering semantic index column...");
+      ztoolkit.log("[MCP Plugin] [SHUTDOWN 3/7] Unregistering search index column...");
     unregisterSemanticIndexColumn();
     ztoolkit.log("[MCP Plugin] [SHUTDOWN 3/7] Done");
   } catch (error) {
@@ -1312,7 +1331,7 @@ function unregisterSemanticIndexMenus(win: Window) {
 }
 
 /**
- * Register semantic index context menu
+ * Register search index context menu
  */
 function registerSemanticIndexMenu(win: _ZoteroTypes.MainWindow) {
   // Remove any leftovers first (re-enable / duplicate onMainWindowLoad calls)
@@ -1374,7 +1393,7 @@ function registerSemanticIndexMenu(win: _ZoteroTypes.MainWindow) {
     itemMenu.appendChild(separator);
     itemMenu.appendChild(parentMenu);
 
-    ztoolkit.log("[MCP Plugin] Semantic index context menu registered");
+  ztoolkit.log("[MCP Plugin] Search index context menu registered");
   } catch (error) {
     ztoolkit.log(`[MCP Plugin] Error registering context menu: ${error}`, "error");
   }
@@ -1384,7 +1403,7 @@ function registerSemanticIndexMenu(win: _ZoteroTypes.MainWindow) {
 }
 
 /**
- * Register semantic index context menu for collections
+ * Register search index context menu for collections
  */
 function registerCollectionSemanticIndexMenu(win: _ZoteroTypes.MainWindow) {
   try {
@@ -1444,7 +1463,7 @@ function registerCollectionSemanticIndexMenu(win: _ZoteroTypes.MainWindow) {
     collectionMenu.appendChild(separator);
     collectionMenu.appendChild(parentMenu);
 
-    ztoolkit.log("[MCP Plugin] Collection semantic index context menu registered");
+  ztoolkit.log("[MCP Plugin] Collection search index context menu registered");
   } catch (error) {
     ztoolkit.log(`[MCP Plugin] Error registering collection context menu: ${error}`, "error");
   }
@@ -1569,7 +1588,7 @@ async function handleIndexCollection(win: _ZoteroTypes.MainWindow, rebuild: bool
 
   } catch (error) {
     ztoolkit.log(`[MCP Plugin] Error handling collection index: ${error}`, "error");
-    showNotification(win, getString("menu-semantic-index-error" as any) || "Semantic indexing failed");
+    showNotification(win, getString("menu-semantic-index-error" as any) || "Indexing failed");
   }
 }
 
@@ -1594,7 +1613,7 @@ async function handleClearCollectionIndex(win: _ZoteroTypes.MainWindow) {
 
     // Confirm before clearing
     const confirmMsg = getString("menu-collection-clear-confirm" as any) ||
-      `Are you sure you want to clear the semantic index for "${collection.name}"?`;
+    `Are you sure you want to clear the search index for "${collection.name}"?`;
     if (!win.confirm(confirmMsg)) {
       return;
     }
@@ -1626,18 +1645,8 @@ async function handleClearCollectionIndex(win: _ZoteroTypes.MainWindow) {
     const vectorStore = getVectorStore();
     await vectorStore.initialize();
 
-    let clearedCount = 0;
-    for (const itemKey of itemKeys) {
-      try {
-        await vectorStore.deleteItemVectors(
-          itemKey,
-          collection.libraryID,
-        );
-        clearedCount++;
-      } catch (e) {
-        // Ignore errors for items that weren't indexed
-      }
-    }
+    await vectorStore.deleteItemsVectors(itemKeys, collection.libraryID);
+    const clearedCount = itemKeys.length;
 
     ztoolkit.log(`[MCP Plugin] Cleared index for ${clearedCount} items in collection "${collection.name}"`);
 
@@ -1709,7 +1718,7 @@ async function handleClearSelectedIndex(win: _ZoteroTypes.MainWindow) {
 
     // Confirm before clearing
     const confirmMsg = getString("menu-semantic-clear-selected-confirm" as any) ||
-      `Are you sure you want to clear the semantic index for ${itemKeys.length} selected item(s)?`;
+    `Are you sure you want to clear the search index for ${itemKeys.length} selected item(s)?`;
     if (!win.confirm(confirmMsg)) {
       return;
     }
@@ -1724,14 +1733,8 @@ async function handleClearSelectedIndex(win: _ZoteroTypes.MainWindow) {
 
     let clearedCount = 0;
     for (const [libraryID, keys] of keysByLibrary) {
-      for (const itemKey of keys) {
-        try {
-          await vectorStore.deleteItemVectors(itemKey, libraryID);
-          clearedCount++;
-        } catch (e) {
-          // Ignore errors for items that weren't indexed
-        }
-      }
+      await vectorStore.deleteItemsVectors(keys, libraryID);
+      clearedCount += keys.length;
     }
 
     ztoolkit.log(`[MCP Plugin] Cleared index for ${clearedCount} items`);
@@ -1905,7 +1908,7 @@ async function handleIndexSelected(win: _ZoteroTypes.MainWindow) {
 
   } catch (error) {
     ztoolkit.log(`[MCP Plugin] Error handling index selected: ${error}`, "error");
-    showNotification(win, getString("menu-semantic-index-error" as any) || "Semantic indexing failed");
+    showNotification(win, getString("menu-semantic-index-error" as any) || "Indexing failed");
   }
 }
 
@@ -1970,7 +1973,7 @@ async function handleIndexAll(win: _ZoteroTypes.MainWindow) {
 
   } catch (error) {
     ztoolkit.log(`[MCP Plugin] Error handling index all: ${error}`, "error");
-    showNotification(win, getString("menu-semantic-index-error" as any) || "Semantic indexing failed");
+    showNotification(win, getString("menu-semantic-index-error" as any) || "Indexing failed");
   }
 }
 

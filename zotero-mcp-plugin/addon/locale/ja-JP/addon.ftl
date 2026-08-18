@@ -263,10 +263,11 @@ config-guide-json-header = ## 設定スニペット
 config-guide-steps-header = ## 設定手順
 config-guide-tools-header = ## 利用可能なツール
 config-guide-tools-list =
-    - search_library - Zoteroライブラリを検索
+    - hybrid_search - 文献探索の既定の第一歩。キーワード（メタデータ + インデックス済み本文）と意味検索を並行実行
+    - search_library - 構造化メタデータ検索
     - get_item_details - アイテムの詳細を取得
-    - get_item_fulltext - アイテムの全文コンテンツを取得
-    - search_fulltext - 全文検索
+    - get_document_chunks - インデックス済み本文を順番に読む
+    - search_fulltext - 1 篇の文献内を検索。hybrid_search が返す itemKey が必要
     - get_collections - コレクション一覧を取得
     - search_annotations - 注釈とハイライトを検索
     - その他...
@@ -277,18 +278,18 @@ config-guide-troubleshooting-list =
     3. ファイアウォールの設定を確認してください
     4. 設定ファイルの形式が正しいことを確認してください
 config-guide-generated-time = 生成日時: { $time }
-# Context menu for semantic indexing
+# Context menu for indexing
 menu-semantic-index = インデックスを更新
 menu-semantic-index-selected = 選択したアイテムをインデックス
 menu-semantic-index-all = すべてのアイテムをインデックス
 menu-semantic-clear-selected = 選択したアイテムのインデックスをクリア
-menu-semantic-clear-selected-confirm = 選択したアイテムのセマンティックインデックスをクリアしますか？
+menu-semantic-clear-selected-confirm = 選択したアイテムの検索インデックス（意味ベクトル + 本文キーワード）を削除しますか？
 menu-semantic-clear-selected-done = インデックスをクリアしました:
 menu-semantic-items = 件のアイテム
-menu-semantic-index-started = セマンティックインデックスを開始しました
+menu-semantic-index-started = インデックス作成を開始しました
 menu-semantic-index-completed = インデックス作成が完了しました
 menu-semantic-index-busy = インデックス作成がすでに実行中です。完了をお待ちください
-menu-semantic-index-error = セマンティックインデックスに失敗しました
+menu-semantic-index-error = インデックス作成に失敗しました
 menu-semantic-index-no-collection = コレクションを選択してください
 menu-semantic-index-no-items = インデックス可能なアイテムがありません
 # Collection context menu
@@ -296,7 +297,7 @@ menu-collection-semantic-index = インデックス
 menu-collection-build-index = インデックスを構築
 menu-collection-rebuild-index = インデックスを再構築
 menu-collection-clear-index = インデックスをクリア
-menu-collection-clear-confirm = このコレクションのセマンティックインデックスをクリアしますか？
+menu-collection-clear-confirm = このコレクションの検索インデックス（意味ベクトル + 本文キーワード）を削除しますか？
 menu-collection-index-cleared = インデックスをクリアしました
 # 索引结果通知 / index result notifications
 notice-index-done = インデックス完了

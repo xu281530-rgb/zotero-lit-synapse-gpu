@@ -93,7 +93,7 @@ const baseRequest = {
   expertRole: "solidification microstructure specialist",
 };
 
-// ---- the passages that clear the threshold come back, ranked and scoped ----
+// ---- passages either branch admits come back, RRF-ranked and scoped ----
 
 resetFixture();
 const result = await runDocumentDeepDive(baseRequest);
@@ -113,9 +113,21 @@ assert.equal(
   1,
   "the passage both branches agree on must rank first",
 );
+// Chunk-level, the same rule as document-level: a passage is here because at
+// least one branch admitted it, so each row must carry that branch's own
+// relevance and at least one of the two must clear its floor.
 assert.ok(
-  result.chunks.every((chunk) => chunk.score >= 0.6),
-  "passages below the user's threshold must not be returned",
+  result.chunks.every(
+    (chunk) =>
+      (chunk.normalizedKeywordScore ?? 0) >= 0.52 ||
+      (chunk.normalizedSemanticScore ?? 0) >= 0.6,
+  ),
+  "every returned passage must have cleared at least one branch's floor",
+);
+// And the RRF score is emphatically NOT re-checked against either floor.
+assert.ok(
+  result.chunks.every((chunk) => chunk.score > 0 && chunk.score < 0.6),
+  "the chunk score is an RRF position, never re-filtered by a relevance floor",
 );
 assert.ok(
   result.chunks.every((chunk) => chunk.text.length > 0),
@@ -125,7 +137,11 @@ assert.ok(
   result.chunks.length < CHUNKS.length,
   "irrelevant passages must be discarded, not returned with a low score",
 );
-assert.equal(result.metadata.appliedMinScore, 0.6);
+assert.equal(result.metadata.appliedKeywordMinScore, 0.52);
+assert.equal(result.metadata.appliedSemanticMinScore, 0.6);
+// The very same two settings hybrid_search reads — one place to configure.
+assert.equal(result.metadata.userKeywordMinScore, 0.52);
+assert.equal(result.metadata.userSemanticMinScore, 0.6);
 assert.equal(result.metadata.appliedMaxChunks, 5);
 assert.ok(result.metadata.discardedBelowThreshold > 0);
 // The semantic branch must be scoped to this one document.
@@ -149,12 +165,30 @@ assert.deepEqual(
 );
 
 resetFixture();
-const loosened = await runDocumentDeepDive({ ...baseRequest, minScore: 0.1 });
+const loosened = await runDocumentDeepDive({
+  ...baseRequest,
+  minKeywordScore: 0.1,
+  minSemanticScore: 0.1,
+});
 assert.equal(
-  loosened.metadata.appliedMinScore,
-  0.6,
-  "a caller must not be able to lower the user's relevance threshold",
+  loosened.metadata.appliedKeywordMinScore,
+  0.52,
+  "a caller must not be able to lower the user's keyword threshold",
 );
+assert.equal(
+  loosened.metadata.appliedSemanticMinScore,
+  0.6,
+  "a caller must not be able to lower the user's semantic threshold",
+);
+
+// ...but it may tighten either one independently, and tightening one must not
+// touch the other.
+const stricterSemantic = await runDocumentDeepDive({
+  ...baseRequest,
+  minSemanticScore: 0.95,
+});
+assert.equal(stricterSemantic.metadata.appliedSemanticMinScore, 0.95);
+assert.equal(stricterSemantic.metadata.appliedKeywordMinScore, 0.52);
 assert.match(loosened.warnings.join(" "), /raised to/i);
 
 // ---- nothing relevant means nothing returned ----

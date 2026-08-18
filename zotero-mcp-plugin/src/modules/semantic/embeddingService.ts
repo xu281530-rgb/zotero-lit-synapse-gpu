@@ -132,8 +132,8 @@ export function batchTooManyInputsMessage(
       : `${Math.max(1, Math.floor(attemptedCount / 2))}`;
   return (
     `API 拒绝了本次请求：${serverMessage} / API rejected the request: ${serverMessage}\n` +
-    `本次提交了 ${attemptedCount} 个 chunk。请在「设置 → 语义搜索 → 单次请求最大批量」中改为 ${target} 或更小。 / ` +
-    `This request carried ${attemptedCount} chunks. Set "Max inputs per request" to ${target} or lower in Settings → Semantic Search.`
+    `本次提交了 ${attemptedCount} 个 chunk。请在「设置 → 搜索 → 单次请求最大批量」中改为 ${target} 或更小。 / ` +
+    `This request carried ${attemptedCount} chunks. Set "Max inputs per request" to ${target} or lower in Settings → Search.`
   );
 }
 

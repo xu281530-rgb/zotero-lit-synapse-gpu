@@ -900,7 +900,8 @@ export async function handleSearchFulltext(
           domain: query.get("domain") ?? undefined,
           expertRole: query.get("expertRole") ?? undefined,
           maxChunks: query.get("maxChunks") ?? undefined,
-          minScore: query.get("minScore") ?? undefined,
+          minKeywordScore: query.get("minKeywordScore") ?? undefined,
+          minSemanticScore: query.get("minSemanticScore") ?? undefined,
         });
 
     return {

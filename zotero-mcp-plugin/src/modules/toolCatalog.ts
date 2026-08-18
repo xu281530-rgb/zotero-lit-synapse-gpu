@@ -92,7 +92,9 @@ export function buildToolCatalog(): ToolDefinition[] {
     name: 'hybrid_search',
     category: 'search',
     description: [
-      'DEFAULT FIRST STEP for locating literature. Runs Zotero metadata/field keyword retrieval and semantic vector retrieval in parallel, then fuses them into one normalized 0-1 relevance score: each branch is normalised on its own scale, the stronger branch sets the score, and the weaker branch adds a bounded agreement bonus, so corroboration can only lift a document and never dilute it. Reciprocal Rank Fusion is computed too, but only as the tie-break between candidates whose fused scores are equal — rrfK tunes that tie-break, not the ranking. It does not scan full document text.',
+      'DEFAULT FIRST STEP for locating literature. Runs keyword retrieval and semantic vector retrieval in parallel, gates each one against ITS OWN user-configured relevance threshold on ITS OWN scale, unions whatever survives, and ranks the union by weighted Reciprocal Rank Fusion. Clearing either threshold on its own is enough to appear in the results: a branch can admit a document but can never veto one.',
+      '',
+      'The keyword branch reads the metadata of the whole library (title, abstract, creators, publication title, tags, extra) AND the body text of every document in the plugin\'s keyword index. The semantic branch reads the indexed passages. Neither branch scans Zotero\'s full-text cache or opens a PDF on the fly, so body coverage on both sides is exactly what has been indexed — metadata.bodyKeywords reports the keyword index\'s share, and each row\'s fullText field reports the semantic index\'s.',
       '',
       'The library is bilingual, so every call must retrieve Chinese AND English literature, no matter which language the user asked in. Do NOT translate the question into a single language and do NOT restrict the search to the language of the question. You (the calling AI) are responsible for the query rewrite: this tool never calls an LLM of its own.',
       '',
@@ -117,15 +119,17 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'Leave language at its "all" default so retrieval stays genuinely cross-lingual; the other language values only narrow recall.',
       '',
-      'SCORING: both branches are normalized to 0-1 and fused into one relevance score by taking the stronger branch and adding a bounded share of the weaker one, so a second, weaker hit can never push a document below what it scored on its own. Documents below the user-configured threshold are discarded by the server, and at most the user-configured number of documents is returned. That number is an upper bound, NOT a target: a weakly related paper is never added to make the list longer.',
+      'SCORING - read this before you interpret any number in the response. The two branches are never compared against each other. Each is filtered on its OWN scale: the keyword branch on normalised BM25F, the semantic branch on cosine similarity, each against its own user-configured threshold. The survivors are UNIONED - clearing either threshold on its own is enough to appear, and a branch can admit a document but can never veto one, so a paper the keyword branch never found is still returned if the semantic branch rates it, and vice versa. The ranking is then weighted Reciprocal Rank Fusion over where each document placed WITHIN each branch that admitted it: score = keywordWeight/(rrfK + keywordRank) + semanticWeight/(rrfK + semanticRank), with an absent branch contributing nothing rather than a penalty. A document both branches admit therefore collects two contributions and outranks single-branch documents at comparable ranks.',
       '',
-      'WHAT YOU GET BACK: a LIGHTWEIGHT candidate row per surviving document — itemKey, title, creators, year, venue, the language it is written in, the fused score, which of your keywords matched which fields, and a short snippet from its best-matching passages. That is a shortlist to triage, not a reading pile.',
+      'CONSEQUENCE FOR HOW YOU READ THE ROWS: `score` is that RRF value. It is a POSITION, not a relevance - it is a small number (a document first in both branches lands near 0.033 at the default k=60) and comparing it against 0.6, or against a score from another search, or against a score from keyword_search or semantic_search, is meaningless. When you need to know how relevant a document actually is, read normalizedKeywordScore and normalizedSemanticScore, which are real 0-1 relevances on their own branch scale and are exactly what the thresholds were applied to. A MISSING one means that branch did not admit the document - not that it scored zero, and not that the document is weak. Do not re-sort the list by anything else: re-sorting a rank fusion undoes the fusion. And at most the user-configured number of documents is returned, which is an upper bound and NOT a target: a weakly related paper is never added to make the list longer.',
+      '',
+      'WHAT YOU GET BACK: a LIGHTWEIGHT candidate row per surviving document — itemKey, title, creators, year, venue, the language it is written in, the RRF score plus each branch\'s own relevance, which of your keywords matched which fields, and a short snippet from its best-matching passages. A document the keyword branch matched in its BODY also carries bodyEvidence: the passages that contained your terms, with their chunkIds. Read it whenever matchedFields is just ["body"] — that row has nothing in its title or abstract to judge it by, and the passage is the whole reason it is here. That is a shortlist to triage, not a reading pile.',
       '',
       'ABSTRACTS ARE NOT RETURNED, on purpose. They are still indexed, still searched by the keyword branch, and still part of what produced this ranking — they are simply not shipped back, because most candidates never need to be read in full. Judge each row from its title, score, matched keywords and snippet. Only for a paper you are seriously considering going deeper on, call get_item_abstract with that one itemKey. Reading every candidate\'s abstract is the exact behaviour this design removes: 20 candidates does not mean 20 abstracts.',
       '',
       'SCOPE: by default this searches the entire library. When the user question is clearly confined to part of their collection, call get_collections FIRST, read the real folder names, and pass the relevant ones as collectionKeys — the scope is applied before scoring, so it cuts the work rather than filtering the results afterwards. Judge each collection by what it plainly is: include what the user named, include what obviously relates, exclude only what obviously does not, and INCLUDE anything you cannot classify. Personal folder names carry no subject information — "待读", "综述", "课题资料", "论文写作" — yet often hold exactly the papers that matter, so uncertainty means include, never exclude. When most of the structure is opaque to you, or the question spans several fields, skip collectionKeys and search everything: a scope that misses a paper is a worse outcome than a scan that costs a little more.',
       '',
-      'PAGING: topK is the size of ONE page, not the depth of the search. The response carries a pagination block: appliedMinScore (the floor these results passed), totalRelevant (how many documents cleared that floor — often more than one page), returned, hasMore and nextCursor. Filtering happens BEFORE paging, so a later page can never contain a document below the threshold, and a short last page is never padded out. To read further, call hybrid_search again with cursor set to nextCursor and everything else unchanged; that returns the next window of the SAME ranking rather than a fresh search. Page on when the bottom of a page is still relevant, or when the user asked for a comprehensive sweep or a literature review — not by reflex. Never lower minScore to make more results appear.',
+      'PAGING: topK is the size of ONE page, not the depth of the search. The response carries a pagination block: appliedKeywordMinScore and appliedSemanticMinScore (the two floors these results were gated by), totalRelevant (how many documents at least one branch admitted — often more than one page), returned, hasMore and nextCursor. Gating happens BEFORE paging, so a later page can never contain a document both branches rejected, and a short last page is never padded out. To read further, call hybrid_search again with cursor set to nextCursor and everything else unchanged; that returns the next window of the SAME ranking rather than a fresh search. Page on when the bottom of a page is still relevant, or when the user asked for a comprehensive sweep or a literature review — not by reflex. Never lower either floor to make more results appear.',
       '',
       'THEN: having read one paper\'s abstract, redo the expert analysis for THAT paper — re-fit domain and expertRole to what it actually studies, write a query and keywords out of its own subject matter, in the language that paper is written in — and call search_fulltext with its single itemKey. Answer from the stage-1 rows alone when the user only asks which literature is relevant.',
     ].join('\n'),
@@ -141,7 +145,7 @@ export function buildToolCatalog(): ToolDefinition[] {
           items: { type: 'string' },
           minItems: 1,
           maxItems: MAX_SUPPLIED_KEYWORDS,
-          description: `Lexical probes for the keyword branch, derived from your domain analysis of the question rather than from its wording: the core concepts and mechanism, precise Chinese AND English terms of art, standard technical translations, accepted synonyms, field abbreviations, and closely coupled concepts with a clear professional link to the research intent. For best results, it is recommended to provide 5-12 relevant Chinese and/or English keywords. Fewer or more keywords are still allowed within the implemented input limit of 1 to ${MAX_HYBRID_KEYWORDS} entries. Always supply both scripts regardless of the language the user asked in. Do not pad with generic or weakly related words — keyword coverage is part of the score, so filler actively hurts ranking. All keywords are matched together in one pass over title, abstract, creator, publicationTitle and tags, and ranked by term specificity, field weight and keyword coverage, so a broad word cannot outrank a discriminative phrase. Omitting this makes the server fall back to mechanically splitting the query: it can only probe the language the user typed in, is scored at a lower weight, and the response is flagged with keywordSource "fallback" plus an explicit warning.`
+          description: `Lexical probes for the keyword branch, derived from your domain analysis of the question rather than from its wording: the core concepts and mechanism, precise Chinese AND English terms of art, standard technical translations, accepted synonyms, field abbreviations, and closely coupled concepts with a clear professional link to the research intent. For best results, it is recommended to provide 5-12 relevant Chinese and/or English keywords. Fewer or more keywords are still allowed within the implemented input limit of 1 to ${MAX_HYBRID_KEYWORDS} entries. Always supply both scripts regardless of the language the user asked in. Do not pad with generic or weakly related words — keyword coverage is part of the score, so filler actively hurts ranking. All keywords are matched together in one pass over title, abstract, creator, publicationTitle, tags, extra AND the indexed body text, scored with BM25F — per-field weights, per-field length normalisation, saturating repeat counts — plus a bonus for covering more DISTINCT keywords, so a broad word cannot outrank a discriminative phrase. A document whose body carries your terms is retrieved even when its title and abstract do not, provided it is in the keyword index; body coverage is partial and is reported in metadata.bodyKeywords. Omitting this makes the server fall back to mechanically splitting the query: it can only probe the language the user typed in, is scored at a lower weight, and the response is flagged with keywordSource "fallback" plus an explicit warning.`
         },
         domain: {
           type: 'string',
@@ -167,11 +171,15 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         cursor: {
           type: 'string',
-          description: 'Continue a previous hybrid_search: pass the nextCursor it returned, exactly as given. The cursor names one already-ranked, already-threshold-filtered result set, and returns the next page of THAT set — it does not re-run retrieval, so pages cannot duplicate, drop or reorder documents. Send it with query, keywords, domain, expertRole and minScore either unchanged or omitted; changing any of them is a different search and is rejected. Omit cursor to start a new search.'
+          description: 'Continue a previous hybrid_search: pass the nextCursor it returned, exactly as given. The cursor names one already-ranked, already-gated result set, and returns the next page of THAT set — it does not re-run retrieval, so pages cannot duplicate, drop or reorder documents. Send it with query, keywords, domain, expertRole, minKeywordScore and minSemanticScore either unchanged or omitted; changing any of them is a different search and is rejected. Omit cursor to start a new search.'
         },
-        minScore: {
+        minKeywordScore: {
           type: 'number',
-          description: 'Relevance floor 0-1 applied to the fused score. May only be STRICTER than the user setting; a lower value is raised back to the user threshold. Documents below it are discarded and are never padded back in.'
+          description: 'Keyword-branch relevance floor 0-1, on the normalised BM25F scale. Gates the keyword branch ONLY: a document below it contributes no keyword rank, but the semantic branch can still admit it. May only be STRICTER than the user setting; a lower value is raised back to it.'
+        },
+        minSemanticScore: {
+          type: 'number',
+          description: 'Semantic-branch relevance floor 0-1, on the cosine-similarity scale. Gates the semantic branch ONLY, under the same rule. Raise this and lower nothing when you want fewer, more certain matches; the two floors are independent, so tightening one does not touch the other.'
         },
         language: {
           type: 'string',
@@ -180,15 +188,17 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         rrfK: {
           type: 'number',
-          description: 'Rank constant for the Reciprocal Rank Fusion TIE-BREAK (default: 60). Ranking is decided by the fused 0-1 relevance score; RRF only orders candidates whose fused scores are equal, so changing this rarely changes anything.'
+          description: 'Reciprocal Rank Fusion rank constant (default: 60). RRF now decides the whole ranking, and k controls how quickly the advantage of a better rank flattens out: a small k makes the top few positions dominate, a large k flattens the list towards the branch weights. It is one shared constant on purpose — expressing a preference for a branch is what keywordWeight and semanticWeight are for, and doing it with two different k values would tangle "how much do I trust this branch" together with "how much does placing first matter". Leave it alone unless you have a specific reason.'
         },
         keywordWeight: {
           type: 'number',
-          description: 'Non-negative keyword branch weight (default: 1)'
+          description: "The keyword branch's weight in the RRF sum: score = keywordWeight/(k + keywordRank) + semanticWeight/(k + semanticRank). Non-negative. Defaults to the user's setting, so omit it unless this particular question calls for leaning one way; 0 disables the branch entirely, so it can then neither rank nor admit a document. It does NOT change either threshold — a branch you down-weight still admits the same documents, they just count for less."
+
         },
         semanticWeight: {
           type: 'number',
-          description: 'Non-negative semantic branch weight (default: 1)'
+          description: "The semantic branch's weight in the same RRF sum, under the same rules and with the same default."
+
         },
         libraryID: {
           type: 'number',
@@ -684,7 +694,7 @@ export function buildToolCatalog(): ToolDefinition[] {
     name: 'search_fulltext',
     category: 'semantic',
     description: [
-      'SECOND-STAGE retrieval: a hybrid search inside the full text of ONE document located by hybrid_search. Same machinery as hybrid_search - keyword matching plus vector semantic retrieval over the same index, fused into the same normalized 0-1 relevance score, filtered by the same user threshold - except the candidates are the passages (chunks) of a single paper instead of the whole library.',
+      'SECOND-STAGE retrieval: a hybrid search inside the full text of ONE document located by hybrid_search. Same shape as hybrid_search - keyword matching and vector semantic retrieval, each gated against its own user threshold, the survivors unioned, the union ranked by weighted Reciprocal Rank Fusion - except the candidates are the passages (chunks) of a single paper instead of the whole library. It reads that paper\'s INDEXED passages; a document with no semantic index is refused rather than parsed on the fly.',
       '',
       "Call it once per document, with that document's own itemKey.",
       '',
@@ -695,9 +705,15 @@ export function buildToolCatalog(): ToolDefinition[] {
       'D. Write query and keywords out of THAT: a natural-language sentence about what you need from this paper, and probes in this paper\'s own vocabulary and terms of art.',
       'E. Write those keywords in the LANGUAGE THIS PAPER IS WRITTEN IN — one language, not both. Library-wide search is bilingual because the library is; this search is not, because a single document is not. Chinese probes cannot match an English paper\'s passages and vice versa: they match nothing and only dilute keyword coverage. hybrid_search reports each candidate\'s language, and the abstract confirms it. Only a genuinely mixed-language document takes mixed probes.',
       '',
-      'CONTEXT EXPANSION: read the returned passages first and stop when the evidence is sufficient. Only when a passage is clearly missing its cause, its consequence, its experimental conditions or its mechanism context, call this tool again with chunkIds set to the chunkId(s) of that passage - it then returns those passages plus their immediate neighbours in reading order, within the radius the user allows. Never request neighbours by default and never ask for the whole document.',
+      'CONTEXT EXPANSION is a SEPARATE call, not a later stage of this one. Ranking ends at the RRF list above; nothing is expanded automatically. Read the returned passages first and stop when the evidence is sufficient. Only when a passage is clearly missing its cause, its consequence, its experimental conditions or its mechanism context, call this tool AGAIN with chunkIds set to the chunkId(s) of that passage - that call performs no retrieval and no ranking at all, it just returns those passages plus their immediate neighbours in reading order, within the radius the user allows. The decision to expand is yours; never request neighbours by default and never ask for the whole document.',
       '',
-      "Result counts are capped by the user's preferences and the relevance threshold is a floor you cannot lower. Passages below it are discarded; the cap is a ceiling, not a quota, so a document with only one good passage returns one passage.",
+      "SCORING follows the same RULE as hybrid_search, one level down, on a scale of its own. Each branch is gated separately against the SAME two user settings hybrid_search uses, and the survivors are UNIONED — a passage only has to clear ONE of the two to be returned, so a passage your keywords miss still comes back when the embedding rates it, and a passage the embedding rates low still comes back when it literally carries your terms. Ranking is then weighted Reciprocal Rank Fusion over each passage's rank within each branch that admitted it.",
+      '',
+      "What differs from hybrid_search is what the keyword number MEANS. At library level the keyword branch is BM25F over a document's fields; inside one paper every candidate is a single passage with one field, so it is scored by term specificity across THIS paper's own passages, field weight, how many distinct keywords the passage covers, and saturating repeat counts, then mapped into 0-1. Term specificity is therefore computed over a handful of chunks rather than a whole library, which compresses it towards the middle of its range. Treat a chunk-level keyword score as comparable to other chunks of the same paper, not to a document-level score from hybrid_search or keyword_search.",
+      '',
+      "`score` is the RRF value: a position, not a relevance, and not comparable across tools or across searches. Read normalizedKeywordScore and normalizedSemanticScore for how relevant a passage actually is; a MISSING one means that branch did not admit the passage, not that it scored zero.",
+      '',
+      "Result counts are capped by the user's preferences and both floors are floors you cannot lower. The cap is a ceiling, not a quota, so a document with only one good passage returns one passage.",
     ].join('\n'),
     inputSchema: {
       type: 'object',
@@ -742,9 +758,13 @@ export function buildToolCatalog(): ToolDefinition[] {
           type: 'number',
           description: 'Upper bound on returned passages. Capped by the user setting. Only lowers the cap; it can never raise it, and it never pads weak passages in to reach a count.'
         },
-        minScore: {
+        minKeywordScore: {
           type: 'number',
-          description: 'Relevance floor 0-1 for the fused score. May only be stricter than the user setting; a lower value is raised back to it.'
+          description: 'Keyword-branch floor 0-1 for this document\'s passages. NOT the BM25F scale hybrid_search uses: inside one paper the keyword branch scores each passage by term specificity across THIS paper\'s own passages, then maps it into 0-1, so the same number is a different quantity here - see SCORING. Gates the keyword branch only; the semantic branch can still admit a passage below it. Same user setting, and same "stricter only" rule, as hybrid_search.'
+        },
+        minSemanticScore: {
+          type: 'number',
+          description: 'Semantic-branch floor 0-1 for this document\'s passages, on the cosine scale. Gates the semantic branch only, under the same rule.'
         },
       },
       required: ['itemKey'],
@@ -783,18 +803,26 @@ export function buildToolCatalog(): ToolDefinition[] {
     name: 'keyword_search',
     category: 'semantic',
     description: [
-      'LEXICAL-ONLY retrieval over Zotero metadata: title, abstract, creators, publication title and tags. No embeddings are involved, nothing is scored semantically, and document body text is not scanned.',
+      'LEXICAL-ONLY retrieval: literal term matching, no embeddings, nothing scored semantically. It searches the metadata fields of the WHOLE library — title, abstract, creators, publication title, tags, extra — AND the body text of every document that is in the keyword index.',
+      '',
+      'BODY COVERAGE IS PARTIAL, AND THAT IS THE ONE THING TO KNOW BEFORE READING A RESULT. Body matching reads the plugin\'s own keyword index. It does not scan Zotero\'s full-text cache, does not open PDFs, and does not reach a document the user has not indexed yet. Metadata coverage is the whole library; body coverage is whatever is indexed. So a document can be missing here because nobody indexed its body, NOT because its body lacks your terms — check metadata.bodyKeywords (indexedDocuments vs metadataCollectionSize) before concluding the library has nothing.',
+      '',
+      'A body hit is a first-class hit: a document whose title, abstract and tags contain none of your keywords still enters the ranking on its body alone. Those rows come back with matchedFields ["body"] and a bodyEvidence array naming the passages that carried the terms — read it, because for a body-only row it is the only thing that says why the document is in front of you.',
       '',
       'WHEN TO USE IT. Two cases, and they are the only two.',
       '1. The user named something exact - a term of art, an author, an abbreviation, a compound, a standard number - and you want every document that literally contains it, including ones a semantic query would rank low.',
       '2. COARSE FILTER before a fine search. Run keyword_search to reduce the library to a defensible shortlist, take the itemKeys it returned, and pass them to semantic_search as itemKeys. The semantic pass then scores only that shortlist. This is the cheap way to ask a conceptual question of a precisely delimited subset.',
-      'For ordinary literature discovery, hybrid_search is still the default first step - it runs this branch AND the semantic branch and fuses them, so calling both separately is strictly more work for a worse ranking.',
+      'For ordinary literature discovery, hybrid_search is still the default first step - it runs this branch AND the semantic branch, gates each on its own threshold and rank-fuses the union, so calling both separately is strictly more work for a worse ranking.',
       '',
-      'KEYWORDS ARE THE WHOLE INPUT. Pass the terms a specialist in the sub-field would actually search on, covering BOTH Chinese and English: core concepts, mechanism and governing variables, standard technical translations, accepted synonyms, the abbreviations of the field. The library is bilingual and this tool searches all of it, so restricting yourself to the language the user typed in silently halves recall. Around 5-12 keywords is the recommendation; 1 to \' + String(MAX_HYBRID_KEYWORDS) + \' is accepted. Do not pad the list - every keyword must be defensible as a term of art, because generic words dilute the coverage score and push the right papers down.',
+      `KEYWORDS ARE THE WHOLE INPUT. Pass the terms a specialist in the sub-field would actually search on, covering BOTH Chinese and English: core concepts, mechanism and governing variables, standard technical translations, accepted synonyms, the abbreviations of the field. The library is bilingual and this tool searches all of it, so restricting yourself to the language the user typed in silently halves recall. Around 5-12 keywords is the recommendation; 1 to ${MAX_HYBRID_KEYWORDS} is accepted. Do not pad the list - every keyword must be defensible as a term of art, because generic words dilute the coverage score and push the right papers down.`,
       '',
-      'SCORING. Each keyword is matched in a single pass over the candidate records, then scored by term specificity, field weight and how many DISTINCT keywords a record matched, and normalised to the same 0-1 scale every other relevance score in this plugin uses. The relevance threshold set by the user is applied before paging, exactly as in hybrid_search.',
+      'SCORING. BM25F over the fields above, with body as one of those fields. Every keyword is matched in one pass; each field has its own weight and its own length normalisation, so a term in a title counts for more than the same term buried in a long body, and repeating one term saturates instead of accumulating without limit. On top of that, matching several DISTINCT keywords beats matching one keyword many times. The raw score is unbounded, so it is mapped into 0-1 by a saturating curve.',
       '',
-      'WHAT YOU GET BACK. The same lightweight candidate row hybrid_search returns - itemKey, title, creators, year, venue, language, score, which keywords matched which fields, whether an abstract exists, and fullText (whether that document has indexed body text). Abstracts are not shipped back; fetch one with get_item_abstract for a paper worth pursuing.',
+      'The floor applied here is the user\'s KEYWORD relevance threshold - the same setting, on the same normalised BM25F scale, that gates hybrid_search\'s keyword branch. It is not shared with the semantic threshold: the two scales are different and are never compared. Filtering happens before paging, so no page can contain a document below the floor and a short final page is never padded.',
+      '',
+      'WHAT YOU GET BACK. The same lightweight candidate row hybrid_search returns - itemKey, title, creators, year, venue, language, score, which keywords matched which fields, whether an abstract exists, and fullText (whether that document has indexed body text) - plus bodyEvidence on any row that matched in the body. Here, and ONLY here among the retrieval tools, score is a real 0-1 relevance: one branch means there is nothing to fuse, so the number is this document\'s normalised BM25F score and is exactly what the threshold was applied to. (hybrid_search and search_fulltext report a rank-fusion score instead, which is a position, not a relevance - do not carry a number from one tool to the other.) Abstracts are not shipped back; fetch one with get_item_abstract for a paper worth pursuing.',
+      '',
+      'bodyEvidence entries carry chunkId, which of your keywords that passage contained, how many times, and the passage text. occurrences is evidence strength for YOU to read - it takes no part in ranking. To read around one of those passages, pass its chunkId to search_fulltext.',
       '',
       'PAGING. topK is the page size, not the depth of the search. Use pagination.nextCursor with every other argument unchanged to window further down the SAME ranking.',
     ].join('\n'),
@@ -858,14 +886,14 @@ export function buildToolCatalog(): ToolDefinition[] {
     description: [
       'PURE EMBEDDING-SIMILARITY retrieval. One natural-language query is embedded and compared against every indexed passage; no keyword matching takes part at any point.',
       '',
-      'WHEN TO USE IT. hybrid_search is the default first step for literature discovery and you should reach for it first - it runs the semantic branch AND the lexical branch and fuses them. Use semantic_search when the lexical branch would only add noise:',
+      'WHEN TO USE IT. hybrid_search is the default first step for literature discovery and you should reach for it first - it runs the semantic branch AND the lexical branch, gates each on its own threshold and rank-fuses the union. Use semantic_search when the lexical branch would only add noise:',
       '1. The user is asking about a CONCEPT or MECHANISM whose vocabulary you cannot pin down - where the right papers may share no surface term with the question.',
       '2. FINE SEARCH after a coarse filter. Run keyword_search first, take its itemKeys, pass them here, and the semantic pass scores only that shortlist.',
       '3. The user explicitly asked for semantic-only retrieval.',
       '',
       'THE QUERY IS THE WHOLE INPUT. Write ONE complete natural-language sentence stating the real research intent as an expert in that sub-field would state it. It is embedded verbatim, so do not reduce it to loose tokens. Writing an English phrasing followed by " / " and the Chinese phrasing is recommended, so the embedding sees both surface forms - retrieval is cross-lingual and the library is bilingual.',
       '',
-      'SCORING AND PAGING now match hybrid_search exactly. Passage similarities are aggregated to ONE score per document on the same 0-1 scale; the relevance threshold set by the user is applied BEFORE paging, so no page can contain a document below it and a short final page is never padded; topK is the size of one page. The response carries appliedMinScore, totalRelevant, returned, hasMore and nextCursor - pass nextCursor back as cursor with everything else unchanged to window the SAME ranking rather than searching again.',
+      'SCORING AND PAGING. Passage similarities are aggregated to ONE cosine score per document, and the floor applied is the user\'s SEMANTIC relevance threshold - the same setting, on the same cosine scale, that gates hybrid_search\'s semantic branch. It is not shared with the keyword threshold; the two scales are different and are never compared. Because there is only one branch here there is nothing to fuse, so score is a real 0-1 relevance and is exactly what the threshold was applied to - unlike hybrid_search and search_fulltext, whose score is a rank-fusion position. Never carry a number between the two kinds of tool. Filtering happens BEFORE paging, so no page can contain a document below the floor and a short final page is never padded; topK is the size of one page. The response carries appliedMinScore, totalRelevant, returned, hasMore and nextCursor - pass nextCursor back as cursor with everything else unchanged to window the SAME ranking rather than searching again.',
       '',
       'WHAT YOU GET BACK. The same lightweight candidate row hybrid_search returns, including fullText - whether that document actually has indexed body text, or whether it was indexed from title and abstract alone. Read fullText before you read the evidence snippets: for a document that is not "indexed", the snippets ARE its title and abstract, not passages from the paper. Abstracts are not shipped back; fetch one with get_item_abstract only for a candidate worth pursuing.',
     ].join('\n'),
@@ -931,10 +959,10 @@ export function buildToolCatalog(): ToolDefinition[] {
       '1. YOU pick the representative chunks. Run search_fulltext on the paper you are expanding from and read the passages it returns. Choose the ones that actually characterise the paper for YOUR task — its method, its mechanism, its material system, its findings, or whichever facets matter — and note their chunkId values. This tool does not and cannot judge which passages are representative; that judgement is the part only you can make, and it decides the quality of everything below.',
       '2. Full-index semantic scan with every chunk you passed, as separate query vectors. Their stored vectors are reused directly, so nothing is re-embedded.',
       '3. The query paper itself is excluded from its own results.',
-      '4. DOCUMENT-LEVEL aggregation. Chunk scores are folded into ONE score per candidate document: for each of your query chunks, the candidate\'s two best-matching passages are averaged, then those per-chunk-query scores are combined (mostly their mean, plus a smaller weight on the strongest one). A paper therefore scores high by relating to SEVERAL of the facets you supplied, not by owning one lucky passage. The result is on the same 0-1 scale as every other relevance score in this plugin.',
+      '4. DOCUMENT-LEVEL aggregation. Chunk scores are folded into ONE score per candidate document: for each of your query chunks, the candidate\'s two best-matching passages are averaged, then those per-chunk-query scores are combined (mostly their mean, plus a smaller weight on the strongest one). A paper therefore scores high by relating to SEVERAL of the facets you supplied, not by owning one lucky passage. The result is a 0-1 cosine relevance on the same scale as semantic_search, and the floor applied to it is the user\'s SEMANTIC relevance threshold. It is NOT comparable to hybrid_search\'s or search_fulltext\'s score, which is a rank-fusion position rather than a relevance.',
       '5. The user\'s relevance threshold is applied to those document scores, and EVERY document above it is ranked and paged - there is no cap on how many papers may qualify.',
       '',
-      'PAGING: 20 documents per page, ordered best first. When hasMore is true, call again with cursor set to nextCursor and nothing else changed; that replays the stored ranking instead of re-scanning the library. Decide as you page whether to keep going or to stop and dig into a promising candidate with get_item_abstract and search_fulltext.',
+      'PAGING: ordered best first, one page at a time. The page size is the user\'s configured MAXIMUM NUMBER OF DOCUMENTS - there is no fixed count here, and topK can only lower it. That cap bounds one page, never how many documents qualify, which is unlimited. When hasMore is true, call again with cursor set to nextCursor and nothing else changed; that replays the stored ranking instead of re-scanning the library. Decide as you page whether to keep going or to stop and dig into a promising candidate with get_item_abstract and search_fulltext.',
       '',
       'WHAT COMES BACK: identity, score, the chunkIds that carried the score, and fullText — whether that document has body text in the index, one of: indexed, parse_failed, no_source, not_indexed, unknown. No passage text. To read a candidate, call search_fulltext on its itemKey; a row whose fullText is "parse_failed", "no_source" or "not_indexed" holds only title and abstract and will be refused there, and one that is "unknown" predates the record so its passages are unverified.',
       '',
@@ -964,7 +992,7 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         topK: {
           type: 'number',
-          description: 'Page size. Capped by the user\'s maximum (20); it only lowers the page size and never the number of qualifying documents, which is unlimited.'
+          description: 'Page size. Capped by the user\'s configured maximum number of documents; a larger value is lowered to it. It only lowers the page size and never the number of qualifying documents, which is unlimited.'
         },
         cursor: {
           type: 'string',

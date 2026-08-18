@@ -53,7 +53,10 @@ export interface DeepDiveRequest {
   domain?: unknown;
   expertRole?: unknown;
   maxChunks?: unknown;
-  minScore?: unknown;
+  /** Keyword-branch floor for THIS document's chunks. Only ever stricter. */
+  minKeywordScore?: unknown;
+  /** Semantic-branch floor for THIS document's chunks. Only ever stricter. */
+  minSemanticScore?: unknown;
   keywordWeight?: number;
   semanticWeight?: number;
   rrfK?: number;
@@ -211,7 +214,17 @@ export async function runDocumentDeepDive(
   const item = await resolveItem(request.itemKey, libraryID);
 
   const cap = resolveResultCap(request.maxChunks, settings.maxChunksPerItem);
-  const floor = resolveScoreFloor(request.minScore, settings.minScore);
+  // The SAME two settings the library-level search uses. A chunk is a candidate
+  // document here, so nothing about the gating changes between the two levels —
+  // which is the point: one place to configure, one behaviour to reason about.
+  const keywordFloor = resolveScoreFloor(
+    request.minKeywordScore,
+    settings.keywordMinScore,
+  );
+  const semanticFloor = resolveScoreFloor(
+    request.minSemanticScore,
+    settings.semanticMinScore,
+  );
 
   const legacyIndexWarning = await assertBodyTextIndexed(
     request.itemKey,
@@ -225,7 +238,7 @@ export async function runDocumentDeepDive(
   );
   if (storedChunks.length === 0) {
     throw new Error(
-      `Item ${request.itemKey} has no indexed full text. Build or refresh the semantic index for it (Zotero → item context menu → update semantic index), then retry.`,
+        `Item ${request.itemKey} has no indexed full text. Build or refresh the search index for it (Zotero → item context menu → update index), then retry.`,
     );
   }
 
@@ -266,9 +279,10 @@ export async function runDocumentDeepDive(
       keywords: lexicalKeywords,
       topK: cap.value,
       rrfK: request.rrfK ?? 60,
-      keywordWeight: request.keywordWeight ?? 1,
-      semanticWeight: request.semanticWeight ?? 1,
-      minScore: floor.value,
+      keywordWeight: request.keywordWeight ?? settings.keywordRrfWeight,
+      semanticWeight: request.semanticWeight ?? settings.semanticRrfWeight,
+      keywordMinScore: keywordFloor.value,
+      semanticMinScore: semanticFloor.value,
       keywordSearchTimeoutMs,
       semanticBranchTimeoutMs:
         vectorScanTimeoutMs + DEFAULT_EMBEDDING_TIMEOUT_MS,
@@ -322,9 +336,14 @@ export async function runDocumentDeepDive(
       `Requested chunk count exceeded the user's per-document limit; capped at ${cap.value}.`,
     );
   }
-  if (floor.clamped) {
+  if (keywordFloor.clamped) {
     warnings.push(
-      `Requested minScore was below the user's relevance threshold; raised to ${floor.value}.`,
+      `Requested minKeywordScore was below the user's keyword relevance threshold; raised to ${keywordFloor.value}.`,
+    );
+  }
+  if (semanticFloor.clamped) {
+    warnings.push(
+      `Requested minSemanticScore was below the user's semantic relevance threshold; raised to ${semanticFloor.value}.`,
     );
   }
 
@@ -350,7 +369,7 @@ export async function runDocumentDeepDive(
   });
 
   ztoolkit.log(
-    `[DocumentDeepDive] ${request.itemKey}: ${chunks.length}/${storedChunks.length} chunks kept (minScore=${floor.value}, cap=${cap.value}, discarded=${searchResult.discardedBelowThreshold}, keywordSource=${provenance.keywordSource})`,
+    `[DocumentDeepDive] ${request.itemKey}: ${chunks.length}/${storedChunks.length} chunks kept (keywordMinScore=${keywordFloor.value}, semanticMinScore=${semanticFloor.value}, cap=${cap.value}, keywordAdmitted=${searchResult.keywordAdmittedCount}, semanticAdmitted=${searchResult.semanticAdmittedCount}, rejectedByBoth=${searchResult.discardedBelowThreshold}, keywordSource=${provenance.keywordSource})`,
   );
 
   const fallbackWarning =
@@ -372,7 +391,9 @@ export async function runDocumentDeepDive(
     metadata: {
       extractedAt: new Date().toISOString(),
       searchMode: "document_hybrid",
-      fusion: "normalized_weighted_hybrid",
+      fusion: "independent_thresholds_weighted_rrf",
+      fusionNote:
+        "Chunk-level, following the same rule as hybrid_search's document-level fusion: each branch is filtered against its own user threshold on its own scale, the survivors are unioned, and ranking is weighted RRF over each chunk's rank within each branch that admitted it. A passage only has to clear ONE threshold to be returned. The keyword scale differs from the library level: a chunk is a single-field candidate scored by specificity across THIS document's chunks, coverage and saturating repeats (see chunkFieldWeights), not by the BM25F used over a document's metadata fields — so a chunk keyword score is comparable to other chunks of this paper, not to a hybrid_search score. `score` is the RRF value and orders the list; it is not a relevance — read normalizedKeywordScore and normalizedSemanticScore for that. Adjacent-chunk expansion is not part of this ranking; it is a separate call the client decides to make.",
       keywordSource: provenance.keywordSource,
       keywordProbeOrigin: provenance.probeOrigin,
       keywordFallbackReason: provenance.reason ?? undefined,
@@ -385,8 +406,10 @@ export async function runDocumentDeepDive(
         origin: entry.origin,
       })),
       chunkFieldWeights: CHUNK_FIELD_WEIGHTS,
-      appliedMinScore: searchResult.appliedMinScore,
-      userMinScore: settings.minScore,
+      appliedKeywordMinScore: searchResult.appliedKeywordMinScore,
+      appliedSemanticMinScore: searchResult.appliedSemanticMinScore,
+      userKeywordMinScore: settings.keywordMinScore,
+      userSemanticMinScore: settings.semanticMinScore,
       appliedMaxChunks: cap.value,
       userMaxChunks: settings.maxChunksPerItem,
       neighborRadiusLimit: settings.neighborRadius,
@@ -395,6 +418,9 @@ export async function runDocumentDeepDive(
       candidatePoolTruncated,
       keywordResultCount: searchResult.keywordResultCount,
       semanticResultCount: searchResult.semanticResultCount,
+      keywordAdmittedCount: searchResult.keywordAdmittedCount,
+      semanticAdmittedCount: searchResult.semanticAdmittedCount,
+      /** Chunks rejected by BOTH branches — the only way one is dropped. */
       discardedBelowThreshold: searchResult.discardedBelowThreshold,
       resultCount: chunks.length,
       degraded,
@@ -407,7 +433,7 @@ export async function runDocumentDeepDive(
       },
       nextStep:
         chunks.length === 0
-          ? "No passage in this document reached the relevance threshold. Do not lower the threshold; either this paper does not answer the question, or the query needs to be rewritten from the paper's own terminology."
+          ? "No passage in this document cleared either relevance threshold — and a passage only had to clear one of them, so this is not one branch being strict. Do not lower a threshold; either this paper does not answer the question, or the query needs to be rewritten from the paper's own terminology."
           : "Read these passages first. Only if a passage is missing its cause, consequence, experimental condition or mechanism context, call search_fulltext again with chunkIds set to that passage's chunkId to pull in its neighbours. Do not request neighbours by default.",
     },
   };

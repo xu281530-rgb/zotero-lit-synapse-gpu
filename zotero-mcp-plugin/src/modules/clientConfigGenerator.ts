@@ -265,7 +265,7 @@ url = "http://127.0.0.1:${port}/mcp"
         "   qwen mcp list",
         "",
         "4. Available MCP tools in Qwen Code:",
-        "   - hybrid_search: STAGE 1; classify the field, adopt that expert role, then fuse metadata keyword and semantic retrieval over the whole library into one 0-1 relevance score. Pass a complete natural-language query, bilingual Chinese/English keywords (about 5-12 recommended), and the domain/expertRole you reasoned from. Returns lightweight candidate rows - metadata, score, matched keywords/fields, a short evidence snippet, language - WITHOUT abstracts",
+        "   - hybrid_search: STAGE 1; classify the field, adopt that expert role, then run keyword retrieval (library metadata + indexed body text) and semantic retrieval over the whole library. Each branch is filtered against its own relevance threshold and the survivors are unioned - clearing either one is enough - then ranked by weighted Reciprocal Rank Fusion. Pass a complete natural-language query, bilingual Chinese/English keywords (about 5-12 recommended), and the domain/expertRole you reasoned from. Returns lightweight candidate rows - metadata, the RRF ranking score plus each branch's own 0-1 relevance, matched keywords/fields, a short evidence snippet, language - WITHOUT abstracts",
         "   - search_library: Search your Zotero library by exact/field relevance",
         "   - semantic_search: Search by embedding similarity only",
         "   - get_annotations: Get annotations and notes",

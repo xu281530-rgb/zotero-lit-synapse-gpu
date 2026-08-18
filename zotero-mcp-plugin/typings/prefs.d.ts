@@ -30,7 +30,12 @@ declare namespace _ZoteroTypes {
       "ui.includeMetadata": boolean;
       "hybrid.maxDocuments": number;
       "hybrid.maxChunksPerItem": number;
+      "hybrid.keywordMinScore": string;
+      "hybrid.semanticMinScore": string;
+      "hybrid.keywordRrfWeight": string;
+      "hybrid.semanticRrfWeight": string;
       "hybrid.minScore": string;
+      "hybrid.thresholdSplitMigrated": boolean;
       "hybrid.chunkTargetChars": number;
       "hybrid.chunkAppendToleranceChars": number;
       "hybrid.neighborRadius": number;

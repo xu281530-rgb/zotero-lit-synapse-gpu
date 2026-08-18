@@ -263,11 +263,11 @@ config-guide-json-header = ## Configuration Snippet
 config-guide-steps-header = ## Configuration Steps
 config-guide-tools-header = ## Available Tools
 config-guide-tools-list =
-    - hybrid_search - Default first step for literature discovery; no full-text scan
+    - hybrid_search - Default first step for literature discovery; keyword (metadata + indexed body) and semantic branches in parallel
     - search_library - Structured metadata search
     - get_item_details - Get item details
-    - get_item_fulltext - Get item full text content
-    - search_fulltext - Second-stage search requiring itemKeys from hybrid_search
+    - get_document_chunks - Read a paper's indexed body passages in order
+    - search_fulltext - Search inside one paper; needs an itemKey from hybrid_search
     - get_collections - Get collections list
     - search_annotations - Search annotations and highlights
     - And more...
@@ -278,18 +278,18 @@ config-guide-troubleshooting-list =
     3. Check firewall settings
     4. Verify configuration file format is correct
 config-guide-generated-time = Generated at: { $time }
-# Context menu for semantic indexing
+# Context menu for indexing
 menu-semantic-index = Update Index
 menu-semantic-index-selected = Index Selected Items
 menu-semantic-index-all = Index All Items
 menu-semantic-clear-selected = Clear Selected Items Index
-menu-semantic-clear-selected-confirm = Are you sure you want to clear the semantic index for the selected items?
+menu-semantic-clear-selected-confirm = Clear the search index (semantic vectors + body keywords) for the selected items?
 menu-semantic-clear-selected-done = Index cleared for
 menu-semantic-items = items
-menu-semantic-index-started = Semantic indexing started
+menu-semantic-index-started = Indexing started
 menu-semantic-index-completed = Indexing completed
 menu-semantic-index-busy = An index build is already running, please wait for it to finish
-menu-semantic-index-error = Semantic indexing failed
+menu-semantic-index-error = Indexing failed
 menu-semantic-index-no-collection = Please select a collection
 menu-semantic-index-no-items = No indexable items
 # Collection context menu
@@ -297,7 +297,7 @@ menu-collection-semantic-index = Index
 menu-collection-build-index = Build Index
 menu-collection-rebuild-index = Rebuild Index
 menu-collection-clear-index = Clear Index
-menu-collection-clear-confirm = Are you sure you want to clear the semantic index for this collection?
+menu-collection-clear-confirm = Clear the search index (semantic vectors + body keywords) for this collection?
 menu-collection-index-cleared = Index cleared
 # 索引结果通知 / index result notifications
 notice-index-done = Indexing finished

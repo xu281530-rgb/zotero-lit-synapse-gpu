@@ -16,7 +16,7 @@ interface FulltextDatabaseDependencies {
       libraryID: number,
       limit: number,
     ): Promise<{ total: number; items: IndexedContentMetadata[] }>;
-    getStats(): Promise<{
+    getStats(libraryID?: number): Promise<{
       totalItems: number;
       totalVectors: number;
       zhVectors: number;
@@ -188,7 +188,9 @@ export class FulltextDatabaseService {
 
     if (request.action === "stats") {
       const [stats, indexed] = await Promise.all([
-        this.dependencies.vectorStore.getStats(),
+        // Same library as `indexed` below: this action already answers for one
+        // library, so its vector counts must be that library's too.
+        this.dependencies.vectorStore.getStats(libraryID),
         this.dependencies.vectorStore.listIndexedContentMetadata(libraryID, 0),
       ]);
       return {

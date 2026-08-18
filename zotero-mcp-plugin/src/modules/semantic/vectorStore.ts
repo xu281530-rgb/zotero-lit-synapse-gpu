@@ -10,7 +10,10 @@ declare let ztoolkit: ZToolkit;
 declare let PathUtils: any;
 declare let IOUtils: any;
 
-import { KeywordIndexStore } from "../keyword/keywordIndexStore";
+import {
+  KeywordIndexStore,
+  type KeywordIndexReport,
+} from "../keyword/keywordIndexStore";
 import { bodyIndexStateFromSourceKind } from './bodyIndexState';
 import {
   VectorDimensionMismatchError,
@@ -276,6 +279,58 @@ export interface VectorStoreStats {
   dbPath?: string;                  // Path to database file
 }
 
+/**
+ * Documents each index holds for ONE library, and how many distinct documents
+ * the two of them hold between them.
+ *
+ * `totalDocuments` is a real union computed in SQL over the two indexes' own
+ * document identities, not an arithmetic guess from two counts: a document may
+ * be in either index, in both, or in neither, and only during a fully
+ * synchronised build is one side a subset of the other. Taking the larger of
+ * the two counts silently understated the total for every partially indexed or
+ * half-cleaned state, which is exactly when the number is worth reading.
+ */
+export interface IndexedDocumentTotals {
+  /** Documents with at least one stored vector in this library. */
+  semanticDocuments: number;
+  /** Live keyword-index documents in this library. */
+  keywordDocuments: number;
+  /** |semantic ∪ keyword|, counted once per document. */
+  totalDocuments: number;
+}
+
+/**
+ * How the index database's pages are divided between the two indexes.
+ *
+ * Physical, not estimated: SQLite's `dbstat` virtual table reports the pages
+ * each b-tree actually occupies, and every table's own indexes are folded into
+ * the table they belong to. Pages cannot be attributed to a library — a page
+ * holds whatever rows landed on it — so this is a whole-file split, unlike the
+ * document and record counts around it.
+ *
+ * `semanticBytes + keywordBytes + bookkeepingBytes + freeBytes` reconciles to
+ * the file size (verified against the live database), so nothing is
+ * double-counted and nothing is silently dropped.
+ */
+export interface IndexStorageBreakdown {
+  /** Pages held by the vector index's tables and their indexes. */
+  semanticBytes?: number;
+  /** Pages held by the keyword index's tables and their indexes. */
+  keywordBytes?: number;
+  /** Pages held by SQLite's own schema and sequence tables. */
+  bookkeepingBytes?: number;
+  /** Pages on the freelist: allocated to the file, owned by neither index. */
+  freeBytes?: number;
+  /** The database file's size on disk, for reconciliation. */
+  fileBytes?: number;
+  /**
+   * False when this SQLite build has no `dbstat`. Callers must then show
+   * "unknown" rather than substitute the file size or any derived figure:
+   * a per-index number that is really the whole file would be a lie.
+   */
+  measured: boolean;
+}
+
 export const SEMANTIC_BUSINESS_TABLES = [
   'embeddings',
   'vectors_f32',
@@ -285,7 +340,29 @@ export const SEMANTIC_BUSINESS_TABLES = [
   'index_builds',
 ] as const;
 
-type SemanticBusinessTable = (typeof SEMANTIC_BUSINESS_TABLES)[number];
+/**
+ * The body-keyword index's tables.
+ *
+ * Listed separately from the vector tables only because they are created by
+ * KeywordIndexStore rather than by this file's schema. For every DESTRUCTIVE
+ * operation they are part of the same index and must be treated as one: a
+ * "delete everything" that emptied the vector tables and left these behind used
+ * to leave keyword_search answering for documents that no longer exist anywhere
+ * else in the plugin.
+ */
+export const KEYWORD_BUSINESS_TABLES = [
+  'kw_postings',
+  'kw_docs',
+  'kw_terms',
+] as const;
+
+/** Every table a full reset must empty, in a safe deletion order. */
+export const INDEX_BUSINESS_TABLES = [
+  ...SEMANTIC_BUSINESS_TABLES,
+  ...KEYWORD_BUSINESS_TABLES,
+] as const;
+
+type SemanticBusinessTable = (typeof INDEX_BUSINESS_TABLES)[number];
 type SemanticBusinessCounts = Record<SemanticBusinessTable, number>;
 
 export interface SemanticDatabaseClearReport {
@@ -411,26 +488,33 @@ export class VectorStore {
     }
   }
 
-  /** Drop one item from the keyword index; never throws. */
+  /** Drop one item from the keyword index. */
   async removeKeywordIndex(itemKey: string, libraryID: number): Promise<void> {
-    try {
-      await this.ensureInitialized();
-      await this.getKeywordIndexStore().removeItem(libraryID, itemKey);
-    } catch (error) {
-      ztoolkit.log(
-        `[VectorStore] keyword index removal failed for ${itemKey}: ${error}`,
-        'warn',
-      );
-    }
+    await this.ensureInitialized();
+    await this.getKeywordIndexStore().removeItem(libraryID, itemKey);
   }
 
-  /** Drop a library (or everything) from the keyword index; never throws. */
+  /** Drop a library (or everything) from the keyword index. */
   async clearKeywordIndex(libraryID?: number): Promise<void> {
+    await this.ensureInitialized();
+    await this.getKeywordIndexStore().clear(libraryID);
+  }
+
+  /**
+   * Counts for the preferences pane; never throws.
+   *
+   * Returns undefined rather than zeroes when the index cannot be read, so the
+   * pane can show "-" instead of claiming an empty index that may not be empty.
+   */
+  async getKeywordIndexReport(
+    libraryID: number,
+  ): Promise<KeywordIndexReport | undefined> {
     try {
       await this.ensureInitialized();
-      await this.getKeywordIndexStore().clear(libraryID);
+      return await this.getKeywordIndexStore().report(libraryID);
     } catch (error) {
-      ztoolkit.log(`[VectorStore] keyword index clear failed: ${error}`, 'warn');
+      ztoolkit.log(`[VectorStore] keyword index report failed: ${error}`, 'warn');
+      return undefined;
     }
   }
 
@@ -1041,7 +1125,6 @@ export class VectorStore {
     attachmentModified?: string;
     /** Extraction settings this attempt ran under; see bodyRetryPolicy. */
     bodyRetrySignature?: string;
-    buildID?: string;
   }): Promise<void> {
     await this.ensureInitialized();
     const storageKey = this.toStorageKey(options.itemKey, options.libraryID);
@@ -1086,16 +1169,6 @@ export class VectorStore {
           options.bodyRetrySignature ?? null,
         ],
       );
-      await this.db.queryAsync(
-        `DELETE FROM index_failures WHERE library_id = ? AND item_key = ?`,
-        [options.libraryID, options.itemKey],
-      );
-      if (options.buildID) {
-        await this.db.queryAsync(
-          `UPDATE index_build_targets SET state = 'succeeded' WHERE build_id = ? AND library_id = ? AND item_key = ?`,
-          [options.buildID, options.libraryID, options.itemKey],
-        );
-      }
     });
 
     for (const key of this.vectorCache.keys()) {
@@ -2672,6 +2745,10 @@ export class VectorStore {
   ): Promise<void> {
     await this.ensureInitialized();
     const scope = this.libraryScopeClause(libraryID);
+    // Outside the transaction: creating tables is idempotent and must not be
+    // part of what a rollback undoes.
+    const keywordStore = this.getKeywordIndexStore();
+    await keywordStore.ensureSchema();
     await this.db.executeTransaction(async () => {
       await this.db.queryAsync(
         `DELETE FROM embeddings WHERE ${scope.clause}`,
@@ -2689,6 +2766,11 @@ export class VectorStore {
         `DELETE FROM index_failures WHERE library_id = ?`,
         [libraryID],
       );
+      // The keyword index is cleared in the SAME transaction and BEFORE the
+      // reset flag commits. A rebuild that wiped the vectors, committed, then
+      // died would otherwise resume believing the reset was done while the old
+      // keyword postings were still on disk — the exact residue this fixes.
+      await keywordStore.clearWithoutTransaction(libraryID);
       await this.db.queryAsync(
         `UPDATE index_builds SET reset_completed = 1 WHERE build_id = ?`,
         [buildID],
@@ -2867,13 +2949,32 @@ export class VectorStore {
   }
 
   /**
-   * Delete vectors for an item
+   * Delete one item from BOTH indexes.
+   *
+   * The keyword removal lives here, at the choke point, rather than at each
+   * call site. It used to be the caller's job, and four call sites in hooks.ts
+   * -- an erased item, an erased attachment's parent, "clear this collection's
+   * index" and "clear the selected items' index" -- did not do it. Each left
+   * the document's keyword postings behind, so keyword_search kept returning a
+   * paper the user had just removed from the index, with no vectors and no
+   * index_status row to explain it. Putting it here means a future caller
+   * cannot make the same omission.
+   *
+   * Both halves share one SQLite transaction. The keyword half uses its normal
+   * tombstone model; compaction remains deferred.
+   *
    * @param itemKey The item key to delete
    */
   async deleteItemVectors(itemKey: string, libraryID?: number): Promise<void> {
     await this.ensureInitialized();
 
     const storageKey = this.toStorageKey(itemKey, libraryID);
+    const effectiveLibraryID =
+      libraryID ?? Zotero.Libraries.userLibraryID;
+    const keywordStore = this.getKeywordIndexStore();
+    // Schema creation is idempotent DDL and deliberately precedes the business
+    // transaction, matching clearLibraryForBuild.
+    await keywordStore.ensureSchema();
     await this.db.executeTransaction(async () => {
       await this.db.queryAsync(
         `DELETE FROM embeddings WHERE item_key = ?`,
@@ -2887,6 +2988,7 @@ export class VectorStore {
         `DELETE FROM index_status WHERE item_key = ?`,
         [storageKey]
       );
+      await keywordStore.removeItem(effectiveLibraryID, itemKey);
     });
 
     // Clear cache entries
@@ -2901,14 +3003,19 @@ export class VectorStore {
       kind: 'itemsDeleted',
       items: [
         {
-          libraryID: libraryID ?? Zotero.Libraries.userLibraryID,
+          libraryID: effectiveLibraryID,
           itemKey,
         },
       ],
     });
   }
 
-  /** Delete only the requested items while preserving every other index row. */
+  /**
+   * Delete the requested items from BOTH indexes, preserving every other row.
+   *
+   * Same reasoning as {@link deleteItemVectors}: whichever index a caller
+   * thinks it is deleting from, it is deleting from both.
+   */
   async deleteItemsVectors(
     itemKeys: string[],
     libraryID?: number,
@@ -2918,6 +3025,11 @@ export class VectorStore {
       new Set(itemKeys.map((key) => this.toStorageKey(key, libraryID))),
     );
     if (storageKeys.length === 0) return;
+    const identities = storageKeys.map((storageKey) =>
+      this.fromStorageKey(storageKey),
+    );
+    const keywordStore = this.getKeywordIndexStore();
+    await keywordStore.ensureSchema();
 
     const batchSize = 500;
     await this.db.executeTransaction(async () => {
@@ -2937,6 +3049,12 @@ export class VectorStore {
           batch,
         );
       }
+      for (const identity of identities) {
+        await keywordStore.removeItem(
+          identity.libraryID ?? Zotero.Libraries.userLibraryID,
+          identity.itemKey,
+        );
+      }
     });
 
     for (const key of this.vectorCache.keys()) {
@@ -2944,12 +3062,13 @@ export class VectorStore {
         this.vectorCache.delete(key);
       }
     }
+
     ztoolkit.log(
       `[VectorStore] Deleted vectors for ${storageKeys.length} targeted items`,
     );
     await this.publishGpuMutation({
       kind: 'itemsDeleted',
-      items: storageKeys.map((storageKey) => this.fromStorageKey(storageKey)),
+      items: identities,
     });
   }
 
@@ -3060,7 +3179,7 @@ export class VectorStore {
 
   private async countSemanticBusinessRows(): Promise<SemanticBusinessCounts> {
     const counts = {} as SemanticBusinessCounts;
-    for (const table of SEMANTIC_BUSINESS_TABLES) {
+    for (const table of INDEX_BUSINESS_TABLES) {
       counts[table] = Number(
         await this.db.valueQueryAsync(`SELECT COUNT(*) FROM ${table}`),
       );
@@ -3097,16 +3216,16 @@ export class VectorStore {
       await this.db.valueQueryAsync(`PRAGMA freelist_count`),
     );
     ztoolkit.log(
-      `[VectorStore] clearAll() starting: ${SEMANTIC_BUSINESS_TABLES.map((table) => `${table}=${before[table]}`).join(', ')}`,
+      `[VectorStore] clearAll() starting: ${INDEX_BUSINESS_TABLES.map((table) => `${table}=${before[table]}`).join(', ')}`,
     );
 
     await this.db.executeTransaction(async () => {
-      for (const table of SEMANTIC_BUSINESS_TABLES) {
+      for (const table of INDEX_BUSINESS_TABLES) {
         await this.db.queryAsync(`DELETE FROM ${table}`);
       }
       await this.db.queryAsync(
-        `DELETE FROM sqlite_sequence WHERE name IN (?, ?)`,
-        ['embeddings', 'vectors_f32'],
+        `DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?)`,
+        ['embeddings', 'vectors_f32', 'kw_docs', 'kw_terms'],
       );
     });
 
@@ -3128,25 +3247,25 @@ export class VectorStore {
     const walAfterBytes = this.readDatabaseFileSize(`${this.dbPath}-wal`);
     const shmAfterBytes = this.readDatabaseFileSize(`${this.dbPath}-shm`);
 
-    const remaining = SEMANTIC_BUSINESS_TABLES.filter(
+    const remaining = INDEX_BUSINESS_TABLES.filter(
       (table) => after[table] !== 0,
     );
     if (remaining.length > 0) {
       throw new Error(
-        `Semantic database reset left business rows: ${remaining.map((table) => `${table}=${after[table]}`).join(', ')}`,
+        `Search index database reset left business rows: ${remaining.map((table) => `${table}=${after[table]}`).join(', ')}`,
       );
     }
     if (freelistAfter !== 0) {
       throw new Error(
-        `Semantic database VACUUM left ${freelistAfter} free pages`,
+        `Search index database VACUUM left ${freelistAfter} free pages`,
       );
     }
     if (walAfterBytes !== undefined && walAfterBytes !== 0) {
       throw new Error(
-        `Semantic database WAL was not truncated (${walAfterBytes} bytes remain)`,
+        `Search index database WAL was not truncated (${walAfterBytes} bytes remain)`,
       );
     }
-    const rowsBefore = SEMANTIC_BUSINESS_TABLES.reduce(
+    const rowsBefore = INDEX_BUSINESS_TABLES.reduce(
       (sum, table) => sum + before[table],
       0,
     );
@@ -3157,7 +3276,7 @@ export class VectorStore {
       afterBytes >= beforeBytes
     ) {
       throw new Error(
-        `Semantic database did not physically shrink (${beforeBytes} -> ${afterBytes} bytes)`,
+        `Search index database did not physically shrink (${beforeBytes} -> ${afterBytes} bytes)`,
       );
     }
 
@@ -3185,36 +3304,196 @@ export class VectorStore {
   }
 
   /**
-   * Get statistics
+   * How many documents each index holds for one library, and their union.
+   *
+   * The union is one SQL query because both indexes live in the same database
+   * file, so the two sides are read at the same instant and from the same
+   * transaction — a union assembled from two separately timed counts could
+   * report a total that was never simultaneously true.
+   *
+   * Identity is the item key, normalised: the vector tables store My Library's
+   * items under a bare key and every other library's under `<libraryID>:<key>`,
+   * while the keyword index stores a bare key with the library in its own
+   * column. The prefix is stripped before the union so the same document is
+   * one document on both sides.
    */
-  async getStats(): Promise<VectorStoreStats> {
+  async getIndexedDocumentTotals(
+    libraryID: number,
+  ): Promise<IndexedDocumentTotals> {
+    await this.ensureInitialized();
+    const scope = this.libraryScopeClause(libraryID);
+    const isUserLibrary = libraryID === Zotero.Libraries.userLibraryID;
+    const prefix = `${libraryID}:`;
+    // For a group library the stored key carries a `<libraryID>:` prefix that
+    // the keyword index does not use; SUBSTR removes exactly that prefix.
+    const semanticKey = isUserLibrary
+      ? 'item_key'
+      : `SUBSTR(item_key, ${prefix.length + 1})`;
+
+    const [semantic, keyword, union] = await Promise.all([
+      this.db.valueQueryAsync(
+        `SELECT COUNT(DISTINCT item_key) FROM embeddings WHERE ${scope.clause}`,
+        scope.params,
+      ),
+      this.db.valueQueryAsync(
+        `SELECT COUNT(*) FROM kw_docs WHERE library_id = ? AND alive = 1`,
+        [libraryID],
+      ),
+      this.db.valueQueryAsync(
+        `SELECT COUNT(*) FROM (
+           SELECT ${semanticKey} AS document_key FROM embeddings WHERE ${scope.clause}
+           UNION
+           SELECT item_key FROM kw_docs WHERE library_id = ? AND alive = 1
+         )`,
+        [...scope.params, libraryID],
+      ),
+    ]);
+
+    return {
+      semanticDocuments: Number(semantic || 0),
+      keywordDocuments: Number(keyword || 0),
+      totalDocuments: Number(union || 0),
+    };
+  }
+
+  /**
+   * Split the database file between the two indexes, physically.
+   *
+   * `dbstat` is a virtual table SQLite exposes when built with
+   * SQLITE_ENABLE_DBSTAT_VTAB; Zotero's SQLite is (verified in the shipped
+   * binary, which carries the vtab's `pgoffset` / `mx_payload` schema). Its
+   * `aggregate` mode returns one row per b-tree instead of one row per page,
+   * which is what keeps this affordable: 54ms on a 177MB synthetic index, 5ms
+   * on the real 17MB one.
+   *
+   * Joining through sqlite_master maps every index b-tree — including the
+   * implicit `sqlite_autoindex_*` ones created by UNIQUE constraints — onto the
+   * table it belongs to, so an index's footprint counts against its own index
+   * rather than disappearing into an "other" bucket.
+   *
+   * Never throws: a SQLite build without the vtab reports `measured: false`.
+   */
+  async getIndexStorageBreakdown(): Promise<IndexStorageBreakdown> {
     await this.ensureInitialized();
 
-    ztoolkit.log(`[VectorStore] getStats() called: instanceId=${this.instanceId}, dbPath=${this.dbPath}`);
+    const fileBytes = this.readDatabaseFileSize(this.dbPath);
+    const unmeasured: IndexStorageBreakdown = { fileBytes, measured: false };
+
+    let rows: any[] | undefined;
+    try {
+      rows = await this.db.queryAsync(
+        `SELECT COALESCE(m.tbl_name, d.name) AS tbl, SUM(d.pgsize) AS bytes
+           FROM dbstat AS d LEFT JOIN sqlite_master AS m ON m.name = d.name
+          WHERE d.aggregate = TRUE
+          GROUP BY COALESCE(m.tbl_name, d.name)`,
+      );
+    } catch (error) {
+      // Older SQLite has dbstat without the `aggregate` column: same numbers,
+      // one row per page instead of one per b-tree.
+      try {
+        rows = await this.db.queryAsync(
+          `SELECT COALESCE(m.tbl_name, d.name) AS tbl, SUM(d.pgsize) AS bytes
+             FROM dbstat AS d LEFT JOIN sqlite_master AS m ON m.name = d.name
+            GROUP BY COALESCE(m.tbl_name, d.name)`,
+        );
+      } catch (fallbackError) {
+        ztoolkit.log(
+          `[VectorStore] per-index storage unavailable (dbstat): ${error}; ${fallbackError}`,
+          'warn',
+        );
+        return unmeasured;
+      }
+    }
+    if (!rows) return unmeasured;
+
+    const semanticTables = new Set<string>(SEMANTIC_BUSINESS_TABLES);
+    const keywordTables = new Set<string>(KEYWORD_BUSINESS_TABLES);
+    let semanticBytes = 0;
+    let keywordBytes = 0;
+    let bookkeepingBytes = 0;
+    for (const row of rows) {
+      const table = String(row.tbl ?? '');
+      const bytes = Number(row.bytes ?? 0);
+      if (semanticTables.has(table)) semanticBytes += bytes;
+      else if (keywordTables.has(table)) keywordBytes += bytes;
+      else bookkeepingBytes += bytes;
+    }
+
+    let freeBytes: number | undefined;
+    try {
+      const pageSize = Number(await this.db.valueQueryAsync(`PRAGMA page_size`));
+      const freePages = Number(
+        await this.db.valueQueryAsync(`PRAGMA freelist_count`),
+      );
+      if (Number.isFinite(pageSize) && Number.isFinite(freePages)) {
+        freeBytes = pageSize * freePages;
+      }
+    } catch {
+      // Leave undefined; the two index figures do not depend on it.
+    }
+
+    return {
+      semanticBytes,
+      keywordBytes,
+      bookkeepingBytes,
+      freeBytes,
+      fileBytes,
+      measured: true,
+    };
+  }
+
+  /**
+   * Get statistics
+   *
+   * @param libraryID Restrict every count to one library. The preferences pane
+   *   passes it so that a second library's vectors cannot inflate the numbers
+   *   shown for the library being looked at; callers asking a whole-database
+   *   question (dimension compatibility, migration coverage) omit it.
+   */
+  async getStats(libraryID?: number): Promise<VectorStoreStats> {
+    await this.ensureInitialized();
+
+    ztoolkit.log(`[VectorStore] getStats() called: instanceId=${this.instanceId}, dbPath=${this.dbPath}, libraryID=${libraryID ?? 'all'}`);
+
+    // One scope for every count below, so no figure in the returned object can
+    // be answering a different question from the one next to it.
+    const scope =
+      libraryID === undefined ? null : this.libraryScopeClause(libraryID);
+    const where = scope ? ` WHERE ${scope.clause}` : '';
+    const and = scope ? ` AND ${scope.clause}` : '';
+    const params = scope ? scope.params : [];
 
     const total = await this.db.valueQueryAsync(
-      `SELECT COUNT(*) FROM embeddings`
+      `SELECT COUNT(*) FROM embeddings${where}`,
+      params,
     );
     const items = await this.db.valueQueryAsync(
-      `SELECT COUNT(DISTINCT item_key) FROM embeddings`
+      `SELECT COUNT(DISTINCT item_key) FROM embeddings${where}`,
+      params,
     );
     const zh = await this.db.valueQueryAsync(
-      `SELECT COUNT(*) FROM embeddings WHERE language = 'zh'`
+      `SELECT COUNT(*) FROM embeddings WHERE language = 'zh'${and}`,
+      params,
     );
     const en = await this.db.valueQueryAsync(
-      `SELECT COUNT(*) FROM embeddings WHERE language = 'en'`
+      `SELECT COUNT(*) FROM embeddings WHERE language = 'en'${and}`,
+      params,
     );
 
     // Get stored dimensions (from first vector)
     let storedDimensions: number | undefined;
-    const dimsRow = await this.db.queryAsync(`SELECT dimensions FROM embeddings LIMIT 1`);
+    const dimsRow = await this.db.queryAsync(
+      `SELECT dimensions FROM embeddings${where} LIMIT 1`,
+      params,
+    );
     if (dimsRow && dimsRow.length > 0) {
       storedDimensions = dimsRow[0].dimensions;
     }
 
     // Int8 migration status
     const int8Count = await this.db.valueQueryAsync(
-      `SELECT COUNT(*) FROM embeddings WHERE vector_int8 IS NOT NULL`
+      `SELECT COUNT(*) FROM embeddings WHERE vector_int8 IS NOT NULL${and}`,
+      params,
     );
     const int8MigrationStatus = total > 0 ? {
       migrated: int8Count || 0,
@@ -3224,10 +3503,12 @@ export class VectorStore {
 
     // Float32 table migration status
     const f32Count = await this.db.valueQueryAsync(
-      `SELECT COUNT(*) FROM vectors_f32`
+      `SELECT COUNT(*) FROM vectors_f32${where}`,
+      params,
     );
     const f32Unmigrated = await this.db.valueQueryAsync(
-      `SELECT COUNT(*) FROM embeddings WHERE LENGTH(vector) > 0`
+      `SELECT COUNT(*) FROM embeddings WHERE LENGTH(vector) > 0${and}`,
+      params,
     );
     if (f32Unmigrated > 0) {
       ztoolkit.log(`[VectorStore] Stats: ${f32Unmigrated} vectors still in embeddings.vector (not yet migrated to vectors_f32)`, 'warn');
@@ -3247,7 +3528,8 @@ export class VectorStore {
 
     // index_status table count (may differ from embeddings DISTINCT count)
     const indexStatusCount = await this.db.valueQueryAsync(
-      `SELECT COUNT(*) FROM index_status`
+      `SELECT COUNT(*) FROM index_status${where}`,
+      params,
     );
     if (indexStatusCount !== items) {
       ztoolkit.log(`[VectorStore] Stats mismatch: index_status=${indexStatusCount}, embeddings(DISTINCT item_key)=${items}. Some items may have index_status but no embeddings.`, 'warn');
@@ -3262,7 +3544,8 @@ export class VectorStore {
     };
     try {
       const coverageRows = await this.db.queryAsync(
-        `SELECT source_kind, COUNT(*) AS n FROM index_status GROUP BY source_kind`,
+        `SELECT source_kind, COUNT(*) AS n FROM index_status${where} GROUP BY source_kind`,
+        params,
       );
       for (const row of coverageRows || []) {
         const count = Number(row.n) || 0;

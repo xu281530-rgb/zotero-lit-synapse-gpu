@@ -72,8 +72,21 @@ export interface SearchFingerprint {
   keywords: string[];
   domain?: string;
   expertRole?: string;
-  /** 实际生效的阈值（已按用户设置收紧过），不是调用方传入的原始值。 */
+  /**
+   * 单分支工具（semantic_search / keyword_search / find_similar）实际生效的
+   * 阈值——已按用户设置收紧过，不是调用方传入的原始值。
+   */
   appliedMinScore: number;
+  /**
+   * 双分支工具（hybrid_search / search_fulltext）的两路阈值。
+   *
+   * 两路各自独立准入，所以「换了哪一路的阈值」都等于换了一份名单：改关键词
+   * 阈值会增删关键词分支准入的文献并因此改变它们的分支名次，进而改变 RRF
+   * 排序；改语义阈值同理。单独留一个 appliedMinScore 判不出这件事，因为
+   * RRF 分数上根本不存在「统一阈值」这个东西。
+   */
+  appliedKeywordMinScore?: number;
+  appliedSemanticMinScore?: number;
   language: string;
   libraryID: number;
   /**
@@ -185,6 +198,16 @@ export function fingerprintsMatch(
     stored.appliedMinScore.toFixed(6) !== claim.appliedMinScore.toFixed(6)
   ) {
     return { match: false, changed: "minScore" };
+  }
+  for (const [field, label] of [
+    ["appliedKeywordMinScore", "minKeywordScore"],
+    ["appliedSemanticMinScore", "minSemanticScore"],
+  ] as const) {
+    const claimed = claim[field];
+    if (claimed === undefined) continue;
+    if ((stored[field] ?? 0).toFixed(6) !== claimed.toFixed(6)) {
+      return { match: false, changed: label };
+    }
   }
   if (
     claim.language !== undefined &&

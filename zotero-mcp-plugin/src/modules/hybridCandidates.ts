@@ -39,6 +39,21 @@ export function roundScore(value: unknown): number | undefined {
 }
 
 /**
+ * 排序分（RRF）专用的舍入精度：6 位，不是 4 位。
+ *
+ * RRF 分数不是相关度，是名次分：k=60 时相邻两名之差只有 1/61-1/62 ≈ 2.6e-4，
+ * 名次靠后时降到 1e-5 量级。用 4 位小数会把相邻名次舍入成同一个数，于是一页
+ * 结果里出现「分数一样但顺序不同」——而这一栏正是为了让顺序和分数对得上才存在
+ * 的。相关度分（余弦、命中片段）仍然用 roundScore：它们是真实的 0-1 量，4 位
+ * 足够，多出来的位数只是噪声。
+ */
+export function roundRankScore(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.round(value * 1000000) / 1000000
+    : undefined;
+}
+
+/**
  * 判断文献本身是用哪种语言写的。
  *
  * 第三段（单篇全文检索）的关键词必须用文献自身的语言——另一种语言的探针
@@ -94,8 +109,22 @@ export interface HybridCandidate {
   DOI?: string;
   /** 该文献的书写语言，供第三段决定关键词用哪种语言。 */
   language: "zh" | "en";
+  /**
+   * 排序分：加权 RRF。**这不是相关度**，是名次共识分，数值很小（两路都排第一
+   * 时约 0.033），拿它跟 0.6 比或者跟另一次检索的分数比都没有意义。它和列表
+   * 顺序是同一个量，所以照着它读顺序永远不会读错。
+   */
   score?: number;
-  /** 这篇是被哪一路召回的，取代一堆分路排名与分数字段。 */
+  /**
+   * 关键词分支自己的 0-1 相关度（归一化 BM25F）。**「有多相关」看这两栏。**
+   *
+   * 缺失表示这一路没有准入这篇，不表示它得了 0 分——两路各自独立准入，一篇
+   * 只要过了其中一路就会出现在这里。
+   */
+  normalizedKeywordScore?: number;
+  /** 语义分支自己的 0-1 相关度（余弦），语义同上。 */
+  normalizedSemanticScore?: number;
+  /** 这篇是被哪一路准入的。 */
   matchedBy: "keyword+semantic" | "keyword" | "semantic";
   matchedKeywords?: string[];
   matchedFields?: string[];
@@ -122,6 +151,26 @@ export interface HybridCandidate {
     chunkId?: number;
     score?: number;
     text: string;
+  }>;
+  /**
+   * 为什么这篇是被**正文关键词**召回的。
+   *
+   * 关键词分支同时检索元数据字段和**已建立关键词索引的正文**，所以一篇标题、
+   * 摘要、标签里一个查询词都没有的文献，完全可能因为正文里出现了这些词而进入
+   * 结果。此时 matchedFields 只会显示 "body"，调用方看着一行「哪个词都没在标题
+   * 里」的候选，无从判断它到底是真命中还是噪声——这一栏就是把那个判断依据交出来。
+   *
+   * 只在正文有命中时出现。里面是命中片段本身，不是相关度：`occurrences` 是该
+   * 片段内命中次数，用来说明证据强度，**不参与任何排序或打分**。
+   */
+  bodyEvidence?: Array<{
+    chunkId: number;
+    /** 这一段命中了查询里的哪些词。 */
+    matchedKeywords: string[];
+    /** 这一段内的命中次数，合计所有命中词。 */
+    occurrences: number;
+    /** 片段原文，与 matchedChunks 同样截断。 */
+    text?: string;
   }>;
 }
 
@@ -169,7 +218,32 @@ export function projectHybridCandidate(
         String(result.title || ""),
         ...evidence.map((chunk) => chunk.text),
       ]),
-    score: roundScore(result.score),
+    score: roundRankScore(result.score),
+    // 排序分自己说明不了「有多相关」，所以两路各自的相关度必须跟着一起回去。
+    // 这两栏正是阈值实际作用的那两个数，缺一个就等于让调用方拿着一个名次分去
+    // 判断相关性。
+    normalizedKeywordScore: roundScore(result.normalizedKeywordScore),
+    normalizedSemanticScore: roundScore(result.normalizedSemanticScore),
+    // 正文关键词命中的出处。排序器早就把它算好挂在命中上了，只是投影层从来
+    // 没有把它带出去——于是「正文里出现了这些词」这个召回理由，在返回给调用方
+    // 的那一刻就丢了。与 matchedChunks 用同一套上限和截断，所以它不会把正文
+    // 从后门搬回来。
+    ...(Array.isArray(result.bodyEvidence) && result.bodyEvidence.length > 0
+      ? {
+          bodyEvidence: result.bodyEvidence
+            .slice(0, HYBRID_EVIDENCE_CHUNKS)
+            .map((chunk: any) => ({
+              chunkId: chunk?.chunkId,
+              matchedKeywords: Array.isArray(chunk?.matchedKeywords)
+                ? chunk.matchedKeywords
+                : [],
+              occurrences: chunk?.occurrences,
+              ...(chunk?.text
+                ? { text: truncateEvidence(String(chunk.text)) }
+                : {}),
+            })),
+        }
+      : {}),
     matchedBy:
       matchedByKeyword && matchedBySemantic
         ? "keyword+semantic"

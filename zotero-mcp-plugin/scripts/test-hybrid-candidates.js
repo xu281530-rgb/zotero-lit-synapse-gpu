@@ -102,8 +102,81 @@ function fusedMatch(overrides = {}) {
   assert.equal(row.DOI, "10.1016/j.actamat.2021.117401");
   assert.deepEqual(row.matchedKeywords, ["directional solidification", "CET"]);
   assert.deepEqual(row.matchedFields, ["title", "abstractNote", "tags"]);
-  assert.equal(row.score, 0.9339, "score is rounded, not re-fused");
+  // The ranking score is rounded to SIX decimals, not four. It is an RRF value
+  // now: adjacent ranks differ by ~2.6e-4 at k=60 and by ~1e-5 further down, so
+  // four decimals would collapse neighbouring positions onto one printed
+  // number and produce a page whose scores tie while its order does not.
+  assert.equal(row.score, 0.933906, "score is rounded, never re-computed");
   assert.equal(row.matchedBy, "keyword+semantic");
+  // The two branch relevances travel with the row. Without them the caller is
+  // left holding a rank score and nothing that answers "how relevant is this?".
+  assert.equal(row.normalizedKeywordScore, 0.8461);
+  assert.equal(row.normalizedSemanticScore, 0.778);
+}
+
+// ---------------------------------------------------------------------------
+// 2b. Body-keyword evidence survives the projection.
+//
+// The keyword branch searches indexed BODY text as well as metadata, so a
+// document can be retrieved with matchedFields ["body"] and nothing in its
+// title, abstract or tags. The ranker attaches the passages that carried the
+// hit; the projection used to drop them, leaving a row whose entire reason for
+// existing was invisible. This is the assertion that it does not.
+// ---------------------------------------------------------------------------
+{
+  const LONG_PASSAGE =
+    "The columnar grains coarsen as the withdrawal rate falls, and the " +
+    "thermal gradient ahead of the solid/liquid interface therefore sets the " +
+    "primary dendrite arm spacing across the whole sample cross-section, " +
+    "which is the mechanism this section is concerned with in detail.";
+  const row = projectHybridCandidate(
+    fusedMatch({
+      matchedFields: ["body"],
+      bodyEvidence: [
+        {
+          chunkId: 42,
+          matchedKeywords: ["directional solidification", "CET"],
+          occurrences: 5,
+          text: LONG_PASSAGE,
+        },
+        { chunkId: 77, matchedKeywords: ["CET"], occurrences: 2, text: "Second." },
+        { chunkId: 91, matchedKeywords: ["CET"], occurrences: 1, text: "Third." },
+      ],
+    }),
+  );
+
+  assert.ok(Array.isArray(row.bodyEvidence), "body evidence must be projected");
+  assert.equal(
+    row.bodyEvidence.length,
+    2,
+    "body evidence obeys the same per-row cap as semantic evidence",
+  );
+  const [first] = row.bodyEvidence;
+  // chunkId is what makes the evidence actionable: it is the handle the caller
+  // passes to search_fulltext to read around the passage.
+  assert.equal(first.chunkId, 42);
+  assert.deepEqual(first.matchedKeywords, ["directional solidification", "CET"]);
+  assert.equal(first.occurrences, 5);
+  assert.ok(
+    first.text.length <= HYBRID_EVIDENCE_CHARS + 1,
+    "body evidence text is truncated like every other snippet",
+  );
+  assert.ok(first.text.endsWith("…"), "a truncated passage says so");
+
+  // Absent when there was no body hit — an empty array would read as "the body
+  // was searched and matched nothing", which is a different claim.
+  assert.equal(
+    "bodyEvidence" in projectHybridCandidate(fusedMatch()),
+    false,
+    "no body hit means no bodyEvidence key at all",
+  );
+
+  // Evidence must not disturb ranking: the row's score is untouched by it.
+  assert.equal(
+    row.score,
+    projectHybridCandidate(fusedMatch()).score,
+    "attaching body evidence must not change the score",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -112,8 +185,6 @@ function fusedMatch(overrides = {}) {
 {
   const row = projectHybridCandidate(fusedMatch());
   for (const dropped of [
-    "normalizedKeywordScore",
-    "normalizedSemanticScore",
     "rrfScore",
     "keywordRank",
     "semanticRank",

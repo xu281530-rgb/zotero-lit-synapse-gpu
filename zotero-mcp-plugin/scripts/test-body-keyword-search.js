@@ -430,6 +430,52 @@ test("gamma prime reaches a paper that only writes the symbol", async () => {
   }
 });
 
+test("body evidence reaches the caller instead of being dropped", async () => {
+  // The whole point of a body hit is that the document has nothing in its
+  // title or abstract to justify it, so the passage IS the justification. Two
+  // layers used to throw it away between the ranker and the response: the
+  // single-branch normaliser (keyword_search) and the row projection (both
+  // tools). Assert against the real sources, because this is a plumbing bug
+  // that reappears the moment someone rewrites either mapping.
+  const serverSource = fs.readFileSync(
+    new URL("../src/modules/streamableMCPServer.ts", import.meta.url),
+    "utf8",
+  );
+  const normaliser = serverSource.slice(
+    serverSource.indexOf("private normaliseSingleBranchRows"),
+    serverSource.indexOf("private async callFindSimilar"),
+  );
+  assert.match(
+    normaliser,
+    /bodyEvidence: match\.bodyEvidence/,
+    "keyword_search must carry body evidence through row normalisation",
+  );
+
+  const { projectHybridCandidate } = await import(
+    "../src/modules/hybridCandidates.ts"
+  );
+  const row = projectHybridCandidate({
+    itemKey: "AAAA1111",
+    libraryID: 1,
+    title: "A paper whose keywords appear only in its body",
+    score: 0.0161,
+    keywordRank: 3,
+    matchedFields: ["body"],
+    bodyEvidence: [
+      {
+        chunkId: 12,
+        matchedKeywords: ["柱状晶"],
+        occurrences: 4,
+        text: "柱状晶沿抽拉方向连续生长。",
+      },
+    ],
+  });
+  assert.equal(row.bodyEvidence?.[0]?.chunkId, 12);
+  assert.deepEqual(row.bodyEvidence?.[0]?.matchedKeywords, ["柱状晶"]);
+  assert.equal(row.bodyEvidence?.[0]?.occurrences, 4);
+  assert.ok(row.bodyEvidence?.[0]?.text);
+});
+
 test("diagnostics account for the work done", async () => {
   const { store, resolver } = await seeded();
   const outcome = await runBodyKeywordSearch(store, resolver, {

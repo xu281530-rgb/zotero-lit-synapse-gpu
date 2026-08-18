@@ -236,7 +236,7 @@ export function describeFullTextAvailability(
         'its title and abstract — nothing distinguishes the two here. search_fulltext still works on it, ' +
         'but do not cite its matchedChunks as passages from the paper without checking that they read ' +
         'like body text rather than an abstract. To settle it, ask the user to rebuild this item\'s ' +
-        'semantic index (Zotero → item context menu → update semantic index).'
+        'semantic index (Zotero → item context menu → update index).'
       );
     default:
       return undefined;
@@ -286,7 +286,7 @@ export function describeMissingBodyText(
       `Item ${itemKey} has no indexed body text: its PDF/Markdown could not be parsed, ` +
       `so only the title and abstract were indexed and there are no passages to search. ` +
       `Do not treat its title or abstract as full-text evidence. ` +
-      `Tell the user to check this item's PDF (Zotero → item context menu → update semantic index) ` +
+      `Tell the user to check this item's PDF (Zotero → item context menu → update index) ` +
       `and use get_item_abstract if the abstract alone is enough.`
     );
   }

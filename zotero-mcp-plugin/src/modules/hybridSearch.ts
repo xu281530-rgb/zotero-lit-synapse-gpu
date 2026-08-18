@@ -29,10 +29,20 @@ export interface SemanticSearchItem {
 export interface HybridSearchOptions {
   query?: string;
   /**
-   * Fused-score floor in 0..1. Candidates below it are discarded outright and
-   * are never padded back in to reach topK — topK is a ceiling, not a quota.
+   * Keyword-branch relevance floor, 0..1 on the normalised BM25F scale.
+   *
+   * Gates the keyword branch and NOTHING else. A document below it contributes
+   * no keyword rank to the fusion, but the semantic branch may still admit it
+   * on its own — the two branches can no longer veto each other. Defaults to 0
+   * (admit everything the branch returned) for direct/test callers; production
+   * callers pass the user's setting.
    */
-  minScore?: number;
+  keywordMinScore?: number;
+  /**
+   * Semantic-branch relevance floor, 0..1 on the cosine scale. Gates the
+   * semantic branch alone, under the same rule.
+   */
+  semanticMinScore?: number;
   /**
    * Optional caller-supplied lexical keywords. Expected to already mix Chinese
    * and English surface forms so the lexical branch recalls literature written
@@ -71,15 +81,30 @@ export interface HybridSearchResult extends Record<string, unknown> {
   itemKey: string;
   libraryID?: number;
   /**
-   * The unified fused relevance, normalised to 0..1. This is the value the
-   * threshold is applied to and the value results are ranked by.
+   * The weighted Reciprocal Rank Fusion score — the ONLY ranking key.
+   *
+   * Deliberately not a relevance: it is a small rank-consensus number (a
+   * first-place-in-both-branches document lands near 2/(k+1) ≈ 0.033 at the
+   * default k=60), so it says "this ranked above that" and nothing about how
+   * relevant either one is. Always equal to {@link rrfScore}; the field is
+   * duplicated so that the value results are SORTED by and the value called
+   * `score` can never drift apart, which is the one way a consumer could be
+   * misled into re-sorting.
+   *
+   * "How relevant is it?" is answered by normalizedKeywordScore and
+   * normalizedSemanticScore, which are real 0..1 relevances on their own
+   * branch's scale — and which are what the thresholds were applied to.
    */
   score: number;
-  /** Normalised (0..1) view of the lexical branch's own score. */
+  /**
+   * Normalised (0..1) BM25F relevance, present only when the keyword branch
+   * ADMITTED this document, i.e. only when it cleared keywordMinScore. Absent
+   * means "this branch contributed no rank", never "this branch scored 0".
+   */
   normalizedKeywordScore?: number;
-  /** Normalised (0..1) view of the semantic branch's own score. */
+  /** Same, for the semantic branch and semanticMinScore. */
   normalizedSemanticScore?: number;
-  /** Rank-consensus score, kept as a tie-break and for diagnostics. */
+  /** The weighted RRF score. Identical to {@link score}. */
   rrfScore: number;
   keywordRank?: number;
   semanticRank?: number;
@@ -122,10 +147,22 @@ export interface HybridSearchRunResult {
   warnings: string[];
   keywordResultCount: number;
   semanticResultCount: number;
-  /** Fused candidates dropped for scoring below the threshold. */
+  /**
+   * Documents that one or both branches retrieved but NEITHER admitted.
+   *
+   * Under the old single fused floor this counted documents rejected by one
+   * verdict. It now counts documents rejected twice over, which is the only
+   * way a candidate can be dropped: clearing either threshold is enough.
+   */
   discardedBelowThreshold: number;
-  /** The floor actually applied (after the user's setting was enforced). */
-  appliedMinScore: number;
+  /** The keyword floor actually applied (after the user's setting won). */
+  appliedKeywordMinScore: number;
+  /** The semantic floor actually applied. */
+  appliedSemanticMinScore: number;
+  /** Documents the keyword branch admitted. */
+  keywordAdmittedCount: number;
+  /** Documents the semantic branch admitted. */
+  semanticAdmittedCount: number;
   timings: {
     keywordMs: number;
     semanticMs: number;
@@ -154,6 +191,10 @@ interface FusedCandidate {
   semanticItem?: SemanticSearchItem;
   keywordRank?: number;
   semanticRank?: number;
+  /** Set only when the keyword branch admitted this document. */
+  normalizedKeywordScore?: number;
+  /** Set only when the semantic branch admitted this document. */
+  normalizedSemanticScore?: number;
   rrfScore: number;
 }
 
@@ -720,9 +761,6 @@ export const CHUNK_FIELD_WEIGHTS: Record<string, number> = {
  */
 export const LEXICAL_SCORE_SATURATION = 4;
 
-/** Bonus applied when both branches independently retrieved the candidate. */
-export const HYBRID_AGREEMENT_BONUS = 0.15;
-
 export function normalizeLexicalScore(rawScore: number | undefined): number {
   if (typeof rawScore !== "number" || !Number.isFinite(rawScore)) return 0;
   if (rawScore <= 0) return 0;
@@ -736,67 +774,24 @@ export function normalizeSemanticScore(rawScore: number | undefined): number {
   return rawScore > 1 ? 1 : rawScore;
 }
 
-/**
- * Combine the two normalised branch scores into the single 0..1 relevance the
- * threshold is applied to.
+/*
+ * There is deliberately no function here that combines the two branch scores
+ * into one relevance number.
  *
- * The rule is that evidence may never cost a document its score. A candidate
- * found by one branch keeps that branch's strength, and a candidate both
- * branches found scores the STRONGER branch plus a bounded share of the weaker
- * one — so agreement lifts a document and never dilutes it.
+ * There used to be: the stronger branch set the score and the weaker one added
+ * a bounded agreement bonus (max + 0.15·min), and that single number was both
+ * the ranking key and the thing the user's one threshold was applied to. It
+ * required believing that a normalised BM25F score and a cosine similarity are
+ * commensurable — that keyword 0.62 and semantic 0.62 mean the same amount of
+ * relevance — which they are not: they come from differently-shaped scales and
+ * only ever looked comparable because both happen to land inside 0..1.
  *
- * The previous formula averaged the two branches, which inverted that: a paper
- * the semantic index scored 0.75 passed a 0.60 threshold on its own, and the
- * same paper with one incidental keyword hit (0.10) averaged down to 0.49 and
- * was filtered out. Finding MORE evidence for a document deleted it — measured
- * on the real library, one broad keyword removed a 0.7153-scoring paper from
- * the result set entirely. Weaker-than-perfect agreement was penalised: a
- * keyword score below ~0.55 always dragged a 0.75 semantic match down.
- *
- * Equal agreement is scored exactly as before (0.75 + 0.15*0.75 == 0.75*1.15),
- * so this removes the dilution without inflating the agreement bonus.
- *
- * Weights scale each branch's contribution relative to the strongest weight, so
- * the default 1/1 leaves both branches at full strength, and lowering one
- * weight demotes that branch instead of reweighting an average.
+ * The replacement never compares them. Each branch is thresholded on its OWN
+ * scale, where its number does mean something, and the ranking is decided by
+ * where each document placed WITHIN its own branch — see
+ * {@link fuseHybridSearchResultsDetailed}. Rank is the one quantity the two
+ * branches genuinely share.
  */
-export function computeFusedScore(params: {
-  normalizedKeywordScore?: number;
-  normalizedSemanticScore?: number;
-  keywordWeight: number;
-  semanticWeight: number;
-}): number {
-  const keywordActive =
-    params.normalizedKeywordScore !== undefined && params.keywordWeight > 0;
-  const semanticActive =
-    params.normalizedSemanticScore !== undefined && params.semanticWeight > 0;
-
-  if (!keywordActive && !semanticActive) return 0;
-
-  const maxWeight = Math.max(
-    keywordActive ? params.keywordWeight : 0,
-    semanticActive ? params.semanticWeight : 0,
-  );
-  if (maxWeight <= 0) return 0;
-
-  const keywordContribution = keywordActive
-    ? (params.normalizedKeywordScore ?? 0) * (params.keywordWeight / maxWeight)
-    : undefined;
-  const semanticContribution = semanticActive
-    ? (params.normalizedSemanticScore ?? 0) * (params.semanticWeight / maxWeight)
-    : undefined;
-
-  if (keywordContribution === undefined) {
-    return Math.min(1, Math.max(0, semanticContribution ?? 0));
-  }
-  if (semanticContribution === undefined) {
-    return Math.min(1, Math.max(0, keywordContribution));
-  }
-
-  const dominant = Math.max(keywordContribution, semanticContribution);
-  const support = Math.min(keywordContribution, semanticContribution);
-  return Math.min(1, Math.max(0, dominant + HYBRID_AGREEMENT_BONUS * support));
-}
 
 /**
  * Whether the calling AI can be *confirmed* to have done the domain-expert
@@ -923,13 +918,11 @@ export function validateHybridSearchOptions(
   if (options.keywords !== undefined) {
     normalizeKeywords(options.keywords);
   }
-  if (options.minScore !== undefined) {
-    if (
-      !Number.isFinite(options.minScore) ||
-      options.minScore < 0 ||
-      options.minScore > 1
-    ) {
-      throw new Error("minScore must be a finite number between 0 and 1");
+  for (const name of ["keywordMinScore", "semanticMinScore"] as const) {
+    const value = options[name];
+    if (value === undefined) continue;
+    if (!Number.isFinite(value) || value < 0 || value > 1) {
+      throw new Error(`${name} must be a finite number between 0 and 1`);
     }
   }
 
@@ -942,19 +935,22 @@ export interface HybridFusionOutcome {
   /** The first `topK` of {@link ranked} — what a non-paginating caller reads. */
   results: HybridSearchResult[];
   /**
-   * EVERY candidate that cleared the relevance threshold, in final order.
+   * EVERY candidate at least ONE branch admitted, in final RRF order.
    *
-   * `results` is a window onto this list, not a different ranking: the
-   * threshold has already been applied here, so paging through `ranked` can
-   * never surface a document the threshold rejected, and never has to lower
-   * the threshold to fill a page.
+   * `results` is a window onto this list, not a different ranking: both
+   * thresholds have already been applied here, so paging through `ranked` can
+   * never surface a document both branches rejected, and never has to lower a
+   * threshold to fill a page.
    */
   ranked: HybridSearchResult[];
-  /** Candidates that scored below the threshold and were dropped. */
+  /** Candidates that were retrieved but admitted by NEITHER branch. */
   discardedBelowThreshold: number;
-  /** Candidates that survived the threshold but did not fit inside topK. */
+  /** Candidates that survived but did not fit inside topK. */
   discardedBeyondTopK: number;
-  appliedMinScore: number;
+  appliedKeywordMinScore: number;
+  appliedSemanticMinScore: number;
+  keywordAdmittedCount: number;
+  semanticAdmittedCount: number;
 }
 
 export function fuseHybridSearchResults(
@@ -962,7 +958,12 @@ export function fuseHybridSearchResults(
   semanticResults: SemanticSearchItem[],
   options: Pick<
     HybridSearchOptions,
-    "topK" | "rrfK" | "keywordWeight" | "semanticWeight" | "minScore"
+    | "topK"
+    | "rrfK"
+    | "keywordWeight"
+    | "semanticWeight"
+    | "keywordMinScore"
+    | "semanticMinScore"
   >,
 ): HybridSearchResult[] {
   return fuseHybridSearchResultsDetailed(
@@ -973,20 +974,50 @@ export function fuseHybridSearchResults(
 }
 
 /**
- * Fuse the two branches into one 0..1-scored ranking and apply the relevance
- * floor.
+ * Gate each branch on its OWN scale, union the survivors, and rank the union by
+ * weighted Reciprocal Rank Fusion.
  *
- * Ordering is by the fused score, with the rank-consensus RRF score kept only
- * as a tie-break. `topK` is a ceiling applied AFTER the threshold, so a query
- * the library cannot answer returns few results — or none — instead of being
- * padded out with weak matches.
+ * The rule that makes this different from what it replaced: **a branch may
+ * admit, never veto.** A document enters the fusion the moment one branch's
+ * threshold accepts it, and the other branch's opinion — including "I never
+ * retrieved it at all" — cannot take it back out. A document both branches
+ * admit is not a document that survived twice; it is a document that collects
+ * TWO rank contributions and therefore outranks single-branch documents at
+ * comparable ranks. Corroboration is expressed as position, not as a bonus.
+ *
+ *   RRF = keywordWeight/(k + keywordRank) + semanticWeight/(k + semanticRank)
+ *
+ * with an absent branch contributing nothing rather than a penalty. The weights
+ * are what a user leans on to prefer one branch; `rrfK` controls how quickly
+ * rank advantage flattens out and is deliberately NOT a per-branch knob — two
+ * different k values would tangle "how much do I trust this branch" together
+ * with "how much does placing first matter", which is the confusion the
+ * weights exist to avoid.
+ *
+ * RANKS ARE POSITIONS AMONG THE ADMITTED, and that happens to cost nothing:
+ * each branch hands back a list already sorted by its own score, and each
+ * threshold is a floor on that same score, so the admitted set is always a
+ * prefix of the list and a document's position is the same whether counted
+ * before or after filtering. That is why one pass can filter and rank without
+ * the two disagreeing.
+ *
+ * There is NO threshold on the RRF score. It is an ordering, not a relevance —
+ * comparing it against 0.6 would be meaningless — and the old single fused
+ * floor that did exactly that is gone. `topK` is a ceiling applied after
+ * ranking, so a query the library cannot answer returns few results, or none,
+ * rather than being padded out with weak matches.
  */
 export function fuseHybridSearchResultsDetailed(
   keywordResults: KeywordSearchItem[],
   semanticResults: SemanticSearchItem[],
   options: Pick<
     HybridSearchOptions,
-    "topK" | "rrfK" | "keywordWeight" | "semanticWeight" | "minScore"
+    | "topK"
+    | "rrfK"
+    | "keywordWeight"
+    | "semanticWeight"
+    | "keywordMinScore"
+    | "semanticMinScore"
   >,
 ): HybridFusionOutcome {
   validateFiniteNumber(options.topK, "topK", 1);
@@ -994,117 +1025,123 @@ export function fuseHybridSearchResultsDetailed(
   validateFiniteNumber(options.keywordWeight, "keywordWeight", 0);
   validateFiniteNumber(options.semanticWeight, "semanticWeight", 0);
 
-  const candidates = new Map<string, FusedCandidate>();
+  const clampFloor = (value: number | undefined): number =>
+    typeof value === "number" && Number.isFinite(value)
+      ? Math.min(1, Math.max(0, value))
+      : 0;
+  const keywordMinScore = clampFloor(options.keywordMinScore);
+  const semanticMinScore = clampFloor(options.semanticMinScore);
 
+  const candidates = new Map<string, FusedCandidate>();
+  // Every document either branch returned, admitted or not. Used only to report
+  // how many were turned away by BOTH — the one number a caller can no longer
+  // infer from the surviving rows.
+  const retrieved = new Set<string>();
+  let keywordAdmittedCount = 0;
+  let semanticAdmittedCount = 0;
+
+  const upsert = (
+    identityKey: string,
+    itemKey: string,
+    libraryID: number | undefined,
+  ): FusedCandidate => {
+    const existing = candidates.get(identityKey);
+    if (existing) return existing;
+    const created: FusedCandidate = { itemKey, libraryID, rrfScore: 0 };
+    candidates.set(identityKey, created);
+    return created;
+  };
+
+  // Weight 0 disables a branch outright: it can then neither admit a document
+  // nor contribute a rank, which is what "weight 0" has to mean for the weights
+  // to be a usable control at all.
   if (options.keywordWeight > 0) {
-    keywordResults.forEach((item, index) => {
+    let admittedRank = 0;
+    for (const item of keywordResults) {
+      if (!item.key) continue;
       const identityKey = `${item.libraryID ?? "unknown"}:${item.key}`;
-      if (!item.key || candidates.get(identityKey)?.keywordItem) return;
-      const rank = index + 1;
-      const existing = candidates.get(identityKey) || {
-        itemKey: item.key,
-        libraryID: item.libraryID,
-        rrfScore: 0,
-      };
-      existing.keywordItem = item;
-      existing.keywordRank = rank;
-      existing.rrfScore += options.keywordWeight / (options.rrfK + rank);
-      candidates.set(identityKey, existing);
-    });
+      retrieved.add(identityKey);
+      // A branch may list a document once. A duplicate is an upstream bug, and
+      // letting it through would pay that document two rank contributions out
+      // of a single branch.
+      if (candidates.get(identityKey)?.keywordItem) continue;
+      const normalized = normalizeLexicalScore(item.relevanceScore);
+      if (normalized < keywordMinScore) continue;
+      admittedRank += 1;
+      const candidate = upsert(identityKey, item.key, item.libraryID);
+      candidate.keywordItem = item;
+      candidate.keywordRank = admittedRank;
+      candidate.normalizedKeywordScore = normalized;
+      candidate.rrfScore +=
+        options.keywordWeight / (options.rrfK + admittedRank);
+      keywordAdmittedCount += 1;
+    }
   }
 
   if (options.semanticWeight > 0) {
-    semanticResults.forEach((item, index) => {
+    let admittedRank = 0;
+    for (const item of semanticResults) {
+      if (!item.itemKey) continue;
       const identityKey = `${item.libraryID ?? "unknown"}:${item.itemKey}`;
-      if (!item.itemKey || candidates.get(identityKey)?.semanticItem) return;
-      const rank = index + 1;
-      const existing = candidates.get(identityKey) || {
-        itemKey: item.itemKey,
-        libraryID: item.libraryID,
-        rrfScore: 0,
-      };
-      existing.semanticItem = item;
-      existing.semanticRank = rank;
-      existing.rrfScore += options.semanticWeight / (options.rrfK + rank);
-      candidates.set(identityKey, existing);
-    });
+      retrieved.add(identityKey);
+      if (candidates.get(identityKey)?.semanticItem) continue;
+      const normalized = normalizeSemanticScore(item.score);
+      if (normalized < semanticMinScore) continue;
+      admittedRank += 1;
+      const candidate = upsert(identityKey, item.itemKey, item.libraryID);
+      candidate.semanticItem = item;
+      candidate.semanticRank = admittedRank;
+      candidate.normalizedSemanticScore = normalized;
+      candidate.rrfScore +=
+        options.semanticWeight / (options.rrfK + admittedRank);
+      semanticAdmittedCount += 1;
+    }
   }
 
-  const minScore =
-    typeof options.minScore === "number" && Number.isFinite(options.minScore)
-      ? Math.min(1, Math.max(0, options.minScore))
-      : 0;
+  // A map entry is only ever created for a document some branch admitted, so
+  // the difference is precisely the documents both branches turned away.
+  const discardedBelowThreshold = Math.max(0, retrieved.size - candidates.size);
 
-  const scored = Array.from(candidates.values()).map((candidate) => {
-    const normalizedKeywordScore = candidate.keywordItem
-      ? normalizeLexicalScore(candidate.keywordItem.relevanceScore)
-      : undefined;
-    const normalizedSemanticScore = candidate.semanticItem
-      ? normalizeSemanticScore(candidate.semanticItem.score)
-      : undefined;
+  const ordered = Array.from(candidates.values()).sort((a, b) => {
+    const rrfDifference = b.rrfScore - a.rrfScore;
+    if (rrfDifference !== 0) return rrfDifference;
+    return compareFusedCandidates(a, b);
+  });
+
+  const ranked = ordered.map((candidate) => {
+    const keywordItem = candidate.keywordItem;
+    const semanticItem = candidate.semanticItem;
+    const base = keywordItem
+      ? { ...keywordItem }
+      : semanticItem
+        ? { ...semanticItem }
+        : {};
+
+    delete (base as Record<string, unknown>).key;
+    delete (base as Record<string, unknown>).score;
+
     return {
-      candidate,
-      normalizedKeywordScore,
-      normalizedSemanticScore,
-      score: computeFusedScore({
-        normalizedKeywordScore,
-        normalizedSemanticScore,
-        keywordWeight: options.keywordWeight,
-        semanticWeight: options.semanticWeight,
-      }),
+      ...base,
+      itemKey: candidate.itemKey,
+      libraryID: candidate.libraryID,
+      title: keywordItem?.title || semanticItem?.title || "",
+      // Ranking key and reported score are the same value on purpose: a row
+      // whose `score` disagreed with its position would invite the reader to
+      // re-sort, and re-sorting a rank fusion by anything else undoes it.
+      score: candidate.rrfScore,
+      normalizedKeywordScore: candidate.normalizedKeywordScore,
+      normalizedSemanticScore: candidate.normalizedSemanticScore,
+      rrfScore: candidate.rrfScore,
+      keywordRank: candidate.keywordRank,
+      semanticRank: candidate.semanticRank,
+      keywordScore: keywordItem?.relevanceScore,
+      semanticScore: semanticItem?.score,
+      matchedChunks: semanticItem?.matchedChunks,
     };
   });
 
-  const surviving = scored.filter((entry) => entry.score >= minScore);
-  const discardedBelowThreshold = scored.length - surviving.length;
-
-  const ordered = surviving.sort((a, b) => {
-    const fusedDifference = b.score - a.score;
-    if (fusedDifference !== 0) return fusedDifference;
-    const rrfDifference = b.candidate.rrfScore - a.candidate.rrfScore;
-    if (rrfDifference !== 0) return rrfDifference;
-    return compareFusedCandidates(a.candidate, b.candidate);
-  });
-
-  const ranked = ordered
-    .map(
-      ({
-        candidate,
-        normalizedKeywordScore,
-        normalizedSemanticScore,
-        score,
-      }) => {
-        const keywordItem = candidate.keywordItem;
-        const semanticItem = candidate.semanticItem;
-        const base = keywordItem
-          ? { ...keywordItem }
-          : semanticItem
-            ? { ...semanticItem }
-            : {};
-
-        delete (base as Record<string, unknown>).key;
-        delete (base as Record<string, unknown>).score;
-
-        return {
-          ...base,
-          itemKey: candidate.itemKey,
-          libraryID: candidate.libraryID,
-          title: keywordItem?.title || semanticItem?.title || "",
-          score,
-          normalizedKeywordScore,
-          normalizedSemanticScore,
-          rrfScore: candidate.rrfScore,
-          keywordRank: candidate.keywordRank,
-          semanticRank: candidate.semanticRank,
-          keywordScore: keywordItem?.relevanceScore,
-          semanticScore: semanticItem?.score,
-          matchedChunks: semanticItem?.matchedChunks,
-        };
-      },
-    );
-
-  // The window is taken after scoring, ordering and thresholding, so page 1 is
-  // byte-for-byte what it was before pagination existed.
+  // The window is taken after gating and ordering, so a page can never contain
+  // a document neither branch admitted, and a short last page is never padded.
   const results = ranked.slice(0, options.topK);
 
   return {
@@ -1112,7 +1149,10 @@ export function fuseHybridSearchResultsDetailed(
     ranked,
     discardedBelowThreshold,
     discardedBeyondTopK: Math.max(0, ranked.length - results.length),
-    appliedMinScore: minScore,
+    appliedKeywordMinScore: keywordMinScore,
+    appliedSemanticMinScore: semanticMinScore,
+    keywordAdmittedCount,
+    semanticAdmittedCount,
   };
 }
 
@@ -1306,7 +1346,10 @@ export async function runHybridSearch(
     keywordResultCount: keywordResults.length,
     semanticResultCount: semanticResults.length,
     discardedBelowThreshold: fusion.discardedBelowThreshold,
-    appliedMinScore: fusion.appliedMinScore,
+    appliedKeywordMinScore: fusion.appliedKeywordMinScore,
+    appliedSemanticMinScore: fusion.appliedSemanticMinScore,
+    keywordAdmittedCount: fusion.keywordAdmittedCount,
+    semanticAdmittedCount: fusion.semanticAdmittedCount,
     timings: {
       keywordMs: keywordRun.elapsedMs,
       semanticMs: semanticRun.elapsedMs,

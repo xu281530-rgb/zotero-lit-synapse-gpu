@@ -139,6 +139,16 @@ function mutationBackend(events) {
   };
 }
 
+/*
+ * "Delete everything" means BOTH indexes.
+ *
+ * These lists are duplicated from vectorStore.ts on purpose: the point is to
+ * fail when someone adds a table to the reset without deciding, deliberately,
+ * that it should be wiped. The keyword tables are the reason the split exists
+ * at all — they used to be absent from the allowlist, so the settings pane's
+ * "delete all" emptied every vector table and left the entire keyword index
+ * behind, still answering queries.
+ */
 const semanticBusinessTables = [
   "embeddings",
   "vectors_f32",
@@ -147,12 +157,17 @@ const semanticBusinessTables = [
   "index_build_targets",
   "index_builds",
 ];
+const keywordBusinessTables = ["kw_postings", "kw_docs", "kw_terms"];
+const indexBusinessTables = [
+  ...semanticBusinessTables,
+  ...keywordBusinessTables,
+];
 
 {
   const events = [];
   const report = {
-    before: Object.fromEntries(semanticBusinessTables.map((table) => [table, 1])),
-    after: Object.fromEntries(semanticBusinessTables.map((table) => [table, 0])),
+    before: Object.fromEntries(indexBusinessTables.map((table) => [table, 1])),
+    after: Object.fromEntries(indexBusinessTables.map((table) => [table, 0])),
     database: {
       path: "semantic.sqlite",
       pageCountBefore: 10,
@@ -327,7 +342,6 @@ const semanticBusinessTables = [
     contentHash: "new-hash",
     contentLength: 3,
     sourceKind: "on-demand",
-    buildID: "build",
   };
 
   await assert.rejects(
@@ -344,9 +358,9 @@ const semanticBusinessTables = [
   await store.replaceItemIndex(replacement);
   assert.deepEqual([...state.embeddings.keys()], ["2:ITEM:0"]);
   assert.equal(state.status.get("2:ITEM"), "new-hash");
-  assert.equal(state.failures.has("2:ITEM"), false);
+  assert.equal(state.failures.has("2:ITEM"), true);
   assert.equal(state.failures.has("1:ITEM"), true);
-  assert.equal(state.targets.get("build:2:ITEM"), "succeeded");
+  assert.equal(state.targets.get("build:2:ITEM"), "failed");
   assert.equal(store.vectorCache.has("2:ITEM_1"), false);
 }
 
@@ -433,6 +447,15 @@ const semanticBusinessTables = [
 // A full rebuild's destructive reset and its durable completion flag share a
 // transaction. A resumed session can therefore distinguish "never committed"
 // from "already cleared" without clearing successful recovery work again.
+//
+// The reset covers BOTH indexes. It used to empty only the vector tables, so a
+// full-library rebuild left every keyword posting of the old index on disk:
+// keyword_search went on answering for documents whose vectors had been
+// deleted, and nothing else in the plugin could explain those rows. The
+// assertions below pin the two properties that fix required — the keyword
+// tables are deleted, and they are deleted BEFORE the reset flag commits, in
+// the same transaction, so a crash can never leave the flag saying "cleared"
+// over a keyword index that was not.
 {
   const { store, calls } = mockStore();
   await store.recordFailedItem({
@@ -468,9 +491,22 @@ const semanticBusinessTables = [
   const transactionDeletes = calls.filter((call) =>
     /^DELETE FROM/.test(call.sql),
   );
-  assert.equal(transactionDeletes.length, 4);
+  const keywordDeletes = transactionDeletes.filter((call) =>
+    /^DELETE FROM kw_/.test(call.sql),
+  );
+  assert.deepEqual(
+    keywordDeletes.map((call) => call.sql.match(/DELETE FROM (kw_\w+)/)[1]),
+    ["kw_postings", "kw_docs", "kw_terms"],
+    "a full-library rebuild must drop the keyword index too, postings first",
+  );
+  assert.ok(
+    keywordDeletes.every((call) => call.params[0] === 2),
+    "and only for the library being rebuilt",
+  );
+  assert.equal(transactionDeletes.length, 7);
   const indexDeletes = transactionDeletes.filter(
-    (call) => !call.sql.includes("index_failures"),
+    (call) =>
+      !call.sql.includes("index_failures") && !/^DELETE FROM kw_/.test(call.sql),
   );
   assert.ok(indexDeletes.every((call) => call.params[0] === "2:*"));
   assert.deepEqual(
@@ -485,12 +521,23 @@ const semanticBusinessTables = [
     ]),
     [[1, "PERSONAL"]],
   );
+  const resetFlagAt = calls.findIndex((call) =>
+    call.sql.includes("reset_completed = 1"),
+  );
   assert.ok(
-    calls.findIndex((call) => call.sql.includes("reset_completed = 1")) >
+    resetFlagAt >
       calls.findIndex((call) =>
         call.sql.startsWith("DELETE FROM index_status"),
       ),
   );
+  // Same ordering guarantee for the keyword side: every keyword deletion is
+  // committed before the flag that says the reset happened.
+  for (const call of keywordDeletes) {
+    assert.ok(
+      calls.indexOf(call) < resetFlagAt,
+      "keyword deletions must precede the reset flag",
+    );
+  }
 }
 
 // Completion is reconciled against the entire frozen target journal, not only
@@ -611,10 +658,10 @@ const semanticBusinessTables = [
   );
   await store.clearLibraryForBuild("sync-build", 2);
   const clearReport = await store.clearAll();
-  assert.deepEqual(Object.keys(clearReport.after), semanticBusinessTables);
+  assert.deepEqual(Object.keys(clearReport.after), indexBusinessTables);
   assert.ok(
     Object.values(clearReport.after).every((count) => count === 0),
-    "every semantic business table must be empty before reset succeeds",
+    "every business table of BOTH indexes must be empty before reset succeeds",
   );
   assert.deepEqual(events, [
     { kind: "itemChanged", libraryID: 2, itemKey: "SYNC_ITEM" },
@@ -636,7 +683,20 @@ const semanticBusinessTables = [
   const deletedTables = sql
     .map((statement) => /^DELETE FROM ([a-z0-9_]+)/i.exec(statement)?.[1])
     .filter(Boolean);
-  assert.deepEqual(deletedTables.slice(0, semanticBusinessTables.length), semanticBusinessTables);
+  assert.deepEqual(
+    deletedTables.slice(0, indexBusinessTables.length),
+    indexBusinessTables,
+    "the reset allowlist must cover the keyword index as well as the vectors",
+  );
+  // Named explicitly, so removing them from the allowlist cannot pass by
+  // accident just because the slice above still lines up.
+  for (const table of keywordBusinessTables) {
+    assert.ok(
+      deletedTables.includes(table),
+      `"delete all" must empty ${table}; leaving it behind is what let a wiped
+       library keep answering keyword_search`,
+    );
+  }
   assert.ok(!sql.some((statement) => /DELETE FROM schema_migrations/i.test(statement)));
   assert.ok(
     sql.some(

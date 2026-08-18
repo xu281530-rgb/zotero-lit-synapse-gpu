@@ -9,7 +9,7 @@
  * The previous implementation caught every error and returned `[]`. That made
  * a transient Zotero query failure indistinguishable from "this library has 0
  * items", with the worst possible consequence: the rebuild wiped the whole
- * semantic index, found nothing to do, and reported `completed` because
+ * search index, found nothing to do, and reported `completed` because
  * 0 succeeded of 0 total. The index was gone and nothing said so.
  *
  * So enumeration has exactly two outcomes here — a list, or a throw. There is
@@ -32,7 +32,7 @@ export class ItemEnumerationError extends Error {
       cause instanceof Error ? cause.message : String(cause ?? 'unknown error');
     super(
       `Could not enumerate items in library ${libraryID}: ${detail}. ` +
-        'The existing semantic index has been left untouched; nothing was ' +
+      'The existing search index has been left untouched; nothing was ' +
         'cleared or rebuilt. Retry once Zotero can answer the query again.',
     );
     this.name = 'ItemEnumerationError';

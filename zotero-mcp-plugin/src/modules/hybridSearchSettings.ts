@@ -20,8 +20,26 @@ export interface HybridSearchSettings {
   maxDocuments: number;
   /** Upper bound on chunks returned per document by search_fulltext. */
   maxChunksPerItem: number;
-  /** Fused relevance below this (0..1) is discarded, never padded back in. */
-  minScore: number;
+  /**
+   * Keyword-branch relevance floor, 0..1 on the normalised BM25F scale.
+   *
+   * Gates the keyword branch ALONE. A document below it simply contributes no
+   * keyword rank to the fusion; the semantic branch can still admit it, and
+   * frequently does. This is the half of the split that replaced the old single
+   * fused-score floor.
+   */
+  keywordMinScore: number;
+  /**
+   * Semantic-branch relevance floor, 0..1 on the cosine scale.
+   *
+   * Gates the semantic branch alone, with the same "one branch cannot veto the
+   * other" rule as {@link keywordMinScore}.
+   */
+  semanticMinScore: number;
+  /** Keyword branch's weight in the weighted RRF that produces the ranking. */
+  keywordRrfWeight: number;
+  /** Semantic branch's weight in the same weighted RRF. */
+  semanticRrfWeight: number;
   /** Target characters per chunk when indexing. */
   chunkTargetChars: number;
   /** A paragraph up to this long may still join a chunk that hit the target. */
@@ -50,7 +68,10 @@ export const HYBRID_SETTING_DEFAULTS: HybridSearchSettings = {
   gpuPrecision: "auto",
   maxDocuments: 20,
   maxChunksPerItem: 5,
-  minScore: 0.6,
+  keywordMinScore: 0.52,
+  semanticMinScore: 0.6,
+  keywordRrfWeight: 1,
+  semanticRrfWeight: 1,
   chunkTargetChars: 1000,
   chunkAppendToleranceChars: 500,
   neighborRadius: 1,
@@ -66,7 +87,10 @@ export const HYBRID_SETTING_DEFAULTS: HybridSearchSettings = {
 export const HYBRID_SETTING_BOUNDS = {
   maxDocuments: { min: 1, max: 20 },
   maxChunksPerItem: { min: 1, max: 50 },
-  minScore: { min: 0, max: 1 },
+  keywordMinScore: { min: 0, max: 1 },
+  semanticMinScore: { min: 0, max: 1 },
+  keywordRrfWeight: { min: 0, max: 10 },
+  semanticRrfWeight: { min: 0, max: 10 },
   chunkTargetChars: { min: 200, max: 4000 },
   chunkAppendToleranceChars: { min: 0, max: 2000 },
   neighborRadius: { min: 0, max: 10 },
@@ -79,7 +103,10 @@ export const HYBRID_SETTING_PREF_KEYS = {
   gpuPrecision: "hybrid.gpuPrecision",
   maxDocuments: "hybrid.maxDocuments",
   maxChunksPerItem: "hybrid.maxChunksPerItem",
-  minScore: "hybrid.minScore",
+  keywordMinScore: "hybrid.keywordMinScore",
+  semanticMinScore: "hybrid.semanticMinScore",
+  keywordRrfWeight: "hybrid.keywordRrfWeight",
+  semanticRrfWeight: "hybrid.semanticRrfWeight",
   chunkTargetChars: "hybrid.chunkTargetChars",
   chunkAppendToleranceChars: "hybrid.chunkAppendToleranceChars",
   neighborRadius: "hybrid.neighborRadius",
@@ -90,6 +117,127 @@ export const HYBRID_SETTING_PREF_KEYS = {
   vectorScanTimeoutMs: "hybrid.searchTimeoutMs",
   keywordSearchTimeoutMs: "hybrid.keywordSearchTimeoutMs",
 } as const;
+
+/**
+ * The values the preference pane advertises as "推荐值 / Recommended".
+ *
+ * A hint, never a policy: nothing in retrieval reads this table, so a user who
+ * types something else keeps what they typed. It exists so the pane, the tool
+ * documentation and the calibration test all quote the SAME number, and so that
+ * changing a recommendation is one edit rather than four.
+ *
+ * Where each number comes from:
+ *
+ * `keywordMinScore` — MEASURED, not chosen. `npm run calibrate:branch-thresholds`
+ * scores 8 real queries against 931 real documents from this user's own library
+ * with the production BM25F ranker, against relevance labels written by reading
+ * each document's title and abstract, and sweeps the threshold. 0.52 is the F0.5
+ * optimum (precision 0.935, recall 0.457). F0.5 rather than F1 because the union
+ * gives recall a backstop — the semantic branch admits documents on its own —
+ * and gives precision none. The corpus is metadata-only, which is the strict
+ * case: body-text hits can only raise scores, so real recall is better than the
+ * measured figure. `scripts/test-branch-thresholds.js` fails if this number ever
+ * stops being the measured optimum.
+ *
+ * `semanticMinScore` — INHERITED from the behaviour this replaced. The old
+ * single fused-score floor defaulted to 0.60, and for a document only the
+ * semantic branch found, that fused score WAS the cosine similarity — so 0.60
+ * has been the de-facto semantic-only floor all along, and keeping it is the
+ * option that changes least. Confirmed against the live library: a real
+ * directional-solidification query returned semantic-only matches at 0.6711 and
+ * 0.6041, both genuinely on topic, both still admitted at 0.60.
+ *
+ * `keywordRrfWeight` / `semanticRrfWeight` — 1.0 / 1.0. No measurement supports
+ * preferring either branch, so neither is preferred. These exist to let a user
+ * who knows their own library lean one way, not to encode a guess.
+ */
+export const HYBRID_SETTING_RECOMMENDATIONS = {
+  keywordMinScore: 0.52,
+  semanticMinScore: 0.6,
+  keywordRrfWeight: 1,
+  semanticRrfWeight: 1,
+} as const;
+
+/**
+ * The retired single fused-score threshold.
+ *
+ * Only the migration below reads it. It is deliberately NOT in
+ * HYBRID_SETTING_PREF_KEYS: nothing in retrieval may consult it any more, and
+ * leaving it out of that table is what makes that mechanical rather than a
+ * promise.
+ */
+const LEGACY_MIN_SCORE_PREF = "hybrid.minScore";
+const LEGACY_MIN_SCORE_DEFAULT = 0.6;
+const THRESHOLD_SPLIT_MIGRATION_PREF = "hybrid.thresholdSplitMigrated";
+
+/**
+ * Carry a user's own fused-score threshold across to the semantic threshold.
+ *
+ * The old setting gated ONE number that both branches had to clear together.
+ * Splitting it in two would otherwise silently discard whatever the user had
+ * tuned, so the value moves to the semantic side — the side where it means the
+ * same thing it always did, because a semantic-only document's old fused score
+ * was exactly its cosine similarity. The keyword side starts from the measured
+ * recommendation instead: the old number was never a BM25F threshold, and
+ * reusing it there would be inventing a calibration rather than migrating one.
+ *
+ * Runs once, guarded by its own flag. A user who left the old threshold at its
+ * 0.60 default has nothing to carry over and is left entirely alone.
+ *
+ * Returns what it did, so startup can log it and the test can assert it.
+ */
+export function migrateFusedScoreThreshold(): {
+  migrated: boolean;
+  reason:
+    | "already-migrated"
+    | "left-at-default"
+    | "unreadable"
+    | "carried-over";
+  value?: number;
+} {
+  try {
+    if (
+      Zotero.Prefs.get(PREF_PREFIX + THRESHOLD_SPLIT_MIGRATION_PREF, true) ===
+      true
+    ) {
+      return { migrated: false, reason: "already-migrated" };
+    }
+  } catch {
+    return { migrated: false, reason: "unreadable" };
+  }
+
+  let legacy: unknown;
+  try {
+    legacy = Zotero.Prefs.get(PREF_PREFIX + LEGACY_MIN_SCORE_PREF, true);
+  } catch {
+    return { migrated: false, reason: "unreadable" };
+  }
+
+  const parsed = typeof legacy === "string" ? Number(legacy) : legacy;
+  const customised =
+    typeof parsed === "number" &&
+    Number.isFinite(parsed) &&
+    parsed >= 0 &&
+    parsed <= 1 &&
+    Math.abs(parsed - LEGACY_MIN_SCORE_DEFAULT) > 1e-9;
+
+  try {
+    if (customised) {
+      Zotero.Prefs.set(
+        PREF_PREFIX + HYBRID_SETTING_PREF_KEYS.semanticMinScore,
+        String(parsed),
+        true,
+      );
+    }
+    Zotero.Prefs.set(PREF_PREFIX + THRESHOLD_SPLIT_MIGRATION_PREF, true, true);
+  } catch {
+    return { migrated: false, reason: "unreadable" };
+  }
+
+  return customised
+    ? { migrated: true, reason: "carried-over", value: parsed as number }
+    : { migrated: false, reason: "left-at-default" };
+}
 
 function clamp(value: number, min: number, max: number): number {
   if (value < min) return min;
@@ -148,7 +296,10 @@ export function getHybridSearchSettings(): HybridSearchSettings {
     })(),
     maxDocuments: readNumberPref("maxDocuments", true),
     maxChunksPerItem: readNumberPref("maxChunksPerItem", true),
-    minScore: readNumberPref("minScore", false),
+    keywordMinScore: readNumberPref("keywordMinScore", false),
+    semanticMinScore: readNumberPref("semanticMinScore", false),
+    keywordRrfWeight: readNumberPref("keywordRrfWeight", false),
+    semanticRrfWeight: readNumberPref("semanticRrfWeight", false),
     chunkTargetChars: readNumberPref("chunkTargetChars", true),
     chunkAppendToleranceChars: readNumberPref(
       "chunkAppendToleranceChars",

@@ -263,12 +263,13 @@ config-guide-json-header = ## Konfigurationsausschnitt
 config-guide-steps-header = ## Konfigurationsschritte
 config-guide-tools-header = ## Verfügbare Tools
 config-guide-tools-list =
-    - search_library - Zotero-Bibliothek durchsuchen
+    - hybrid_search - Erster Schritt der Literatursuche; Stichwort- (Metadaten + indizierter Volltext) und Semantikzweig parallel
+    - search_library - Strukturierte Metadatensuche
     - get_item_details - Elementdetails abrufen
-    - get_item_fulltext - Volltext des Elements abrufen
-    - search_fulltext - Volltextsuche
+    - get_document_chunks - Indizierte Textabschnitte der Reihe nach lesen
+    - search_fulltext - Suche innerhalb eines Dokuments; benoetigt itemKey aus hybrid_search
     - get_collections - Sammlungsliste abrufen
-    - search_annotations - Annotationen und Markierungen durchsuchen
+    - search_annotations - Anmerkungen und Markierungen durchsuchen
     - Und mehr...
 config-guide-troubleshooting-header = ## Fehlerbehebung
 config-guide-troubleshooting-list =
@@ -282,13 +283,13 @@ menu-semantic-index = Index aktualisieren
 menu-semantic-index-selected = Ausgewählte Elemente indizieren
 menu-semantic-index-all = Alle Elemente indizieren
 menu-semantic-clear-selected = Index ausgewählter Elemente löschen
-menu-semantic-clear-selected-confirm = Möchten Sie wirklich den semantischen Index für die ausgewählten Elemente löschen?
+menu-semantic-clear-selected-confirm = Suchindex (semantische Vektoren + Volltext-Stichwoerter) fuer die ausgewaehlten Elemente loeschen?
 menu-semantic-clear-selected-done = Index gelöscht für
 menu-semantic-items = Elemente
-menu-semantic-index-started = Semantische Indizierung gestartet
+menu-semantic-index-started = Indizierung gestartet
 menu-semantic-index-completed = Indizierung abgeschlossen
 menu-semantic-index-busy = Eine Indizierung läuft bereits, bitte warten Sie, bis sie abgeschlossen ist
-menu-semantic-index-error = Semantische Indizierung fehlgeschlagen
+menu-semantic-index-error = Indizierung fehlgeschlagen
 menu-semantic-index-no-collection = Bitte wählen Sie eine Sammlung aus
 menu-semantic-index-no-items = Keine indizierbaren Elemente vorhanden
 # Sammlungs-Kontextmenü
@@ -296,7 +297,7 @@ menu-collection-semantic-index = Index
 menu-collection-build-index = Index aufbauen
 menu-collection-rebuild-index = Index neu aufbauen
 menu-collection-clear-index = Index löschen
-menu-collection-clear-confirm = Möchten Sie wirklich den semantischen Index für diese Sammlung löschen?
+menu-collection-clear-confirm = Suchindex (semantische Vektoren + Volltext-Stichwoerter) fuer diese Sammlung loeschen?
 menu-collection-index-cleared = Index gelöscht
 # 索引结果通知 / index result notifications
 notice-index-done = Indizierung abgeschlossen

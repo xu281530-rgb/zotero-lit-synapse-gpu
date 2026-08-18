@@ -263,13 +263,14 @@ config-guide-json-header = ## Extrait de configuration
 config-guide-steps-header = ## Etapes de configuration
 config-guide-tools-header = ## Outils disponibles
 config-guide-tools-list =
-    - search_library - Rechercher dans la bibliotheque Zotero
+    - hybrid_search - Premiere etape de la recherche documentaire ; branches mots-cles (metadonnees + texte indexe) et semantique en parallele
+    - search_library - Recherche structuree de metadonnees
     - get_item_details - Obtenir les details d'un element
-    - get_item_fulltext - Obtenir le texte integral d'un element
-    - search_fulltext - Recherche en texte integral
+    - get_document_chunks - Lire dans l'ordre les segments de texte indexes
+    - search_fulltext - Rechercher dans un seul document ; necessite un itemKey de hybrid_search
     - get_collections - Obtenir la liste des collections
     - search_annotations - Rechercher les annotations et surlignages
-    - Et plus encore...
+    - Et plus...
 config-guide-troubleshooting-header = ## Depannage
 config-guide-troubleshooting-list =
     1. Assurez-vous que Zotero est en cours d'execution
@@ -277,18 +278,18 @@ config-guide-troubleshooting-list =
     3. Verifiez les parametres du pare-feu
     4. Verifiez que le format du fichier de configuration est correct
 config-guide-generated-time = Genere le : { $time }
-# Context menu for semantic indexing
+# Context menu for indexing
 menu-semantic-index = Mettre a jour l'index
 menu-semantic-index-selected = Indexer les elements selectionnes
 menu-semantic-index-all = Indexer tous les elements
 menu-semantic-clear-selected = Effacer l'index des elements selectionnes
-menu-semantic-clear-selected-confirm = Etes-vous sur de vouloir effacer l'index semantique des elements selectionnes ?
+menu-semantic-clear-selected-confirm = Effacer l'index de recherche (vecteurs semantiques + mots-cles du texte) pour les elements selectionnes ?
 menu-semantic-clear-selected-done = Index efface pour
 menu-semantic-items = elements
-menu-semantic-index-started = Indexation semantique demarree
+menu-semantic-index-started = Indexation demarree
 menu-semantic-index-completed = Indexation terminee
 menu-semantic-index-busy = Une indexation est deja en cours, veuillez attendre la fin
-menu-semantic-index-error = Echec de l'indexation semantique
+menu-semantic-index-error = Echec de l'indexation
 menu-semantic-index-no-collection = Veuillez selectionner une collection
 menu-semantic-index-no-items = Aucun element indexable
 # Collection context menu
@@ -296,7 +297,7 @@ menu-collection-semantic-index = Index
 menu-collection-build-index = Construire l'index
 menu-collection-rebuild-index = Reconstruire l'index
 menu-collection-clear-index = Effacer l'index
-menu-collection-clear-confirm = Etes-vous sur de vouloir effacer l'index semantique de cette collection ?
+menu-collection-clear-confirm = Effacer l'index de recherche (vecteurs semantiques + mots-cles du texte) pour cette collection ?
 menu-collection-index-cleared = Index efface
 # 索引结果通知 / index result notifications
 notice-index-done = Indexation terminée

@@ -21,7 +21,21 @@ pref("custom.enableCompression", true);
 pref("ui.includeMetadata", true);
 pref("hybrid.maxDocuments", 20);
 pref("hybrid.maxChunksPerItem", 5);
+// Two independent branch thresholds, replacing the single fused-score floor.
+// Stored as strings: Firefox preference files have no float type.
+// keywordMinScore is MEASURED — see HYBRID_SETTING_RECOMMENDATIONS and
+// `npm run calibrate:branch-thresholds`. semanticMinScore inherits the retired
+// hybrid.minScore default, which for a semantic-only hit always WAS the cosine.
+pref("hybrid.keywordMinScore", "0.52");
+pref("hybrid.semanticMinScore", "0.6");
+// Weighted RRF: score = keywordRrfWeight/(k + keywordRank) + semanticRrfWeight/(k + semanticRank)
+pref("hybrid.keywordRrfWeight", "1");
+pref("hybrid.semanticRrfWeight", "1");
+// Retired. Declared only so the one-shot migration in hybridSearchSettings.ts
+// can still read a value the user tuned before the split. Nothing in retrieval
+// consults it.
 pref("hybrid.minScore", "0.6");
+pref("hybrid.thresholdSplitMigrated", false);
 pref("hybrid.chunkTargetChars", 1000);
 pref("hybrid.chunkAppendToleranceChars", 500);
 pref("hybrid.neighborRadius", 1);

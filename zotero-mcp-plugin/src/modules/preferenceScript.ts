@@ -8,6 +8,7 @@ import {
   trackedSetTimeout,
 } from "../hooks";
 import {
+  HYBRID_SETTING_RECOMMENDATIONS,
   getChunkingSignature,
   getHybridSearchSettings,
   getStoredChunkingSignature,
@@ -363,7 +364,7 @@ function bindPrefEvents() {
   // ============ API Usage Stats ============
   bindApiUsageStats(doc);
 
-  // ============ Semantic Index Stats ============
+// ============ Search Index Stats ============
   bindSemanticStatsSettings(doc);
 
   // ============ Hybrid Search ============
@@ -559,7 +560,13 @@ function bindHybridSearchSettings(doc: Document) {
 
   bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-max-documents`, P + "maxDocuments", 1, 20, 20);
   bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-max-chunks`, P + "maxChunksPerItem", 1, 50, 5);
-  bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-min-score`, P + "minScore", 0, 1, 0.6, true);
+  // The four knobs of the two-branch fusion. Each is bound to its own pref and
+  // its own bounds; the pane shows a "推荐值" line under each, sourced from
+  // HYBRID_SETTING_RECOMMENDATIONS so the hint cannot drift from the default.
+  bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-keyword-min-score`, P + "keywordMinScore", 0, 1, HYBRID_SETTING_RECOMMENDATIONS.keywordMinScore, true);
+  bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-semantic-min-score`, P + "semanticMinScore", 0, 1, HYBRID_SETTING_RECOMMENDATIONS.semanticMinScore, true);
+  bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-keyword-rrf-weight`, P + "keywordRrfWeight", 0, 10, HYBRID_SETTING_RECOMMENDATIONS.keywordRrfWeight, true);
+  bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-semantic-rrf-weight`, P + "semanticRrfWeight", 0, 10, HYBRID_SETTING_RECOMMENDATIONS.semanticRrfWeight, true);
   bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-neighbor-radius`, P + "neighborRadius", 0, 10, 1);
   bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-search-timeout`, P + "searchTimeoutMs", 1, 3600000, 8000);
   bindBoundedNumber(`#zotero-prefpane-${ref}-hybrid-keyword-search-timeout`, P + "keywordSearchTimeoutMs", 1000, 3600000, 30000);
@@ -1158,6 +1165,16 @@ const PREF_SERVER_ENABLED = 'extensions.zotero.zotero-mcp-plugin.mcp.server.enab
 let _silentRefresh = false;
 
 /**
+ * Repaint the index statistics, set by the index-stats binder.
+ *
+ * The API usage panel and the index panel are bound by two separate functions
+ * that share no scope, and "Reset stats" lives in the first while both indexes'
+ * numbers live in the second. Null until the index panel is bound, which is
+ * why every call site uses `?.()`.
+ */
+let refreshIndexStatsAfterUsageReset: (() => void) | null = null;
+
+/**
  * Bind semantic search enable/disable toggle
  */
 function bindSemanticEnabledToggle(doc: Document) {
@@ -1746,11 +1763,19 @@ function bindApiUsageStats(doc: Document) {
     loadApiUsageStats();
   });
 
-  // Reset button
+  // Reset button.
+  //
+  // Its meaning is unchanged: it zeroes the API usage COUNTERS and nothing
+  // else. Neither index has counters of that kind — every keyword and vector
+  // figure in this pane is a direct count of rows that really exist — so there
+  // is nothing on either side for a reset to clear, and clearing an index here
+  // would be data loss disguised as a statistics reset. What it does now do is
+  // repaint both index sections afterwards, so the whole panel agrees.
   resetButton?.addEventListener("click", () => {
     const confirmMsg = getString("pref-api-usage-reset-confirm" as any) || "Are you sure you want to reset all API usage statistics?";
     if (addon.data.prefs!.window.confirm(confirmMsg)) {
       resetApiUsageStats();
+      refreshIndexStatsAfterUsageReset?.();
     }
   });
 
@@ -1843,8 +1868,20 @@ function bindSemanticStatsSettings(doc: Document) {
   const contentEl = doc?.querySelector("#semantic-stats-content") as HTMLElement;
   const refreshButton = doc?.querySelector("#refresh-semantic-stats-button") as HTMLButtonElement;
 
+  // Top row: the COMBINED figure across both indexes.
   const totalItemsEl = doc?.querySelector("#semantic-stats-total-items") as HTMLElement;
+  const totalRecordsEl = doc?.querySelector("#semantic-stats-total-records") as HTMLElement;
+  // Detail rows: each index's own numbers, never summed.
+  const semanticItemsEl = doc?.querySelector("#semantic-stats-indexed-items") as HTMLElement;
   const totalVectorsEl = doc?.querySelector("#semantic-stats-total-vectors") as HTMLElement;
+  const keywordDocumentsEl = doc?.querySelector("#keyword-stats-documents") as HTMLElement;
+  const keywordChunksEl = doc?.querySelector("#keyword-stats-chunks") as HTMLElement;
+  const keywordTermsEl = doc?.querySelector("#keyword-stats-terms") as HTMLElement;
+  const keywordPostingsEl = doc?.querySelector("#keyword-stats-postings") as HTMLElement;
+  const keywordWithBodyEl = doc?.querySelector("#keyword-stats-with-body") as HTMLElement;
+  const keywordMetadataOnlyEl = doc?.querySelector("#keyword-stats-metadata-only") as HTMLElement;
+  const keywordDbUsageEl = doc?.querySelector("#keyword-stats-db-usage") as HTMLElement;
+  const semanticDbUsageEl = doc?.querySelector("#semantic-stats-db-usage") as HTMLElement;
   const zhVectorsEl = doc?.querySelector("#semantic-stats-zh-vectors") as HTMLElement;
   const enVectorsEl = doc?.querySelector("#semantic-stats-en-vectors") as HTMLElement;
   const cachedItemsEl = doc?.querySelector("#semantic-stats-cached-items") as HTMLElement;
@@ -1881,7 +1918,9 @@ function bindSemanticStatsSettings(doc: Document) {
   // Register error callback for semantic service
   registerErrorCallback();
 
-  // Unified refresh: updates semantic stats, API usage, and detail summary
+  // Unified refresh: both indexes' statistics, API usage, and the collapsed
+  // summary line. One entry point, so "Refresh" can never update one index's
+  // numbers and leave the other's stale.
   function refreshAllStats(silent = false) {
     _silentRefresh = silent;
     loadSemanticStats(silent);
@@ -1890,10 +1929,16 @@ function bindSemanticStatsSettings(doc: Document) {
     _silentRefresh = false;
   }
 
-  // Refresh button - also triggers API usage refresh
+  // Refresh button - both indexes plus API usage
   refreshButton?.addEventListener("click", () => {
     refreshAllStats();
   });
+
+  // Let "Reset stats" (bound in the API usage panel) repaint the index numbers
+  // without resetting them; see the comment on that button.
+  refreshIndexStatsAfterUsageReset = () => {
+    void loadSemanticStats(true);
+  };
 
   // Auto-refresh stats every 5 seconds (silent mode: no loading flash, no log spam)
   // Skip when server or semantic search is disabled
@@ -2105,7 +2150,7 @@ function bindSemanticStatsSettings(doc: Document) {
 
   // Clear index button
   clearButton?.addEventListener("click", async () => {
-    const confirmMsg = getString("pref-semantic-index-confirm-clear" as any) || "This permanently deletes all plugin semantic database data. Zotero items, PDFs, and Markdown attachments are not deleted. Continue?";
+  const confirmMsg = getString("pref-semantic-index-confirm-clear" as any) || "This permanently deletes all plugin search index data. Zotero items, PDFs, and Markdown attachments are not deleted. Continue?";
     if (!addon.data.prefs!.window.confirm(confirmMsg)) {
       return;
     }
@@ -2143,13 +2188,13 @@ function bindSemanticStatsSettings(doc: Document) {
       await updateChunkStaleWarning(doc);
       await loadSemanticStats();
 
-      showMessage(getString("pref-semantic-index-cleared" as any) || "All semantic database data deleted", "success");
+    showMessage(getString("pref-semantic-index-cleared" as any) || "All search index data deleted", "success");
       ztoolkit.log(
-        `[PreferenceScript] Semantic database reset verified: ${JSON.stringify(report)}`,
+      `[PreferenceScript] Search index database reset verified: ${JSON.stringify(report)}`,
       );
     } catch (error) {
       showMessage(getString("pref-semantic-index-error" as any) + `: ${error}`, "error");
-      ztoolkit.log(`[PreferenceScript] Failed to reset semantic database: ${error}`, "error");
+    ztoolkit.log(`[PreferenceScript] Failed to reset search index database: ${error}`, "error");
     } finally {
       isIndexing = false;
       clearButton.disabled = false;
@@ -2404,13 +2449,66 @@ function bindSemanticStatsSettings(doc: Document) {
       };
 
       // Update UI
-      if (totalItemsEl) totalItemsEl.textContent = String(stats.indexStats.totalItems);
-      if (totalVectorsEl) totalVectorsEl.textContent = String(stats.indexStats.totalVectors);
+      const keywordStats = stats.keywordStats;
+      const groups = (value: number) => value.toLocaleString();
+
+      /*
+       * The top row is the two indexes combined, each in the way its own
+       * quantity combines:
+       *
+       *  - documents: a document can be in one index, the other, or both, so
+       *    the total is a UNION. It is computed in SQL over both indexes'
+       *    document keys inside one library, not derived from the two counts —
+       *    no arithmetic on two totals can recover a union, and the largest of
+       *    the two understates it for every state except a fully synchronised
+       *    one.
+       *  - records: vectors and postings are disjoint rows, so that one really
+       *    is a sum.
+       *  - database size: ONE file holds both indexes, so the top figure is the
+       *    whole file; each index's own share is in its detailed section.
+       */
+      const combinedDocuments = stats.documentTotals.totalDocuments;
+      const combinedRecords = keywordStats
+        ? stats.indexStats.totalVectors + keywordStats.postingCount
+        : stats.indexStats.totalVectors;
+
+      if (totalItemsEl) totalItemsEl.textContent = groups(combinedDocuments);
+      if (totalRecordsEl) totalRecordsEl.textContent = groups(combinedRecords);
+      if (semanticItemsEl) semanticItemsEl.textContent = groups(stats.indexStats.totalItems);
+      if (totalVectorsEl) totalVectorsEl.textContent = groups(stats.indexStats.totalVectors);
+
+      // "-" rather than 0 when the report could not be read: an unreadable
+      // index and an empty index are different facts.
+      const keywordCells: Array<[HTMLElement | null, number | undefined]> = [
+        [keywordDocumentsEl, keywordStats?.documentCount],
+        [keywordChunksEl, keywordStats?.indexedChunks],
+        [keywordTermsEl, keywordStats?.termCount],
+        [keywordPostingsEl, keywordStats?.postingCount],
+        [keywordWithBodyEl, keywordStats?.documentsWithBody],
+        [keywordMetadataOnlyEl, keywordStats?.documentsMetadataOnly],
+      ];
+      for (const [element, value] of keywordCells) {
+        if (element) element.textContent = value === undefined ? '-' : groups(value);
+      }
       if (zhVectorsEl) zhVectorsEl.textContent = String(stats.indexStats.zhVectors);
       if (enVectorsEl) enVectorsEl.textContent = String(stats.indexStats.enVectors);
       if (cachedItemsEl) cachedItemsEl.textContent = String(stats.indexStats.cachedContentItems || 0);
       if (cacheSizeEl) cacheSizeEl.textContent = formatSize(stats.indexStats.cachedContentSizeBytes || 0);
       if (dbSizeEl) dbSizeEl.textContent = stats.indexStats.dbSizeBytes ? formatSize(stats.indexStats.dbSizeBytes) : '-';
+      // Each index's own pages. "-" when this SQLite build cannot report them:
+      // repeating the whole file's size under an index's name would be a
+      // number that is not this index's, and adding the two would double it.
+      const usageCells: Array<[HTMLElement | null, number | undefined]> = [
+        [semanticDbUsageEl, stats.storage.semanticBytes],
+        [keywordDbUsageEl, stats.storage.keywordBytes],
+      ];
+      for (const [element, bytes] of usageCells) {
+        if (element)
+          element.textContent =
+            stats.storage.measured && bytes !== undefined
+              ? formatSize(bytes)
+              : '-';
+      }
       if (dimensionsEl) {
         if (stats.indexStats.storedDimensions) {
           // Get configured dimensions from prefs to show comparison

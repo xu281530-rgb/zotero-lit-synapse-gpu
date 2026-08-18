@@ -61,7 +61,7 @@ export async function clearSemanticDatabase(
     );
     if (cleanupFailures.length > 0) {
       throw new Error(
-        `Semantic database rows were cleared, but runtime cleanup was incomplete: ${cleanupFailures.join("; ")}`,
+      `Search index database rows were cleared, but runtime cleanup was incomplete: ${cleanupFailures.join("; ")}`,
       );
     }
     return report;

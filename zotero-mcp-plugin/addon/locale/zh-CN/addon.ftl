@@ -263,11 +263,11 @@ config-guide-json-header = ## 配置片段
 config-guide-steps-header = ## 配置步骤
 config-guide-tools-header = ## 可用工具
 config-guide-tools-list =
-    - hybrid_search - 文献定位默认第一步，不扫描全文
+    - hybrid_search - 文献定位默认第一步；关键词（元数据 + 已索引正文）与语义两路并行
     - search_library - 结构化元数据搜索
     - get_item_details - 获取文献详细信息
-    - get_item_fulltext - 获取文献全文内容
-    - search_fulltext - 二阶段全文搜索，必须传入 hybrid_search 返回的 itemKeys
+    - get_document_chunks - 按顺序阅读已索引的正文段落
+    - search_fulltext - 在单篇文献内部检索，需传入 hybrid_search 返回的 itemKey
     - get_collections - 获取收藏夹列表
     - search_annotations - 搜索注释和标注
     - 以及更多...
@@ -278,18 +278,18 @@ config-guide-troubleshooting-list =
     3. 检查防火墙设置
     4. 验证配置文件格式正确
 config-guide-generated-time = 生成时间: { $time }
-# 语义索引右键菜单
+# 索引右键菜单
 menu-semantic-index = 更新索引
 menu-semantic-index-selected = 索引选中条目
 menu-semantic-index-all = 索引所有条目
 menu-semantic-clear-selected = 清除选中条目索引
-menu-semantic-clear-selected-confirm = 确定要清除选中条目的语义索引吗？
+menu-semantic-clear-selected-confirm = 确定要清除选中条目的搜索索引（语义向量 + 正文关键词）吗？
 menu-semantic-clear-selected-done = 已清除索引的条目数
 menu-semantic-items = 条
-menu-semantic-index-started = 语义索引已开始
+menu-semantic-index-started = 索引已开始
 menu-semantic-index-completed = 索引完成
 menu-semantic-index-busy = 已有索引任务正在运行，请等待其完成
-menu-semantic-index-error = 语义索引失败
+menu-semantic-index-error = 索引失败
 menu-semantic-index-no-collection = 请选择一个分类
 menu-semantic-index-no-items = 没有可索引的条目
 # 分类右键菜单
@@ -297,7 +297,7 @@ menu-collection-semantic-index = 索引
 menu-collection-build-index = 构建索引
 menu-collection-rebuild-index = 重建索引
 menu-collection-clear-index = 清除索引
-menu-collection-clear-confirm = 确定要清除该分类的语义索引吗？
+menu-collection-clear-confirm = 确定要清除该分类的搜索索引（语义向量 + 正文关键词）吗？
 menu-collection-index-cleared = 索引已清除
 # 索引结果通知 / index result notifications
 notice-index-done = 索引完成

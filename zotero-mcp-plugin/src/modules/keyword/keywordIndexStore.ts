@@ -151,6 +151,42 @@ export interface KeywordCorpusStatistics {
 }
 
 /**
+ * What the preferences pane can say about the keyword index WITHOUT guessing.
+ *
+ * Every field here is a direct count over the index's own tables. There is
+ * deliberately no "failed documents" figure: a failed keyword write is logged
+ * and dropped, nothing records it, so a number for it would be invented.
+ * `documentsWithBody` / `documentsMetadataOnly` is the honest split the data
+ * model does support — whether a document contributed body passages, or only
+ * its metadata fields.
+ */
+export interface KeywordIndexReport {
+  /** Live documents in the index for this library. */
+  documentCount: number;
+  /** Body passages actually written to the inverted index. */
+  indexedChunks: number;
+  /** Distinct terms in this library's dictionary. */
+  termCount: number;
+  /**
+   * Inverted-index rows owned by this library's LIVE documents.
+   *
+   * Two exclusions, both deliberate. Other libraries' postings are excluded
+   * because a second library's index is not this one's size. Tombstoned
+   * revisions are excluded because they are already counted by
+   * {@link tombstonedDocuments}, and because a deleted item has to leave this
+   * figure the moment it is deleted rather than whenever compaction next runs.
+   */
+  postingCount: number;
+  documentsWithBody: number;
+  documentsMetadataOnly: number;
+  /**
+   * Documents whose postings are tombstoned and awaiting {@link compact}.
+   * Normally 0 at rest, because a build compacts when it finishes.
+   */
+  tombstonedDocuments: number;
+}
+
+/**
  * Cap on posting rows one query may read.
  *
  * A common Chinese bigram can appear in most chunks of most documents, so an
@@ -177,6 +213,11 @@ function totalTokens(counts: Map<string, number>): number {
 export class KeywordIndexStore {
   private readonly db: KeywordIndexDatabase;
   private schemaReady = false;
+  /** Per library: the last live posting count, and the index state it was read from. */
+  private readonly livePostingCounts = new Map<
+    number,
+    { signature: string; value: number }
+  >();
 
   constructor(db: KeywordIndexDatabase) {
     this.db = db;
@@ -458,29 +499,40 @@ export class KeywordIndexStore {
   /** Drop everything for one library, or for every library when omitted. */
   async clear(libraryID?: number): Promise<void> {
     await this.ensureSchema();
-    await this.db.executeTransaction(async () => {
-      if (libraryID === undefined) {
-        await this.db.queryAsync(`DELETE FROM kw_postings`);
-        await this.db.queryAsync(`DELETE FROM kw_docs`);
-        await this.db.queryAsync(`DELETE FROM kw_terms`);
-        return;
-      }
-      const terms = await this.db.queryAsync(
-        `SELECT term_id FROM kw_terms WHERE library_id = ?`,
-        [libraryID],
-      );
-      for (const row of terms ?? []) {
-        await this.db.queryAsync(`DELETE FROM kw_postings WHERE term_id = ?`, [
-          Number(row.term_id),
-        ]);
-      }
-      await this.db.queryAsync(`DELETE FROM kw_docs WHERE library_id = ?`, [
-        libraryID,
-      ]);
-      await this.db.queryAsync(`DELETE FROM kw_terms WHERE library_id = ?`, [
-        libraryID,
-      ]);
-    });
+    await this.db.executeTransaction(() => this.clearWithoutTransaction(libraryID));
+  }
+
+  /**
+   * The statements {@link clear} runs, without opening a transaction.
+   *
+   * Split out because the vector store has to drop both indexes in ONE
+   * transaction: a full-library rebuild that committed the vector deletions and
+   * then failed would otherwise leave the keyword index answering for documents
+   * whose vectors are gone. Callers that are not already inside a transaction
+   * want {@link clear}.
+   *
+   * Terms are keyed UNIQUE(library_id, term), so every term_id belongs to
+   * exactly one library and the sub-select below is an exact scope — not an
+   * approximation of the per-term loop it replaces.
+   */
+  async clearWithoutTransaction(libraryID?: number): Promise<void> {
+    await this.ensureSchema();
+    if (libraryID === undefined) {
+      await this.db.queryAsync(`DELETE FROM kw_postings`);
+      await this.db.queryAsync(`DELETE FROM kw_docs`);
+      await this.db.queryAsync(`DELETE FROM kw_terms`);
+      return;
+    }
+    await this.db.queryAsync(
+      `DELETE FROM kw_postings WHERE term_id IN (SELECT term_id FROM kw_terms WHERE library_id = ?)`,
+      [libraryID],
+    );
+    await this.db.queryAsync(`DELETE FROM kw_docs WHERE library_id = ?`, [
+      libraryID,
+    ]);
+    await this.db.queryAsync(`DELETE FROM kw_terms WHERE library_id = ?`, [
+      libraryID,
+    ]);
   }
 
   /**
@@ -612,6 +664,93 @@ export class KeywordIndexStore {
         extra: mean(row.e),
       },
     };
+  }
+
+  /**
+   * Counts for the preferences pane. Every figure is scoped to one library.
+   */
+  async report(libraryID: number): Promise<KeywordIndexReport> {
+    await this.ensureSchema();
+    const docRows = await this.db.queryAsync(
+      `SELECT COUNT(*) AS n, SUM(indexed_chunks) AS chunks, SUM(CASE WHEN len_body > 0 THEN 1 ELSE 0 END) AS with_body FROM kw_docs WHERE library_id = ? AND alive = 1`,
+      [libraryID],
+    );
+    const docRow = docRows?.[0] ?? {};
+    const documentCount = Number(docRow.n ?? 0);
+    const documentsWithBody = Number(docRow.with_body ?? 0);
+
+    const termRows = await this.db.queryAsync(
+      `SELECT COUNT(*) AS n FROM kw_terms WHERE library_id = ?`,
+      [libraryID],
+    );
+    const postingCount = await this.livePostingCount(libraryID);
+    const deadRows = await this.db.queryAsync(
+      `SELECT COUNT(*) AS n FROM kw_docs WHERE library_id = ? AND alive = 0`,
+      [libraryID],
+    );
+
+    return {
+      documentCount,
+      indexedChunks: Number(docRow.chunks ?? 0),
+      termCount: Number(termRows?.[0]?.n ?? 0),
+      postingCount,
+      documentsWithBody,
+      documentsMetadataOnly: Math.max(0, documentCount - documentsWithBody),
+      tombstonedDocuments: Number(deadRows?.[0]?.n ?? 0),
+    };
+  }
+
+  /**
+   * Inverted-index rows belonging to one library's live documents.
+   *
+   * Scoping is exact rather than approximate on both axes:
+   *
+   *  - Library: terms are keyed UNIQUE(library_id, term), so every term_id
+   *    belongs to exactly one library and the sub-select is a scope, not a
+   *    heuristic. A second library's postings can never be reached through
+   *    this library's terms.
+   *  - Liveness: a slot encodes its document as `slot / CHUNK_STRIDE`, so the
+   *    tombstoned documents are excluded by set membership on doc_id. The dead
+   *    set is deliberately NOT filtered by library — doc_id is globally unique,
+   *    so the extra ids simply never match, and reading them costs nothing.
+   *
+   * Measured on a synthetic two-library index (3.2M postings, 240k terms,
+   * 4,000 documents, 177MB): whole table 10ms (the figure this replaced, and
+   * wrong on both axes), library-scoped only 65ms, this query 169ms, a
+   * kw_docs join 433ms, and subtracting per-document dead slot ranges 5.2s.
+   * The user's real index — 87k postings — answers in about 5ms.
+   *
+   * The preferences pane re-reads its statistics every five seconds, so the
+   * result is memoised against a signature that changes whenever any posting
+   * can have changed. Every write path inserts a kw_docs row (writeItem always
+   * inserts, superseding by tombstone), and the only paths that remove
+   * postings — {@link compact}, {@link clear} — remove kw_docs rows with them,
+   * so (row count, live count, greatest doc_id) cannot stay fixed across a
+   * mutation. The memo therefore never serves a value the SQL would not
+   * return; it only skips repeating the scan when nothing has happened.
+   */
+  async livePostingCount(libraryID: number): Promise<number> {
+    await this.ensureSchema();
+    const signature = await this.documentMutationSignature();
+    const cached = this.livePostingCounts.get(libraryID);
+    if (cached && cached.signature === signature) return cached.value;
+
+    const rows = await this.db.queryAsync(
+      `SELECT COUNT(*) AS n FROM kw_postings WHERE term_id IN (SELECT term_id FROM kw_terms WHERE library_id = ?) AND slot / ${CHUNK_STRIDE} NOT IN (SELECT doc_id FROM kw_docs WHERE alive = 0)`,
+      [libraryID],
+    );
+    const value = Number(rows?.[0]?.n ?? 0);
+    this.livePostingCounts.set(libraryID, { signature, value });
+    return value;
+  }
+
+  /** A value that changes whenever any posting can have changed. */
+  private async documentMutationSignature(): Promise<string> {
+    const rows = await this.db.queryAsync(
+      `SELECT COUNT(*) AS docs, COALESCE(SUM(alive), 0) AS live, COALESCE(MAX(doc_id), 0) AS max_id FROM kw_docs`,
+    );
+    const row = rows?.[0] ?? {};
+    return `${Number(row.docs ?? 0)}:${Number(row.live ?? 0)}:${Number(row.max_id ?? 0)}`;
   }
 
   /** How many postings a term has, used to read the rarest terms first. */

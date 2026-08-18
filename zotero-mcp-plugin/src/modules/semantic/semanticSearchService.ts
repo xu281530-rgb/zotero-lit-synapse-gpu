@@ -20,7 +20,10 @@ import {
   getVectorStore,
   VectorStore,
   type FailedIndexItem,
+  type IndexStorageBreakdown,
+  type IndexedDocumentTotals,
 } from './vectorStore';
+import type { KeywordIndexReport } from '../keyword/keywordIndexStore';
 import {
   MAX_SIMILAR_QUERY_CHUNKS,
   rankSimilarDocuments,
@@ -308,6 +311,20 @@ export interface SemanticServiceStats {
       unknown: number;
     };
   };
+  /**
+   * The body-keyword index's own counts, or undefined when they could not be
+   * read. Never merged into `indexStats`: those are the vector index's numbers,
+   * and folding two indexes into one bag is what made the keyword index a
+   * hidden appendage in the first place.
+   */
+  keywordStats?: KeywordIndexReport;
+  /**
+   * Documents per index and their union, for the library the pane is showing.
+   * The union is computed in the database; see IndexedDocumentTotals.
+   */
+  documentTotals: IndexedDocumentTotals;
+  /** Physical page usage per index; whole-file, since pages have no library. */
+  storage: IndexStorageBreakdown;
   serviceStatus: {
     initialized: boolean;
     embeddingReady: boolean;
@@ -873,7 +890,7 @@ export class SemanticSearchService {
     );
     if (itemVectors.length === 0) {
       throw new Error(
-        `Item ${itemKey} has no indexed vectors, so it cannot be used as a similarity query. Build or refresh its semantic index (Zotero → item context menu → update semantic index) and retry.`,
+        `Item ${itemKey} has no indexed vectors, so it cannot be used as a similarity query. Build or refresh its semantic index (Zotero → item context menu → update index) and retry.`,
       );
     }
 
@@ -953,7 +970,7 @@ export class SemanticSearchService {
   // ============ Indexing Methods ============
 
   /**
-   * Build or update the semantic index
+   * Build or update the search index
    */
   async buildIndex(options: {
     itemKeys?: string[];
@@ -978,7 +995,7 @@ export class SemanticSearchService {
 
     if (this._databaseResetActive) {
       ztoolkit.log(
-        '[SemanticSearch] buildIndex rejected while semantic database reset is active',
+        '[SemanticSearch] buildIndex rejected while search index database reset is active',
         'warn',
       );
       return { ...this.indexProgress, status: 'busy' };
@@ -1577,7 +1594,7 @@ export class SemanticSearchService {
     force: boolean = this._forceRun,
   ): Promise<IndexWorkOutcome> {
     if (this._databaseResetActive) {
-      throw new Error('Semantic database reset is active');
+      throw new Error('Search index database reset is active');
     }
     const startTime = Date.now();
     const itemTitle = item.getDisplayTitle?.() || item.key;
@@ -1680,7 +1697,6 @@ export class SemanticSearchService {
         itemModified,
         attachmentModified,
         bodyRetrySignature,
-        buildID: this._activeBuildID ?? undefined,
       });
       // Recorded with no chunks: the item IS keyword-indexed, it simply has no
       // body. Leaving it absent would make every later pass treat it as pending.
@@ -1747,6 +1763,17 @@ export class SemanticSearchService {
             bodyRetrySignature,
         );
       }
+      // A forced run may be retrying a keyword write that failed after the
+      // vectors committed. The shared content hash is therefore not evidence
+      // that both indexes are complete. Rebuild only the cheap keyword side;
+      // the existing vectors remain valid and no embedding quota is spent.
+      if (force) {
+        const unchangedChunks = this.textChunker.chunk(content);
+        if (unchangedChunks.length === 0) {
+          throw new Error(`No chunks generated for ${item.key}`);
+        }
+        await this.writeKeywordIndexForItem(item, unchangedChunks);
+      }
       this.indexProgress.unchanged = (this.indexProgress.unchanged || 0) + 1;
       ztoolkit.log(`[SemanticSearch] indexItem() skip: content unchanged, updated timestamps`);
       return this.noteBodyExtractionOutcome(item, bodyState, extracted, { status: 'succeeded' });
@@ -1804,7 +1831,6 @@ export class SemanticSearchService {
       itemModified,
       attachmentModified,
       bodyRetrySignature,
-      buildID: this._activeBuildID ?? undefined,
     });
 
     // After the vectors, and outside their transaction: a keyword failure must
@@ -1826,58 +1852,50 @@ export class SemanticSearchService {
    * the vector index, so a keyword hit in passage 12 is the same passage 12 that
    * `search_fulltext` and `get_document_chunks` return.
    *
-   * Never throws. The two indexes are recorded separately and fail separately:
-   * a keyword failure must not discard vectors that already cost embedding quota.
+   * A keyword failure propagates to the build queue. The vector write remains
+   * committed, but the item is not complete until this second write succeeds.
    */
   private async writeKeywordIndexForItem(
     item: any,
     chunks: string[],
   ): Promise<void> {
+    let tags: string[] = [];
     try {
-      let tags: string[] = [];
+      tags = (item.getTags?.() ?? []).map((tag: any) => tag.tag).filter(Boolean);
+    } catch {
+      tags = [];
+    }
+    let creator = '';
+    try {
+      creator = (item.getCreators?.() ?? [])
+        .map((entry: any) => `${entry.firstName || ''} ${entry.lastName || ''}`.trim())
+        .filter(Boolean)
+        .join(', ');
+    } catch {
+      creator = '';
+    }
+    const field = (name: string): string => {
       try {
-        tags = (item.getTags?.() ?? []).map((tag: any) => tag.tag).filter(Boolean);
+        const value = item.getField?.(name);
+        return typeof value === 'string' ? value : '';
       } catch {
-        tags = [];
+        return '';
       }
-      let creator = '';
-      try {
-        creator = (item.getCreators?.() ?? [])
-          .map((entry: any) => `${entry.firstName || ''} ${entry.lastName || ''}`.trim())
-          .filter(Boolean)
-          .join(', ');
-      } catch {
-        creator = '';
-      }
-      const field = (name: string): string => {
-        try {
-          const value = item.getField?.(name);
-          return typeof value === 'string' ? value : '';
-        } catch {
-          return '';
-        }
-      };
-      const outcome = await this.vectorStore.writeKeywordIndex({
-        itemKey: item.key,
-        libraryID: item.libraryID,
-        title: item.getDisplayTitle?.() || field('title'),
-        abstract: TextFormatter.htmlToText(field('abstractNote')),
-        tags,
-        publicationTitle: field('publicationTitle'),
-        creator,
-        extra: field('extra'),
-        chunks,
-      });
-      if (!outcome.ok) {
-        ztoolkit.log(
-          `[SemanticSearch] keyword index NOT updated for ${item.key}: ${outcome.error}`,
-          'warn',
-        );
-      }
-    } catch (error) {
-      ztoolkit.log(
-        `[SemanticSearch] keyword index step threw for ${item.key}: ${error}`,
-        'warn',
+    };
+    const outcome = await this.vectorStore.writeKeywordIndex({
+      itemKey: item.key,
+      libraryID: item.libraryID,
+      title: item.getDisplayTitle?.() || field('title'),
+      abstract: TextFormatter.htmlToText(field('abstractNote')),
+      tags,
+      publicationTitle: field('publicationTitle'),
+      creator,
+      extra: field('extra'),
+      chunks,
+    });
+    if (!outcome.ok) {
+      throw new Error(
+        `Keyword index write failed for ${item.key}: ${outcome.error ?? 'unknown error'}`,
       );
     }
   }
@@ -1975,13 +1993,11 @@ export class SemanticSearchService {
    */
   async deleteItemIndex(itemKey: string, libraryID?: number): Promise<void> {
     await this.initialize();
+    // Drops BOTH indexes: deleteItemVectors removes the keyword postings too,
+    // so that every caller of it — including the four in hooks.ts that reach
+    // the vector store directly — gets the same guarantee without having to
+    // remember a second call.
     await this.vectorStore.deleteItemVectors(itemKey, libraryID);
-    // Both indexes, or the keyword side keeps answering for a document whose
-    // vectors are gone — a result row nothing else in the plugin can explain.
-    await this.vectorStore.removeKeywordIndex(
-      itemKey,
-      libraryID ?? Zotero.Libraries.userLibraryID,
-    );
     ztoolkit.log(`[SemanticSearch] Deleted index for item: ${itemKey} (libraryID=${libraryID ?? 'user'})`);
   }
 
@@ -2003,7 +2019,20 @@ export class SemanticSearchService {
   async getStats(): Promise<SemanticServiceStats> {
     await this.initialize();
 
-    const indexStats = await this.vectorStore.getStats();
+    // One library for every figure below. Statistics that mixed a
+    // whole-database vector count with a library-scoped keyword count could not
+    // be added, subtracted or compared with each other at all.
+    const libraryID = Zotero.Libraries.userLibraryID;
+
+    const indexStats = await this.vectorStore.getStats(libraryID);
+    // Both indexes, one call: the pane shows a combined total on top, and a
+    // total assembled from two calls made at different moments would be a
+    // number that was never simultaneously true.
+    const keywordStats =
+      await this.vectorStore.getKeywordIndexReport(libraryID);
+    const documentTotals =
+      await this.vectorStore.getIndexedDocumentTotals(libraryID);
+    const storage = await this.vectorStore.getIndexStorageBreakdown();
     const embeddingStatus = this.embeddingService.getStatus();
 
     // Log comparison: library items vs indexed items
@@ -2017,6 +2046,9 @@ export class SemanticSearchService {
 
     return {
       indexStats,
+      keywordStats,
+      documentTotals,
+      storage,
       serviceStatus: {
         initialized: this.initialized,
         embeddingReady: embeddingStatus.initialized,
@@ -2181,7 +2213,7 @@ export class SemanticSearchService {
 
   async beginDatabaseReset(): Promise<void> {
     if (this._databaseResetActive) {
-      throw new Error('A semantic database reset is already active');
+      throw new Error('A search index database reset is already active');
     }
     this._databaseResetActive = true;
     if (this._buildActive) {
@@ -2202,7 +2234,7 @@ export class SemanticSearchService {
     Zotero.Prefs.clear(PREF_INDEX_PROGRESS, true);
     const savedProgress = Zotero.Prefs.get(PREF_INDEX_PROGRESS, true);
     if (typeof savedProgress === 'string' && savedProgress.trim()) {
-      throw new Error('Persisted semantic index progress could not be cleared');
+        throw new Error('Persisted search index progress could not be cleared');
     }
     this.embeddingService.clearQueryCache();
     this._failedItems.clear();
