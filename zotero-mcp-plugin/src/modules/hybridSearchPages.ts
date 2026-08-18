@@ -87,6 +87,9 @@ export interface SearchFingerprint {
    */
   appliedKeywordMinScore?: number;
   appliedSemanticMinScore?: number;
+  appliedWikiMinScore?: number;
+  /** User preference behind the applied Wiki floor; detects mid-cursor changes. */
+  wikiPreferenceMinScore?: number;
   language: string;
   libraryID: number;
   /**
@@ -98,6 +101,9 @@ export interface SearchFingerprint {
   rrfK: number;
   keywordWeight: number;
   semanticWeight: number;
+  wikiWeight?: number;
+  wikiEnabled?: boolean;
+  wikiShadowMode?: boolean;
   /** 第一页用的页大小；续页省略 topK 时沿用它，而不是回落到用户默认值。 */
   pageSize: number;
   /**
@@ -202,6 +208,8 @@ export function fingerprintsMatch(
   for (const [field, label] of [
     ["appliedKeywordMinScore", "minKeywordScore"],
     ["appliedSemanticMinScore", "minSemanticScore"],
+    ["appliedWikiMinScore", "wikiMinScore"],
+    ["wikiPreferenceMinScore", "wikiPreferenceMinScore"],
   ] as const) {
     const claimed = claim[field];
     if (claimed === undefined) continue;
@@ -225,7 +233,13 @@ export function fingerprintsMatch(
     "rrfK",
     "keywordWeight",
     "semanticWeight",
+    "wikiWeight",
   ] as const) {
+    if (claim[knob] !== undefined && stored[knob] !== claim[knob]) {
+      return { match: false, changed: knob };
+    }
+  }
+  for (const knob of ["wikiEnabled", "wikiShadowMode"] as const) {
     if (claim[knob] !== undefined && stored[knob] !== claim[knob]) {
       return { match: false, changed: knob };
     }
@@ -269,10 +283,7 @@ export function decodeCursor(
  *
  * 时钟由外部注入，过期与淘汰因此是可测试的，而不是「等 15 分钟看看」。
  */
-export class HybridSearchPageStore<
-  TRow,
-  TMeta = Record<string, unknown>,
-> {
+export class HybridSearchPageStore<TRow, TMeta = Record<string, unknown>> {
   private states = new Map<string, PageState<TRow, TMeta>>();
   private counter = 0;
   // 参数属性（constructor(private x)）在 Node 的 strip-only 模式下不被支持，

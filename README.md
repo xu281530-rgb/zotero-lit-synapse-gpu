@@ -2,10 +2,10 @@
 
 Zotero MCP is an open-source project designed to seamlessly integrate powerful AI capabilities with the leading reference management tool, Zotero, through the Model Context Protocol (MCP). This project consists of two core components: a Zotero plugin and an MCP server, which work together to provide AI assistants (like Claude) with the ability to interact with your local Zotero library.
 _This README is also available in: [:cn: 简体中文](./README-zh.md) | :gb: English._
-[![zotero target version](https://img.shields.io/badge/Zotero-7-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
+[![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-1.9.2-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-2.0.0-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -26,6 +26,7 @@ The Zotero MCP server is a tool server based on the Model Context Protocol that 
 - 📝 **Annotation Analysis**: Search and analyze PDF highlights and annotations by color, tags, and keywords
 - 📂 **Collection Browsing**: Browse and search collection hierarchies, retrieve items within collections
 - 🧠 **Semantic Search**: AI-powered concept matching via embedding vectors, discover related literature across languages
+- 🧩 **LLM Wiki Memory**: Question-driven, reusable Claims, Concepts and Relations with evidence links back to Zotero chunks
 - ✏️ **Write Operations**: Create notes, manage tags, update metadata, create new items and attach PDFs
 - 💾 **Full-text Database**: Access and search cached PDF full-text content
 
@@ -171,6 +172,12 @@ Example configuration for Claude Desktop:
   - Vector indexing with SQLite-vec storage
   - Index status column in main library view
   - Collection/item context menu for index management
+- **LLM Wiki and Long-Term Memory**:
+  - Stores authoritative Pages, Claims, Concepts, Aliases, Relations and Evidence in the independent `zotero-mcp-wiki.sqlite` database
+  - Verifies every Evidence excerpt against a real Zotero document chunk and relinks it after search-index reset or rebuild
+  - Exposes controlled prepare/commit/search/read/export/reverify/deep-paper tools without hidden server-side LLM calls
+  - Calculates Alias/Concept, Claim embedding, Relation and one-hop retrieval as a third route; 2.0.0 defaults to Shadow Mode, so existing Keyword + Semantic Weighted RRF ranking is unchanged until real-library calibration
+  - Opens a Zotero Wiki panel for knowledge status, Evidence, terminology/alias management, Page merge, Claim deletion, Markdown export and a document knowledge graph
 - **Write Operations**: Create/modify notes, manage tags, update metadata fields, create new items and reparent standalone PDFs
 - **Full-text Database**: Cached PDF full-text database with list, search, get, and stats operations
 - **Standalone Attachment Management**: Search and manage standalone PDF items without parent metadata
@@ -226,7 +233,7 @@ branch can admit a document but can never veto one. A paper the keyword branch
 never found is still returned when the embedding rates it, and vice versa.
 
 Ranking is then **weighted Reciprocal Rank Fusion** over where each document
-placed *within each branch that admitted it*:
+placed _within each branch that admitted it_:
 
 ```
 score = keywordWeight/(rrfK + keywordRank) + semanticWeight/(rrfK + semanticRank)
@@ -271,7 +278,7 @@ one branch admitted, which is usually more than one page. The order is
 **retrieve → gate each branch on its own threshold → union → rank by RRF →
 page**, so a later page can never contain a document both branches rejected and
 a short final page is never padded out. Pass `nextCursor` back as `cursor` (with every other
-argument unchanged or omitted) to window further down the *same* ranking; it
+argument unchanged or omitted) to window further down the _same_ ranking; it
 does not re-run retrieval, so pages cannot duplicate, drop or reorder
 documents. Changing `query`, `keywords`, `domain`, `expertRole`,
 `minKeywordScore` or `minSemanticScore` alongside a cursor is rejected — that is
@@ -279,7 +286,7 @@ a new search. Pagination state lives 15
 minutes and covers the 5 most recent searches; an expired cursor fails with a
 clear message rather than silently restarting.
 
-**Retrieval depth.** Both branches are *exhaustive*: fusion sees every
+**Retrieval depth.** Both branches are _exhaustive_: fusion sees every
 candidate, `ranked` holds every document at least one branch admitted, and
 `results` is just a window onto it. There is therefore no candidate pool to
 saturate and no `candidateK` parameter. `totalRelevant` is exact, and degrades
@@ -303,7 +310,7 @@ verbatim and attribute it to the user.
 
 At least one of `q`, `colors` or `tags` is required; an unfiltered sweep of every
 mark in the library is not a question. Every mark matching the filters is scored
-and ranked *before* one page is served — the previous implementation ranked an
+and ranked _before_ one page is served — the previous implementation ranked an
 arbitrary first 100 candidates, so in a library with more matches than that the
 best one was routinely outside the window it ranked.
 
@@ -336,7 +343,7 @@ what `get_annotations(itemKeys)`, `get_item_details`, `search_fulltext` and
 - Handing an attachment, note or annotation key to `get_item_details`,
   `get_document_chunks` or `search_fulltext` is now refused by name, and the
   refusal gives you the document key to use instead. `get_item_details`
-  previously *succeeded* on an attachment key and returned the PDF's filename
+  previously _succeeded_ on an attachment key and returned the PDF's filename
   as the title.
 
 #### `search_fulltext`
@@ -520,7 +527,7 @@ old version returned `formatItem`'s full default field list, so two rows measure
 `hybrid_search`, `keyword_search` and `semantic_search` return **the same
 lightweight candidate row** and share the same scoping and cursor paging, so
 switching between them costs nothing. Two things do differ and must not be
-carried across: each tool applies the threshold of the branch it *is*
+carried across: each tool applies the threshold of the branch it _is_
 (`keyword_search` the keyword floor, `semantic_search` and `find_similar` the
 semantic floor, `hybrid_search` both independently), and the `score` field means
 a 0–1 relevance on the single-branch tools but a rank-fusion **position** on
@@ -561,7 +568,7 @@ keyword branch.
 Two uses: an exact term you must not miss, and — the intended one — a **coarse
 filter** whose `itemKeys` you hand to `semantic_search` so the semantic pass only
 scores that shortlist. For ordinary discovery `hybrid_search` is still the
-default first step, since it runs this branch *and* the semantic one.
+default first step, since it runs this branch _and_ the semantic one.
 
 - `keywords` (required unless following a cursor; bilingual, 1–16, ~5–12
   recommended), `query` (fallback probes only — never embedded), `domain`,
@@ -578,7 +585,7 @@ Before 1.9.0 this tool was the last one still on the pre-funnel architecture:
 hard-coded `topK = 10` and `minScore = 0.3` that ignored the user's own settings,
 no cursor, no collection or item scoping, rows shipping raw untruncated chunk
 text (in a real library, whole reference lists as "evidence"), and no `fullText`
-status — so a semantic hit on a paper's *abstract* was indistinguishable from a
+status — so a semantic hit on a paper's _abstract_ was indistinguishable from a
 hit on its body. All of that now matches `hybrid_search` exactly.
 
 - `query` (required unless following a cursor), `domain`, `expertRole`,
@@ -608,7 +615,7 @@ stored it, a few chunks per page. `search_fulltext` answers "where in this paper
 does it say X"; this answers "let me read this paper".
 
 Every chunk carries `chunkIndex` (position in reading order) and `chunkId` (the
-stable id `search_fulltext` and `find_similar` accept). The two are *not*
+stable id `search_fulltext` and `find_similar` accept). The two are _not_
 interchangeable — they diverge wherever a chunk was dropped — so never compute
 one from the other.
 
@@ -628,7 +635,25 @@ being answered with its title and abstract dressed up as body text.
 > bypass around the retrieval funnel every other tool enforces. Index
 > maintenance now lives only in the plugin's preferences UI.
 
-### 4. Write Operations (9 tools, can be disabled in preferences)
+### 4. LLM Wiki (9 tools, can be disabled independently)
+
+The Wiki is an independent long-term knowledge database. It stores reusable
+Pages, Claims, Concepts, Relations and traceable Evidence rather than another
+paper-summary index. Normal research uses a prepare/controlled-commit flow;
+`wiki_build_from_paper` is allowed only for one paper explicitly requested by
+the user. The server performs no hidden LLM calls.
+
+- `wiki_prepare_update` — search existing knowledge before proposing changes; pass up to two exact `proposedPageTitles` so its short-lived token can authorize only the Page titles that were actually searched
+- `wiki_commit` — apply validated `SKIP`, Evidence, Claim, Page, Relation or conflict actions
+- `wiki_search` — search Concept/Alias, Claim, Relation and one-hop Evidence links
+- `wiki_get_page` — read a Page with its Claims and Evidence
+- `wiki_get_claim` — read one atomic Claim and its provenance
+- `wiki_status` — report Wiki and Evidence-link status
+- `wiki_export` — render derived Markdown without changing the authoritative database
+- `wiki_reverify` — relink Evidence after index rebuilds
+- `wiki_build_from_paper` — prepare an explicit, single-paper deep-reading workflow
+
+### 5. Write Operations (9 tools, can be disabled in preferences)
 
 All nine are hidden from `tools/list` and from `/capabilities` when write
 operations are disabled, which is the default — the server never advertises a

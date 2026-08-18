@@ -28,6 +28,7 @@ export interface SemanticDatabaseResetDependencies {
   resumeAutoUpdates(): void;
   clearChunkingSignatures(): void;
   clearPaginationState(): void;
+  markWikiEvidencePending?(resetGeneration: string): Promise<void>;
 }
 
 export async function clearSemanticDatabase(
@@ -44,6 +45,13 @@ export async function clearSemanticDatabase(
     resetGeneration = dependencies.prepareRefreshQueueReset();
     await dependencies.semanticService.beginDatabaseReset();
     resetStarted = true;
+
+    // Mark durable Evidence before invalidating the rebuildable index. If the
+    // independent Wiki database cannot be updated, abort while the search
+    // database is still intact instead of failing halfway through reset.
+    if (dependencies.markWikiEvidencePending) {
+      await dependencies.markWikiEvidencePending(resetGeneration);
+    }
 
     await dependencies.vectorStore.initialize();
     const report = await dependencies.vectorStore.clearAll({
@@ -86,10 +94,7 @@ export async function clearSemanticDatabase(
     }
     return report;
   } catch (error) {
-    if (
-      error instanceof SemanticDatabaseClearError &&
-      error.databaseCleared
-    ) {
+    if (error instanceof SemanticDatabaseClearError && error.databaseCleared) {
       databaseCleared = true;
       if (resetGeneration) {
         try {

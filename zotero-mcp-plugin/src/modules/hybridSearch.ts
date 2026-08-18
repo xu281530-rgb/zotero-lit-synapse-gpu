@@ -26,6 +26,18 @@ export interface SemanticSearchItem {
   }>;
 }
 
+export interface WikiSearchItem {
+  itemKey: string;
+  libraryID?: number;
+  title?: string;
+  /** Query relevance only. Evidence quality is deliberately separate below. */
+  normalizedWikiScore: number;
+  evidenceConfidence: number;
+  readDepth: string;
+  epistemicStatus: string;
+  wikiClaims?: unknown[];
+}
+
 export interface HybridSearchOptions {
   query?: string;
   /**
@@ -53,6 +65,14 @@ export interface HybridSearchOptions {
   rrfK: number;
   keywordWeight: number;
   semanticWeight: number;
+  /** Optional third-route RRF weight. Zero disables active Wiki fusion. */
+  wikiWeight?: number;
+  /** Wiki relevance floor, on normalizedWikiScore rather than confidence. */
+  wikiMinScore?: number;
+  /** Compute and report Wiki retrieval without changing the final ranking. */
+  wikiShadowMode?: boolean;
+  /** Independent deadline; a Wiki failure never blocks the two existing routes. */
+  wikiSearchTimeoutMs?: number;
   // NOTE: there is deliberately no `exhaustive` option here. Fusion is already
   // exhaustive — `ranked` holds every scored candidate and `results` is just the
   // topK window onto it — so the flag had no effect at this layer except the one
@@ -104,12 +124,18 @@ export interface HybridSearchResult extends Record<string, unknown> {
   normalizedKeywordScore?: number;
   /** Same, for the semantic branch and semanticMinScore. */
   normalizedSemanticScore?: number;
+  normalizedWikiScore?: number;
   /** The weighted RRF score. Identical to {@link score}. */
   rrfScore: number;
   keywordRank?: number;
   semanticRank?: number;
+  wikiRank?: number;
   keywordScore?: number;
   semanticScore?: number;
+  evidenceConfidence?: number;
+  readDepth?: string;
+  epistemicStatus?: string;
+  wikiClaims?: unknown[];
   matchedChunks?: SemanticSearchItem["matchedChunks"];
 }
 
@@ -147,6 +173,15 @@ export interface HybridSearchRunResult {
   warnings: string[];
   keywordResultCount: number;
   semanticResultCount: number;
+  wikiResultCount: number;
+  wikiAdmittedCount: number;
+  wikiShadowMode: boolean;
+  /** Wiki documents admitted after its own relevance threshold. */
+  wikiCandidateItemKeys: string[];
+  /** Shadow candidates not admitted by either existing route. */
+  wikiNovelDocumentCount: number;
+  wikiKeywordOverlapCount: number;
+  wikiSemanticOverlapCount: number;
   /**
    * Documents that one or both branches retrieved but NEITHER admitted.
    *
@@ -159,6 +194,8 @@ export interface HybridSearchRunResult {
   appliedKeywordMinScore: number;
   /** The semantic floor actually applied. */
   appliedSemanticMinScore: number;
+  /** The Wiki relevance floor actually applied. */
+  appliedWikiMinScore: number;
   /** Documents the keyword branch admitted. */
   keywordAdmittedCount: number;
   /** Documents the semantic branch admitted. */
@@ -166,6 +203,7 @@ export interface HybridSearchRunResult {
   timings: {
     keywordMs: number;
     semanticMs: number;
+    wikiMs: number;
     rrfMs: number;
     totalMs: number;
   };
@@ -174,6 +212,7 @@ export interface HybridSearchRunResult {
 interface HybridSearchDependencies {
   keywordSearch: () => Promise<KeywordSearchItem[]>;
   semanticSearch: () => Promise<SemanticSearchItem[]>;
+  wikiSearch?: () => Promise<WikiSearchItem[]>;
   /**
    * Called when a branch loses its race against the timeout. Racing a promise
    * only stops waiting for it — without these hooks the abandoned embedding
@@ -182,6 +221,7 @@ interface HybridSearchDependencies {
    */
   cancelKeywordSearch?: () => void;
   cancelSemanticSearch?: () => void;
+  cancelWikiSearch?: () => void;
 }
 
 interface FusedCandidate {
@@ -189,12 +229,15 @@ interface FusedCandidate {
   libraryID?: number;
   keywordItem?: KeywordSearchItem;
   semanticItem?: SemanticSearchItem;
+  wikiItem?: WikiSearchItem;
   keywordRank?: number;
   semanticRank?: number;
+  wikiRank?: number;
   /** Set only when the keyword branch admitted this document. */
   normalizedKeywordScore?: number;
   /** Set only when the semantic branch admitted this document. */
   normalizedSemanticScore?: number;
+  normalizedWikiScore?: number;
   rrfScore: number;
 }
 
@@ -215,6 +258,7 @@ export const DEFAULT_KEYWORD_SEARCH_TIMEOUT_MS = 30000;
  * settled at all" backstop, so it is deliberately looser than either.
  */
 export const DEFAULT_SEMANTIC_BRANCH_TIMEOUT_MS = 60000;
+export const DEFAULT_WIKI_SEARCH_TIMEOUT_MS = 5000;
 
 /**
  * Upper bound on lexical probes issued per hybrid call — the only hard limit.
@@ -712,13 +756,13 @@ export function rankLexicalCandidates(
   });
 
   const ordered = ranked.sort((a, b) => {
-      const scoreDifference = (b.relevanceScore || 0) - (a.relevanceScore || 0);
-      if (scoreDifference !== 0) return scoreDifference;
-      const coverageDifference =
-        (b.matchedKeywords?.length || 0) - (a.matchedKeywords?.length || 0);
-      if (coverageDifference !== 0) return coverageDifference;
-      return a.key.localeCompare(b.key);
-    });
+    const scoreDifference = (b.relevanceScore || 0) - (a.relevanceScore || 0);
+    if (scoreDifference !== 0) return scoreDifference;
+    const coverageDifference =
+      (b.matchedKeywords?.length || 0) - (a.matchedKeywords?.length || 0);
+    if (coverageDifference !== 0) return coverageDifference;
+    return a.key.localeCompare(b.key);
+  });
   return options.limit === undefined
     ? ordered
     : ordered.slice(0, options.limit);
@@ -894,6 +938,9 @@ export function validateHybridSearchOptions(
   validateFiniteNumber(options.rrfK, "rrfK", 1);
   validateFiniteNumber(options.keywordWeight, "keywordWeight", 0);
   validateFiniteNumber(options.semanticWeight, "semanticWeight", 0);
+  if (options.wikiWeight !== undefined) {
+    validateFiniteNumber(options.wikiWeight, "wikiWeight", 0);
+  }
   if (!Number.isInteger(options.topK) || options.topK > 20) {
     throw new Error("topK must be an integer between 1 and 20");
   }
@@ -915,10 +962,17 @@ export function validateHybridSearchOptions(
       1,
     );
   }
+  if (options.wikiSearchTimeoutMs !== undefined) {
+    validateFiniteNumber(options.wikiSearchTimeoutMs, "wikiSearchTimeoutMs", 1);
+  }
   if (options.keywords !== undefined) {
     normalizeKeywords(options.keywords);
   }
-  for (const name of ["keywordMinScore", "semanticMinScore"] as const) {
+  for (const name of [
+    "keywordMinScore",
+    "semanticMinScore",
+    "wikiMinScore",
+  ] as const) {
     const value = options[name];
     if (value === undefined) continue;
     if (!Number.isFinite(value) || value < 0 || value > 1) {
@@ -926,8 +980,12 @@ export function validateHybridSearchOptions(
     }
   }
 
-  if (options.keywordWeight === 0 && options.semanticWeight === 0) {
-    throw new Error("keywordWeight and semanticWeight cannot both be zero");
+  if (
+    options.keywordWeight === 0 &&
+    options.semanticWeight === 0 &&
+    (options.wikiShadowMode || (options.wikiWeight ?? 0) === 0)
+  ) {
+    throw new Error("at least one active retrieval weight must be non-zero");
   }
 }
 
@@ -949,8 +1007,10 @@ export interface HybridFusionOutcome {
   discardedBeyondTopK: number;
   appliedKeywordMinScore: number;
   appliedSemanticMinScore: number;
+  appliedWikiMinScore: number;
   keywordAdmittedCount: number;
   semanticAdmittedCount: number;
+  wikiAdmittedCount: number;
 }
 
 export function fuseHybridSearchResults(
@@ -985,7 +1045,9 @@ export function fuseHybridSearchResults(
  * TWO rank contributions and therefore outranks single-branch documents at
  * comparable ranks. Corroboration is expressed as position, not as a bonus.
  *
- *   RRF = keywordWeight/(k + keywordRank) + semanticWeight/(k + semanticRank)
+ *   RRF = keywordWeight/(k + keywordRank)
+ *       + semanticWeight/(k + semanticRank)
+ *       + wikiWeight/(k + wikiRank)
  *
  * with an absent branch contributing nothing rather than a penalty. The weights
  * are what a user leans on to prefer one branch; `rrfK` controls how quickly
@@ -1010,16 +1072,39 @@ export function fuseHybridSearchResults(
 export function fuseHybridSearchResultsDetailed(
   keywordResults: KeywordSearchItem[],
   semanticResults: SemanticSearchItem[],
-  options: Pick<
+  wikiResultsOrOptions:
+    | WikiSearchItem[]
+    | Pick<
+        HybridSearchOptions,
+        | "topK"
+        | "rrfK"
+        | "keywordWeight"
+        | "semanticWeight"
+        | "wikiWeight"
+        | "keywordMinScore"
+        | "semanticMinScore"
+        | "wikiMinScore"
+        | "wikiShadowMode"
+      >,
+  maybeOptions?: Pick<
     HybridSearchOptions,
     | "topK"
     | "rrfK"
     | "keywordWeight"
     | "semanticWeight"
+    | "wikiWeight"
     | "keywordMinScore"
     | "semanticMinScore"
+    | "wikiMinScore"
+    | "wikiShadowMode"
   >,
 ): HybridFusionOutcome {
+  const wikiResults = Array.isArray(wikiResultsOrOptions)
+    ? wikiResultsOrOptions
+    : [];
+  const options = Array.isArray(wikiResultsOrOptions)
+    ? maybeOptions!
+    : wikiResultsOrOptions;
   validateFiniteNumber(options.topK, "topK", 1);
   validateFiniteNumber(options.rrfK, "rrfK", 1);
   validateFiniteNumber(options.keywordWeight, "keywordWeight", 0);
@@ -1031,6 +1116,7 @@ export function fuseHybridSearchResultsDetailed(
       : 0;
   const keywordMinScore = clampFloor(options.keywordMinScore);
   const semanticMinScore = clampFloor(options.semanticMinScore);
+  const wikiMinScore = clampFloor(options.wikiMinScore);
 
   const candidates = new Map<string, FusedCandidate>();
   // Every document either branch returned, admitted or not. Used only to report
@@ -1039,6 +1125,7 @@ export function fuseHybridSearchResultsDetailed(
   const retrieved = new Set<string>();
   let keywordAdmittedCount = 0;
   let semanticAdmittedCount = 0;
+  let wikiAdmittedCount = 0;
 
   const upsert = (
     identityKey: string,
@@ -1098,6 +1185,32 @@ export function fuseHybridSearchResultsDetailed(
     }
   }
 
+  // Shadow Mode deliberately computes admission/rank diagnostics but never
+  // creates or mutates a fused candidate. This keeps the legacy two-route
+  // ordering byte-for-byte stable while real Zotero searches calibrate Wiki.
+  const wikiWeight = options.wikiWeight ?? 0;
+  if (wikiWeight > 0 || options.wikiShadowMode) {
+    let admittedRank = 0;
+    const seen = new Set<string>();
+    for (const item of wikiResults) {
+      if (!item.itemKey) continue;
+      const identityKey = `${item.libraryID ?? "unknown"}:${item.itemKey}`;
+      if (seen.has(identityKey)) continue;
+      seen.add(identityKey);
+      const normalized = clampFloor(item.normalizedWikiScore);
+      if (normalized < wikiMinScore) continue;
+      admittedRank += 1;
+      wikiAdmittedCount += 1;
+      if (options.wikiShadowMode || wikiWeight === 0) continue;
+      retrieved.add(identityKey);
+      const candidate = upsert(identityKey, item.itemKey, item.libraryID);
+      candidate.wikiItem = item;
+      candidate.wikiRank = admittedRank;
+      candidate.normalizedWikiScore = normalized;
+      candidate.rrfScore += wikiWeight / (options.rrfK + admittedRank);
+    }
+  }
+
   // A map entry is only ever created for a document some branch admitted, so
   // the difference is precisely the documents both branches turned away.
   const discardedBelowThreshold = Math.max(0, retrieved.size - candidates.size);
@@ -1111,11 +1224,14 @@ export function fuseHybridSearchResultsDetailed(
   const ranked = ordered.map((candidate) => {
     const keywordItem = candidate.keywordItem;
     const semanticItem = candidate.semanticItem;
+    const wikiItem = candidate.wikiItem;
     const base = keywordItem
       ? { ...keywordItem }
       : semanticItem
         ? { ...semanticItem }
-        : {};
+        : wikiItem
+          ? { ...wikiItem }
+          : {};
 
     delete (base as Record<string, unknown>).key;
     delete (base as Record<string, unknown>).score;
@@ -1124,18 +1240,24 @@ export function fuseHybridSearchResultsDetailed(
       ...base,
       itemKey: candidate.itemKey,
       libraryID: candidate.libraryID,
-      title: keywordItem?.title || semanticItem?.title || "",
+      title: keywordItem?.title || semanticItem?.title || wikiItem?.title || "",
       // Ranking key and reported score are the same value on purpose: a row
       // whose `score` disagreed with its position would invite the reader to
       // re-sort, and re-sorting a rank fusion by anything else undoes it.
       score: candidate.rrfScore,
       normalizedKeywordScore: candidate.normalizedKeywordScore,
       normalizedSemanticScore: candidate.normalizedSemanticScore,
+      normalizedWikiScore: candidate.normalizedWikiScore,
       rrfScore: candidate.rrfScore,
       keywordRank: candidate.keywordRank,
       semanticRank: candidate.semanticRank,
+      wikiRank: candidate.wikiRank,
       keywordScore: keywordItem?.relevanceScore,
       semanticScore: semanticItem?.score,
+      evidenceConfidence: wikiItem?.evidenceConfidence,
+      readDepth: wikiItem?.readDepth,
+      epistemicStatus: wikiItem?.epistemicStatus,
+      wikiClaims: wikiItem?.wikiClaims,
       matchedChunks: semanticItem?.matchedChunks,
     };
   });
@@ -1151,26 +1273,34 @@ export function fuseHybridSearchResultsDetailed(
     discardedBeyondTopK: Math.max(0, ranked.length - results.length),
     appliedKeywordMinScore: keywordMinScore,
     appliedSemanticMinScore: semanticMinScore,
+    appliedWikiMinScore: wikiMinScore,
     keywordAdmittedCount,
     semanticAdmittedCount,
+    wikiAdmittedCount,
   };
 }
 
 /** Stable ordering for candidates whose fused and RRF scores are identical. */
 function compareFusedCandidates(a: FusedCandidate, b: FusedCandidate): number {
   const aSourceCount =
-    Number(Boolean(a.keywordItem)) + Number(Boolean(a.semanticItem));
+    Number(Boolean(a.keywordItem)) +
+    Number(Boolean(a.semanticItem)) +
+    Number(Boolean(a.wikiItem));
   const bSourceCount =
-    Number(Boolean(b.keywordItem)) + Number(Boolean(b.semanticItem));
+    Number(Boolean(b.keywordItem)) +
+    Number(Boolean(b.semanticItem)) +
+    Number(Boolean(b.wikiItem));
   if (aSourceCount !== bSourceCount) return bSourceCount - aSourceCount;
 
   const aBestRank = Math.min(
     a.keywordRank ?? Infinity,
     a.semanticRank ?? Infinity,
+    a.wikiRank ?? Infinity,
   );
   const bBestRank = Math.min(
     b.keywordRank ?? Infinity,
     b.semanticRank ?? Infinity,
+    b.wikiRank ?? Infinity,
   );
   if (aBestRank !== bBestRank) return aBestRank - bBestRank;
 
@@ -1244,7 +1374,12 @@ export async function runHybridSearch(
   // never removes a deadline: an unbounded branch here used to let a single
   // hybrid_search hang the caller indefinitely, because the library-level tool
   // always sets exhaustive.
-  const [keywordRun, semanticRun] = await Promise.all([
+  const wikiSearchTimeoutMs =
+    options.wikiSearchTimeoutMs ?? DEFAULT_WIKI_SEARCH_TIMEOUT_MS;
+  const wikiRequested =
+    Boolean(dependencies.wikiSearch) &&
+    (options.wikiShadowMode === true || (options.wikiWeight ?? 0) > 0);
+  const [keywordRun, semanticRun, wikiRun] = await Promise.all([
     options.keywordWeight > 0
       ? settleWithTimeout(
           dependencies.keywordSearch,
@@ -1273,9 +1408,24 @@ export async function runHybridSearch(
           } as PromiseFulfilledResult<SemanticSearchItem[]>,
           elapsedMs: 0,
         }),
+    wikiRequested
+      ? settleWithTimeout(
+          dependencies.wikiSearch!,
+          wikiSearchTimeoutMs,
+          "Wiki search",
+          dependencies.cancelWikiSearch,
+        )
+      : Promise.resolve({
+          outcome: {
+            status: "fulfilled",
+            value: [],
+          } as PromiseFulfilledResult<WikiSearchItem[]>,
+          elapsedMs: 0,
+        }),
   ]);
   const keywordOutcome = keywordRun.outcome;
   const semanticOutcome = semanticRun.outcome;
+  const wikiOutcome = wikiRun.outcome;
 
   if (
     keywordOutcome.status === "rejected" &&
@@ -1291,6 +1441,33 @@ export async function runHybridSearch(
     keywordOutcome.status === "fulfilled" ? keywordOutcome.value : [];
   const semanticResults =
     semanticOutcome.status === "fulfilled" ? semanticOutcome.value : [];
+  const wikiResults =
+    wikiOutcome.status === "fulfilled" ? wikiOutcome.value : [];
+
+  const identity = (libraryID: number | undefined, itemKey: string): string =>
+    `${libraryID ?? "unknown"}:${itemKey}`;
+  const keywordKeys = new Set(
+    keywordResults
+      .filter((item) => item.key)
+      .map((item) => identity(item.libraryID, item.key)),
+  );
+  const semanticKeys = new Set(
+    semanticResults
+      .filter((item) => item.itemKey)
+      .map((item) => identity(item.libraryID, item.itemKey)),
+  );
+  const wikiFloor = Math.max(0, Math.min(1, options.wikiMinScore ?? 0));
+  const wikiCandidateKeys = Array.from(
+    new Set(
+      wikiResults
+        .filter(
+          (item) =>
+            item.itemKey &&
+            Math.max(0, Math.min(1, item.normalizedWikiScore)) >= wikiFloor,
+        )
+        .map((item) => identity(item.libraryID, item.itemKey)),
+    ),
+  );
 
   const keywordSearchUnavailable =
     keywordOutcome.status === "rejected" &&
@@ -1327,11 +1504,17 @@ export async function runHybridSearch(
       `${DIMENSION_MISMATCH_HINT} These results come from the keyword branch ALONE — treat them as a keyword search, not as a hybrid one, and do not read a small or empty result set as evidence that the library lacks relevant work.`,
     );
   }
+  if (wikiOutcome.status === "rejected") {
+    warnings.push(
+      `Wiki search unavailable; Keyword + Semantic results are unaffected: ${errorMessage(wikiOutcome.reason)}`,
+    );
+  }
 
   const rrfStartedAt = Date.now();
   const fusion = fuseHybridSearchResultsDetailed(
     keywordResults,
     semanticResults,
+    wikiResults,
     options,
   );
   const rrfMs = Date.now() - rrfStartedAt;
@@ -1345,14 +1528,31 @@ export async function runHybridSearch(
     warnings,
     keywordResultCount: keywordResults.length,
     semanticResultCount: semanticResults.length,
+    wikiResultCount: wikiResults.length,
+    wikiAdmittedCount: fusion.wikiAdmittedCount,
+    wikiShadowMode: options.wikiShadowMode === true,
+    wikiCandidateItemKeys: wikiCandidateKeys.map((key) =>
+      key.slice(key.indexOf(":") + 1),
+    ),
+    wikiNovelDocumentCount: wikiCandidateKeys.filter(
+      (key) => !keywordKeys.has(key) && !semanticKeys.has(key),
+    ).length,
+    wikiKeywordOverlapCount: wikiCandidateKeys.filter((key) =>
+      keywordKeys.has(key),
+    ).length,
+    wikiSemanticOverlapCount: wikiCandidateKeys.filter((key) =>
+      semanticKeys.has(key),
+    ).length,
     discardedBelowThreshold: fusion.discardedBelowThreshold,
     appliedKeywordMinScore: fusion.appliedKeywordMinScore,
     appliedSemanticMinScore: fusion.appliedSemanticMinScore,
+    appliedWikiMinScore: fusion.appliedWikiMinScore,
     keywordAdmittedCount: fusion.keywordAdmittedCount,
     semanticAdmittedCount: fusion.semanticAdmittedCount,
     timings: {
       keywordMs: keywordRun.elapsedMs,
       semanticMs: semanticRun.elapsedMs,
+      wikiMs: wikiRun.elapsedMs,
       rrfMs,
       totalMs: Date.now() - startedAt,
     },

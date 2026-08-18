@@ -403,3 +403,24 @@ pref-hybrid-scan-benchmark-col-max = 最长（毫秒）
 pref-hybrid-scan-benchmark-row-vector = 向量扫描
 pref-hybrid-scan-benchmark-row-keyword = 关键词搜索
 pref-hybrid-scan-benchmark-scope-label = 测试范围
+
+# --- LLM Wiki ---
+pref-wiki-title = LLM Wiki 与长期研究记忆
+pref-wiki-desc = 在独立数据库中保存可复用的 Claim、概念、关系和可回溯 Evidence；不重复保存普通论文摘要，插件自身也不会隐藏调用 LLM。
+pref-wiki-permission-note = Wiki 内部数据库更新与修改 Zotero 条目属于不同权限类别。清空或重建搜索索引不会删除这些长期知识。
+pref-wiki-enabled-text = 启用 LLM Wiki
+pref-wiki-enabled-sub = 提供 Wiki 工具，并在混合检索中计算 Wiki 第三路候选。
+pref-wiki-auto-write-text = 允许 AI 自动沉淀 Wiki
+pref-wiki-auto-write-sub = 默认关闭；关闭时每次 wiki_commit 都需要本机明确确认。
+pref-wiki-write-mode-label = Wiki 自动写入模式
+pref-wiki-write-mode-hint = 只有同时开启“允许 AI 自动沉淀”时，自动模式才会生效。
+pref-wiki-write-mode-confirm = 每次确认
+pref-wiki-write-mode-auto = 自动写入
+pref-wiki-shadow-text = Wiki 检索 Shadow Mode
+pref-wiki-shadow-sub = 计算并报告 Wiki 候选，但不改变现有关键词与语义两路排序。
+pref-wiki-min-score-label = Wiki 相关度阈值
+pref-wiki-min-score-hint = 2.0.0 不预设理论推荐值；请先在真实 Zotero 检索中保持 Shadow Mode 校准。
+pref-wiki-rrf-weight-label = Wiki RRF 权重
+pref-wiki-rrf-weight-hint = 仅在退出 Shadow Mode 后使用。不固定理论默认值；设为 0 时 Wiki 不影响排序。
+pref-wiki-timeout-label = Wiki 检索超时（毫秒）
+pref-wiki-timeout-hint = Wiki 超时或数据库为空时自动退回原有关键词与语义两路，不阻断检索。

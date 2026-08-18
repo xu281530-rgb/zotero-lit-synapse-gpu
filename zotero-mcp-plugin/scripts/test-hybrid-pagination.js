@@ -44,22 +44,32 @@ const FINGERPRINT = {
   rrfK: 60,
   keywordWeight: 1,
   semanticWeight: 1,
+  appliedWikiMinScore: 0.75,
+  wikiPreferenceMinScore: 0.2,
+  wikiWeight: 0,
+  wikiEnabled: true,
+  wikiShadowMode: true,
   pageSize: 20,
   scope: "library",
 };
 
 // Hydrating one returned page must not put text into the cached ranking.
 {
-  const cached = [{
-    itemKey: "LIGHT",
-    matchedChunks: [{ rowId: 1, chunkId: 0, score: 0.9, text: "" }],
-  }];
+  const cached = [
+    {
+      itemKey: "LIGHT",
+      matchedChunks: [{ rowId: 1, chunkId: 0, score: 0.9, text: "" }],
+    },
+  ];
   const detached = detachPageWindow(windowOf(cached, 0, 100, "sid"));
   assert.equal(detached.returned, 1);
   detached.rows[0].matchedChunks[0].text = "hydrated current page";
   assert.equal(cached[0].matchedChunks[0].text, "");
   assert.notEqual(detached.rows[0], cached[0]);
-  assert.notEqual(detached.rows[0].matchedChunks[0], cached[0].matchedChunks[0]);
+  assert.notEqual(
+    detached.rows[0].matchedChunks[0],
+    cached[0].matchedChunks[0],
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -93,7 +103,11 @@ const FINGERPRINT = {
     semanticMinScore: 0.7,
   });
 
-  assert.equal(fusion.ranked.length, 47, "only documents above 0.70 may be paged");
+  assert.equal(
+    fusion.ranked.length,
+    47,
+    "only documents above 0.70 may be paged",
+  );
   assert.equal(fusion.discardedBelowThreshold, 53);
   assert.equal(fusion.results.length, 20, "page 1 is still topK");
   assert.deepEqual(
@@ -106,7 +120,9 @@ const FINGERPRINT = {
     "no sub-threshold document may appear anywhere in the paged population",
   );
   assert.ok(
-    fusion.ranked.every((row, i, all) => i === 0 || all[i - 1].score >= row.score),
+    fusion.ranked.every(
+      (row, i, all) => i === 0 || all[i - 1].score >= row.score,
+    ),
     "the paged population must be in descending RRF order",
   );
   // The RRF score is never re-thresholded: every one of these sits far below
@@ -141,12 +157,18 @@ const FINGERPRINT = {
   assert.equal(page3.offset, 40);
   assert.equal(page3.totalRelevant, 47);
   assert.equal(page3.hasMore, false);
-  assert.equal(page3.nextCursor, undefined, "no cursor is offered past the end");
+  assert.equal(
+    page3.nextCursor,
+    undefined,
+    "no cursor is offered past the end",
+  );
 
   // ------------------------------------------------------------------------
   // 3. One cursor chain: stable order, no duplicates, no gaps.
   // ------------------------------------------------------------------------
-  const seen = [...page1.rows, ...page2.rows, ...page3.rows].map((r) => r.itemKey);
+  const seen = [...page1.rows, ...page2.rows, ...page3.rows].map(
+    (r) => r.itemKey,
+  );
   assert.equal(seen.length, 47);
   assert.equal(new Set(seen).size, 47, "no document may appear on two pages");
   assert.deepEqual(
@@ -189,10 +211,14 @@ const FINGERPRINT = {
   assert.doesNotThrow(() => store.read(cursor, {}, 10));
   assert.doesNotThrow(() => store.read(cursor, { ...FINGERPRINT }, 10));
   assert.doesNotThrow(() =>
-    store.read(cursor, { query: "  Columnar-to-Equiaxed Transition / 柱状晶转变 " }, 10),
+    store.read(
+      cursor,
+      { query: "  Columnar-to-Equiaxed Transition / 柱状晶转变 " },
+      10,
+    ),
   );
-  assert.doesNotThrow(() =>
-    store.read(cursor, { keywords: ["定向凝固", "cet"] }, 10),
+  assert.doesNotThrow(
+    () => store.read(cursor, { keywords: ["定向凝固", "cet"] }, 10),
     "keyword order and case are not a change of search",
   );
 
@@ -209,6 +235,11 @@ const FINGERPRINT = {
     ["rrfK", { rrfK: 5 }],
     ["keywordWeight", { keywordWeight: 9 }],
     ["semanticWeight", { semanticWeight: 0 }],
+    ["wikiMinScore", { appliedWikiMinScore: 0.8 }],
+    ["wikiPreferenceMinScore", { wikiPreferenceMinScore: 0.3 }],
+    ["wikiWeight", { wikiWeight: 0.5 }],
+    ["wikiEnabled", { wikiEnabled: false }],
+    ["wikiShadowMode", { wikiShadowMode: false }],
     // Narrowing to collections is a different result set, not a filter on the
     // one already ranked.
     ["collectionKeys", { scope: "collections:ABCD1234" }],
@@ -285,12 +316,16 @@ const FINGERPRINT = {
   now += 1;
   store.create(FINGERPRINT, ranked, {});
   assert.equal(store.size, 2, "only the most recent searches are kept");
-  assert.throws(
-    () => store.read(encodeCursor(first, 2), {}, 2),
-    CursorError,
-  );
+  assert.throws(() => store.read(encodeCursor(first, 2), {}, 2), CursorError);
 
-  for (const bad of ["", "garbage", "hs1_abc", "hs9_abc_0", "hs1_abc_-1", "hs1_abc_x"]) {
+  for (const bad of [
+    "",
+    "garbage",
+    "hs1_abc",
+    "hs9_abc_0",
+    "hs1_abc_-1",
+    "hs1_abc_x",
+  ]) {
     assert.throws(
       () => decodeCursor(bad),
       CursorError,
@@ -307,7 +342,11 @@ const FINGERPRINT = {
   const ranked = Array.from({ length: 47 }, (_, i) => ({ itemKey: `K${i}` }));
   for (const pageSize of [5, 20]) {
     const w = windowOf(ranked, 0, pageSize, "sid");
-    assert.equal(w.totalRelevant, 47, "totalRelevant never depends on page size");
+    assert.equal(
+      w.totalRelevant,
+      47,
+      "totalRelevant never depends on page size",
+    );
     assert.equal(w.returned, Math.min(pageSize, 47));
     assert.equal(w.hasMore, pageSize < 47);
   }
@@ -415,7 +454,10 @@ const FINGERPRINT = {
   assert.equal(page.returned, 15);
   assert.equal(page.offset, 260);
   assert.equal(new Set(seen).size, 275);
-  assert.deepEqual(seen, ranked.map((row) => row.itemKey));
+  assert.deepEqual(
+    seen,
+    ranked.map((row) => row.itemKey),
+  );
 }
 
 console.log("Hybrid search pagination regression tests passed");

@@ -51,6 +51,14 @@
     <preference id="extensions.zotero.__addonRef__.hybrid.neighborRadius" name="extensions.zotero.__addonRef__.hybrid.neighborRadius" type="int" />
     <preference id="extensions.zotero.__addonRef__.hybrid.gpuAccelerationEnabled" name="extensions.zotero.__addonRef__.hybrid.gpuAccelerationEnabled" type="bool" />
     <preference id="extensions.zotero.__addonRef__.hybrid.gpuPrecision" name="extensions.zotero.__addonRef__.hybrid.gpuPrecision" type="string" />
+    <!-- Independent LLM Wiki settings -->
+    <preference id="extensions.zotero.__addonRef__.wiki.enabled" name="extensions.zotero.__addonRef__.wiki.enabled" type="bool" />
+    <preference id="extensions.zotero.__addonRef__.wiki.autoWrite" name="extensions.zotero.__addonRef__.wiki.autoWrite" type="bool" />
+    <preference id="extensions.zotero.__addonRef__.wiki.writeMode" name="extensions.zotero.__addonRef__.wiki.writeMode" type="string" />
+    <preference id="extensions.zotero.__addonRef__.wiki.shadowMode" name="extensions.zotero.__addonRef__.wiki.shadowMode" type="bool" />
+    <preference id="extensions.zotero.__addonRef__.wiki.minScore" name="extensions.zotero.__addonRef__.wiki.minScore" type="string" />
+    <preference id="extensions.zotero.__addonRef__.wiki.rrfWeight" name="extensions.zotero.__addonRef__.wiki.rrfWeight" type="string" />
+    <preference id="extensions.zotero.__addonRef__.wiki.searchTimeoutMs" name="extensions.zotero.__addonRef__.wiki.searchTimeoutMs" type="int" />
     <!-- MinerU high-precision PDF parsing -->
     <preference id="extensions.zotero.__addonRef__.mineru.mode" name="extensions.zotero.__addonRef__.mineru.mode" type="string" />
     <preference id="extensions.zotero.__addonRef__.mineru.baseURL" name="extensions.zotero.__addonRef__.mineru.baseURL" type="string" />
@@ -141,6 +149,7 @@
       --ic-client: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9.5 14.5a4.2 4.2 0 0 0 6.3.45l2.6-2.6a4.2 4.2 0 1 0-5.95-5.95l-1.5 1.5'/%3E%3Cpath d='M14.5 9.5a4.2 4.2 0 0 0-6.3-.45l-2.6 2.6a4.2 4.2 0 1 0 5.95 5.95l1.5-1.5'/%3E%3C/svg%3E");
       --ic-semantic: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='10.5' cy='10.5' r='6.5'/%3E%3Cpath d='M20 20l-4.2-4.2'/%3E%3Cpath d='M10.5 7l.85 2.15L13.5 10l-2.15.85L10.5 13l-.85-2.15L7.5 10l2.15-.85z' fill='%23000' stroke='none'/%3E%3C/svg%3E");
       --ic-mineru: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z'/%3E%3Cpath d='M14 3v5h5'/%3E%3Cpath d='M9 13h6M9 17h4'/%3E%3C/svg%3E");
+      --ic-wiki: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 5.5A2.5 2.5 0 0 1 6.5 3H11v16H6.5A2.5 2.5 0 0 0 4 21.5z'/%3E%3Cpath d='M20 5.5A2.5 2.5 0 0 0 17.5 3H13v16h4.5a2.5 2.5 0 0 1 2.5 2.5z'/%3E%3C/svg%3E");
       --ic-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.5 2.5L8 6l-3.5 3.5'/%3E%3C/svg%3E");
     }
 
@@ -263,6 +272,10 @@
     .zmp-s[data-icon="mineru"] .zmp-s-title::before {
       mask-image: var(--ic-mineru);
       -webkit-mask-image: var(--ic-mineru);
+    }
+    .zmp-s[data-icon="wiki"] .zmp-s-title::before {
+      mask-image: var(--ic-wiki);
+      -webkit-mask-image: var(--ic-wiki);
     }
     .zmp-s-desc {
       font-size: 12px;
@@ -1775,7 +1788,177 @@
 
       </html:div>
 
-      <!-- ⑤ MinerU 高精度 PDF 解析 -->
+      <!-- ⑤ LLM Wiki / long-term research memory -->
+      <html:div class="zmp-s" data-icon="wiki">
+        <html:div class="zmp-s-title" data-l10n-id="pref-wiki-title"></html:div>
+        <html:div class="zmp-s-desc" data-l10n-id="pref-wiki-desc"></html:div>
+
+        <html:div
+          class="zmp-translation-note"
+          data-l10n-id="pref-wiki-permission-note"
+        ></html:div>
+
+        <html:div class="zmp-sw">
+          <html:div>
+            <html:div
+              class="zmp-sw-text"
+              data-l10n-id="pref-wiki-enabled-text"
+            ></html:div>
+            <html:div
+              class="zmp-sw-sub"
+              data-l10n-id="pref-wiki-enabled-sub"
+            ></html:div>
+          </html:div>
+          <html:label class="zmp-tog">
+            <html:input
+              type="checkbox"
+              id="zotero-prefpane-__addonRef__-wiki-enabled"
+              preference="extensions.zotero.__addonRef__.wiki.enabled"
+            />
+            <html:span class="zmp-tog-track"></html:span>
+          </html:label>
+        </html:div>
+
+        <html:div class="zmp-sw">
+          <html:div>
+            <html:div
+              class="zmp-sw-text"
+              data-l10n-id="pref-wiki-auto-write-text"
+            ></html:div>
+            <html:div
+              class="zmp-sw-sub"
+              data-l10n-id="pref-wiki-auto-write-sub"
+            ></html:div>
+          </html:div>
+          <html:label class="zmp-tog">
+            <html:input
+              type="checkbox"
+              id="zotero-prefpane-__addonRef__-wiki-auto-write"
+              preference="extensions.zotero.__addonRef__.wiki.autoWrite"
+            />
+            <html:span class="zmp-tog-track"></html:span>
+          </html:label>
+        </html:div>
+
+        <html:div class="zmp-sw zmp-nrow">
+          <html:div>
+            <html:div
+              class="zmp-sw-text"
+              data-l10n-id="pref-wiki-write-mode-label"
+            ></html:div>
+            <html:div
+              class="zmp-sw-sub"
+              data-l10n-id="pref-wiki-write-mode-hint"
+            ></html:div>
+          </html:div>
+          <html:select
+            class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-wiki-write-mode"
+            preference="extensions.zotero.__addonRef__.wiki.writeMode"
+          >
+            <html:option
+              value="confirm"
+              data-l10n-id="pref-wiki-write-mode-confirm"
+            ></html:option>
+            <html:option
+              value="auto"
+              data-l10n-id="pref-wiki-write-mode-auto"
+            ></html:option>
+          </html:select>
+        </html:div>
+
+        <html:div class="zmp-sw">
+          <html:div>
+            <html:div
+              class="zmp-sw-text"
+              data-l10n-id="pref-wiki-shadow-text"
+            ></html:div>
+            <html:div
+              class="zmp-sw-sub"
+              data-l10n-id="pref-wiki-shadow-sub"
+            ></html:div>
+          </html:div>
+          <html:label class="zmp-tog">
+            <html:input
+              type="checkbox"
+              id="zotero-prefpane-__addonRef__-wiki-shadow-mode"
+              preference="extensions.zotero.__addonRef__.wiki.shadowMode"
+            />
+            <html:span class="zmp-tog-track"></html:span>
+          </html:label>
+        </html:div>
+
+        <html:div class="zmp-sw zmp-nrow">
+          <html:div>
+            <html:div
+              class="zmp-sw-text"
+              data-l10n-id="pref-wiki-min-score-label"
+            ></html:div>
+            <html:div
+              class="zmp-sw-sub"
+              data-l10n-id="pref-wiki-min-score-hint"
+            ></html:div>
+          </html:div>
+          <html:input
+            type="number"
+            class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-wiki-min-score"
+            preference="extensions.zotero.__addonRef__.wiki.minScore"
+            min="0"
+            max="1"
+            step="0.01"
+            placeholder="0"
+          />
+        </html:div>
+
+        <html:div class="zmp-sw zmp-nrow">
+          <html:div>
+            <html:div
+              class="zmp-sw-text"
+              data-l10n-id="pref-wiki-rrf-weight-label"
+            ></html:div>
+            <html:div
+              class="zmp-sw-sub"
+              data-l10n-id="pref-wiki-rrf-weight-hint"
+            ></html:div>
+          </html:div>
+          <html:input
+            type="number"
+            class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-wiki-rrf-weight"
+            preference="extensions.zotero.__addonRef__.wiki.rrfWeight"
+            min="0"
+            max="10"
+            step="0.1"
+            placeholder="0"
+          />
+        </html:div>
+
+        <html:div class="zmp-sw zmp-nrow">
+          <html:div>
+            <html:div
+              class="zmp-sw-text"
+              data-l10n-id="pref-wiki-timeout-label"
+            ></html:div>
+            <html:div
+              class="zmp-sw-sub"
+              data-l10n-id="pref-wiki-timeout-hint"
+            ></html:div>
+          </html:div>
+          <html:input
+            type="number"
+            class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-wiki-timeout"
+            preference="extensions.zotero.__addonRef__.wiki.searchTimeoutMs"
+            min="100"
+            max="60000"
+            step="100"
+            placeholder="5000"
+          />
+        </html:div>
+      </html:div>
+
+      <!-- ⑥ MinerU 高精度 PDF 解析 -->
       <html:div class="zmp-s" data-icon="mineru">
         <html:div class="zmp-s-title" data-l10n-id="pref-mineru-title"></html:div>
         <html:div class="zmp-s-desc" data-l10n-id="pref-mineru-desc"></html:div>

@@ -2,10 +2,10 @@
 
 Zotero MCP 是一个开源项目，旨在通过模型上下文协议（Model Context Protocol, MCP）将强大的 AI 功能与领先的文献管理工具 Zotero 无缝集成，为 AI 助手（如 Claude）提供与您本地 Zotero 文献库交互的能力。
 _This README is also available in: [:gb: English](./README.md) | :cn: 简体中文._
-[![zotero target version](https://img.shields.io/badge/Zotero-7-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
+[![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-1.9.2-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-2.0.0-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -26,6 +26,7 @@ Zotero MCP 服务器是一个基于 Model Context Protocol 的工具服务器，
 - 📝 **批注分析**：按颜色、标签、关键词检索和分析 PDF 高亮与注释
 - 📂 **分类浏览**：浏览和搜索分类层级结构，获取分类下的条目
 - 🧠 **语义搜索**：基于 AI 向量嵌入的概念匹配，发现跨语言的相关文献
+- 🧩 **LLM Wiki 长期记忆**：通过提问逐步沉淀可复用的 Claim、Concept 和 Relation，并始终回溯 Zotero 原文 chunk
 - ✏️ **写入操作**：创建笔记、管理标签、更新元数据、创建新条目并关联附件
 - 💾 **全文数据库**：访问和搜索缓存的 PDF 全文内容
 
@@ -161,6 +162,12 @@ AI 客户端 ↔ Streamable HTTP ↔ Zotero 插件（集成 MCP 服务器）
 - **智能批注系统**: 按颜色、标签、关键词搜索和检索 PDF 高亮、注释和笔记，支持智能排序
 - **分类管理**: 浏览、搜索分类层级结构，获取分类详情、子分类和条目列表
 - **语义搜索**: 基于 AI 向量嵌入的语义搜索，支持 OpenAI/Ollama API，发现概念相关的文献
+- **LLM Wiki 与长期研究记忆**:
+  - Page、Claim、Concept、Alias、Relation 与 Evidence 的权威数据独立保存到 `zotero-mcp-wiki.sqlite`
+  - 每条 Evidence 都验证真实 Zotero 文献和原文 chunk；搜索索引 reset/rebuild 后自动进入待重连并重新定位，不删除长期知识
+  - 提供受控的准备、提交、检索、查看、导出、重验证和指定单篇深读工具；服务器不新增隐藏 LLM 调用
+  - Alias/Concept、Claim embedding、Relation 和有限一跳关联构成第三路召回；2.0.0 默认使用 Shadow Mode，不改变现有关键词+语义 Weighted RRF 排序，等待真实文库校准
+  - Zotero Wiki 面板支持知识状态、证据查看、标准术语与 alias 管理、Page 合并、错误 Claim 删除、Markdown 导出和文献知识图谱
 - **写入功能**: 创建/修改笔记、管理标签、更新元数据字段、创建新条目并关联独立 PDF
 - **全文数据库**: 缓存的 PDF 全文数据库，支持列表、搜索、获取和统计操作
 - **独立附件管理**: 搜索和管理只有 PDF 没有元数据信息的独立条目
@@ -323,7 +330,7 @@ MCP 服务器已集成在插件内，位于 `src/modules/streamableMCPServer.ts`
 响应与 HTTP `/capabilities` 文档都由它投影得到。**不存在需要人工同步的第二份
 清单**，`npm run test:tool-catalog` 会在两份投影出现分歧时让构建失败。
 
-插件集成的 MCP 服务器提供以下 **28 个工具**，分为 4 大类：
+插件集成的 MCP 服务器提供以下 **38 个工具**，分为 5 大类：
 
 ### 一、搜索与查询（12 个）
 
@@ -446,18 +453,18 @@ cursor 过期会明确报错，而不是悄悄重新搜一遍。
 **关键词用该文献自身的语言书写，只用一种语言**：单篇文档内部，另一种语言的
 探针匹配不到任何内容，只会稀释关键词覆盖度。
 
-| 参数             | 类型     | 描述                                     |
-| ---------------- | -------- | ---------------------------------------- |
-| `itemKey`        | string   | **必需**，要深入的那一篇                 |
-| `query`          | string   | 针对该篇写的自然语言检索句               |
-| `keywords`       | string[] | 该篇专属探针，使用该文献自身的语言       |
-| `domain`         | string   | 重新贴合该篇的学科/子领域                |
-| `expertRole`     | string   | 针对该篇采用的专家视角                   |
-| `chunkIds`       | number[] | 上下文扩展：拉取指定段落的相邻段落       |
-| `neighborRadius` | number   | 上下文扩展半径，受用户设置上限约束       |
-| `maxChunks`      | number   | 返回段落数上限，受用户设置上限约束       |
-| `minKeywordScore` | number  | 关键词一路的相关度下限，只能比用户设置更严格 |
-| `minSemanticScore` | number | 语义一路的相关度下限，只能比用户设置更严格 |
+| 参数               | 类型     | 描述                                         |
+| ------------------ | -------- | -------------------------------------------- |
+| `itemKey`          | string   | **必需**，要深入的那一篇                     |
+| `query`            | string   | 针对该篇写的自然语言检索句                   |
+| `keywords`         | string[] | 该篇专属探针，使用该文献自身的语言           |
+| `domain`           | string   | 重新贴合该篇的学科/子领域                    |
+| `expertRole`       | string   | 针对该篇采用的专家视角                       |
+| `chunkIds`         | number[] | 上下文扩展：拉取指定段落的相邻段落           |
+| `neighborRadius`   | number   | 上下文扩展半径，受用户设置上限约束           |
+| `maxChunks`        | number   | 返回段落数上限，受用户设置上限约束           |
+| `minKeywordScore`  | number   | 关键词一路的相关度下限，只能比用户设置更严格 |
+| `minSemanticScore` | number   | 语义一路的相关度下限，只能比用户设置更严格   |
 
 #### `search_collections`
 
@@ -667,14 +674,14 @@ itemKeys 限定；返回的行里带**未截断的原始 chunk 正文**（在真
 
 超时：不新增独立设置。扫描截止时间 = 用户的单次扫描超时 `vectorScanTimeoutMs` × 动态倍率，倍率按查询 chunk 数量 N 和实际执行路径确定：CPU 为 `0.8 + 0.35N`（数据库只读一遍，只有点积随 N 增长），GPU 为 `0.5 + 1.1N`（向量常驻显存，每个查询各扫一遍）。两组系数均来自实测（`npm run benchmark:find-similar-scaling`），本次生效的预算会写在返回的 `metadata.scanBudget` 里。
 
-| 参数        | 类型     | 描述                                                              |
-| ----------- | -------- | ----------------------------------------------------------------- |
-| `itemKey`   | string   | 查询文献（新检索必需，翻页时可省略）                              |
+| 参数        | 类型     | 描述                                                               |
+| ----------- | -------- | ------------------------------------------------------------------ |
+| `itemKey`   | string   | 查询文献（新检索必需，翻页时可省略）                               |
 | `chunkIds`  | number[] | 该文献中代表性段落的 chunkId（新检索必需，最多 20 个，须同属一篇） |
-| `minScore`  | number   | 文献级相关度下限，只能比用户设置更严格                            |
-| `topK`      | number   | 每页篇数，上限为用户设置的最大返回文献数                        |
-| `cursor`    | string   | 续页游标，原样回传 `nextCursor`                                   |
-| `libraryID` | number   | 文献库 ID（默认用户库）                                           |
+| `minScore`  | number   | 文献级相关度下限，只能比用户设置更严格                             |
+| `topK`      | number   | 每页篇数，上限为用户设置的最大返回文献数                           |
+| `cursor`    | string   | 续页游标，原样回传 `nextCursor`                                    |
+| `libraryID` | number   | 文献库 ID（默认用户库）                                            |
 
 #### `semantic_status`
 
@@ -702,7 +709,23 @@ itemKeys 限定；返回的行里带**未截断的原始 chunk 正文**（在真
 > 正文——那是全服务器唯一一条绕开检索漏斗的旁路。数据库维护能力保留在插件设置
 > 界面内部，不再对外暴露。
 
-### 四、写入操作（9 个，可在偏好设置中禁用）
+### 四、LLM Wiki（9 个，可独立禁用）
+
+Wiki 使用独立长期知识数据库，保存可复用的 Page、Claim、Concept、Relation 和可回溯
+Evidence，而不是再建一份论文摘要索引。普通研究采用“先检索、后受控提交”的流程；
+`wiki_build_from_paper` 仅允许用户明确指定单篇文献时使用。服务器不会隐藏调用 LLM。
+
+- `wiki_prepare_update` —— 写入前搜索已有知识；可传入最多两个准确的 `proposedPageTitles`，短期 token 只能授权真正搜索过的 Page 标题
+- `wiki_commit` —— 提交经过验证的 SKIP、Evidence、Claim、Page、Relation 或冲突动作
+- `wiki_search` —— 检索 Concept/Alias、Claim、Relation 与一跳 Evidence 关联
+- `wiki_get_page` —— 查看 Page、Claim 与 Evidence
+- `wiki_get_claim` —— 查看一个原子 Claim 及其来源
+- `wiki_status` —— 查看 Wiki 与 Evidence 链接状态
+- `wiki_export` —— 导出派生 Markdown，不改变权威数据库
+- `wiki_reverify` —— 索引重建后重新定位 Evidence
+- `wiki_build_from_paper` —— 准备用户明确要求的单篇深度阅读流程
+
+### 五、写入操作（9 个，可在偏好设置中禁用）
 
 写入默认关闭。关闭时这 9 个工具在 `tools/list` 与 `/capabilities` 中都不出现——
 服务器绝不声明一个自己会拒绝执行的能力。

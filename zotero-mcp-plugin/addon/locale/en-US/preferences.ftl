@@ -403,3 +403,24 @@ pref-hybrid-scan-benchmark-col-max = Longest (ms)
 pref-hybrid-scan-benchmark-row-vector = Vector scan
 pref-hybrid-scan-benchmark-row-keyword = Keyword search
 pref-hybrid-scan-benchmark-scope-label = Scope
+
+# --- LLM Wiki ---
+pref-wiki-title = LLM Wiki and long-term research memory
+pref-wiki-desc = Stores reusable claims, concepts, relations, and traceable evidence in an independent database. It does not duplicate ordinary paper summaries and never calls an LLM by itself.
+pref-wiki-permission-note = Wiki database updates are a separate permission category from editing Zotero items. Search-index reset or rebuild never deletes this long-term knowledge.
+pref-wiki-enabled-text = Enable LLM Wiki
+pref-wiki-enabled-sub = Expose the Wiki tools and calculate the Wiki retrieval route during hybrid search.
+pref-wiki-auto-write-text = Allow AI to consolidate Wiki knowledge automatically
+pref-wiki-auto-write-sub = Off by default. When off, every wiki_commit requires explicit local confirmation.
+pref-wiki-write-mode-label = Wiki write mode
+pref-wiki-write-mode-hint = Auto is effective only when automatic consolidation is also enabled.
+pref-wiki-write-mode-confirm = Confirm each commit
+pref-wiki-write-mode-auto = Automatic
+pref-wiki-shadow-text = Wiki retrieval Shadow Mode
+pref-wiki-shadow-sub = Calculate and report Wiki candidates without changing Keyword + Semantic ranking.
+pref-wiki-min-score-label = Wiki relevance threshold
+pref-wiki-min-score-hint = Uncalibrated in 2.0.0. Keep Shadow Mode on while measuring against real Zotero searches.
+pref-wiki-rrf-weight-label = Wiki RRF weight
+pref-wiki-rrf-weight-hint = Used only outside Shadow Mode. No theoretical default is imposed; 0 prevents Wiki from affecting ranking.
+pref-wiki-timeout-label = Wiki search timeout (ms)
+pref-wiki-timeout-hint = A timeout or empty Wiki silently falls back to the existing Keyword + Semantic routes.

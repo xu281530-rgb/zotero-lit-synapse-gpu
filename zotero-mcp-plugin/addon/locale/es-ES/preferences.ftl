@@ -356,3 +356,24 @@ pref-hybrid-scan-benchmark-col-max = Máximo (ms)
 pref-hybrid-scan-benchmark-row-vector = Escaneo vectorial
 pref-hybrid-scan-benchmark-row-keyword = Búsqueda por palabras clave
 pref-hybrid-scan-benchmark-scope-label = Alcance
+
+# --- LLM Wiki ---
+pref-wiki-title = Wiki LLM y memoria de investigación a largo plazo
+pref-wiki-desc = Guarda afirmaciones, conceptos, relaciones y evidencias reutilizables en una base independiente. El complemento no llama a ningún LLM por sí mismo.
+pref-wiki-permission-note = Actualizar la Wiki es un permiso distinto de editar elementos de Zotero. Reconstruir el índice de búsqueda no borra este conocimiento.
+pref-wiki-enabled-text = Activar Wiki LLM
+pref-wiki-enabled-sub = Expone las herramientas Wiki y calcula su ruta de recuperación.
+pref-wiki-auto-write-text = Permitir consolidación automática por IA
+pref-wiki-auto-write-sub = Desactivado por defecto; cada wiki_commit requiere confirmación local.
+pref-wiki-write-mode-label = Modo de escritura Wiki
+pref-wiki-write-mode-hint = Automático solo funciona si la consolidación automática también está activada.
+pref-wiki-write-mode-confirm = Confirmar cada cambio
+pref-wiki-write-mode-auto = Automático
+pref-wiki-shadow-text = Recuperación Wiki en modo Shadow
+pref-wiki-shadow-sub = Calcula candidatos Wiki sin alterar la clasificación existente.
+pref-wiki-min-score-label = Umbral de relevancia Wiki
+pref-wiki-min-score-hint = Sin calibrar en 2.0.0; mídalo primero con búsquedas reales de Zotero.
+pref-wiki-rrf-weight-label = Peso RRF de Wiki
+pref-wiki-rrf-weight-hint = Solo fuera de Shadow; 0 evita cambios en la clasificación.
+pref-wiki-timeout-label = Tiempo límite Wiki (ms)
+pref-wiki-timeout-hint = Si falla o expira, se vuelve automáticamente a Keyword + Semantic.

@@ -373,6 +373,9 @@ function bindPrefEvents() {
   // ============ Hybrid Search ============
   bindHybridSearchSettings(doc);
 
+  // ============ LLM Wiki ============
+  bindWikiSettings(doc);
+
   // ============ MinerU PDF Parsing ============
   bindMinerUSettings(doc);
 
@@ -392,6 +395,82 @@ function bindPrefEvents() {
  * 分块相关的两项只影响新建的索引，所以顺带对比索引里记录的分块签名，不一致时
  * 提示用户重建，而不是偷偷替他重建。
  */
+function bindWikiSettings(doc: Document) {
+  const prefix = "extensions.zotero.zotero-mcp-plugin.wiki.";
+  const ref = config.addonRef;
+  bindHtmlCheckbox(
+    doc,
+    `#zotero-prefpane-${ref}-wiki-enabled`,
+    prefix + "enabled",
+  );
+  bindHtmlCheckbox(
+    doc,
+    `#zotero-prefpane-${ref}-wiki-auto-write`,
+    prefix + "autoWrite",
+  );
+  bindHtmlSelect(
+    doc,
+    `#zotero-prefpane-${ref}-wiki-write-mode`,
+    prefix + "writeMode",
+  );
+  bindHtmlCheckbox(
+    doc,
+    `#zotero-prefpane-${ref}-wiki-shadow-mode`,
+    prefix + "shadowMode",
+  );
+
+  const bindNumber = (
+    selector: string,
+    key: string,
+    min: number,
+    max: number,
+    fallback: number,
+    storeAsString = false,
+  ) => {
+    const element = doc.querySelector(selector) as HTMLInputElement | null;
+    if (!element) return;
+    const stored = Zotero.Prefs.get(prefix + key, true);
+    const parsed = Number(stored);
+    element.value = String(Number.isFinite(parsed) ? parsed : fallback);
+    element.addEventListener("change", () => {
+      const input = Number(element.value);
+      const value = Number.isFinite(input)
+        ? Math.max(min, Math.min(max, input))
+        : fallback;
+      element.value = String(value);
+      Zotero.Prefs.set(
+        prefix + key,
+        storeAsString ? String(value) : Math.round(value),
+        true,
+      );
+    });
+  };
+
+  bindNumber(
+    `#zotero-prefpane-${ref}-wiki-min-score`,
+    "minScore",
+    0,
+    1,
+    0,
+    true,
+  );
+  bindNumber(
+    `#zotero-prefpane-${ref}-wiki-rrf-weight`,
+    "rrfWeight",
+    0,
+    10,
+    0,
+    true,
+  );
+  bindNumber(
+    `#zotero-prefpane-${ref}-wiki-timeout`,
+    "searchTimeoutMs",
+    100,
+    60000,
+    5000,
+  );
+}
+
 function bindHybridSearchSettings(doc: Document) {
   const P = "extensions.zotero.zotero-mcp-plugin.hybrid.";
   const ref = config.addonRef;
@@ -2184,6 +2263,10 @@ function bindSemanticStatsSettings(doc: Document) {
         clearChunkingSignatures: clearStoredChunkingSignatures,
         clearPaginationState: () =>
           addon.data.httpServer?.clearSemanticState(),
+        markWikiEvidencePending: async (generation) => {
+          const { getWikiStore } = await import('./wiki/wikiStore');
+          await getWikiStore().markResetPending(generation);
+        },
       });
 
       if (progressContainer) progressContainer.style.display = "none";

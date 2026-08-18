@@ -43,6 +43,13 @@ declare namespace _ZoteroTypes {
       "hybrid.keywordSearchTimeoutMs": number;
       "hybrid.gpuAccelerationEnabled": boolean;
       "hybrid.gpuPrecision": string;
+      "wiki.enabled": boolean;
+      "wiki.autoWrite": boolean;
+      "wiki.writeMode": string;
+      "wiki.shadowMode": boolean;
+      "wiki.minScore": string;
+      "wiki.rrfWeight": string;
+      "wiki.searchTimeoutMs": number;
       "semantic.enabled": boolean;
       "semantic.autoUpdate": boolean;
       "embedding.apiBase": string;

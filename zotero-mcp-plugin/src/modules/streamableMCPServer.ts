@@ -14,10 +14,7 @@ import {
   handleAddItemsToCollection,
   handleRemoveItemsFromCollection,
 } from './apiHandlers';
-import {
-  describeNonDocumentKey,
-  type ItemKeyKind,
-} from './itemKeyKind';
+import { describeNonDocumentKey, type ItemKeyKind } from './itemKeyKind';
 import { DEFAULT_FIELD_PARAMETERS } from './keyword/bm25f';
 import { UnifiedContentExtractor } from './unifiedContentExtractor';
 import { SmartAnnotationExtractor } from './smartAnnotationExtractor';
@@ -89,10 +86,7 @@ import {
   resolveScoreFloor,
 } from './hybridSearchSettings';
 import { expandChunkContext, runDocumentDeepDive } from './documentDeepDive';
-import {
-  isLexicalSearchTimeoutError,
-  runLexicalSearch,
-} from './lexicalSearch';
+import { isLexicalSearchTimeoutError, runLexicalSearch } from './lexicalSearch';
 import {
   isKeywordSearchGateError,
   isKeywordSearchUnavailableError,
@@ -128,6 +122,8 @@ import {
 } from './mcpTransport';
 import { sanitizeForPrivacy, scrubPathFields } from '../utils/privacy';
 import { config } from '../../package.json';
+import { getWikiService } from './wiki/wikiService';
+import { getWikiSettings } from './wiki/wikiSettings';
 
 export interface MCPRequest {
   jsonrpc: '2.0';
@@ -135,8 +131,6 @@ export interface MCPRequest {
   method: string;
   params?: any;
 }
-
-
 
 export interface MCPResponse {
   jsonrpc: '2.0';
@@ -157,8 +151,10 @@ export interface MCPNotification {
 }
 
 const PREF_WRITE_ENABLED = 'extensions.zotero.zotero-mcp-plugin.write.enabled';
-const PREF_WRITE_CONFIRM = 'extensions.zotero.zotero-mcp-plugin.write.confirmBeforeMutation';
-const PREF_ALLOW_FILE_IMPORT = 'extensions.zotero.zotero-mcp-plugin.write.allowFileImport';
+const PREF_WRITE_CONFIRM =
+  'extensions.zotero.zotero-mcp-plugin.write.confirmBeforeMutation';
+const PREF_ALLOW_FILE_IMPORT =
+  'extensions.zotero.zotero-mcp-plugin.write.allowFileImport';
 
 /**
  * 所有会改动 Zotero 数据的工具。
@@ -178,7 +174,6 @@ export const MUTATING_TOOL_NAMES = new Set<string>([
   'add_items_to_collection',
   'remove_items_from_collection',
 ]);
-
 
 /**
  * Trim a fused row to what a cached page can ever need.
@@ -200,9 +195,7 @@ function trimCachedEvidence(row: Record<string, any>): Record<string, any> {
         chunkId: chunk?.chunkId,
         matchedKeywords: chunk?.matchedKeywords,
         occurrences: chunk?.occurrences,
-        ...(chunk?.text
-          ? { text: truncateEvidence(String(chunk.text)) }
-          : {}),
+        ...(chunk?.text ? { text: truncateEvidence(String(chunk.text)) } : {}),
       }));
   }
   if (!Array.isArray(row.matchedChunks)) return row;
@@ -232,7 +225,10 @@ function trimCachedEvidence(row: Record<string, any>): Record<string, any> {
  */
 function describeScope(scope: CollectionScope): string {
   if (scope.searchScope === 'library') return 'library';
-  return `collections:${scope.collections.map((c) => c.key).sort().join(',')}`;
+  return `collections:${scope.collections
+    .map((c) => c.key)
+    .sort()
+    .join(',')}`;
 }
 
 /** Everything about one find_similar run that stays the same across its pages. */
@@ -261,6 +257,7 @@ interface HybridSearchSnapshot {
   appliedMinScore: number;
   appliedKeywordMinScore?: number;
   appliedSemanticMinScore?: number;
+  appliedWikiMinScore?: number;
   libraryID: number;
   /** True when a retrieval branch failed or timed out during this search. */
   branchFailed: boolean;
@@ -287,7 +284,10 @@ export function isWriteEnabled(): boolean {
 
 function assertWriteEnabled(toolName: string): void {
   if (!isWriteEnabled()) {
-    ztoolkit.log(`[StreamableMCP] Blocked ${toolName}: write operations disabled`, 'warn');
+    ztoolkit.log(
+      `[StreamableMCP] Blocked ${toolName}: write operations disabled`,
+      'warn',
+    );
     throw new Error(WRITE_DISABLED_MESSAGE);
   }
 }
@@ -318,9 +318,11 @@ function describeMutation(toolName: string, args: any): string {
   if (args?.itemKey) parts.push(`item: ${String(args.itemKey)}`);
   if (args?.noteKey) parts.push(`note: ${String(args.noteKey)}`);
   if (args?.parentKey) parts.push(`parent: ${String(args.parentKey)}`);
-  if (args?.collectionKey) parts.push(`collection: ${String(args.collectionKey)}`);
+  if (args?.collectionKey)
+    parts.push(`collection: ${String(args.collectionKey)}`);
   if (args?.name) parts.push(`name: ${String(args.name)}`);
-  if (Array.isArray(args?.itemKeys)) parts.push(`items: ${args.itemKeys.length}`);
+  if (Array.isArray(args?.itemKeys))
+    parts.push(`items: ${args.itemKeys.length}`);
   if (Array.isArray(args?.tags)) parts.push(`tags: ${args.tags.length}`);
   return parts.length > 0 ? parts.join(', ') : 'no additional parameters';
 }
@@ -332,7 +334,10 @@ function describeMutation(toolName: string, args: any): string {
  * 弹一个模态确认框；用户拒绝或没有可用主窗口时抛错，让工具调用失败而不是
  * 无声地改库。
  */
-async function assertMutationConfirmed(toolName: string, args: any): Promise<void> {
+async function assertMutationConfirmed(
+  toolName: string,
+  args: any,
+): Promise<void> {
   if (!isMutationConfirmationRequired()) return;
 
   let win: any = null;
@@ -362,7 +367,10 @@ ${describeMutation(toolName, args)}
 Allow this change?`,
     );
   } catch (error) {
-    ztoolkit.log(`[StreamableMCP] Mutation confirmation dialog failed: ${error}`, 'error');
+    ztoolkit.log(
+      `[StreamableMCP] Mutation confirmation dialog failed: ${error}`,
+      'error',
+    );
     throw new Error(
       `Could not display the write confirmation dialog required by write.confirmBeforeMutation: ${error}`,
     );
@@ -372,6 +380,25 @@ Allow this change?`,
     ztoolkit.log(`[StreamableMCP] User declined mutation: ${toolName}`, 'warn');
     throw new Error(`The user declined the requested ${toolName} operation.`);
   }
+}
+
+async function assertWikiCommitConfirmed(args: any): Promise<void> {
+  const settings = getWikiSettings();
+  if (!settings.enabled)
+    throw new Error('LLM Wiki is disabled in plugin preferences.');
+  if (settings.autoWrite && settings.writeMode === 'auto') return;
+  const win = Zotero.getMainWindow?.();
+  if (!win) {
+    throw new Error(
+      'Wiki confirmation is required, but no Zotero window is available.',
+    );
+  }
+  const approved = Services.prompt.confirm(
+    win as any,
+    'Zotero MCP LLM Wiki',
+    `An MCP client wants to update the independent long-term Wiki database.\n\nControlled actions: ${Array.isArray(args?.actions) ? args.actions.length : 0}\nThis does not modify Zotero items.\n\nAllow this Wiki update?`,
+  );
+  if (!approved) throw new Error('The user declined the Wiki database update.');
 }
 
 /**
@@ -390,7 +417,10 @@ export class StreamableMCPServer {
     // 与 manifest.json / 设置页脚同源，避免三处版本号各说各话。
     version: config.addonVersion,
   };
-  private clientSessions: Map<string, { initTime: Date; lastActivity: Date; clientInfo?: any }> = new Map();
+  private clientSessions: Map<
+    string,
+    { initTime: Date; lastActivity: Date; clientInfo?: any }
+  > = new Map();
   /**
    * Paging state for hybrid_search: one entry per recent search, holding the
    * complete list of documents that cleared the relevance threshold. Page 2
@@ -457,7 +487,12 @@ export class StreamableMCPServer {
   async handleMCPRequest(
     requestBody: string,
     requestId = 0,
-  ): Promise<{ status: number; statusText: string; headers: any; body: string }> {
+  ): Promise<{
+    status: number;
+    statusText: string;
+    headers: any;
+    body: string;
+  }> {
     let parsedRequest: unknown;
 
     try {
@@ -478,47 +513,59 @@ export class StreamableMCPServer {
         id: null,
         error: {
           code: -32700,
-          message: 'Parse error'
-        }
+          message: 'Parse error',
+        },
       };
 
       return {
         status: 400,
-        statusText: "Bad Request",
-        headers: { "Content-Type": "application/json; charset=utf-8" },
-        body: this.serializeResponse(errorResponse)
+        statusText: 'Bad Request',
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        body: this.serializeResponse(errorResponse),
       };
     }
 
     try {
       if (Array.isArray(parsedRequest)) {
-        const batchError = this.createError(null, -32600, 'Invalid Request: batch requests are not supported');
+        const batchError = this.createError(
+          null,
+          -32600,
+          'Invalid Request: batch requests are not supported',
+        );
         return {
           status: 400,
-          statusText: "Bad Request",
-          headers: { "Content-Type": "application/json; charset=utf-8" },
-          body: this.serializeResponse(batchError)
+          statusText: 'Bad Request',
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          body: this.serializeResponse(batchError),
         };
       }
 
       if (!parsedRequest || typeof parsedRequest !== 'object') {
-        const invalidRequest = this.createError(null, -32600, 'Invalid Request');
+        const invalidRequest = this.createError(
+          null,
+          -32600,
+          'Invalid Request',
+        );
         return {
           status: 400,
-          statusText: "Bad Request",
-          headers: { "Content-Type": "application/json; charset=utf-8" },
-          body: this.serializeResponse(invalidRequest)
+          statusText: 'Bad Request',
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          body: this.serializeResponse(invalidRequest),
         };
       }
 
       const request = parsedRequest as MCPRequest;
       if (typeof request.method !== 'string' || !request.method.trim()) {
-        const invalidRequest = this.createError(null, -32600, 'Invalid Request: method is required');
+        const invalidRequest = this.createError(
+          null,
+          -32600,
+          'Invalid Request: method is required',
+        );
         return {
           status: 400,
-          statusText: "Bad Request",
-          headers: { "Content-Type": "application/json; charset=utf-8" },
-          body: this.serializeResponse(invalidRequest)
+          statusText: 'Bad Request',
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          body: this.serializeResponse(invalidRequest),
         };
       }
 
@@ -531,9 +578,9 @@ export class StreamableMCPServer {
       if (response === null) {
         return {
           status: 202,
-          statusText: "Accepted",
-          headers: { "Content-Type": "application/json; charset=utf-8" },
-          body: ''
+          statusText: 'Accepted',
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          body: '',
         };
       }
 
@@ -543,28 +590,30 @@ export class StreamableMCPServer {
       );
       return {
         status,
-        statusText: status === 400 ? "Bad Request" : "OK",
-        headers: { "Content-Type": "application/json; charset=utf-8" },
-        body: this.serializeResponse(response)
+        statusText: status === 400 ? 'Bad Request' : 'OK',
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        body: this.serializeResponse(response),
       };
-      
     } catch (error) {
-      ztoolkit.log(`[StreamableMCP] #${requestId} Error handling request: ${error}`, 'error');
+      ztoolkit.log(
+        `[StreamableMCP] #${requestId} Error handling request: ${error}`,
+        'error',
+      );
 
       const errorResponse: MCPResponse = {
         jsonrpc: '2.0',
         id: null,
         error: {
           code: -32603,
-          message: 'Internal error'
-        }
+          message: 'Internal error',
+        },
       };
-      
+
       return {
         status: 400,
-        statusText: "Bad Request",
-        headers: { "Content-Type": "application/json; charset=utf-8" },
-        body: this.serializeResponse(errorResponse)
+        statusText: 'Bad Request',
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        body: this.serializeResponse(errorResponse),
       };
     }
   }
@@ -572,7 +621,9 @@ export class StreamableMCPServer {
   /**
    * Process individual MCP requests
    */
-  private async processRequest(request: MCPRequest): Promise<MCPResponse | null> {
+  private async processRequest(
+    request: MCPRequest,
+  ): Promise<MCPResponse | null> {
     const isNotification = this.isNotificationRequest(request);
 
     if (isNotification) {
@@ -584,10 +635,16 @@ export class StreamableMCPServer {
           return null;
         default:
           if (request.method.startsWith('notifications/')) {
-            ztoolkit.log(`[StreamableMCP] Ignoring unsupported notification: ${request.method}`);
+            ztoolkit.log(
+              `[StreamableMCP] Ignoring unsupported notification: ${request.method}`,
+            );
             return null;
           }
-          return this.createError(null, -32600, `Invalid Request: id is required for method ${request.method}`);
+          return this.createError(
+            null,
+            -32600,
+            `Invalid Request: id is required for method ${request.method}`,
+          );
       }
     }
 
@@ -618,10 +675,16 @@ export class StreamableMCPServer {
           return this.handlePing(request);
 
         default:
-          return this.createError(request.id ?? null, -32601, `Method not found: ${request.method}`);
+          return this.createError(
+            request.id ?? null,
+            -32601,
+            `Method not found: ${request.method}`,
+          );
       }
     } catch (error) {
-      ztoolkit.log(`[StreamableMCP] Error processing ${request.method}: ${error}`);
+      ztoolkit.log(
+        `[StreamableMCP] Error processing ${request.method}: ${error}`,
+      );
       return this.createError(request.id ?? null, -32603, 'Internal error');
     }
   }
@@ -634,7 +697,10 @@ export class StreamableMCPServer {
     // - 缺失 -> 按服务器最新支持版本处理。
     // 只有 protocolVersion 类型非法（不是字符串）才算 invalid params。
     const requestedVersion = request.params?.protocolVersion;
-    if (requestedVersion !== undefined && typeof requestedVersion !== 'string') {
+    if (
+      requestedVersion !== undefined &&
+      typeof requestedVersion !== 'string'
+    ) {
       return this.createError(
         request.id ?? null,
         -32602,
@@ -644,7 +710,10 @@ export class StreamableMCPServer {
     }
 
     const negotiatedVersion = negotiateProtocolVersion(requestedVersion);
-    if (requestedVersion !== undefined && negotiatedVersion !== requestedVersion) {
+    if (
+      requestedVersion !== undefined &&
+      negotiatedVersion !== requestedVersion
+    ) {
       ztoolkit.log(
         `[StreamableMCP] Client requested unsupported protocol version ${requestedVersion}; offering ${negotiatedVersion} instead`,
         'warn',
@@ -654,16 +723,18 @@ export class StreamableMCPServer {
     // Extract client info from initialize request
     const clientInfo = request.params?.clientInfo || {};
     const sessionId = this.generateSessionId();
-    
+
     // Store session info
     this.clientSessions.set(sessionId, {
       initTime: new Date(),
       lastActivity: new Date(),
-      clientInfo
+      clientInfo,
     });
-    
-    ztoolkit.log(`[StreamableMCP] Client initialized with session: ${sessionId}, client: ${clientInfo.name || 'unknown'}, protocol: ${negotiatedVersion}`);
-    
+
+    ztoolkit.log(
+      `[StreamableMCP] Client initialized with session: ${sessionId}, client: ${clientInfo.name || 'unknown'}, protocol: ${negotiatedVersion}`,
+    );
+
     // Create standard MCP initialize response (no custom fields)
     return this.createResponse(request.id ?? null, {
       protocolVersion: negotiatedVersion,
@@ -717,7 +788,12 @@ Nothing in this server returns a whole document in one response. Every reading t
   }
 
   private generateSessionId(): string {
-    return 'mcp-session-' + Date.now().toString(36) + '-' + Math.random().toString(36).substr(2, 9);
+    return (
+      'mcp-session-' +
+      Date.now().toString(36) +
+      '-' +
+      Math.random().toString(36).substr(2, 9)
+    );
   }
 
   private handleResourcesList(request: MCPRequest): MCPResponse {
@@ -748,9 +824,10 @@ Nothing in this server returns a whole document in one response. Every reading t
     return 200;
   }
 
-
   private handleToolsList(request: MCPRequest): MCPResponse {
-    return this.createResponse(request.id ?? null, { tools: this.getAvailableTools() });
+    return this.createResponse(request.id ?? null, {
+      tools: this.getAvailableTools(),
+    });
   }
 
   /**
@@ -774,6 +851,7 @@ Nothing in this server returns a whole document in one response. Every reading t
           'extensions.zotero.zotero-mcp-plugin.semantic.enabled',
           true,
         ) !== false,
+      wikiEnabled: getWikiSettings().enabled,
       writeEnabled: isWriteEnabled(),
       mutatingToolNames: MUTATING_TOOL_NAMES,
     });
@@ -791,7 +869,7 @@ Nothing in this server returns a whole document in one response. Every reading t
       }
 
       let result;
-      
+
       switch (name) {
         case 'get_libraries':
           result = await this.callGetLibraries(args);
@@ -806,7 +884,9 @@ Nothing in this server returns a whole document in one response. Every reading t
 
         case 'search_library':
           if (args?.fulltext) {
-            throw new Error('search_library.fulltext is disabled. Use hybrid_search first, then search_fulltext with one matched itemKey at a time');
+            throw new Error(
+              'search_library.fulltext is disabled. Use hybrid_search first, then search_fulltext with one matched itemKey at a time',
+            );
           }
           result = await this.callSearchLibrary(args);
           break;
@@ -828,7 +908,9 @@ Nothing in this server returns a whole document in one response. Every reading t
         case 'search_annotations':
           // q is optional when colors or tags filters are provided
           if (!args?.q && !args?.colors && !args?.tags) {
-            throw new Error('Either q (query), colors, or tags filter is required');
+            throw new Error(
+              'Either q (query), colors, or tags filter is required',
+            );
           }
           result = await this.callSearchAnnotations(args);
           break;
@@ -847,7 +929,9 @@ Nothing in this server returns a whole document in one response. Every reading t
             !args?.annotationId &&
             !args?.annotationIds
           ) {
-            throw new Error('One of itemKeys, itemKey, annotationId or annotationIds is required');
+            throw new Error(
+              'One of itemKeys, itemKey, annotationId or annotationIds is required',
+            );
           }
           result = await this.callGetAnnotations(args);
           break;
@@ -855,7 +939,7 @@ Nothing in this server returns a whole document in one response. Every reading t
         case 'get_attachment_text':
           if (!args?.itemKey) {
             throw new Error(
-              'itemKey is required. Call with itemKey alone to see the item\'s attachments, then again with the attachmentKey you want to read.',
+              "itemKey is required. Call with itemKey alone to see the item's attachments, then again with the attachmentKey you want to read.",
             );
           }
           result = await this.callGetAttachmentText(args);
@@ -883,9 +967,14 @@ Nothing in this server returns a whole document in one response. Every reading t
           break;
 
         case 'create_collection': {
-          const writeEnabledCC = Zotero.Prefs.get('extensions.zotero.zotero-mcp-plugin.write.enabled', true);
+          const writeEnabledCC = Zotero.Prefs.get(
+            'extensions.zotero.zotero-mcp-plugin.write.enabled',
+            true,
+          );
           if (writeEnabledCC !== true) {
-            throw new Error('Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.');
+            throw new Error(
+              'Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.',
+            );
           }
           if (!args?.name) {
             throw new Error('name is required');
@@ -895,9 +984,14 @@ Nothing in this server returns a whole document in one response. Every reading t
         }
 
         case 'update_collection': {
-          const writeEnabledUC = Zotero.Prefs.get('extensions.zotero.zotero-mcp-plugin.write.enabled', true);
+          const writeEnabledUC = Zotero.Prefs.get(
+            'extensions.zotero.zotero-mcp-plugin.write.enabled',
+            true,
+          );
           if (writeEnabledUC !== true) {
-            throw new Error('Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.');
+            throw new Error(
+              'Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.',
+            );
           }
           if (!args?.collectionKey) {
             throw new Error('collectionKey is required');
@@ -907,9 +1001,14 @@ Nothing in this server returns a whole document in one response. Every reading t
         }
 
         case 'delete_collection': {
-          const writeEnabledDC = Zotero.Prefs.get('extensions.zotero.zotero-mcp-plugin.write.enabled', true);
+          const writeEnabledDC = Zotero.Prefs.get(
+            'extensions.zotero.zotero-mcp-plugin.write.enabled',
+            true,
+          );
           if (writeEnabledDC !== true) {
-            throw new Error('Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.');
+            throw new Error(
+              'Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.',
+            );
           }
           if (!args?.collectionKey) {
             throw new Error('collectionKey is required');
@@ -919,34 +1018,54 @@ Nothing in this server returns a whole document in one response. Every reading t
         }
 
         case 'add_items_to_collection': {
-          const writeEnabledAI = Zotero.Prefs.get('extensions.zotero.zotero-mcp-plugin.write.enabled', true);
+          const writeEnabledAI = Zotero.Prefs.get(
+            'extensions.zotero.zotero-mcp-plugin.write.enabled',
+            true,
+          );
           if (writeEnabledAI !== true) {
-            throw new Error('Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.');
+            throw new Error(
+              'Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.',
+            );
           }
           if (!args?.collectionKey) {
             throw new Error('collectionKey is required');
           }
           const addKeys = this.coerceStringArray(args?.itemKeys);
           if (!addKeys || addKeys.length === 0) {
-            throw new Error(`itemKeys array is required, e.g. ["ABCD1234"]. Received: ${JSON.stringify(args?.itemKeys)}`);
+            throw new Error(
+              `itemKeys array is required, e.g. ["ABCD1234"]. Received: ${JSON.stringify(args?.itemKeys)}`,
+            );
           }
-          result = await this.callAddItemsToCollection({ ...args, itemKeys: addKeys });
+          result = await this.callAddItemsToCollection({
+            ...args,
+            itemKeys: addKeys,
+          });
           break;
         }
 
         case 'remove_items_from_collection': {
-          const writeEnabledRI = Zotero.Prefs.get('extensions.zotero.zotero-mcp-plugin.write.enabled', true);
+          const writeEnabledRI = Zotero.Prefs.get(
+            'extensions.zotero.zotero-mcp-plugin.write.enabled',
+            true,
+          );
           if (writeEnabledRI !== true) {
-            throw new Error('Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.');
+            throw new Error(
+              'Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.',
+            );
           }
           if (!args?.collectionKey) {
             throw new Error('collectionKey is required');
           }
           const removeKeys = this.coerceStringArray(args?.itemKeys);
           if (!removeKeys || removeKeys.length === 0) {
-            throw new Error(`itemKeys array is required, e.g. ["ABCD1234"]. Received: ${JSON.stringify(args?.itemKeys)}`);
+            throw new Error(
+              `itemKeys array is required, e.g. ["ABCD1234"]. Received: ${JSON.stringify(args?.itemKeys)}`,
+            );
           }
-          result = await this.callRemoveItemsFromCollection({ ...args, itemKeys: removeKeys });
+          result = await this.callRemoveItemsFromCollection({
+            ...args,
+            itemKeys: removeKeys,
+          });
           break;
         }
 
@@ -992,15 +1111,88 @@ Nothing in this server returns a whole document in one response. Every reading t
           result = await this.callGetItemAbstract(args);
           break;
 
+        case 'wiki_prepare_update': {
+          if (!args?.query?.trim()) throw new Error('query is required');
+          const libraryID = args.libraryID ?? Zotero.Libraries.userLibraryID;
+          result = await getWikiService().prepareUpdate({
+            libraryID,
+            query: args.query,
+            limit: args.limit,
+            proposedPageTitles: this.coerceStringArray(args.proposedPageTitles),
+          });
+          break;
+        }
+        case 'wiki_commit': {
+          await assertWikiCommitConfirmed(args);
+          const libraryID = args.libraryID ?? Zotero.Libraries.userLibraryID;
+          result = await getWikiService().commit({
+            libraryID,
+            userInitiated: true,
+            prepareToken: args.prepareToken,
+            actions: args.actions,
+          });
+          break;
+        }
+        case 'wiki_search': {
+          if (!args?.query?.trim()) throw new Error('query is required');
+          const libraryID = args.libraryID ?? Zotero.Libraries.userLibraryID;
+          result = await getWikiService().search({
+            libraryID,
+            query: args.query,
+            keywords: this.coerceStringArray(args.keywords),
+            itemKeys: this.coerceStringArray(args.itemKeys),
+            minScore: args.minScore,
+            limit: args.limit,
+          });
+          break;
+        }
+        case 'wiki_get_page':
+          if (!Number.isInteger(args?.pageId))
+            throw new Error('pageId is required');
+          result = await getWikiService().getPage(args.pageId);
+          break;
+        case 'wiki_get_claim':
+          if (!Number.isInteger(args?.claimId))
+            throw new Error('claimId is required');
+          result = await getWikiService().getStore().getClaim(args.claimId);
+          break;
+        case 'wiki_status':
+          result = await getWikiService().getStore().getStatus(args?.libraryID);
+          break;
+        case 'wiki_export':
+          result = await getWikiService().exportMarkdown(
+            args?.libraryID ?? Zotero.Libraries.userLibraryID,
+          );
+          break;
+        case 'wiki_reverify':
+          result = await getWikiService().reverify(args?.libraryID);
+          break;
+        case 'wiki_build_from_paper':
+          result = await getWikiService().buildFromPaper({
+            libraryID: args?.libraryID ?? Zotero.Libraries.userLibraryID,
+            userRequested: args?.userRequested === true,
+            itemKey: args?.itemKey,
+            doi: args?.doi,
+            url: args?.url,
+            title: args?.title,
+            includeAllChunks: args?.includeAllChunks === true,
+          });
+          break;
+
         // Semantic Search Tools
         case 'semantic_search':
         case 'keyword_search':
         case 'get_document_chunks':
         case 'find_similar':
         case 'semantic_status': {
-          const semEnabled = Zotero.Prefs.get('extensions.zotero.zotero-mcp-plugin.semantic.enabled', true);
+          const semEnabled = Zotero.Prefs.get(
+            'extensions.zotero.zotero-mcp-plugin.semantic.enabled',
+            true,
+          );
           if (semEnabled === false) {
-            throw new Error('Semantic search is disabled. Enable it in Zotero MCP Plugin preferences.');
+            throw new Error(
+              'Semantic search is disabled. Enable it in Zotero MCP Plugin preferences.',
+            );
           }
           if (name === 'semantic_search') {
             // A cursor names the search it continues, so the query is required
@@ -1040,7 +1232,10 @@ Nothing in this server returns a whole document in one response. Every reading t
                   'itemKey is required (or pass cursor to continue a previous find_similar)',
                 );
               }
-              if (!Array.isArray(args?.chunkIds) || args.chunkIds.length === 0) {
+              if (
+                !Array.isArray(args?.chunkIds) ||
+                args.chunkIds.length === 0
+              ) {
                 throw new Error(
                   'chunkIds is required: pick the representative passages of this paper with search_fulltext first, then pass their chunkIds here. find_similar does not choose them for you.',
                 );
@@ -1055,9 +1250,14 @@ Nothing in this server returns a whole document in one response. Every reading t
 
         // Write Tools
         case 'write_note': {
-          const writeEnabled = Zotero.Prefs.get('extensions.zotero.zotero-mcp-plugin.write.enabled', true);
+          const writeEnabled = Zotero.Prefs.get(
+            'extensions.zotero.zotero-mcp-plugin.write.enabled',
+            true,
+          );
           if (writeEnabled !== true) {
-            throw new Error('Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.');
+            throw new Error(
+              'Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.',
+            );
           }
           if (!args?.action || !args?.content) {
             throw new Error('action and content are required');
@@ -1067,9 +1267,14 @@ Nothing in this server returns a whole document in one response. Every reading t
         }
 
         case 'write_tag': {
-          const writeEnabled2 = Zotero.Prefs.get('extensions.zotero.zotero-mcp-plugin.write.enabled', true);
+          const writeEnabled2 = Zotero.Prefs.get(
+            'extensions.zotero.zotero-mcp-plugin.write.enabled',
+            true,
+          );
           if (writeEnabled2 !== true) {
-            throw new Error('Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.');
+            throw new Error(
+              'Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.',
+            );
           }
           if (!args?.action || !args?.itemKey || !args?.tags) {
             throw new Error('action, itemKey, and tags are required');
@@ -1079,9 +1284,14 @@ Nothing in this server returns a whole document in one response. Every reading t
         }
 
         case 'write_metadata': {
-          const writeEnabled3 = Zotero.Prefs.get('extensions.zotero.zotero-mcp-plugin.write.enabled', true);
+          const writeEnabled3 = Zotero.Prefs.get(
+            'extensions.zotero.zotero-mcp-plugin.write.enabled',
+            true,
+          );
           if (writeEnabled3 !== true) {
-            throw new Error('Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.');
+            throw new Error(
+              'Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.',
+            );
           }
           if (!args?.itemKey) {
             throw new Error('itemKey is required');
@@ -1094,9 +1304,14 @@ Nothing in this server returns a whole document in one response. Every reading t
         }
 
         case 'write_item': {
-          const writeEnabled4 = Zotero.Prefs.get('extensions.zotero.zotero-mcp-plugin.write.enabled', true);
+          const writeEnabled4 = Zotero.Prefs.get(
+            'extensions.zotero.zotero-mcp-plugin.write.enabled',
+            true,
+          );
           if (writeEnabled4 !== true) {
-            throw new Error('Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.');
+            throw new Error(
+              'Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.',
+            );
           }
           if (!args?.action) {
             throw new Error('action is required');
@@ -1128,16 +1343,21 @@ Nothing in this server returns a whole document in one response. Every reading t
       return this.createResponse(request.id ?? null, {
         content: [
           {
-            type: "text",
-            text: compactJson.length > 100000 ? compactJson : JSON.stringify(result, null, 2)
-          }
-        ]
+            type: 'text',
+            text:
+              compactJson.length > 100000
+                ? compactJson
+                : JSON.stringify(result, null, 2),
+          },
+        ],
       });
-
     } catch (error) {
       ztoolkit.log(`[StreamableMCP] Tool call error for ${name}: ${error}`);
-      return this.createError(request.id ?? null, -32603, 
-        `Error executing ${name}: ${error instanceof Error ? error.message : String(error)}`);
+      return this.createError(
+        request.id ?? null,
+        -32603,
+        `Error executing ${name}: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -1170,26 +1390,35 @@ Nothing in this server returns a whole document in one response. Every reading t
     // Apply mode-based defaults before creating search params
     const effectiveMode = args.mode || MCPSettingsService.get('content.mode');
     const modeConfig = this.getSearchModeConfiguration(effectiveMode);
-    
+
     // Apply mode defaults if not explicitly provided
     const processedArgs = {
       ...args,
-      limit: args.limit || modeConfig.limit
+      limit: args.limit || modeConfig.limit,
     };
-    
+
     const searchParams = new URLSearchParams();
     for (const [key, value] of Object.entries(processedArgs)) {
       if (value !== undefined && value !== null) {
-        if (key !== 'mode') { // Don't pass mode to API
+        if (key !== 'mode') {
+          // Don't pass mode to API
           searchParams.append(key, String(value));
         }
       }
     }
-    
+
     const SEARCH_TIMEOUT_MS = 25000; // 25 秒超时，低于 keepAlive 的 30 秒
     const searchPromise = handleSearch(searchParams);
     const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error("Search timed out after 25 seconds. Try narrowing your query or reducing the limit.")), SEARCH_TIMEOUT_MS);
+      setTimeout(
+        () =>
+          reject(
+            new Error(
+              'Search timed out after 25 seconds. Try narrowing your query or reducing the limit.',
+            ),
+          ),
+        SEARCH_TIMEOUT_MS,
+      );
     });
     const response = await Promise.race([searchPromise, timeoutPromise]);
     const result = response.body ? JSON.parse(response.body) : response;
@@ -1199,21 +1428,21 @@ Nothing in this server returns a whole document in one response. Every reading t
           `Keyword metadata search failed with HTTP ${response.status}`,
       );
     }
-    
+
     // Add mode information to metadata
     if (result && typeof result === 'object') {
       result.metadata = {
         ...result.metadata,
         mode: effectiveMode,
-        appliedModeConfig: modeConfig
+        appliedModeConfig: modeConfig,
       };
-      
+
       // Remove any unwanted content array if it's empty
       if (Array.isArray(result.content) && result.content.length === 0) {
         delete result.content;
       }
     }
-    
+
     return result;
   }
 
@@ -1221,6 +1450,7 @@ Nothing in this server returns a whole document in one response. Every reading t
     // The user's preferences are ceilings, not defaults: the caller may ask for
     // fewer documents or a stricter threshold, never for more or looser.
     const settings = getHybridSearchSettings();
+    const wikiSettings = getWikiSettings();
     const documentCap = resolveResultCap(args.topK, settings.maxDocuments);
     // Two independent floors, each on its own branch's scale. resolveScoreFloor
     // enforces the same "the caller may only be stricter" rule on both, so an
@@ -1233,11 +1463,14 @@ Nothing in this server returns a whole document in one response. Every reading t
       args.minSemanticScore,
       settings.semanticMinScore,
     );
+    const wikiFloor = resolveScoreFloor(
+      args.wikiMinScore,
+      wikiSettings.minScore,
+    );
     // topK is only the page size; retrieval enumerates every available match.
     const topK = documentCap.value;
     const language = args.language ?? 'all';
-    const libraryID =
-      args.libraryID ?? Zotero.Libraries.userLibraryID;
+    const libraryID = args.libraryID ?? Zotero.Libraries.userLibraryID;
 
     // CONTINUATION: a cursor names one already-ranked, already-thresholded
     // result set. Serve the next window of it and return; running the search
@@ -1255,6 +1488,7 @@ Nothing in this server returns a whole document in one response. Every reading t
         requestedPageSize: args.topK === undefined ? undefined : topK,
         keywordFloor: keywordFloor.value,
         semanticFloor: semanticFloor.value,
+        wikiFloor: wikiFloor.value,
         language,
         libraryID,
       });
@@ -1272,7 +1506,9 @@ Nothing in this server returns a whole document in one response. Every reading t
     // both of them narrow their candidates instead of scoring the library and
     // discarding afterwards.
     const uncertainCollections = Array.isArray(args.uncertainCollectionKeys)
-      ? args.uncertainCollectionKeys.map((key: unknown) => String(key)).filter(Boolean)
+      ? args.uncertainCollectionKeys
+          .map((key: unknown) => String(key))
+          .filter(Boolean)
       : [];
     const scope = this.resolveHybridScope(args.collectionKeys, libraryID);
     const scopeItemKeys =
@@ -1305,6 +1541,10 @@ Nothing in this server returns a whole document in one response. Every reading t
       // an argument default silently overrides is not a preference.
       keywordWeight: args.keywordWeight ?? settings.keywordRrfWeight,
       semanticWeight: args.semanticWeight ?? settings.semanticRrfWeight,
+      wikiWeight: wikiSettings.enabled ? wikiSettings.rrfWeight : 0,
+      wikiMinScore: wikiFloor.value,
+      wikiShadowMode: wikiSettings.enabled && wikiSettings.shadowMode,
+      wikiSearchTimeoutMs: wikiSettings.searchTimeoutMs,
       keywordMinScore: keywordFloor.value,
       semanticMinScore: semanticFloor.value,
       keywordSearchTimeoutMs: settings.keywordSearchTimeoutMs,
@@ -1322,10 +1562,11 @@ Nothing in this server returns a whole document in one response. Every reading t
     const lexicalDeadlineAt =
       lexicalStartedAt +
       Math.max(1, Math.floor(settings.keywordSearchTimeoutMs * 0.9));
-    const semanticEnabled = Zotero.Prefs.get(
-      'extensions.zotero.zotero-mcp-plugin.semantic.enabled',
-      true,
-    ) !== false;
+    const semanticEnabled =
+      Zotero.Prefs.get(
+        'extensions.zotero.zotero-mcp-plugin.semantic.enabled',
+        true,
+      ) !== false;
 
     // Both branches must be able to stop, not just be stopped waiting for:
     // an abandoned embedding request or library scan would otherwise keep
@@ -1334,11 +1575,14 @@ Nothing in this server returns a whole document in one response. Every reading t
       typeof AbortController !== 'undefined' ? new AbortController() : null;
     // Filled in by the vector scan so the response can report how much work
     // the collection scope actually saved.
-    const semanticScanStats: { chunksScanned?: number; chunksMatched?: number } = {};
+    const semanticScanStats: {
+      chunksScanned?: number;
+      chunksMatched?: number;
+    } = {};
     let lexicalCancelled = false;
-    let lexicalDiagnostics: Awaited<
-      ReturnType<typeof runLexicalSearch>
-    >['diagnostics'] | null = null;
+    let lexicalDiagnostics:
+      | Awaited<ReturnType<typeof runLexicalSearch>>['diagnostics']
+      | null = null;
 
     const searchResult = await runHybridSearch(
       { ...options, query: args.query },
@@ -1365,7 +1609,9 @@ Nothing in this server returns a whole document in one response. Every reading t
         },
         semanticSearch: async (): Promise<SemanticSearchItem[]> => {
           if (!semanticEnabled) {
-            throw new Error('semantic search is disabled in plugin preferences');
+            throw new Error(
+              'semantic search is disabled in plugin preferences',
+            );
           }
           const semanticService = getSemanticSearchService();
           return semanticService.search(args.query, {
@@ -1381,7 +1627,8 @@ Nothing in this server returns a whole document in one response. Every reading t
             // Restricting the vector scan itself: the SQL only reads chunks
             // belonging to these items, so out-of-scope chunks are never
             // dequantised and never have a similarity computed for them.
-            itemKeys: scope.searchScope === 'collections' ? scope.itemKeys : undefined,
+            itemKeys:
+              scope.searchScope === 'collections' ? scope.itemKeys : undefined,
             vectorScanTimeoutMs: settings.vectorScanTimeoutMs,
             signal: semanticAbort?.signal,
             stats: semanticScanStats,
@@ -1390,6 +1637,24 @@ Nothing in this server returns a whole document in one response. Every reading t
         cancelSemanticSearch: () => {
           semanticAbort?.abort();
         },
+        ...(wikiSettings.enabled
+          ? {
+              wikiSearch: async () => {
+                const wiki = await getWikiService().search({
+                  libraryID,
+                  query: args.query,
+                  keywords: lexicalKeywords,
+                  itemKeys:
+                    scope.searchScope === 'collections'
+                      ? scope.itemKeys
+                      : undefined,
+                  minScore: 0,
+                  limit: Math.max(50, topK * 5),
+                });
+                return wiki.documents;
+              },
+            }
+          : {}),
       },
     );
     // Nothing else is waiting on these branches once fusion is done.
@@ -1488,6 +1753,7 @@ Nothing in this server returns a whole document in one response. Every reading t
       appliedMinScore: 0,
       appliedKeywordMinScore: searchResult.appliedKeywordMinScore,
       appliedSemanticMinScore: searchResult.appliedSemanticMinScore,
+      appliedWikiMinScore: wikiFloor.value,
       libraryID,
       // searchResult.warnings carries branch-level failures ("Semantic search
       // unavailable: ..."). An empty result set means something completely
@@ -1506,7 +1772,9 @@ Nothing in this server returns a whole document in one response. Every reading t
             : 'ok',
         fusion: 'independent_thresholds_weighted_rrf',
         fusionNote:
-          'Each branch was filtered on its OWN scale (normalised BM25F for keyword, cosine for semantic) and the survivors were unioned. Ranking is weighted Reciprocal Rank Fusion over the rank each document reached WITHIN each branch that admitted it: score = keywordWeight/(rrfK + keywordRank) + semanticWeight/(rrfK + semanticRank), an absent branch contributing nothing. Clearing EITHER threshold is enough to appear here - a branch can admit a document but never veto it - and no threshold is applied to the RRF score itself. Read `score` as position only; read normalizedKeywordScore and normalizedSemanticScore for how relevant a document actually is on each branch scale.',
+          wikiSettings.enabled && wikiSettings.shadowMode
+            ? 'Keyword and semantic branches keep their existing independent thresholds and Weighted RRF ranking. The Wiki route was independently filtered by normalizedWikiScore and measured in Shadow Mode, so it did not create, remove, or reorder any result. Wiki evidenceConfidence, readDepth and epistemicStatus are reliability fields and were not multiplied into relevance.'
+            : 'Each route was filtered on its OWN relevance scale and survivors were unioned. Ranking is Weighted RRF: keywordWeight/(rrfK + keywordRank) + semanticWeight/(rrfK + semanticRank) + wikiWeight/(rrfK + wikiRank), with an absent route contributing zero. normalizedWikiScore is relevance; evidenceConfidence, readDepth and epistemicStatus remain separate reliability fields.',
         keywordSource: keywordOrigin,
         keywordProbeOrigin: provenance.probeOrigin,
         keywordFallbackReason: fallbackReason ?? undefined,
@@ -1522,7 +1790,8 @@ Nothing in this server returns a whole document in one response. Every reading t
         searchScope: scope.searchScope,
         scopeCollections: scope.collections,
         scopeUncertainCollections: uncertainCollections,
-        scopeItemCount: scope.searchScope === 'collections' ? scope.itemKeys.length : null,
+        scopeItemCount:
+          scope.searchScope === 'collections' ? scope.itemKeys.length : null,
         scopeMissingCollections: scope.missing,
         scopeSubcollectionsIncluded: scope.subcollectionsIncluded,
         scopeFellBackToLibrary: scope.fellBackToLibrary,
@@ -1544,6 +1813,12 @@ Nothing in this server returns a whole document in one response. Every reading t
         rrfK: options.rrfK,
         keywordWeight: options.keywordWeight,
         semanticWeight: options.semanticWeight,
+        wikiEnabled: wikiSettings.enabled,
+        wikiShadowMode: wikiSettings.enabled && wikiSettings.shadowMode,
+        wikiMinScore: wikiFloor.value,
+        userWikiMinScore: wikiSettings.minScore,
+        wikiWeight: wikiSettings.rrfWeight,
+        wikiSearchTimeoutMs: wikiSettings.searchTimeoutMs,
         appliedKeywordMinScore: searchResult.appliedKeywordMinScore,
         appliedSemanticMinScore: searchResult.appliedSemanticMinScore,
         userKeywordMinScore: settings.keywordMinScore,
@@ -1557,6 +1832,12 @@ Nothing in this server returns a whole document in one response. Every reading t
         semanticResultCount: searchResult.semanticResultCount,
         keywordAdmittedCount: searchResult.keywordAdmittedCount,
         semanticAdmittedCount: searchResult.semanticAdmittedCount,
+        wikiResultCount: searchResult.wikiResultCount,
+        wikiAdmittedCount: searchResult.wikiAdmittedCount,
+        wikiCandidateItemKeys: searchResult.wikiCandidateItemKeys,
+        wikiNovelDocumentCount: searchResult.wikiNovelDocumentCount,
+        wikiKeywordOverlapCount: searchResult.wikiKeywordOverlapCount,
+        wikiSemanticOverlapCount: searchResult.wikiSemanticOverlapCount,
         degraded,
         // A machine-readable form of the warning above: "the semantic half of
         // this search produced nothing and cannot produce anything until the
@@ -1573,6 +1854,7 @@ Nothing in this server returns a whole document in one response. Every reading t
         timings: {
           lexicalMs: searchResult.timings.keywordMs,
           semanticMs: searchResult.timings.semanticMs,
+          wikiMs: searchResult.timings.wikiMs,
           rrfMs: searchResult.timings.rrfMs,
           totalMs: searchResult.timings.totalMs,
           lexicalBreakdown: diagnostics
@@ -1597,11 +1879,16 @@ Nothing in this server returns a whole document in one response. Every reading t
       appliedMinScore: 0,
       appliedKeywordMinScore: searchResult.appliedKeywordMinScore,
       appliedSemanticMinScore: searchResult.appliedSemanticMinScore,
+      appliedWikiMinScore: wikiFloor.value,
+      wikiPreferenceMinScore: wikiSettings.minScore,
       language,
       libraryID,
       rrfK: options.rrfK,
       keywordWeight: options.keywordWeight,
       semanticWeight: options.semanticWeight,
+      wikiWeight: options.wikiWeight,
+      wikiEnabled: wikiSettings.enabled,
+      wikiShadowMode: wikiSettings.enabled && wikiSettings.shadowMode,
       pageSize: topK,
       scope: describeScope(scope),
     };
@@ -1672,7 +1959,9 @@ Nothing in this server returns a whole document in one response. Every reading t
         let itemKeys: string[] = [];
         try {
           const childIDs = collection.getChildCollections(true, false) || [];
-          childCollectionKeys = (Zotero.Collections.get(childIDs) as unknown as any[])
+          childCollectionKeys = (
+            Zotero.Collections.get(childIDs) as unknown as any[]
+          )
             .map((child: any) => child?.key)
             .filter(Boolean);
         } catch {
@@ -1721,6 +2010,7 @@ Nothing in this server returns a whole document in one response. Every reading t
       requestedPageSize: number | undefined;
       keywordFloor: number;
       semanticFloor: number;
+      wikiFloor: number;
       language: string;
       libraryID: number;
     },
@@ -1730,6 +2020,11 @@ Nothing in this server returns a whole document in one response. Every reading t
     // search, and continuing the old cursor would answer the new question with
     // the old ranking.
     const claim: FingerprintClaim = {};
+    const currentWikiSettings = getWikiSettings();
+    claim.wikiPreferenceMinScore = currentWikiSettings.minScore;
+    claim.wikiWeight = currentWikiSettings.rrfWeight;
+    claim.wikiEnabled = currentWikiSettings.enabled;
+    claim.wikiShadowMode = currentWikiSettings.shadowMode;
     if (typeof args.query === 'string' && args.query.trim()) {
       claim.query = args.query;
     }
@@ -1749,6 +2044,9 @@ Nothing in this server returns a whole document in one response. Every reading t
     if (args.minSemanticScore !== undefined) {
       claim.appliedSemanticMinScore = request.semanticFloor;
     }
+    if (args.wikiMinScore !== undefined) {
+      claim.appliedWikiMinScore = request.wikiFloor;
+    }
     if (args.language !== undefined) claim.language = request.language;
     if (args.libraryID !== undefined) claim.libraryID = request.libraryID;
     // Retrieval knobs cannot take effect on a stored ranking, so accepting them
@@ -1760,6 +2058,9 @@ Nothing in this server returns a whole document in one response. Every reading t
     if (args.semanticWeight !== undefined) {
       claim.semanticWeight = Number(args.semanticWeight);
     }
+    // Wiki knobs are preference-owned in v2 shadow mode. A cursor remains tied
+    // to the exact Wiki state captured on page 1 even though clients cannot
+    // override these values per call.
     if (args.collectionKeys !== undefined) {
       claim.scope = describeScope(
         this.resolveHybridScope(args.collectionKeys, request.libraryID),
@@ -1833,6 +2134,7 @@ Nothing in this server returns a whole document in one response. Every reading t
         // invented.
         appliedKeywordMinScore: snapshot.appliedKeywordMinScore,
         appliedSemanticMinScore: snapshot.appliedSemanticMinScore,
+        appliedWikiMinScore: snapshot.appliedWikiMinScore,
         // Documents at least one branch admitted in this search — NOT the raw
         // candidate count, and NOT capped by the page size.
         totalRelevant: window.totalRelevant,
@@ -1899,12 +2201,14 @@ Nothing in this server returns a whole document in one response. Every reading t
 
     const bound = window.hasMore
       ? ''
-      : ' These are all the documents above the threshold. Do not lower minScore to find more; the threshold is the user\'s setting.';
+      : " These are all the documents above the threshold. Do not lower minScore to find more; the threshold is the user's setting.";
 
     // Placed in nextStep as well as in warnings: this one changes what the
     // caller may do with specific rows, so it belongs in the instruction it is
     // about to follow, not only in a list it may skim.
-    const fullTextNote = fullTextWarning ? ` FULL TEXT: ${fullTextWarning}` : '';
+    const fullTextNote = fullTextWarning
+      ? ` FULL TEXT: ${fullTextWarning}`
+      : '';
 
     return funnel + paging + bound + degradedNote + fullTextNote;
   }
@@ -1998,7 +2302,8 @@ Nothing in this server returns a whole document in one response. Every reading t
         );
         if (!item) continue;
         if (!result.title) {
-          result.title = item.getDisplayTitle?.() || item.getField?.('title') || '';
+          result.title =
+            item.getDisplayTitle?.() || item.getField?.('title') || '';
         }
         if (!result.itemType) result.itemType = item.itemType;
         if (!result.date) {
@@ -2080,10 +2385,7 @@ Nothing in this server returns a whole document in one response. Every reading t
     ) {
       throw new Error('language must be one of zh, en, all, or auto');
     }
-    if (
-      !Number.isInteger(params.libraryID) ||
-      Number(params.libraryID) <= 0
-    ) {
+    if (!Number.isInteger(params.libraryID) || Number(params.libraryID) <= 0) {
       throw new Error('libraryID must be a positive integer');
     }
     if (
@@ -2163,9 +2465,7 @@ Nothing in this server returns a whole document in one response. Every reading t
     await this.assertDocumentKey(itemKey, libraryID, 'get_item_details');
     const { handleGetItem } = await import('./apiHandlers');
 
-    const effectiveMode = this.resolveItemDetailsMode(
-      args.mode ?? args.detail,
-    );
+    const effectiveMode = this.resolveItemDetailsMode(args.mode ?? args.detail);
     const modeConfig = this.getItemDetailsModeConfiguration(effectiveMode);
 
     const queryParams = new URLSearchParams();
@@ -2213,9 +2513,10 @@ Nothing in this server returns a whole document in one response. Every reading t
    * that no mode returns content, so it is folded in rather than rejected.
    */
   private resolveItemDetailsMode(requested: unknown): string {
-    const raw = typeof requested === 'string' && requested.trim()
-      ? requested.trim()
-      : String(MCPSettingsService.get('content.mode') || 'standard');
+    const raw =
+      typeof requested === 'string' && requested.trim()
+        ? requested.trim()
+        : String(MCPSettingsService.get('content.mode') || 'standard');
     if (raw === 'preview') return 'standard';
     return raw === 'minimal' || raw === 'complete' ? raw : 'standard';
   }
@@ -2298,7 +2599,7 @@ Nothing in this server returns a whole document in one response. Every reading t
         metadata: {
           extractedAt: new Date().toISOString(),
           nextStep: summaries.length
-            ? 'None of this item\'s attachments can yield text (they are images, or unsupported file types). Read the abstract with get_item_abstract instead, and tell the user the full text is not readable from their library.'
+            ? "None of this item's attachments can yield text (they are images, or unsupported file types). Read the abstract with get_item_abstract instead, and tell the user the full text is not readable from their library."
             : 'This item has no attachments at all, so there is no text to read. Use get_item_details and get_item_abstract, and tell the user the full text is not in their library.',
         },
       };
@@ -2311,7 +2612,10 @@ Nothing in this server returns a whole document in one response. Every reading t
         metadata: {
           extractedAt: new Date().toISOString(),
           nextStep: `This item has ${selection.candidates.length} attachments that could yield text, so none was chosen for you — reading the wrong one returns text that looks entirely valid and belongs to a different document. Call get_attachment_text again with the attachmentKey you want: ${selection.candidates
-            .map((candidate) => `${candidate.attachmentKey} (${candidate.filename || candidate.title || 'untitled'})`)
+            .map(
+              (candidate) =>
+                `${candidate.attachmentKey} (${candidate.filename || candidate.title || 'untitled'})`,
+            )
             .join(', ')}.`,
         },
       };
@@ -2367,7 +2671,9 @@ Nothing in this server returns a whole document in one response. Every reading t
   private attachmentCanYieldText(attachment: any): boolean {
     try {
       const contentType = String(attachment.attachmentContentType || '');
-      const filename = String(attachment.attachmentFilename || '').toLowerCase();
+      const filename = String(
+        attachment.attachmentFilename || '',
+      ).toLowerCase();
       if (contentType.includes('pdf') || filename.endsWith('.pdf')) return true;
       if (contentType.includes('html') || contentType.startsWith('text/')) {
         return true;
@@ -2516,7 +2822,12 @@ Nothing in this server returns a whole document in one response. Every reading t
           `Request failed with status ${status}`,
       );
     }
-    if (result && typeof result === 'object' && !Array.isArray(result) && result.error) {
+    if (
+      result &&
+      typeof result === 'object' &&
+      !Array.isArray(result) &&
+      result.error
+    ) {
       throw new Error(result.error);
     }
     return result;
@@ -2526,22 +2837,23 @@ Nothing in this server returns a whole document in one response. Every reading t
     // Apply mode-based defaults before creating search params
     const effectiveMode = args.mode || MCPSettingsService.get('content.mode');
     const modeConfig = this.getCollectionModeConfiguration(effectiveMode);
-    
+
     // Apply mode defaults if not explicitly provided
     const processedArgs = {
       ...args,
-      limit: args.limit || modeConfig.limit
+      limit: args.limit || modeConfig.limit,
     };
-    
+
     const collectionParams = new URLSearchParams();
     for (const [key, value] of Object.entries(processedArgs)) {
       if (value !== undefined && value !== null) {
-        if (key !== 'mode') { // Don't pass mode to API
+        if (key !== 'mode') {
+          // Don't pass mode to API
           collectionParams.append(key, String(value));
         }
       }
     }
-    
+
     const response = await handleGetCollections(collectionParams);
     const result = this.unwrapHandlerResult(
       response,
@@ -2556,7 +2868,7 @@ Nothing in this server returns a whole document in one response. Every reading t
       result.metadata = {
         ...result.metadata,
         mode: effectiveMode,
-        appliedModeConfig: modeConfig
+        appliedModeConfig: modeConfig,
       };
     }
 
@@ -2585,7 +2897,10 @@ Nothing in this server returns a whole document in one response. Every reading t
         detailParams.append(key, String(value));
       }
     }
-    const response = await handleGetCollectionDetails({ 1: collectionKey }, detailParams);
+    const response = await handleGetCollectionDetails(
+      { 1: collectionKey },
+      detailParams,
+    );
     return this.unwrapHandlerResult(
       response,
       response.body ? JSON.parse(response.body) : response,
@@ -2629,12 +2944,14 @@ Nothing in this server returns a whole document in one response. Every reading t
           try {
             // getChildItems(false) is DIRECT children only, which is the whole
             // point of browsing one level at a time.
-            const childItems = (collection.getChildItems(false) ||
-              []) as any[];
+            const childItems = (collection.getChildItems(false) || []) as any[];
             itemKeys = childItems
               .filter(
                 (item: any) =>
-                  item && !item.deleted && !item.isNote?.() && !item.isAttachment?.(),
+                  item &&
+                  !item.deleted &&
+                  !item.isNote?.() &&
+                  !item.isAttachment?.(),
               )
               .map((item: any) => item.key)
               .filter(Boolean);
@@ -2758,7 +3075,9 @@ Nothing in this server returns a whole document in one response. Every reading t
       if (error instanceof CollectionBrowserError) {
         const detail = error.candidates
           ? ` Candidates: ${error.candidates
-              .map((candidate) => `${candidate.collectionKey} (${candidate.path})`)
+              .map(
+                (candidate) => `${candidate.collectionKey} (${candidate.path})`,
+              )
               .join('; ')}.`
           : '';
         throw new Error(`${error.message}${detail}`);
@@ -2807,7 +3126,10 @@ Nothing in this server returns a whole document in one response. Every reading t
         }
       }
       if (trimmed.length > 0) {
-        return trimmed.split(',').map((s) => s.trim()).filter(Boolean);
+        return trimmed
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
       }
     }
     return undefined;
@@ -2815,13 +3137,19 @@ Nothing in this server returns a whole document in one response. Every reading t
 
   private async callAddItemsToCollection(args: any): Promise<any> {
     const { collectionKey, itemKeys, libraryID } = args;
-    const response = await handleAddItemsToCollection({ 1: collectionKey }, { itemKeys, libraryID });
+    const response = await handleAddItemsToCollection(
+      { 1: collectionKey },
+      { itemKeys, libraryID },
+    );
     return response.body ? JSON.parse(response.body) : response;
   }
 
   private async callRemoveItemsFromCollection(args: any): Promise<any> {
     const { collectionKey, itemKeys, libraryID } = args;
-    const response = await handleRemoveItemsFromCollection({ 1: collectionKey }, { itemKeys, libraryID });
+    const response = await handleRemoveItemsFromCollection(
+      { 1: collectionKey },
+      { itemKeys, libraryID },
+    );
     return response.body ? JSON.parse(response.body) : response;
   }
 
@@ -2839,7 +3167,7 @@ Nothing in this server returns a whole document in one response. Every reading t
     );
     if (semanticEnabled === false) {
       throw new Error(
-              'search_fulltext needs indexed full text. Enable search in Zotero MCP Plugin preferences and build the search index first.',
+        'search_fulltext needs indexed full text. Enable search in Zotero MCP Plugin preferences and build the search index first.',
       );
     }
 
@@ -2887,7 +3215,10 @@ Nothing in this server returns a whole document in one response. Every reading t
         abstractParams.append(key, String(value));
       }
     }
-    const response = await handleGetItemAbstract({ 1: itemKey }, abstractParams);
+    const response = await handleGetItemAbstract(
+      { 1: itemKey },
+      abstractParams,
+    );
     const contentType = response.headers?.['Content-Type'] || '';
     if (contentType.startsWith('text/plain')) {
       // format=text returns a plain-text body that must not be JSON.parsed
@@ -2924,7 +3255,8 @@ Nothing in this server returns a whole document in one response. Every reading t
     branch: 'semantic' | 'keyword',
     args: any,
   ): Promise<any> {
-    const toolName = branch === 'semantic' ? 'semantic_search' : 'keyword_search';
+    const toolName =
+      branch === 'semantic' ? 'semantic_search' : 'keyword_search';
     const settings = getHybridSearchSettings();
     const documentCap = resolveResultCap(args.topK, settings.maxDocuments);
     // Each single-branch tool inherits the threshold of the branch it IS. The
@@ -3116,13 +3448,20 @@ Nothing in this server returns a whole document in one response. Every reading t
           `${branch === 'semantic' ? 'Semantic' : 'Keyword'} retrieval failed: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
-      ztoolkit.log(`[StreamableMCP] ${toolName} branch failed: ${error}`, 'error');
+      ztoolkit.log(
+        `[StreamableMCP] ${toolName} branch failed: ${error}`,
+        'error',
+      );
     }
 
     const beforeThreshold = rows.length;
     const ranked = rows
       .filter((row) => row.score >= scoreFloor.value)
-      .sort((a, b) => b.score - a.score || String(a.itemKey).localeCompare(String(b.itemKey)))
+      .sort(
+        (a, b) =>
+          b.score - a.score ||
+          String(a.itemKey).localeCompare(String(b.itemKey)),
+      )
       // Same trim hybrid_search applies before caching: keyword_search's pages
       // live in the same store for the same 15 minutes, and its rows now carry
       // body-passage evidence too. Ordering is already decided above, so this
@@ -3457,7 +3796,10 @@ Nothing in this server returns a whole document in one response. Every reading t
       mode: branch,
       ...(branch === 'semantic'
         ? { query: snapshot.query }
-        : { keywords: snapshot.keywords, keywordSource: snapshot.keywordSource }),
+        : {
+            keywords: snapshot.keywords,
+            keywordSource: snapshot.keywordSource,
+          }),
       degraded: snapshot.degraded,
       ...(snapshot.warning ? { warning: snapshot.warning } : {}),
       pagination: {
@@ -3534,7 +3876,9 @@ Nothing in this server returns a whole document in one response. Every reading t
       ? ' DEGRADED: retrieval failed or timed out during this search, so treat a thin result list as a retrieval problem, not as a fact about the library.'
       : '';
 
-    const fullTextNote = fullTextWarning ? ` FULL TEXT: ${fullTextWarning}` : '';
+    const fullTextNote = fullTextWarning
+      ? ` FULL TEXT: ${fullTextWarning}`
+      : '';
 
     return rows + chain + funnel + paging + degradedNote + fullTextNote;
   }
@@ -3579,7 +3923,8 @@ Nothing in this server returns a whole document in one response. Every reading t
           : null;
       if (cursor) {
         return this.continueFindSimilar(args, cursor, {
-          requestedPageSize: args.topK === undefined ? undefined : pageCap.value,
+          requestedPageSize:
+            args.topK === undefined ? undefined : pageCap.value,
           scoreFloor: scoreFloor.value,
           libraryID,
         });
@@ -3663,7 +4008,7 @@ Nothing in this server returns a whole document in one response. Every reading t
             meanWeight: SIMILAR_MEAN_WEIGHT,
             maxWeight: SIMILAR_MAX_WEIGHT,
             formula:
-              'documentScore = (meanWeight * mean_i(s_i) + maxWeight * max_i(s_i)) / (meanWeight + maxWeight), where s_i is the mean of this document\'s two best chunk cosines against query chunk i (0 when it has none)',
+              "documentScore = (meanWeight * mean_i(s_i) + maxWeight * max_i(s_i)) / (meanWeight + maxWeight), where s_i is the mean of this document's two best chunk cosines against query chunk i (0 when it has none)",
           },
           queryItemKey: outcome.itemKey,
           queryChunkIds: outcome.queryChunkIds,
@@ -3950,13 +4295,13 @@ Nothing in this server returns a whole document in one response. Every reading t
         indexStats: stats?.indexStats || null,
         bodyCoverage: coverage ?? null,
         int8Migration: int8Status,
-        message
+        message,
       };
     } catch (error) {
       ztoolkit.log(`[StreamableMCP] Semantic status error: ${error}`, 'error');
       return {
         ready: false,
-        error: String(error)
+        error: String(error),
       };
     }
   }
@@ -3985,9 +4330,10 @@ Nothing in this server returns a whole document in one response. Every reading t
     let html = markdown;
 
     // Escape HTML entities
-    html = html.replace(/&/g, '&amp;')
-               .replace(/</g, '&lt;')
-               .replace(/>/g, '&gt;');
+    html = html
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
 
     // Headings (process longest first)
     html = html.replace(/^######\s+(.+)$/gm, '<h6>$1</h6>');
@@ -4013,33 +4359,44 @@ Nothing in this server returns a whole document in one response. Every reading t
 
     // Unordered lists (block)
     html = html.replace(/(?:^[-*+]\s+.+$\n?)+/gm, (match) => {
-      const items = match.trim().split('\n').map((line: string) => {
-        const content = line.replace(/^[-*+]\s+/, '');
-        return `<li>${content}</li>`;
-      }).join('');
+      const items = match
+        .trim()
+        .split('\n')
+        .map((line: string) => {
+          const content = line.replace(/^[-*+]\s+/, '');
+          return `<li>${content}</li>`;
+        })
+        .join('');
       return `<ul>${items}</ul>\n`;
     });
 
     // Ordered lists (block)
     html = html.replace(/(?:^\d+\.\s+.+$\n?)+/gm, (match) => {
-      const items = match.trim().split('\n').map((line: string) => {
-        const content = line.replace(/^\d+\.\s+/, '');
-        return `<li>${content}</li>`;
-      }).join('');
+      const items = match
+        .trim()
+        .split('\n')
+        .map((line: string) => {
+          const content = line.replace(/^\d+\.\s+/, '');
+          return `<li>${content}</li>`;
+        })
+        .join('');
       return `<ol>${items}</ol>\n`;
     });
 
     // Paragraphs: split by double newline, wrap plain text blocks in <p>
     const blocks = html.split(/\n\n+/);
-    html = blocks.map((block: string) => {
-      block = block.trim();
-      if (!block) return '';
-      if (/^<(h[1-6]|ul|ol|li|blockquote|hr|div|p|pre|table)/i.test(block)) {
-        return block;
-      }
-      block = block.replace(/\n/g, '<br/>');
-      return `<p>${block}</p>`;
-    }).filter(Boolean).join('\n');
+    html = blocks
+      .map((block: string) => {
+        block = block.trim();
+        if (!block) return '';
+        if (/^<(h[1-6]|ul|ol|li|blockquote|hr|div|p|pre|table)/i.test(block)) {
+          return block;
+        }
+        block = block.replace(/\n/g, '<br/>');
+        return `<p>${block}</p>`;
+      })
+      .filter(Boolean)
+      .join('\n');
 
     return html;
   }
@@ -4048,7 +4405,14 @@ Nothing in this server returns a whole document in one response. Every reading t
    * Handle write_note tool calls: create, update, append notes
    */
   private async callWriteNote(args: any): Promise<any> {
-    const { action, parentKey, noteKey, content, tags, libraryID = Zotero.Libraries.userLibraryID } = args;
+    const {
+      action,
+      parentKey,
+      noteKey,
+      content,
+      tags,
+      libraryID = Zotero.Libraries.userLibraryID,
+    } = args;
 
     try {
       const htmlContent = this.markdownToNoteHtml(content);
@@ -4060,10 +4424,13 @@ Nothing in this server returns a whole document in one response. Every reading t
 
           if (parentKey) {
             const parentItem = await Zotero.Items.getByLibraryAndKeyAsync(
-              libraryID, parentKey
+              libraryID,
+              parentKey,
             );
             if (!parentItem) {
-              throw new Error(`Parent item not found in library ${libraryID}: ${parentKey}`);
+              throw new Error(
+                `Parent item not found in library ${libraryID}: ${parentKey}`,
+              );
             }
             if (parentItem.isNote()) {
               throw new Error('Cannot attach a note to another note');
@@ -4084,7 +4451,9 @@ Nothing in this server returns a whole document in one response. Every reading t
 
           await note.saveTx();
 
-          ztoolkit.log(`[StreamableMCP] Created note ${note.key}${parentKey ? ' attached to ' + parentKey : ' (standalone)'}`);
+          ztoolkit.log(
+            `[StreamableMCP] Created note ${note.key}${parentKey ? ' attached to ' + parentKey : ' (standalone)'}`,
+          );
 
           return {
             action: 'create',
@@ -4096,12 +4465,12 @@ Nothing in this server returns a whole document in one response. Every reading t
               contentPreview: content.substring(0, 200),
               contentLength: content.length,
               tags: tags || [],
-              dateCreated: note.dateAdded
+              dateCreated: note.dateAdded,
             },
             metadata: {
               extractedAt: new Date().toISOString(),
-              message: `Note created successfully (key: ${note.key})`
-            }
+              message: `Note created successfully (key: ${note.key})`,
+            },
           };
         }
 
@@ -4111,10 +4480,13 @@ Nothing in this server returns a whole document in one response. Every reading t
           }
 
           const existingNote = await Zotero.Items.getByLibraryAndKeyAsync(
-            libraryID, noteKey
+            libraryID,
+            noteKey,
           );
           if (!existingNote) {
-            throw new Error(`Note not found in library ${libraryID}: ${noteKey}`);
+            throw new Error(
+              `Note not found in library ${libraryID}: ${noteKey}`,
+            );
           }
           if (!existingNote.isNote()) {
             throw new Error(`Item ${noteKey} is not a note`);
@@ -4140,12 +4512,12 @@ Nothing in this server returns a whole document in one response. Every reading t
               contentPreview: content.substring(0, 200),
               contentLength: content.length,
               tags: existingNote.getTags().map((t: any) => t.tag),
-              dateModified: existingNote.dateModified
+              dateModified: existingNote.dateModified,
             },
             metadata: {
               extractedAt: new Date().toISOString(),
-              message: `Note ${noteKey} updated successfully`
-            }
+              message: `Note ${noteKey} updated successfully`,
+            },
           };
         }
 
@@ -4155,10 +4527,13 @@ Nothing in this server returns a whole document in one response. Every reading t
           }
 
           const existingNote = await Zotero.Items.getByLibraryAndKeyAsync(
-            libraryID, noteKey
+            libraryID,
+            noteKey,
           );
           if (!existingNote) {
-            throw new Error(`Note not found in library ${libraryID}: ${noteKey}`);
+            throw new Error(
+              `Note not found in library ${libraryID}: ${noteKey}`,
+            );
           }
           if (!existingNote.isNote()) {
             throw new Error(`Item ${noteKey} is not a note`);
@@ -4187,23 +4562,25 @@ Nothing in this server returns a whole document in one response. Every reading t
               appendedContentLength: content.length,
               totalContentLength: appendedHtml.length,
               tags: existingNote.getTags().map((t: any) => t.tag),
-              dateModified: existingNote.dateModified
+              dateModified: existingNote.dateModified,
             },
             metadata: {
               extractedAt: new Date().toISOString(),
-              message: `Content appended to note ${noteKey} successfully`
-            }
+              message: `Content appended to note ${noteKey} successfully`,
+            },
           };
         }
 
         default:
-          throw new Error(`Unknown action: ${action}. Use create, update, or append.`);
+          throw new Error(
+            `Unknown action: ${action}. Use create, update, or append.`,
+          );
       }
     } catch (error) {
       ztoolkit.log(`[StreamableMCP] Write note error: ${error}`, 'error');
       return {
         success: false,
-        error: String(error)
+        error: String(error),
       };
     }
   }
@@ -4212,11 +4589,17 @@ Nothing in this server returns a whole document in one response. Every reading t
    * Handle write_tag tool calls: add, remove, set tags on items
    */
   private async callWriteTag(args: any): Promise<any> {
-    const { action, itemKey, tags, libraryID = Zotero.Libraries.userLibraryID } = args;
+    const {
+      action,
+      itemKey,
+      tags,
+      libraryID = Zotero.Libraries.userLibraryID,
+    } = args;
 
     try {
       const item = await Zotero.Items.getByLibraryAndKeyAsync(
-        libraryID, itemKey
+        libraryID,
+        itemKey,
       );
       if (!item) {
         throw new Error(`Item not found in library ${libraryID}: ${itemKey}`);
@@ -4252,14 +4635,18 @@ Nothing in this server returns a whole document in one response. Every reading t
         }
 
         default:
-          throw new Error(`Unknown action: ${action}. Use add, remove, or set.`);
+          throw new Error(
+            `Unknown action: ${action}. Use add, remove, or set.`,
+          );
       }
 
       await item.saveTx();
 
       const afterTags = item.getTags().map((t: any) => t.tag);
 
-      ztoolkit.log(`[StreamableMCP] write_tag ${action} on ${itemKey}: [${beforeTags.join(', ')}] -> [${afterTags.join(', ')}]`);
+      ztoolkit.log(
+        `[StreamableMCP] write_tag ${action} on ${itemKey}: [${beforeTags.join(', ')}] -> [${afterTags.join(', ')}]`,
+      );
 
       return {
         action,
@@ -4268,18 +4655,18 @@ Nothing in this server returns a whole document in one response. Every reading t
           itemKey,
           beforeTags,
           afterTags,
-          tagsModified: tags
+          tagsModified: tags,
         },
         metadata: {
           extractedAt: new Date().toISOString(),
-          message: `Tags ${action === 'add' ? 'added to' : action === 'remove' ? 'removed from' : 'set on'} item ${itemKey}`
-        }
+          message: `Tags ${action === 'add' ? 'added to' : action === 'remove' ? 'removed from' : 'set on'} item ${itemKey}`,
+        },
       };
     } catch (error) {
       ztoolkit.log(`[StreamableMCP] Write tag error: ${error}`, 'error');
       return {
         success: false,
-        error: String(error)
+        error: String(error),
       };
     }
   }
@@ -4288,20 +4675,29 @@ Nothing in this server returns a whole document in one response. Every reading t
    * Handle write_metadata tool calls: update fields and creators on items
    */
   private async callWriteMetadata(args: any): Promise<any> {
-    const { itemKey, fields, creators, libraryID = Zotero.Libraries.userLibraryID } = args;
+    const {
+      itemKey,
+      fields,
+      creators,
+      libraryID = Zotero.Libraries.userLibraryID,
+    } = args;
 
     try {
       const item = await Zotero.Items.getByLibraryAndKeyAsync(
-        libraryID, itemKey
+        libraryID,
+        itemKey,
       );
       if (!item) {
         throw new Error(`Item not found in library ${libraryID}: ${itemKey}`);
       }
       if (!item.isRegularItem()) {
-        throw new Error(`Item ${itemKey} is not a regular item (it is a ${item.itemType}). Use write_note for notes.`);
+        throw new Error(
+          `Item ${itemKey} is not a regular item (it is a ${item.itemType}). Use write_note for notes.`,
+        );
       }
 
-      const updatedFields: Record<string, { before: string; after: string }> = {};
+      const updatedFields: Record<string, { before: string; after: string }> =
+        {};
       let creatorsUpdated = false;
       let beforeCreators: any[] = [];
       let afterCreators: any[] = [];
@@ -4314,7 +4710,9 @@ Nothing in this server returns a whole document in one response. Every reading t
             item.setField(fieldName, String(value));
             updatedFields[fieldName] = { before, after: String(value) };
           } catch (fieldError) {
-            throw new Error(`Failed to set field "${fieldName}": ${fieldError}`);
+            throw new Error(
+              `Failed to set field "${fieldName}": ${fieldError}`,
+            );
           }
         }
       }
@@ -4324,22 +4722,24 @@ Nothing in this server returns a whole document in one response. Every reading t
         beforeCreators = item.getCreators().map((c: any) => ({
           creatorType: Zotero.CreatorTypes.getName(c.creatorTypeID),
           firstName: c.firstName,
-          lastName: c.lastName
+          lastName: c.lastName,
         }));
 
-        item.setCreators(creators.map((c: any) => {
-          const creatorData: any = {
-            creatorType: c.creatorType || 'author'
-          };
-          if (c.name) {
-            // Organization / single-field name
-            creatorData.name = c.name;
-          } else {
-            creatorData.firstName = c.firstName || '';
-            creatorData.lastName = c.lastName || '';
-          }
-          return creatorData;
-        }));
+        item.setCreators(
+          creators.map((c: any) => {
+            const creatorData: any = {
+              creatorType: c.creatorType || 'author',
+            };
+            if (c.name) {
+              // Organization / single-field name
+              creatorData.name = c.name;
+            } else {
+              creatorData.firstName = c.firstName || '';
+              creatorData.lastName = c.lastName || '';
+            }
+            return creatorData;
+          }),
+        );
 
         creatorsUpdated = true;
         afterCreators = creators;
@@ -4347,7 +4747,9 @@ Nothing in this server returns a whole document in one response. Every reading t
 
       await item.saveTx();
 
-      ztoolkit.log(`[StreamableMCP] Updated metadata on ${itemKey}: fields=[${Object.keys(updatedFields).join(', ')}], creators=${creatorsUpdated}`);
+      ztoolkit.log(
+        `[StreamableMCP] Updated metadata on ${itemKey}: fields=[${Object.keys(updatedFields).join(', ')}], creators=${creatorsUpdated}`,
+      );
 
       return {
         success: true,
@@ -4355,18 +4757,18 @@ Nothing in this server returns a whole document in one response. Every reading t
           itemKey,
           updatedFields,
           creatorsUpdated,
-          ...(creatorsUpdated ? { beforeCreators, afterCreators } : {})
+          ...(creatorsUpdated ? { beforeCreators, afterCreators } : {}),
         },
         metadata: {
           extractedAt: new Date().toISOString(),
-          message: `Metadata updated on item ${itemKey}`
-        }
+          message: `Metadata updated on item ${itemKey}`,
+        },
       };
     } catch (error) {
       ztoolkit.log(`[StreamableMCP] Write metadata error: ${error}`, 'error');
       return {
         success: false,
-        error: String(error)
+        error: String(error),
       };
     }
   }
@@ -4375,13 +4777,27 @@ Nothing in this server returns a whole document in one response. Every reading t
    * Handle write_item tool calls: create items, reparent attachments, and import files
    */
   private async callWriteItem(args: any): Promise<any> {
-    const { action, itemType, fields, creators, tags, attachmentKeys, parentKey, filePath, parentItemKey, title, libraryID = Zotero.Libraries.userLibraryID } = args;
+    const {
+      action,
+      itemType,
+      fields,
+      creators,
+      tags,
+      attachmentKeys,
+      parentKey,
+      filePath,
+      parentItemKey,
+      title,
+      libraryID = Zotero.Libraries.userLibraryID,
+    } = args;
 
     try {
       switch (action) {
         case 'create': {
           if (!itemType) {
-            throw new Error('itemType is required for create action (e.g., journalArticle, book, conferencePaper)');
+            throw new Error(
+              'itemType is required for create action (e.g., journalArticle, book, conferencePaper)',
+            );
           }
 
           // Create new item
@@ -4394,23 +4810,29 @@ Nothing in this server returns a whole document in one response. Every reading t
               try {
                 item.setField(fieldName, String(value));
               } catch (fieldError) {
-                throw new Error(`Failed to set field "${fieldName}": ${fieldError}`);
+                throw new Error(
+                  `Failed to set field "${fieldName}": ${fieldError}`,
+                );
               }
             }
           }
 
           // Set creators
           if (creators && Array.isArray(creators)) {
-            item.setCreators(creators.map((c: any) => {
-              const creatorData: any = { creatorType: c.creatorType || 'author' };
-              if (c.name) {
-                creatorData.name = c.name;
-              } else {
-                creatorData.firstName = c.firstName || '';
-                creatorData.lastName = c.lastName || '';
-              }
-              return creatorData;
-            }));
+            item.setCreators(
+              creators.map((c: any) => {
+                const creatorData: any = {
+                  creatorType: c.creatorType || 'author',
+                };
+                if (c.name) {
+                  creatorData.name = c.name;
+                } else {
+                  creatorData.firstName = c.firstName || '';
+                  creatorData.lastName = c.lastName || '';
+                }
+                return creatorData;
+              }),
+            );
           }
 
           // Add tags
@@ -4422,27 +4844,38 @@ Nothing in this server returns a whole document in one response. Every reading t
 
           await item.saveTx();
 
-          ztoolkit.log(`[StreamableMCP] Created item ${item.key} (type: ${itemType})`);
+          ztoolkit.log(
+            `[StreamableMCP] Created item ${item.key} (type: ${itemType})`,
+          );
 
           // Re-parent attachments if provided
           const reparentedAttachments: string[] = [];
           if (attachmentKeys && Array.isArray(attachmentKeys)) {
             for (const attKey of attachmentKeys) {
               const attachment = await Zotero.Items.getByLibraryAndKeyAsync(
-                libraryID, attKey
+                libraryID,
+                attKey,
               );
               if (!attachment) {
-                ztoolkit.log(`[StreamableMCP] Attachment not found in library ${libraryID}: ${attKey}`, 'warn');
+                ztoolkit.log(
+                  `[StreamableMCP] Attachment not found in library ${libraryID}: ${attKey}`,
+                  'warn',
+                );
                 continue;
               }
               if (!attachment.isAttachment()) {
-                ztoolkit.log(`[StreamableMCP] Item ${attKey} is not an attachment (type: ${attachment.itemType}), skipping`, 'warn');
+                ztoolkit.log(
+                  `[StreamableMCP] Item ${attKey} is not an attachment (type: ${attachment.itemType}), skipping`,
+                  'warn',
+                );
                 continue;
               }
               attachment.parentKey = item.key;
               await attachment.saveTx();
               reparentedAttachments.push(attKey);
-              ztoolkit.log(`[StreamableMCP] Re-parented attachment ${attKey} under ${item.key}`);
+              ztoolkit.log(
+                `[StreamableMCP] Re-parented attachment ${attKey} under ${item.key}`,
+              );
             }
           }
 
@@ -4456,17 +4889,21 @@ Nothing in this server returns a whole document in one response. Every reading t
               creatorsCount: creators?.length || 0,
               tagsCount: tags?.length || 0,
               reparentedAttachments,
-              dateCreated: item.dateAdded
+              dateCreated: item.dateAdded,
             },
             metadata: {
               extractedAt: new Date().toISOString(),
-              message: `Item created (key: ${item.key}, type: ${itemType})${reparentedAttachments.length > 0 ? `, ${reparentedAttachments.length} attachment(s) attached` : ''}`
-            }
+              message: `Item created (key: ${item.key}, type: ${itemType})${reparentedAttachments.length > 0 ? `, ${reparentedAttachments.length} attachment(s) attached` : ''}`,
+            },
           };
         }
 
         case 'reparent': {
-          if (!attachmentKeys || !Array.isArray(attachmentKeys) || attachmentKeys.length === 0) {
+          if (
+            !attachmentKeys ||
+            !Array.isArray(attachmentKeys) ||
+            attachmentKeys.length === 0
+          ) {
             throw new Error('attachmentKeys is required for reparent action');
           }
           if (!parentKey) {
@@ -4475,39 +4912,63 @@ Nothing in this server returns a whole document in one response. Every reading t
 
           // Verify parent exists
           const parentItem = await Zotero.Items.getByLibraryAndKeyAsync(
-            libraryID, parentKey
+            libraryID,
+            parentKey,
           );
           if (!parentItem) {
-            throw new Error(`Parent item not found in library ${libraryID}: ${parentKey}`);
+            throw new Error(
+              `Parent item not found in library ${libraryID}: ${parentKey}`,
+            );
           }
           if (!parentItem.isRegularItem()) {
-            throw new Error(`Parent ${parentKey} is not a regular item (type: ${parentItem.itemType})`);
+            throw new Error(
+              `Parent ${parentKey} is not a regular item (type: ${parentItem.itemType})`,
+            );
           }
 
-          const results: Array<{ key: string; success: boolean; error?: string }> = [];
+          const results: Array<{
+            key: string;
+            success: boolean;
+            error?: string;
+          }> = [];
           for (const attKey of attachmentKeys) {
             try {
               const attachment = await Zotero.Items.getByLibraryAndKeyAsync(
-                libraryID, attKey
+                libraryID,
+                attKey,
               );
               if (!attachment) {
-                results.push({ key: attKey, success: false, error: `Not found in library ${libraryID}` });
+                results.push({
+                  key: attKey,
+                  success: false,
+                  error: `Not found in library ${libraryID}`,
+                });
                 continue;
               }
               if (!attachment.isAttachment() && !attachment.isNote()) {
-                results.push({ key: attKey, success: false, error: `Not an attachment or note (type: ${attachment.itemType})` });
+                results.push({
+                  key: attKey,
+                  success: false,
+                  error: `Not an attachment or note (type: ${attachment.itemType})`,
+                });
                 continue;
               }
               attachment.parentKey = parentKey;
               await attachment.saveTx();
               results.push({ key: attKey, success: true });
-              ztoolkit.log(`[StreamableMCP] Re-parented ${attKey} under ${parentKey}`);
+              ztoolkit.log(
+                `[StreamableMCP] Re-parented ${attKey} under ${parentKey}`,
+              );
             } catch (attError) {
-              results.push({ key: attKey, success: false, error: String(attError) });
+              results.push({
+                key: attKey,
+                success: false,
+                error: String(attError),
+              });
             }
           }
 
-          const successCount = results.filter(r => r.success).length;
+          const successCount = results.filter((r) => r.success).length;
 
           return {
             action: 'reparent',
@@ -4516,12 +4977,12 @@ Nothing in this server returns a whole document in one response. Every reading t
               parentKey,
               results,
               successCount,
-              totalCount: attachmentKeys.length
+              totalCount: attachmentKeys.length,
             },
             metadata: {
               extractedAt: new Date().toISOString(),
-              message: `Re-parented ${successCount}/${attachmentKeys.length} item(s) under ${parentKey}`
-            }
+              message: `Re-parented ${successCount}/${attachmentKeys.length} item(s) under ${parentKey}`,
+            },
           };
         }
 
@@ -4534,7 +4995,9 @@ Nothing in this server returns a whole document in one response. Every reading t
             );
           }
           if (!filePath || typeof filePath !== 'string') {
-            throw new Error('filePath is required for import action (absolute path to the file)');
+            throw new Error(
+              'filePath is required for import action (absolute path to the file)',
+            );
           }
           const importParentKey = parentItemKey || parentKey;
           if (!importParentKey) {
@@ -4546,23 +5009,31 @@ Nothing in this server returns a whole document in one response. Every reading t
 
           // Verify parent exists
           const parentItem = await Zotero.Items.getByLibraryAndKeyAsync(
-            libraryID, importParentKey
+            libraryID,
+            importParentKey,
           );
           if (!parentItem) {
-            throw new Error(`Parent item not found in library ${libraryID}: ${importParentKey}`);
+            throw new Error(
+              `Parent item not found in library ${libraryID}: ${importParentKey}`,
+            );
           }
           if (!parentItem.isRegularItem()) {
-            throw new Error(`Parent ${importParentKey} is not a regular item (type: ${parentItem.itemType}), cannot attach files`);
+            throw new Error(
+              `Parent ${importParentKey} is not a regular item (type: ${parentItem.itemType}), cannot attach files`,
+            );
           }
 
           // Import file as attachment
           const attachment = await Zotero.Attachments.importFromFile({
             file: filePath,
             parentItemID: parentItem.id,
-            title: title || filePath.split(/[\\/]/).pop() || 'Imported Attachment'
+            title:
+              title || filePath.split(/[\\/]/).pop() || 'Imported Attachment',
           });
 
-          ztoolkit.log(`[StreamableMCP] Imported file as attachment ${attachment.key} under ${importParentKey}`);
+          ztoolkit.log(
+            `[StreamableMCP] Imported file as attachment ${attachment.key} under ${importParentKey}`,
+          );
 
           return {
             action: 'import',
@@ -4571,23 +5042,25 @@ Nothing in this server returns a whole document in one response. Every reading t
               attachmentKey: attachment.key,
               parentItemKey: importParentKey,
               filePath,
-              title: attachment.getField('title')
+              title: attachment.getField('title'),
             },
             metadata: {
               extractedAt: new Date().toISOString(),
-              message: `File imported as attachment (key: ${attachment.key}) under parent ${importParentKey}`
-            }
+              message: `File imported as attachment (key: ${attachment.key}) under parent ${importParentKey}`,
+            },
           };
         }
 
         default:
-          throw new Error(`Unknown action: ${action}. Use create, reparent, or import.`);
+          throw new Error(
+            `Unknown action: ${action}. Use create, reparent, or import.`,
+          );
       }
     } catch (error) {
       ztoolkit.log(`[StreamableMCP] Write item error: ${error}`, 'error');
       return {
         success: false,
-        error: String(error)
+        error: String(error),
       };
     }
   }
@@ -4598,7 +5071,7 @@ Nothing in this server returns a whole document in one response. Every reading t
   private formatToolResult(result: any, toolName: string, args: any): any {
     // Check if client explicitly requested text format
     const requestedTextFormat = args?.format === 'text';
-    
+
     // If result is already a string (text format), wrap it in MCP content format
     if (typeof result === 'string') {
       return {
@@ -4611,7 +5084,7 @@ Nothing in this server returns a whole document in one response. Every reading t
         isError: false,
       };
     }
-    
+
     // For structured data, provide both JSON and formatted options
     if (typeof result === 'object' && result !== null) {
       // If explicitly requested text format, convert to readable text
@@ -4626,7 +5099,7 @@ Nothing in this server returns a whole document in one response. Every reading t
           isError: false,
         };
       }
-      
+
       // Default: provide structured JSON with formatted preview
       return {
         content: [
@@ -4638,10 +5111,10 @@ Nothing in this server returns a whole document in one response. Every reading t
         isError: false,
         // Include raw structured data for programmatic access
         _structuredData: result,
-        _contentType: 'application/json'
+        _contentType: 'application/json',
       };
     }
-    
+
     // Fallback for other types
     return {
       content: [
@@ -4672,29 +5145,31 @@ Nothing in this server returns a whole document in one response. Every reading t
 
   private formatContentAsText(contentResult: any): string {
     const parts = [];
-    
+
     if (contentResult.title) {
       parts.push(`TITLE: ${contentResult.title}\n`);
     }
-    
+
     if (contentResult.content) {
       if (contentResult.content.abstract) {
         parts.push(`ABSTRACT:\n${contentResult.content.abstract.content}\n`);
       }
-      
+
       if (contentResult.content.attachments) {
         for (const att of contentResult.content.attachments) {
-          parts.push(`ATTACHMENT (${att.filename || att.type}):\n${att.content}\n`);
+          parts.push(
+            `ATTACHMENT (${att.filename || att.type}):\n${att.content}\n`,
+          );
         }
       }
-      
+
       if (contentResult.content.notes) {
         for (const note of contentResult.content.notes) {
           parts.push(`NOTE (${note.title}):\n${note.content}\n`);
         }
       }
     }
-    
+
     return parts.join('\n---\n\n');
   }
 
@@ -4702,13 +5177,15 @@ Nothing in this server returns a whole document in one response. Every reading t
     if (!searchResult.results || !Array.isArray(searchResult.results)) {
       return JSON.stringify(searchResult, null, 2);
     }
-    
+
     const parts = [`SEARCH RESULTS (${searchResult.results.length} items):\n`];
-    
+
     searchResult.results.forEach((item: any, index: number) => {
       parts.push(`${index + 1}. ${item.title || 'Untitled'}`);
       if (item.creators && item.creators.length > 0) {
-        parts.push(`   Authors: ${item.creators.map((c: any) => c.name || `${c.firstName} ${c.lastName}`).join(', ')}`);
+        parts.push(
+          `   Authors: ${item.creators.map((c: any) => c.name || `${c.firstName} ${c.lastName}`).join(', ')}`,
+        );
       }
       if (item.date) {
         parts.push(`   Date: ${item.date}`);
@@ -4718,7 +5195,7 @@ Nothing in this server returns a whole document in one response. Every reading t
       }
       parts.push('');
     });
-    
+
     return parts.join('\n');
   }
 
@@ -4726,9 +5203,9 @@ Nothing in this server returns a whole document in one response. Every reading t
     if (!annotationResult.data || !Array.isArray(annotationResult.data)) {
       return JSON.stringify(annotationResult, null, 2);
     }
-    
+
     const parts = [`ANNOTATIONS (${annotationResult.data.length} items):\n`];
-    
+
     annotationResult.data.forEach((ann: any, index: number) => {
       parts.push(`${index + 1}. [${ann.type.toUpperCase()}] ${ann.content}`);
       if (ann.page) {
@@ -4739,7 +5216,7 @@ Nothing in this server returns a whole document in one response. Every reading t
       }
       parts.push('');
     });
-    
+
     return parts.join('\n');
   }
 
@@ -4762,7 +5239,12 @@ Nothing in this server returns a whole document in one response. Every reading t
     };
   }
 
-  private createError(id: string | number | null, code: number, message: string, data?: any): MCPResponse {
+  private createError(
+    id: string | number | null,
+    code: number,
+    message: string,
+    data?: any,
+  ): MCPResponse {
     return {
       jsonrpc: '2.0',
       id,
@@ -4771,7 +5253,11 @@ Nothing in this server returns a whole document in one response. Every reading t
   }
 
   private isNotificationRequest(request: MCPRequest): boolean {
-    return !Object.prototype.hasOwnProperty.call(request, 'id') || request.id === null || request.id === undefined;
+    return (
+      !Object.prototype.hasOwnProperty.call(request, 'id') ||
+      request.id === null ||
+      request.id === undefined
+    );
   }
 
   /**
@@ -4786,23 +5272,23 @@ Nothing in this server returns a whole document in one response. Every reading t
       supportedProtocolVersions: SUPPORTED_MCP_PROTOCOL_VERSIONS,
       supportedMethods: [
         'initialize',
-        'initialized', 
+        'initialized',
         'notifications/initialized',
         'tools/list',
         'tools/call',
         'resources/list',
         'prompts/list',
-        'ping'
+        'ping',
       ],
       // Derived from the same builder tools/list uses, so this can never
       // drift from what the server actually serves, and it follows the
       // semantic/write prefs instead of ignoring them.
       availableTools: this.getAvailableTools().map((t: any) => t.name),
       transport: {
-        type: "streamable-http",
+        type: 'streamable-http',
         keepAliveSupported: false,
-        maxConnections: 100
-      }
+        maxConnections: 100,
+      },
     };
   }
 
@@ -4811,21 +5297,23 @@ Nothing in this server returns a whole document in one response. Every reading t
    */
   private getSearchModeConfiguration(mode: string): any {
     const modeConfigs = {
-      'minimal': {
-        limit: 30
+      minimal: {
+        limit: 30,
       },
-      'preview': {
-        limit: 100
+      preview: {
+        limit: 100,
       },
-      'standard': {
-        limit: 200
+      standard: {
+        limit: 200,
       },
-      'complete': {
-        limit: 500
-      }
+      complete: {
+        limit: 500,
+      },
     };
 
-    return modeConfigs[mode as keyof typeof modeConfigs] || modeConfigs['standard'];
+    return (
+      modeConfigs[mode as keyof typeof modeConfigs] || modeConfigs['standard']
+    );
   }
 
   /**
@@ -4833,21 +5321,23 @@ Nothing in this server returns a whole document in one response. Every reading t
    */
   private getCollectionModeConfiguration(mode: string): any {
     const modeConfigs = {
-      'minimal': {
-        limit: 20
+      minimal: {
+        limit: 20,
       },
-      'preview': {
-        limit: 50
+      preview: {
+        limit: 50,
       },
-      'standard': {
-        limit: 100
+      standard: {
+        limit: 100,
       },
-      'complete': {
-        limit: 500
-      }
+      complete: {
+        limit: 500,
+      },
     };
 
-    return modeConfigs[mode as keyof typeof modeConfigs] || modeConfigs['standard'];
+    return (
+      modeConfigs[mode as keyof typeof modeConfigs] || modeConfigs['standard']
+    );
   }
 
   /**

@@ -28,6 +28,7 @@ const {
   filterToolCatalog,
   REMOVED_TOOL_REPLACEMENTS,
   SEMANTIC_TOOL_NAMES,
+  WIKI_TOOL_NAMES,
 } = await import("../src/modules/toolCatalog.ts");
 
 const MUTATING = new Set([
@@ -52,9 +53,14 @@ test("every tool has a name, a category, a description and a schema", () => {
     assert.equal(typeof tool.name, "string", `name of ${JSON.stringify(tool)}`);
     assert.ok(tool.name.length > 0);
     assert.ok(
-      ["search", "retrieval", "collections", "semantic", "write"].includes(
-        tool.category,
-      ),
+      [
+        "search",
+        "retrieval",
+        "collections",
+        "semantic",
+        "wiki",
+        "write",
+      ].includes(tool.category),
       `${tool.name} has an unknown category ${tool.category}`,
     );
     assert.equal(typeof tool.description, "string");
@@ -245,10 +251,32 @@ test("disabling writes hides every mutating tool and nothing else", () => {
   }).map((tool) => tool.name);
 
   const hidden = new Set(all.filter((name) => !readOnly.includes(name)));
-  assert.deepEqual(hidden, new Set([...MUTATING].filter((n) => all.includes(n))));
+  assert.deepEqual(
+    hidden,
+    new Set([...MUTATING].filter((n) => all.includes(n))),
+  );
   for (const name of readOnly) {
     assert.ok(!MUTATING.has(name), `${name} is mutating but survived`);
   }
+});
+
+test("disabling Wiki hides exactly the Wiki tools", () => {
+  const all = filterToolCatalog({
+    semanticEnabled: true,
+    wikiEnabled: true,
+    writeEnabled: true,
+    mutatingToolNames: MUTATING,
+  }).map((tool) => tool.name);
+  const withoutWiki = filterToolCatalog({
+    semanticEnabled: true,
+    wikiEnabled: false,
+    writeEnabled: true,
+    mutatingToolNames: MUTATING,
+  }).map((tool) => tool.name);
+  assert.deepEqual(
+    new Set(all.filter((name) => !withoutWiki.includes(name))),
+    new Set(WIKI_TOOL_NAMES),
+  );
 });
 
 test("the /capabilities projection cannot drift from the catalog", () => {

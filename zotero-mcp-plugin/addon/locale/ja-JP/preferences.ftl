@@ -356,3 +356,24 @@ pref-hybrid-scan-benchmark-col-max = 最長 (ms)
 pref-hybrid-scan-benchmark-row-vector = ベクトルスキャン
 pref-hybrid-scan-benchmark-row-keyword = キーワード検索
 pref-hybrid-scan-benchmark-scope-label = テスト範囲
+
+# --- LLM Wiki ---
+pref-wiki-title = LLM Wiki と長期研究メモリ
+pref-wiki-desc = 再利用可能な Claim、概念、関係、追跡可能な Evidence を独立データベースに保存します。プラグイン自身は LLM を呼び出しません。
+pref-wiki-permission-note = Wiki 更新は Zotero アイテム編集とは別の権限です。検索インデックスの再構築で長期知識は削除されません。
+pref-wiki-enabled-text = LLM Wiki を有効にする
+pref-wiki-enabled-sub = Wiki ツールを公開し、Wiki 検索ルートを計算します。
+pref-wiki-auto-write-text = AI による自動 Wiki 統合を許可
+pref-wiki-auto-write-sub = 既定では無効です。無効時は wiki_commit ごとにローカル確認が必要です。
+pref-wiki-write-mode-label = Wiki 書き込みモード
+pref-wiki-write-mode-hint = 自動モードは自動統合も有効な場合のみ動作します。
+pref-wiki-write-mode-confirm = 毎回確認
+pref-wiki-write-mode-auto = 自動
+pref-wiki-shadow-text = Wiki 検索 Shadow Mode
+pref-wiki-shadow-sub = Wiki 候補を計算しますが、既存の順位は変更しません。
+pref-wiki-min-score-label = Wiki 関連度しきい値
+pref-wiki-min-score-hint = 2.0.0 では未調整です。実際の Zotero 検索で先に測定してください。
+pref-wiki-rrf-weight-label = Wiki RRF 重み
+pref-wiki-rrf-weight-hint = Shadow Mode 外でのみ使用します。0 では順位に影響しません。
+pref-wiki-timeout-label = Wiki 検索タイムアウト (ms)
+pref-wiki-timeout-hint = 失敗時は既存の Keyword + Semantic へ自動的に戻ります。

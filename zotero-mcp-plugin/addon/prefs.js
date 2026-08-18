@@ -47,6 +47,16 @@ pref("hybrid.searchTimeoutMs", 8000);
 pref("hybrid.keywordSearchTimeoutMs", 30000);
 pref("hybrid.gpuAccelerationEnabled", false);
 pref("hybrid.gpuPrecision", "auto");
+// Long-term LLM Wiki. The independent Wiki database is enabled by default,
+// but writes still require local confirmation and its retrieval route remains
+// shadow-only until real-library calibration supplies a threshold and weight.
+pref("wiki.enabled", true);
+pref("wiki.autoWrite", false);
+pref("wiki.writeMode", "confirm");
+pref("wiki.shadowMode", true);
+pref("wiki.minScore", "0");
+pref("wiki.rrfWeight", "0");
+pref("wiki.searchTimeoutMs", 5000);
 pref("semantic.enabled", false);
 pref("semantic.autoUpdate", false);
 pref("embedding.apiBase", "");

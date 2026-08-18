@@ -42,6 +42,7 @@ export type ToolCategory =
   | "retrieval"
   | "collections"
   | "semantic"
+  | "wiki"
   | "write";
 
 /** Tools that only exist when semantic search is switched on. */
@@ -52,6 +53,18 @@ export const SEMANTIC_TOOL_NAMES: ReadonlySet<string> = new Set([
   "semantic_status",
   "search_fulltext",
   "get_document_chunks",
+]);
+
+export const WIKI_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "wiki_prepare_update",
+  "wiki_commit",
+  "wiki_search",
+  "wiki_get_page",
+  "wiki_get_claim",
+  "wiki_status",
+  "wiki_export",
+  "wiki_reverify",
+  "wiki_build_from_paper",
 ]);
 
 /**
@@ -1055,6 +1068,225 @@ export function buildToolCatalog(): ToolDefinition[] {
       required: [],
     },
   },
+  {
+    name: 'wiki_prepare_update',
+    category: 'wiki',
+    description: 'Search existing Wiki Page, Concept/Alias, Claim keyword and Claim embedding candidates before proposing a controlled Wiki update. This tool never writes. CREATE_PAGE requires the short-lived prepareToken returned here.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        libraryID: { type: 'number' },
+        query: { type: 'string' },
+        limit: { type: 'integer', minimum: 1, maximum: 50 },
+        proposedPageTitles: {
+          type: 'array',
+          maxItems: 2,
+          items: { type: 'string' },
+          description: 'Exact canonical Page titles being considered. The returned prepareToken authorizes only these titles; defaults to query.'
+        }
+      },
+      required: ['query']
+    }
+  },
+  {
+    name: 'wiki_commit',
+    category: 'wiki',
+    description: 'Apply only controlled Wiki actions. The plugin validates pages, claims, Zotero documents, actual indexed chunks, excerpts, duplicates, versions and the two-page creation ceiling. It never accepts SQL. When automatic Wiki writing is disabled, Zotero asks the user to confirm this Wiki-only database update.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        libraryID: { type: 'number' },
+        prepareToken: {
+          type: 'string',
+          description: 'Required when actions contain CREATE_PAGE. Obtain it from wiki_prepare_update for the same library.'
+        },
+        actions: {
+          type: 'array',
+          minItems: 1,
+          items: {
+            type: 'object',
+            properties: {
+              action: {
+                type: 'string',
+                enum: [
+                  'SKIP',
+                  'ATTACH_EVIDENCE',
+                  'ADD_CLAIM',
+                  'UPDATE_CLAIM',
+                  'CREATE_PAGE',
+                  'LINK_RELATION',
+                  'MARK_CONFLICT'
+                ]
+              },
+              ref: { type: 'string' },
+              pageId: {},
+              claimId: {},
+              expectedVersion: { type: 'integer' },
+              canonicalTitle: { type: 'string' },
+              primaryConceptRef: { type: 'string' },
+              primaryConcept: { type: 'object' },
+              claimText: { type: 'string' },
+              claimType: {
+                type: 'string',
+                enum: [
+                  'definition',
+                  'mechanism',
+                  'model',
+                  'condition',
+                  'comparison',
+                  'limitation',
+                  'consensus',
+                  'conflict'
+                ]
+              },
+              epistemicStatus: {
+                type: 'string',
+                enum: [
+                  'provisional',
+                  'supported',
+                  'corroborated',
+                  'disputed'
+                ]
+              },
+              coverageLevel: {
+                type: 'string',
+                enum: [
+                  'chunk_local',
+                  'section_read',
+                  'paper_reviewed',
+                  'cross_paper',
+                  'partial',
+                  'incomplete'
+                ]
+              },
+              confidence: { type: 'number', minimum: 0, maximum: 1 },
+              evidence: {
+                type: 'array',
+                minItems: 1,
+                description: 'The exact chunks actually used for this Claim in this turn. Do not claim paper_reviewed unless every ordered document chunk was actually read.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    libraryID: { type: 'number' },
+                    itemKey: { type: 'string' },
+                    chunkIdSnapshot: { type: 'integer', minimum: 0 },
+                    excerpt: { type: 'string' },
+                    evidenceRole: {
+                      type: 'string',
+                      enum: ['SUPPORTS', 'CONTRADICTS', 'QUALIFIES', 'EXAMPLE']
+                    },
+                    readDepth: {
+                      type: 'string',
+                      enum: [
+                        'chunk_local',
+                        'section_read',
+                        'paper_reviewed',
+                        'cross_paper'
+                      ]
+                    }
+                  },
+                  required: [
+                    'itemKey',
+                    'chunkIdSnapshot',
+                    'excerpt',
+                    'evidenceRole',
+                    'readDepth'
+                  ]
+                }
+              },
+              sourceConceptId: {},
+              targetConceptId: {},
+              predicate: { type: 'string' }
+            },
+            required: ['action']
+          }
+        }
+      },
+      required: ['actions']
+    }
+  },
+  {
+    name: 'wiki_search',
+    category: 'wiki',
+    description: 'Search Alias/Concept, Claim keyword and CPU embedding indexes, Relations and one-hop neighbors, then resolve valid Evidence to Zotero documents. normalizedWikiScore is query relevance; evidenceConfidence, readDepth and epistemicStatus remain separate reliability fields.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        libraryID: { type: 'number' },
+        query: { type: 'string' },
+        keywords: { type: 'array', items: { type: 'string' } },
+        itemKeys: { type: 'array', items: { type: 'string' } },
+        minScore: { type: 'number', minimum: 0, maximum: 1 },
+        limit: { type: 'integer', minimum: 1, maximum: 100 }
+      },
+      required: ['query']
+    }
+  },
+  {
+    name: 'wiki_get_page',
+    category: 'wiki',
+    description: 'Get one Wiki Page with all Claims and traceable Evidence.',
+    inputSchema: {
+      type: 'object',
+      properties: { pageId: { type: 'integer' } },
+      required: ['pageId']
+    }
+  },
+  {
+    name: 'wiki_get_claim',
+    category: 'wiki',
+    description: 'Get one atomic Wiki Claim with epistemic state, coverage and all Evidence links.',
+    inputSchema: {
+      type: 'object',
+      properties: { claimId: { type: 'integer' } },
+      required: ['claimId']
+    }
+  },
+  {
+    name: 'wiki_status',
+    category: 'wiki',
+    description: 'Report independent Wiki database counts and Evidence relink state.',
+    inputSchema: {
+      type: 'object',
+      properties: { libraryID: { type: 'number' } }
+    }
+  },
+  {
+    name: 'wiki_export',
+    category: 'wiki',
+    description: 'Export the authoritative Wiki state as derived Markdown. Markdown is not used as the data source.',
+    inputSchema: {
+      type: 'object',
+      properties: { libraryID: { type: 'number' } }
+    }
+  },
+  {
+    name: 'wiki_reverify',
+    category: 'wiki',
+    description: 'Relink pending or stale Evidence against the current search index: exact chunk hash first, then same-item excerpt relocation. Only a genuinely deleted Zotero source becomes source_deleted.',
+    inputSchema: {
+      type: 'object',
+      properties: { libraryID: { type: 'number' } }
+    }
+  },
+  {
+    name: 'wiki_build_from_paper',
+    category: 'wiki',
+    description: 'Begin an explicitly user-requested deep Wiki build for exactly one named Zotero paper. Never call automatically or in a batch. The tool invokes no LLM and writes nothing; it returns ordered indexed chunks or a reading plan plus existing Wiki candidates.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        libraryID: { type: 'number' },
+        userRequested: { type: 'boolean' },
+        itemKey: { type: 'string' },
+        doi: { type: 'string' },
+        url: { type: 'string' },
+        title: { type: 'string' },
+        includeAllChunks: { type: 'boolean' }
+      },
+      required: ['userRequested']
+    }
+  },
   // Write Tools
   {
     name: 'write_note',
@@ -1241,11 +1473,15 @@ export function buildToolCatalog(): ToolDefinition[] {
  */
 export function filterToolCatalog(options: {
   semanticEnabled: boolean;
+  wikiEnabled?: boolean;
   writeEnabled: boolean;
   mutatingToolNames: ReadonlySet<string>;
 }): ToolDefinition[] {
   return buildToolCatalog().filter((tool) => {
     if (!options.semanticEnabled && SEMANTIC_TOOL_NAMES.has(tool.name)) {
+      return false;
+    }
+    if (options.wikiEnabled === false && WIKI_TOOL_NAMES.has(tool.name)) {
       return false;
     }
     if (!options.writeEnabled && options.mutatingToolNames.has(tool.name)) {

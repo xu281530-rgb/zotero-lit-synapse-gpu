@@ -14,6 +14,10 @@ import {
   toLibraryQueueKey,
 } from "./modules/libraryScope";
 import { deleteItemIndexWithRecovery } from "./modules/semantic/indexRefreshQueue";
+import {
+  registerWikiPanel,
+  unregisterWikiPanel,
+} from "./modules/wiki/wikiPanel";
 
 // Preference keys for semantic search settings
 const PREF_SEMANTIC_ENABLED = 'extensions.zotero.zotero-mcp-plugin.semantic.enabled';
@@ -520,6 +524,15 @@ async function handleItemsDeleted(itemIds: number[], extraData: any) {
           if (!itemKey) continue;
           const effectiveLibraryID =
             libraryID ?? Zotero.Libraries.userLibraryID;
+          try {
+            const { getWikiStore } = await import("./modules/wiki/wikiStore");
+            await getWikiStore().markSourceDeleted(effectiveLibraryID, itemKey);
+          } catch (wikiError) {
+            ztoolkit.log(
+              `[MCP Plugin] Could not mark Wiki Evidence source_deleted for ${itemKey}: ${wikiError}`,
+              "warn",
+            );
+          }
           const removed = await deleteItemIndexWithRecovery(
             semanticService,
             effectiveLibraryID,
@@ -1060,12 +1073,16 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
   // Register context menu for search indexing
   registerSemanticIndexMenu(win);
 
+  // Persistent top-left entry for the long-term LLM Wiki.
+  registerWikiPanel(win);
+
   // Register search index status column
   registerSemanticIndexColumn();
 }
 
 async function onMainWindowUnload(win: Window): Promise<void> {
   unregisterSemanticIndexMenus(win);
+  unregisterWikiPanel(win);
   ztoolkit.unregisterAll();
 }
 
@@ -1168,10 +1185,18 @@ function onShutdown(): void {
     ztoolkit.log("[MCP Plugin] [SHUTDOWN] Removing context menu elements...");
     for (const win of Zotero.getMainWindows()) {
       unregisterSemanticIndexMenus(win as unknown as Window);
+      unregisterWikiPanel(win as unknown as Window);
     }
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
     ztoolkit.log(`[MCP Plugin] [SHUTDOWN] Error removing menus: ${err.message}`, "error");
+  }
+
+  try {
+    const { resetWikiStore } = require("./modules/wiki/wikiStore");
+    void resetWikiStore();
+  } catch (error) {
+    ztoolkit.log(`[MCP Plugin] Error closing Wiki database: ${error}`, "warn");
   }
 
   ztoolkit.log("[MCP Plugin] [SHUTDOWN] Unregistering server preferences...");

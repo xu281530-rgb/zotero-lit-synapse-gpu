@@ -1,15 +1,15 @@
 {
   "name": "zotero-mcp-plugin",
   "type": "module",
-  "version": "1.10.0",
-  "description": "Zotero MCP Plugin for Zotero 9.0.x: one tool catalog behind MCP and HTTP, three interchangeable retrieval tools (hybrid / keyword / semantic) sharing collection+item scoping, a user threshold and cursor pagination, paged reading of attachments and indexed chunks, level-by-level collection browsing, and MCP 2025-06-18 Streamable HTTP",
+  "version": "2.0.0",
+  "description": "Zotero MCP Plugin for Zotero 9.0.x with question-driven LLM Wiki memory, independent evidence-linked knowledge storage, hybrid keyword/semantic/Wiki retrieval, cursor pagination, and MCP 2025-06-18 Streamable HTTP",
   "config": {
     "addonName": "Zotero MCP Plugin",
     "addonID": "zotero-mcp-plugin@autoagent.my",
     "addonRef": "zotero-mcp-plugin",
     "addonInstance": "ZoteroMCP",
     "prefsPrefix": "extensions.zotero.zotero-mcp-plugin",
-    "addonVersion": "1.10.0"
+    "addonVersion": "2.0.0"
   },
   "repository": {
     "type": "git",
@@ -62,6 +62,9 @@
     "test:reset-queue-invalidation": "node --experimental-strip-types scripts/test-reset-queue-invalidation.js",
     "test:reset-crash-consistency": "node --experimental-strip-types --experimental-sqlite scripts/test-reset-crash-consistency.js",
     "test:index-statistics": "node --experimental-strip-types --experimental-sqlite scripts/test-index-statistics.js",
+    "test:wiki-store": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-store.js",
+    "test:wiki-retrieval": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-retrieval.js",
+    "test:wiki-ui": "node scripts/test-wiki-ui.js",
     "test:fulltext-on-demand": "node --experimental-strip-types scripts/test-fulltext-on-demand.js",
     "test:index-recovery": "node --experimental-strip-types scripts/test-index-recovery.js",
     "test:collection-scope": "node --experimental-strip-types scripts/test-collection-scope.js",

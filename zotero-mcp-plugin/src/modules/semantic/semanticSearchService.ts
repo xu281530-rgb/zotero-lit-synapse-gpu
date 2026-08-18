@@ -76,6 +76,52 @@ import { isIndexResetPending } from './indexRefreshQueue';
 declare let Zotero: any;
 declare let ztoolkit: ZToolkit;
 
+async function markWikiResetPending(
+  buildID: string,
+  libraryID: number,
+): Promise<void> {
+  try {
+    const { getWikiStore } = await import('../wiki/wikiStore');
+    await getWikiStore().markResetPending(`build:${buildID}`, libraryID);
+  } catch (error) {
+    ztoolkit.log(
+      `[SemanticSearch] Could not mark Wiki Evidence pending_relink: ${error}`,
+      'warn',
+    );
+  }
+}
+
+async function markWikiItemsPending(
+  buildID: string,
+  libraryID: number,
+  itemKeys: string[],
+): Promise<void> {
+  try {
+    const { getWikiStore } = await import('../wiki/wikiStore');
+    await getWikiStore().markItemsPending(
+      `build:${buildID}`,
+      libraryID,
+      itemKeys,
+    );
+  } catch (error) {
+    ztoolkit.log(
+      `[SemanticSearch] Could not mark item Wiki Evidence pending_relink: ${error}`,
+      'warn',
+    );
+  }
+}
+
+function scheduleWikiReverify(libraryID: number): void {
+  void import('../wiki/wikiService')
+    .then(({ getWikiService }) => getWikiService().reverify(libraryID))
+    .catch((error) =>
+      ztoolkit.log(
+        `[SemanticSearch] Wiki Evidence relink failed: ${error}`,
+        'warn',
+      ),
+    );
+}
+
 // Preference key for persisting index progress
 const PREF_INDEX_PROGRESS = 'extensions.zotero.zotero-mcp-plugin.semantic.indexProgress';
 
@@ -1176,6 +1222,7 @@ export class SemanticSearchService {
           this.indexProgress.total = items.length;
           this.saveIndexProgress();
           invalidateStoredChunkingSignature(libraryID);
+          await markWikiResetPending(buildID, libraryID);
           await this.vectorStore.clearLibraryForBuild(buildID, libraryID);
           for (const [identity, failure] of this._failedItems) {
             if (failure.libraryID === libraryID) {
@@ -1186,6 +1233,10 @@ export class SemanticSearchService {
             `[SemanticSearch] Existing index data cleared for libraryID=${libraryID}`,
           );
         }
+      }
+
+      if (itemKeysProvided && !this._activeFullLibraryRebuild) {
+        await markWikiItemsPending(buildID, libraryID, itemKeys ?? []);
       }
 
       // Filter already indexed items (unless rebuild or an explicit force)
@@ -1273,6 +1324,9 @@ export class SemanticSearchService {
           this.clearSavedIndexProgress();
         } else {
           this.saveIndexProgress();
+        }
+        if (this.indexProgress.status === 'completed') {
+          scheduleWikiReverify(libraryID);
         }
         return this.indexProgress;
       }
@@ -1499,6 +1553,9 @@ export class SemanticSearchService {
       onProgress?.(this.indexProgress);
 
       ztoolkit.log(`[SemanticSearch] Indexing finished: ${this.indexProgress.processed} items, status=${this.indexProgress.status}`);
+      if (this.indexProgress.status === 'completed') {
+        scheduleWikiReverify(libraryID);
+      }
       return this.indexProgress;
 
     } catch (error) {
