@@ -184,13 +184,21 @@ const indexBusinessTables = [
     },
     vectorStore: {
       initialize: async () => events.push("initialize"),
-      clearAll: async () => {
+      clearAll: async (options) => {
         events.push("database");
+        await options.onDatabaseCleared();
         return report;
       },
     },
     suspendRefreshQueue: async () => events.push("suspend-refresh"),
     resumeRefreshQueue: () => events.push("resume-refresh"),
+    prepareRefreshQueueReset: () => {
+      events.push("prepare-refresh-reset");
+      return "test-reset";
+    },
+    markRefreshQueueDatabaseCleared: () =>
+      events.push("refresh-database-cleared"),
+    cancelRefreshQueueReset: () => events.push("cancel-refresh-reset"),
     suspendPDFRefreshes: async () => events.push("suspend-pdf-refresh"),
     resumePDFRefreshes: () => events.push("resume-pdf-refresh"),
     clearRefreshQueue: () => events.push("clear-refresh"),
@@ -204,10 +212,11 @@ const indexBusinessTables = [
     "suspend-auto",
     "suspend-refresh",
     "suspend-pdf-refresh",
-    "clear-refresh",
+    "prepare-refresh-reset",
     "begin-reset",
     "initialize",
     "database",
+    "refresh-database-cleared",
     "clear-refresh",
     "chunk-signatures",
     "runtime",
@@ -595,10 +604,19 @@ const indexBusinessTables = [
   );
 
   const deletes = calls.filter((call) => /^DELETE FROM/.test(call.sql));
-  assert.equal(deletes.length, 3);
-  for (const call of deletes) {
+  assert.equal(deletes.length, 7);
+  for (const call of deletes.slice(0, 3)) {
     assert.deepEqual(call.params, ["2:TARGET_A", "2:TARGET_WITH_UNDERSCORE"]);
     assert.match(call.sql, /item_key IN \(\?,\?\)/);
+  }
+  for (const [call, itemKey] of [
+    [deletes[3], "TARGET_A"],
+    [deletes[4], "TARGET_A"],
+    [deletes[5], "TARGET_WITH_UNDERSCORE"],
+    [deletes[6], "TARGET_WITH_UNDERSCORE"],
+  ]) {
+    assert.deepEqual(call.params, [2, itemKey]);
+    assert.match(call.sql, /index_(?:failures|build_targets)/);
   }
   assert.equal(store.vectorCache.has("2:TARGET_A_0"), false);
   assert.equal(store.vectorCache.has("2:TARGET_WITH_UNDERSCORE_4"), false);
@@ -613,16 +631,22 @@ const indexBusinessTables = [
   assert.equal(calls.length, 0);
 }
 
-// A true full rebuild clears only the requested Library in every index table.
+// A library clear removes both indexes, scoped to only that Library.
 {
   const { store, calls } = mockStore();
   await store.clear(2);
   const deletes = calls.filter((call) => /^DELETE FROM/.test(call.sql));
-  assert.equal(deletes.length, 3);
-  for (const call of deletes) {
+  assert.equal(deletes.length, 6);
+  for (const call of deletes.slice(0, 3)) {
     assert.match(call.sql, /WHERE item_key GLOB \?/);
     assert.deepEqual(call.params, ["2:*"]);
   }
+  assert.match(deletes[3].sql, /kw_postings/);
+  assert.deepEqual(deletes[3].params, [2]);
+  assert.match(deletes[4].sql, /kw_docs WHERE library_id = \?/);
+  assert.deepEqual(deletes[4].params, [2]);
+  assert.match(deletes[5].sql, /kw_terms WHERE library_id = \?/);
+  assert.deepEqual(deletes[5].params, [2]);
 }
 
 // GPU synchronization is emitted only after the SQLite mutation commits, and

@@ -262,14 +262,13 @@ function deletionStore(events, removeItem) {
   assert.deepEqual(events, []);
 }
 
-// Library clearing has the same contract: a keyword clear failure reaches the
-// settings caller instead of being logged as an overall success.
+// Library clearing has the same contract: the single atomic store operation
+// reaches the settings caller instead of being logged as an overall success.
 {
   const service = Object.create(SemanticSearchService.prototype);
   service.initialize = async () => {};
   service.vectorStore = {
-    clear: async () => {},
-    clearKeywordIndex: async () => {
+    clear: async () => {
       throw new Error("simulated keyword library clear failure");
     },
   };

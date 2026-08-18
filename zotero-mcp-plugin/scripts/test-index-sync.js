@@ -37,7 +37,7 @@ import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { register } from "node:module";
 
-register("./ts-ext-hooks.mjs", import.meta.url);
+register("./index-failure-hooks.mjs", import.meta.url);
 
 globalThis.Zotero = { Libraries: { userLibraryID: 1 } };
 globalThis.ztoolkit = { log: () => undefined };
@@ -47,6 +47,9 @@ const { KeywordIndexStore } = await import(
 );
 const { VectorStore } = await import(
   "../src/modules/semantic/vectorStore.ts"
+);
+const { SemanticSearchService } = await import(
+  "../src/modules/semantic/semanticSearchService.ts"
 );
 const { buildToolCatalog } = await import("../src/modules/toolCatalog.ts");
 
@@ -69,6 +72,15 @@ function adapt(sqlite, beforeQuery = () => {}) {
       if (/^\s*(select|pragma)/iu.test(sql)) return statement.all(...normalised);
       statement.run(...normalised);
       return [];
+    },
+    async valueQueryAsync(sql, params = []) {
+      beforeQuery(sql, params);
+      const statement = sqlite.prepare(sql);
+      const normalised = params.map((value) =>
+        typeof value === "boolean" ? (value ? 1 : 0) : value,
+      );
+      const row = statement.get(...normalised);
+      return row ? Object.values(row)[0] : undefined;
     },
     async executeTransaction(fn) {
       // Zotero's executeTransaction joins an enclosing transaction rather than
@@ -118,6 +130,18 @@ async function freshCombinedStore() {
     CREATE TABLE embeddings (item_key TEXT NOT NULL, chunk_id INTEGER NOT NULL);
     CREATE TABLE vectors_f32 (item_key TEXT NOT NULL, chunk_id INTEGER NOT NULL);
     CREATE TABLE index_status (item_key TEXT PRIMARY KEY);
+    CREATE TABLE index_failures (
+      library_id INTEGER NOT NULL,
+      item_key TEXT NOT NULL,
+      PRIMARY KEY (library_id, item_key)
+    );
+    CREATE TABLE index_build_targets (
+      build_id TEXT NOT NULL,
+      library_id INTEGER NOT NULL,
+      item_key TEXT NOT NULL,
+      state TEXT NOT NULL,
+      PRIMARY KEY (build_id, library_id, item_key)
+    );
   `);
 
   const fault = { when: null };
@@ -505,6 +529,29 @@ test("an atomic batch publishes completion only after commit", async () => {
   ]);
 });
 
+test("a keyword failure rolls back clearIndex before cache and GPU completion", async () => {
+  const { store, sqlite, fault, events } = await freshCombinedStore();
+  await seedCombined(store, sqlite, 2, "CLEAR_A");
+  await seedCombined(store, sqlite, 3, "CLEAR_A");
+  const service = Object.create(SemanticSearchService.prototype);
+  service.initialize = async () => {};
+  service.vectorStore = store;
+  fault.when = (sql) => /DELETE FROM kw_postings/.test(sql);
+
+  await assert.rejects(service.clearIndex(2), /injected atomic delete failure/);
+
+  for (const libraryID of [2, 3]) {
+    assert.deepEqual(combinedState(sqlite, libraryID, "CLEAR_A"), {
+      embeddings: 1,
+      float32: 1,
+      status: 1,
+      keywordAlive: 1,
+    });
+  }
+  assert.equal(store.vectorCache.has("2:CLEAR_A_0"), true);
+  assert.deepEqual(events, [], "a rolled-back clear publishes no completion");
+});
+
 // ---------------------------------------------------------------------------
 // 3. Every deletion path reaches both indexes.
 //
@@ -567,19 +614,19 @@ test("deleting one item's vectors also drops its keyword postings", async () => 
 });
 
 test("hooks may delete vectors directly, because that path now covers both", async () => {
-  // Four call sites reach the vector store without going through the service:
-  // an erased item, an erased attachment's surviving-less parent, "clear this
-  // collection's index" and "clear the selected items' index". They are the
-  // reason the keyword removal was moved into deleteItemVectors; this test
-  // fails if a fifth appears while that guarantee is gone.
+  // Collection and selected-item commands reach the vector store directly.
+  // Permanent deletion uses the recovery wrapper around the same atomic entry.
   const directSingleDeletes =
     hooksSource.match(/vectorStore\.deleteItemVectors\(/g) ?? [];
   const directBatchDeletes =
     hooksSource.match(/vectorStore\.deleteItemsVectors\(/g) ?? [];
+  const recoveredDeletes =
+    hooksSource.match(/deleteItemIndexWithRecovery\(/g) ?? [];
   assert.ok(
-    directSingleDeletes.length + directBatchDeletes.length >= 4,
-    "hooks.ts still deletes through the vector store",
+    directSingleDeletes.length + directBatchDeletes.length >= 2,
+    "collection and selected-item commands still use atomic vector-store deletion",
   );
+  assert.ok(recoveredDeletes.length >= 2, "notifier deletions must be recoverable");
   assert.match(
     transactionBody(
       methodBody(
@@ -621,7 +668,12 @@ test("clearing a library clears both indexes", async () => {
     "async clearIndex(libraryID?: number): Promise<void> {",
   );
   assert.match(clearIndex, /vectorStore\.clear\(libraryID\)/);
-  assert.match(clearIndex, /vectorStore\.clearKeywordIndex\(libraryID\)/);
+  assert.doesNotMatch(clearIndex, /clearKeywordIndex\(/);
+  const atomicClear = methodBody(vectorStoreSource, "async clear(libraryID?: number)");
+  assert.match(
+    transactionBody(atomicClear),
+    /keywordStore\.clearWithoutTransaction\(libraryID\)/,
+  );
 });
 
 test("a full-library rebuild resets the keyword index inside the same transaction", async () => {

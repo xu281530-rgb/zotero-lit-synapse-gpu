@@ -1203,7 +1203,11 @@ assert.doesNotMatch(
 );
 assert.match(hooksSource, /groupQueueKeysByLibrary\(/);
 assert.match(hooksSource, /runBuildsPerLibrary\(/);
-assert.match(hooksSource, /deleteItemVectors\(itemKey, libraryID\)/);
+assert.match(
+  hooksSource,
+  /deleteItemIndexWithRecovery\(\s*semanticService,\s*effectiveLibraryID,/,
+);
+assert.match(hooksSource, /semanticService\.isBuildActive\(\)/);
 assert.match(hooksSource, /libraryID: selectedLibraryID/);
 assert.match(hooksSource, /libraryID: Zotero\.Libraries\.userLibraryID,\n\s+rebuild: false/);
 assert.doesNotMatch(

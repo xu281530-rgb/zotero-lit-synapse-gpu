@@ -383,6 +383,41 @@ export interface SemanticDatabaseClearReport {
   };
 }
 
+export interface SemanticDatabaseClearOptions {
+  /** Correlates the preference-side reset with the transaction commit marker. */
+  resetGeneration?: string;
+  /** Runs immediately after executeTransaction confirms COMMIT. */
+  onDatabaseCleared?: () => void | Promise<void>;
+}
+
+export class SemanticDatabaseClearError extends Error {
+  readonly databaseCleared: boolean;
+  readonly originalError: unknown;
+
+  constructor(databaseCleared: boolean, originalError: unknown) {
+    const phase = databaseCleared ? 'post-commit' : 'pre-commit';
+    const detail =
+      originalError instanceof Error
+        ? originalError.message
+        : String(originalError);
+    super(`Search index database clear failed (${phase}): ${detail}`);
+    this.name = 'SemanticDatabaseClearError';
+    this.databaseCleared = databaseCleared;
+    this.originalError = originalError;
+  }
+}
+
+const RESET_GENERATION_STATE_KEY = 'last_committed_reset_generation';
+
+interface CommittedResetDiagnostics {
+  after: SemanticBusinessCounts;
+  pageCountAfter: number;
+  freelistAfter: number;
+  afterBytes?: number;
+  walAfterBytes?: number;
+  shmAfterBytes?: number;
+}
+
 export interface SemanticLibraryDataCounts {
   chunkCount: number;
   float32VectorCount: number;
@@ -811,6 +846,16 @@ export class VectorStore {
         item_key TEXT NOT NULL,
         state TEXT NOT NULL DEFAULT 'pending',
         PRIMARY KEY (build_id, library_id, item_key)
+      )
+    `);
+
+    // Not a business-index table: this survives clearAll so startup can decide
+    // whether a reset generation committed even if the process died before it
+    // could update the preference-side phase.
+    await this.db.queryAsync(`
+      CREATE TABLE IF NOT EXISTS index_internal_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
       )
     `);
 
@@ -2988,6 +3033,14 @@ export class VectorStore {
         `DELETE FROM index_status WHERE item_key = ?`,
         [storageKey]
       );
+      await this.db.queryAsync(
+        `DELETE FROM index_failures WHERE library_id = ? AND item_key = ?`,
+        [effectiveLibraryID, itemKey],
+      );
+      await this.db.queryAsync(
+        `DELETE FROM index_build_targets WHERE library_id = ? AND item_key = ?`,
+        [effectiveLibraryID, itemKey],
+      );
       await keywordStore.removeItem(effectiveLibraryID, itemKey);
     });
 
@@ -3050,6 +3103,14 @@ export class VectorStore {
         );
       }
       for (const identity of identities) {
+        await this.db.queryAsync(
+          `DELETE FROM index_failures WHERE library_id = ? AND item_key = ?`,
+          [identity.libraryID, identity.itemKey],
+        );
+        await this.db.queryAsync(
+          `DELETE FROM index_build_targets WHERE library_id = ? AND item_key = ?`,
+          [identity.libraryID, identity.itemKey],
+        );
         await keywordStore.removeItem(
           identity.libraryID ?? Zotero.Libraries.userLibraryID,
           identity.itemKey,
@@ -3115,7 +3176,7 @@ export class VectorStore {
   }
 
   /**
-   * Clear vectors and index status.
+   * Clear both search indexes for one library, or for every library.
    *
    * @param libraryID Restrict the wipe to one library. A rebuild of a group
    *   library must not delete My Library's index, and vice versa, so every
@@ -3137,29 +3198,51 @@ export class VectorStore {
     const beforeIndex = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM index_status${where}`, params);
     ztoolkit.log(`[VectorStore] clear() starting: embeddings=${beforeEmbeddings}, index_status=${beforeIndex}`);
 
-    // Execute DELETE statements directly (not in transaction to ensure immediate effect)
-    await this.db.queryAsync(`DELETE FROM embeddings${where}`, params);
-    await this.db.queryAsync(`DELETE FROM vectors_f32${where}`, params);
-    await this.db.queryAsync(`DELETE FROM index_status${where}`, params);
+    const keywordStore = this.getKeywordIndexStore();
+    await keywordStore.ensureSchema();
+    await this.db.executeTransaction(async () => {
+      await this.db.queryAsync(`DELETE FROM embeddings${where}`, params);
+      await this.db.queryAsync(`DELETE FROM vectors_f32${where}`, params);
+      await this.db.queryAsync(`DELETE FROM index_status${where}`, params);
+      await keywordStore.clearWithoutTransaction(libraryID);
 
-    // Verify deletion
-    const afterEmbeddings = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM embeddings${where}`, params);
-    const afterF32 = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM vectors_f32${where}`, params);
-    const afterIndex = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM index_status${where}`, params);
-    ztoolkit.log(`[VectorStore] clear() completed: embeddings=${afterEmbeddings}, vectors_f32=${afterF32}, index_status=${afterIndex}`);
+      const afterEmbeddings = await this.db.valueQueryAsync(
+        `SELECT COUNT(*) FROM embeddings${where}`,
+        params,
+      );
+      const afterF32 = await this.db.valueQueryAsync(
+        `SELECT COUNT(*) FROM vectors_f32${where}`,
+        params,
+      );
+      const afterIndex = await this.db.valueQueryAsync(
+        `SELECT COUNT(*) FROM index_status${where}`,
+        params,
+      );
+      const keywordWhere =
+        libraryID === undefined ? '' : ' WHERE library_id = ?';
+      const keywordParams = libraryID === undefined ? [] : [libraryID];
+      const afterKeywordDocuments = await this.db.valueQueryAsync(
+        `SELECT COUNT(*) FROM kw_docs${keywordWhere}`,
+        keywordParams,
+      );
+      const afterKeywordTerms = await this.db.valueQueryAsync(
+        `SELECT COUNT(*) FROM kw_terms${keywordWhere}`,
+        keywordParams,
+      );
+      if (
+        afterEmbeddings > 0 ||
+        afterF32 > 0 ||
+        afterIndex > 0 ||
+        afterKeywordDocuments > 0 ||
+        afterKeywordTerms > 0
+      ) {
+        throw new Error(
+          `Atomic index clear left rows: embeddings=${afterEmbeddings}, vectors_f32=${afterF32}, index_status=${afterIndex}, kw_docs=${afterKeywordDocuments}, kw_terms=${afterKeywordTerms}`,
+        );
+      }
+    });
 
-    if (afterEmbeddings > 0 || afterF32 > 0 || afterIndex > 0) {
-      ztoolkit.log(`[VectorStore] WARNING: clear() did not fully delete data! Retrying...`, 'warn');
-      // Retry with explicit SQL
-      const retryWhere = scope ? ` WHERE ${scope.clause}` : ' WHERE 1=1';
-      await this.db.queryAsync(`DELETE FROM embeddings${retryWhere}`, params);
-      await this.db.queryAsync(`DELETE FROM vectors_f32${retryWhere}`, params);
-      await this.db.queryAsync(`DELETE FROM index_status${retryWhere}`, params);
-
-      const finalEmbeddings = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM embeddings${where}`, params);
-      const finalIndex = await this.db.valueQueryAsync(`SELECT COUNT(*) FROM index_status${where}`, params);
-      ztoolkit.log(`[VectorStore] clear() retry result: embeddings=${finalEmbeddings}, index_status=${finalIndex}`);
-    }
+    ztoolkit.log(`[VectorStore] clear() transaction committed`);
 
     this.vectorCache.clear();
     // VACUUM to reclaim disk space (DELETE only marks pages as free)
@@ -3197,38 +3280,9 @@ export class VectorStore {
     }
   }
 
-  /**
-   * Remove every semantic business row while preserving schema and migration
-   * metadata. Success means the logical and physical postconditions were both
-   * verified; callers must surface any rejection instead of claiming success.
-   */
-  async clearAll(): Promise<SemanticDatabaseClearReport> {
+  /** Idempotent post-COMMIT work, also used to finish an interrupted reset. */
+  async finalizeCommittedReset(): Promise<CommittedResetDiagnostics> {
     await this.ensureInitialized();
-
-    const before = await this.countSemanticBusinessRows();
-    const beforeBytes = this.readDatabaseFileSize(this.dbPath);
-    const walBeforeBytes = this.readDatabaseFileSize(`${this.dbPath}-wal`);
-    const shmBeforeBytes = this.readDatabaseFileSize(`${this.dbPath}-shm`);
-    const pageCountBefore = Number(
-      await this.db.valueQueryAsync(`PRAGMA page_count`),
-    );
-    const freelistBefore = Number(
-      await this.db.valueQueryAsync(`PRAGMA freelist_count`),
-    );
-    ztoolkit.log(
-      `[VectorStore] clearAll() starting: ${INDEX_BUSINESS_TABLES.map((table) => `${table}=${before[table]}`).join(', ')}`,
-    );
-
-    await this.db.executeTransaction(async () => {
-      for (const table of INDEX_BUSINESS_TABLES) {
-        await this.db.queryAsync(`DELETE FROM ${table}`);
-      }
-      await this.db.queryAsync(
-        `DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?)`,
-        ['embeddings', 'vectors_f32', 'kw_docs', 'kw_terms'],
-      );
-    });
-
     this.vectorCache.clear();
     await this.gpuBackend.shutdown();
 
@@ -3265,42 +3319,121 @@ export class VectorStore {
         `Search index database WAL was not truncated (${walAfterBytes} bytes remain)`,
       );
     }
-    const rowsBefore = INDEX_BUSINESS_TABLES.reduce(
-      (sum, table) => sum + before[table],
-      0,
-    );
-    if (
-      rowsBefore > 0 &&
-      beforeBytes !== undefined &&
-      afterBytes !== undefined &&
-      afterBytes >= beforeBytes
-    ) {
-      throw new Error(
-        `Search index database did not physically shrink (${beforeBytes} -> ${afterBytes} bytes)`,
-      );
-    }
 
-    const report: SemanticDatabaseClearReport = {
-      before,
+    return {
       after,
-      database: {
-        path: this.dbPath,
-        beforeBytes,
-        afterBytes,
-        walBeforeBytes,
-        walAfterBytes,
-        shmBeforeBytes,
-        shmAfterBytes,
-        pageCountBefore,
-        pageCountAfter,
-        freelistBefore,
-        freelistAfter,
-      },
+      pageCountAfter,
+      freelistAfter,
+      afterBytes,
+      walAfterBytes,
+      shmAfterBytes,
     };
-    ztoolkit.log(
-      `[VectorStore] clearAll() verified: db=${beforeBytes ?? 'unknown'} -> ${afterBytes ?? 'unknown'} bytes, pages=${pageCountBefore} -> ${pageCountAfter}`,
+  }
+
+  /**
+   * Remove every semantic business row while preserving schema and migration
+   * metadata. Success means the logical and physical postconditions were both
+   * verified; callers must surface any rejection instead of claiming success.
+   */
+  async clearAll(
+    options: SemanticDatabaseClearOptions = {},
+  ): Promise<SemanticDatabaseClearReport> {
+    let databaseCleared = false;
+    try {
+      await this.ensureInitialized();
+
+      const before = await this.countSemanticBusinessRows();
+      const beforeBytes = this.readDatabaseFileSize(this.dbPath);
+      const walBeforeBytes = this.readDatabaseFileSize(`${this.dbPath}-wal`);
+      const shmBeforeBytes = this.readDatabaseFileSize(`${this.dbPath}-shm`);
+      const pageCountBefore = Number(
+        await this.db.valueQueryAsync(`PRAGMA page_count`),
+      );
+      const freelistBefore = Number(
+        await this.db.valueQueryAsync(`PRAGMA freelist_count`),
+      );
+      ztoolkit.log(
+        `[VectorStore] clearAll() starting: ${INDEX_BUSINESS_TABLES.map((table) => `${table}=${before[table]}`).join(', ')}`,
+      );
+
+      await this.db.executeTransaction(async () => {
+        for (const table of INDEX_BUSINESS_TABLES) {
+          await this.db.queryAsync(`DELETE FROM ${table}`);
+        }
+        await this.db.queryAsync(
+          `DELETE FROM sqlite_sequence WHERE name IN (?, ?, ?, ?)`,
+          ['embeddings', 'vectors_f32', 'kw_docs', 'kw_terms'],
+        );
+        if (options.resetGeneration) {
+          await this.db.queryAsync(
+            `INSERT OR REPLACE INTO index_internal_state (key, value) VALUES (?, ?)`,
+            [RESET_GENERATION_STATE_KEY, options.resetGeneration],
+          );
+        }
+      });
+      databaseCleared = true;
+
+      // This is deliberately the first operation after COMMIT. Failure here is
+      // still post-commit; the SQLite marker remains the recovery authority.
+      await options.onDatabaseCleared?.();
+
+      const {
+        after,
+        pageCountAfter,
+        freelistAfter,
+        afterBytes,
+        walAfterBytes,
+        shmAfterBytes,
+      } = await this.finalizeCommittedReset();
+      const rowsBefore = INDEX_BUSINESS_TABLES.reduce(
+        (sum, table) => sum + before[table],
+        0,
+      );
+      if (
+        rowsBefore > 0 &&
+        beforeBytes !== undefined &&
+        afterBytes !== undefined &&
+        afterBytes >= beforeBytes
+      ) {
+        throw new Error(
+          `Search index database did not physically shrink (${beforeBytes} -> ${afterBytes} bytes)`,
+        );
+      }
+
+      const report: SemanticDatabaseClearReport = {
+        before,
+        after,
+        database: {
+          path: this.dbPath,
+          beforeBytes,
+          afterBytes,
+          walBeforeBytes,
+          walAfterBytes,
+          shmBeforeBytes,
+          shmAfterBytes,
+          pageCountBefore,
+          pageCountAfter,
+          freelistBefore,
+          freelistAfter,
+        },
+      };
+      ztoolkit.log(
+        `[VectorStore] clearAll() verified: db=${beforeBytes ?? 'unknown'} -> ${afterBytes ?? 'unknown'} bytes, pages=${pageCountBefore} -> ${pageCountAfter}`,
+      );
+      return report;
+    } catch (error) {
+      if (error instanceof SemanticDatabaseClearError) throw error;
+      throw new SemanticDatabaseClearError(databaseCleared, error);
+    }
+  }
+
+  async getCommittedResetGeneration(): Promise<string | null> {
+    await this.ensureInitialized();
+    const value = await this.db.valueQueryAsync(
+      `SELECT value FROM index_internal_state WHERE key = ?`,
+      [RESET_GENERATION_STATE_KEY],
     );
-    return report;
+    return typeof value === 'string' && value ? value : null;
   }
 
   /**

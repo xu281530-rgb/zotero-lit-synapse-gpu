@@ -13,6 +13,7 @@ import {
   groupQueueKeysByLibrary,
   toLibraryQueueKey,
 } from "./modules/libraryScope";
+import { deleteItemIndexWithRecovery } from "./modules/semantic/indexRefreshQueue";
 
 // Preference keys for semantic search settings
 const PREF_SEMANTIC_ENABLED = 'extensions.zotero.zotero-mcp-plugin.semantic.enabled';
@@ -470,8 +471,8 @@ function queueModifiedItems(
  */
 async function handleItemsDeleted(itemIds: number[], extraData: any) {
   try {
-    const { getVectorStore } = await import("./modules/semantic/vectorStore");
-    const vectorStore = getVectorStore();
+    const { getSemanticSearchService } = await import("./modules/semantic");
+    const semanticService = getSemanticSearchService();
 
     interface DeletedIdentity {
       itemKey?: string;
@@ -517,8 +518,21 @@ async function handleItemsDeleted(itemIds: number[], extraData: any) {
         if (!parentKey) {
           // Top-level item: its own index is the one that has to go.
           if (!itemKey) continue;
-          await vectorStore.deleteItemVectors(itemKey, libraryID);
-          ztoolkit.log(`[MCP Plugin] Deleted index for item: ${itemKey}`);
+          const effectiveLibraryID =
+            libraryID ?? Zotero.Libraries.userLibraryID;
+          const removed = await deleteItemIndexWithRecovery(
+            semanticService,
+            effectiveLibraryID,
+            itemKey,
+            "permanent-delete-notifier",
+            {
+              buildActive:
+                isAutoIndexing || semanticService.isBuildActive(),
+            },
+          );
+          if (removed) {
+            ztoolkit.log(`[MCP Plugin] Deleted index for item: ${itemKey}`);
+          }
           continue;
         }
         if (knownAnnotation) continue;
@@ -531,10 +545,21 @@ async function handleItemsDeleted(itemIds: number[], extraData: any) {
         );
         if (!owner) {
           // The parent went with it: nothing to rebuild, only to remove.
-          await vectorStore.deleteItemVectors(parentKey, effectiveLibraryID);
-          ztoolkit.log(
-            `[MCP Plugin] Parent ${parentKey} of deleted child is gone too; removed its index`,
+          const removed = await deleteItemIndexWithRecovery(
+            semanticService,
+            effectiveLibraryID,
+            parentKey,
+            "deleted-child-parent-missing",
+            {
+              buildActive:
+                isAutoIndexing || semanticService.isBuildActive(),
+            },
           );
+          if (removed) {
+            ztoolkit.log(
+              `[MCP Plugin] Parent ${parentKey} of deleted child is gone too; removed its index`,
+            );
+          }
           continue;
         }
         if (!owner.isRegularItem?.()) {
@@ -576,11 +601,22 @@ function registerItemNotifier() {
       // Don't process during shutdown
       if (isShuttingDown) return;
 
-      // Don't process during auto-indexing (prevent loops)
-      if (isAutoIndexing) return;
-
       // Only process item events
       if (type !== 'item') return;
+
+      const numericIds = ids.map(id => typeof id === 'string' ? parseInt(id, 10) : id);
+
+      // Permanent deletion is cleanup, not automatic refresh. It must survive
+      // disabled refresh preferences and active builds; the recovery helper
+      // persists it when immediate deletion would race the build.
+      if (event === 'delete') {
+        ztoolkit.log(`[MCP Plugin] Item notifier: event=${event}, type=${type}, ids=${ids.length}`);
+        await handleItemsDeleted(numericIds, extraData);
+        return;
+      }
+
+      // Don't process refresh events during auto-indexing (prevent loops)
+      if (isAutoIndexing) return;
 
       // Check if semantic search and auto-update are enabled
       const semanticOn = Zotero.Prefs.get(PREF_SEMANTIC_ENABLED, true);
@@ -599,15 +635,12 @@ function registerItemNotifier() {
       if (
         event !== 'add' &&
         event !== 'modify' &&
-        event !== 'trash' &&
-        event !== 'delete'
+        event !== 'trash'
       ) {
         return;
       }
 
       ztoolkit.log(`[MCP Plugin] Item notifier: event=${event}, type=${type}, ids=${ids.length}`);
-
-      const numericIds = ids.map(id => typeof id === 'string' ? parseInt(id, 10) : id);
 
       if (event === 'add') {
         // For add events, schedule indexing for new items
@@ -647,10 +680,6 @@ function registerItemNotifier() {
         // cannot rely on one arriving. It also cannot rely on item.deleted
         // being committed yet, hence the explicit flag.
         queueModifiedItems(numericIds, { trashed: true });
-      } else if (event === 'delete') {
-        // For delete events, resolve each erased item to the item that owns
-        // its index (extraData carries the old row; items are already gone)
-        handleItemsDeleted(numericIds, extraData);
       }
     }
   }, ['item'], 'zotero-mcp-plugin-auto-update');

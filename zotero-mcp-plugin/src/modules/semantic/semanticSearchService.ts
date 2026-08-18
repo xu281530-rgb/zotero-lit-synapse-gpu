@@ -71,6 +71,7 @@ import {
   computeBodyExtractionSignature,
   decideBodyRetry,
 } from './bodyRetryPolicy';
+import { isIndexResetPending } from './indexRefreshQueue';
 
 declare let Zotero: any;
 declare let ztoolkit: ZToolkit;
@@ -355,6 +356,7 @@ export class SemanticSearchService {
   private _aborted = false;
   private _pauseResolve: (() => void) | null = null;
   private _buildActive = false;
+  private _activeIndexOperations = 0;
   /** Set for the duration of a forced build; read by extractItemContent */
   private _forceRun = false;
   private _activeBuildID: string | null = null;
@@ -993,9 +995,9 @@ export class SemanticSearchService {
   } = {}): Promise<IndexProgress> {
     await this.initialize();
 
-    if (this._databaseResetActive) {
+    if (this._databaseResetActive || isIndexResetPending()) {
       ztoolkit.log(
-        '[SemanticSearch] buildIndex rejected while search index database reset is active',
+        '[SemanticSearch] buildIndex rejected while search index database reset cleanup is active',
         'warn',
       );
       return { ...this.indexProgress, status: 'busy' };
@@ -1013,7 +1015,7 @@ export class SemanticSearchService {
       frozenChunkSettings,
     } = options;
 
-    if (this._buildActive) {
+    if (this.isBuildActive()) {
       ztoolkit.log('[SemanticSearch] buildIndex already running, ignoring duplicate call', 'warn');
       // Return a copy with a distinct status so callers can tell this apart
       // from a completed build and avoid showing bogus "completed" messages
@@ -1593,9 +1595,11 @@ export class SemanticSearchService {
     sharedProcessor: PDFProcessor | null,
     force: boolean = this._forceRun,
   ): Promise<IndexWorkOutcome> {
-    if (this._databaseResetActive) {
-      throw new Error('Search index database reset is active');
+    if (this._databaseResetActive || isIndexResetPending()) {
+      throw new Error('Search index database reset cleanup is active');
     }
+    this._activeIndexOperations += 1;
+    try {
     const startTime = Date.now();
     const itemTitle = item.getDisplayTitle?.() || item.key;
     ztoolkit.log(`[SemanticSearch] indexItem() start: ${item.key} "${itemTitle.substring(0, 30)}..."`);
@@ -1842,6 +1846,12 @@ export class SemanticSearchService {
     const elapsed = Date.now() - startTime;
     ztoolkit.log(`[SemanticSearch] indexItem() completed: ${item.key} (${records.length} vectors, source=${sourceKind}) in ${elapsed}ms`);
     return this.noteBodyExtractionOutcome(item, bodyState, extracted, { status: 'succeeded' });
+    } finally {
+      this._activeIndexOperations = Math.max(
+        0,
+        this._activeIndexOperations - 1,
+      );
+    }
   }
 
   /**
@@ -1992,12 +2002,16 @@ export class SemanticSearchService {
    * Delete index for an item
    */
   async deleteItemIndex(itemKey: string, libraryID?: number): Promise<void> {
-    await this.initialize();
+    // Deletion is local SQLite cleanup. It must not initialize or call the
+    // Embedding service, especially when replaying a deleted item after restart.
+    await this.vectorStore.initialize();
     // Drops BOTH indexes: deleteItemVectors removes the keyword postings too,
-    // so that every caller of it — including the four in hooks.ts that reach
-    // the vector store directly — gets the same guarantee without having to
-    // remember a second call.
+    // so direct callers and the persistent deletion queue get the same
+    // guarantee without having to remember a second call.
     await this.vectorStore.deleteItemVectors(itemKey, libraryID);
+    const effectiveLibraryID = libraryID ?? Zotero.Libraries.userLibraryID;
+    this._failedItems.delete(`${effectiveLibraryID}:${itemKey}`);
+    this.indexProgress.failedCount = this._failedItems.size;
     ztoolkit.log(`[SemanticSearch] Deleted index for item: ${itemKey} (libraryID=${libraryID ?? 'user'})`);
   }
 
@@ -2006,8 +2020,8 @@ export class SemanticSearchService {
    */
   async clearIndex(libraryID?: number): Promise<void> {
     await this.initialize();
+    // VectorStore.clear is the single atomic dual-index entry point.
     await this.vectorStore.clear(libraryID);
-    await this.vectorStore.clearKeywordIndex(libraryID);
     ztoolkit.log(`[SemanticSearch] Index cleared (libraryID=${libraryID ?? 'all'})`);
   }
 
@@ -2208,7 +2222,7 @@ export class SemanticSearchService {
    * paused state waiting for resume)
    */
   isBuildActive(): boolean {
-    return this._buildActive;
+    return this._buildActive || this._activeIndexOperations > 0;
   }
 
   async beginDatabaseReset(): Promise<void> {
@@ -2225,7 +2239,7 @@ export class SemanticSearchService {
         this._pauseResolve = null;
       }
     }
-    while (this._buildActive) {
+    while (this.isBuildActive()) {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
   }
@@ -2396,7 +2410,7 @@ export class SemanticSearchService {
     // Check BEFORE clearing failure markers: if another build is running,
     // buildIndex would reject the nested call after the bookkeeping was
     // already wiped, losing the failure records without retrying anything
-    if (this._buildActive || this._databaseResetActive) {
+    if (this.isBuildActive() || this._databaseResetActive) {
       ztoolkit.log('[SemanticSearch] retryFailedItems: a build is already running', 'warn');
       return { ...this.indexProgress, status: 'busy' };
     }

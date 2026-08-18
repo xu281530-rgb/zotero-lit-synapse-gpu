@@ -30,8 +30,13 @@ assert.doesNotMatch(
 );
 assert.match(
   hooksSource,
-  /event !== 'add' &&\s*\n?\s*event !== 'modify' &&\s*\n?\s*event !== 'trash' &&\s*\n?\s*event !== 'delete'/,
-  "the notifier must accept add, modify, trash and delete",
+  /event !== 'add' &&\s*\n?\s*event !== 'modify' &&\s*\n?\s*event !== 'trash'/,
+  "the refresh branch must accept add, modify and trash",
+);
+assert.match(
+  hooksSource,
+  /if \(event === 'delete'\)[\s\S]{0,300}?await handleItemsDeleted\(numericIds, extraData\)/,
+  "permanent deletion must use its dedicated durable cleanup branch",
 );
 assert.match(hooksSource, /queueModifiedItems\(numericIds\)/);
 // modify is queued non-forced so an unchanged item costs only a timestamp check.

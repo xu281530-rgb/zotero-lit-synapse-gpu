@@ -27,7 +27,10 @@ import {
 } from "./keywordSearchBenchmark";
 import { runLexicalSearch } from "./lexicalSearch";
 import {
+  cancelIndexRefreshQueueReset,
   clearIndexRefreshQueue,
+  markIndexRefreshQueueDatabaseCleared,
+  prepareIndexRefreshQueueReset,
   resumeIndexRefreshQueue,
   suspendIndexRefreshQueue,
 } from "./semantic/indexRefreshQueue";
@@ -2169,6 +2172,10 @@ function bindSemanticStatsSettings(doc: Document) {
         vectorStore,
         suspendRefreshQueue: suspendIndexRefreshQueue,
         resumeRefreshQueue: resumeIndexRefreshQueue,
+        prepareRefreshQueueReset: prepareIndexRefreshQueueReset,
+        markRefreshQueueDatabaseCleared:
+          markIndexRefreshQueueDatabaseCleared,
+        cancelRefreshQueueReset: cancelIndexRefreshQueueReset,
         suspendPDFRefreshes: suspendPDFSemanticIndexRefreshes,
         resumePDFRefreshes: resumePDFSemanticIndexRefreshes,
         clearRefreshQueue: clearIndexRefreshQueue,
