@@ -65,6 +65,7 @@
     "test:wiki-store": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-store.js",
     "test:wiki-retrieval": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-retrieval.js",
     "test:wiki-ui": "node scripts/test-wiki-ui.js",
+    "test:data-compatibility-locks": "node --experimental-strip-types scripts/test-data-compatibility-locks.js",
     "test:fulltext-on-demand": "node --experimental-strip-types scripts/test-fulltext-on-demand.js",
     "test:index-recovery": "node --experimental-strip-types scripts/test-index-recovery.js",
     "test:collection-scope": "node --experimental-strip-types scripts/test-collection-scope.js",

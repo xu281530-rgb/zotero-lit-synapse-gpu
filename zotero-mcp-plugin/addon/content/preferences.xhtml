@@ -1324,6 +1324,12 @@
               />
             </html:div>
           </html:div>
+          <html:div
+            id="embedding-identity-lock-message"
+            class="zmp-warn zmp-warn-alert"
+            data-l10n-id="pref-embedding-identity-locked"
+            hidden="hidden"
+          ></html:div>
           <html:div class="zmp-fg">
             <html:label class="zmp-fl" data-l10n-id="pref-embedding-timeout-label"></html:label>
             <html:input type="number" class="zmp-fi zmp-fi-s"
@@ -1485,6 +1491,13 @@
                     <html:div class="zmp-warn-p" data-l10n-id="pref-hybrid-chunk-rebuild-p3"></html:div>
                   </html:div>
                 </html:div>
+
+                <html:div
+                  id="hybrid-chunk-lock-message"
+                  class="zmp-warn zmp-warn-alert"
+                  data-l10n-id="pref-hybrid-chunk-locked"
+                  hidden="hidden"
+                ></html:div>
 
                 <html:div class="zmp-sw zmp-nrow">
                   <html:div>
@@ -1956,6 +1969,17 @@
             placeholder="5000"
           />
         </html:div>
+        <html:div class="zmp-bg">
+          <html:button
+            class="zmp-b zmp-b-danger"
+            id="clear-wiki-data-button"
+            data-l10n-id="pref-wiki-clear-button"
+          ></html:button>
+        </html:div>
+        <html:div
+          class="zmp-sw-sub"
+          id="wiki-data-statistics"
+        ></html:div>
       </html:div>
 
       <!-- ⑥ MinerU 高精度 PDF 解析 -->

@@ -229,6 +229,35 @@ test("an empty index totals zero rather than failing", async () => {
   });
 });
 
+test("compatibility counts observe either persistent index and clear to zero", async () => {
+  const { store, sqlite } = await freshStore();
+  assert.deepEqual(await store.getPersistentIndexCounts(), {
+    semanticVectors: 0,
+    keywordDocuments: 0,
+    keywordChunks: 0,
+  });
+
+  await store
+    .getKeywordIndexStore()
+    .writeItem(PAPER(USER_LIBRARY, "KEYWORD1"));
+  let counts = await store.getPersistentIndexCounts();
+  assert.equal(counts.semanticVectors, 0);
+  assert.equal(counts.keywordDocuments, 1);
+  assert.ok(counts.keywordChunks > 0);
+
+  addVector(sqlite, USER_LIBRARY, "VECTOR01");
+  counts = await store.getPersistentIndexCounts();
+  assert.equal(counts.semanticVectors, 1);
+  assert.equal(counts.keywordDocuments, 1);
+
+  await store.clearAll();
+  assert.deepEqual(await store.getPersistentIndexCounts(), {
+    semanticVectors: 0,
+    keywordDocuments: 0,
+    keywordChunks: 0,
+  });
+});
+
 // ---------------------------------------------------------------------------
 // 2. The vector index's own figures are scoped to one library too.
 // ---------------------------------------------------------------------------

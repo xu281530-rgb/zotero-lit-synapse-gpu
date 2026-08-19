@@ -52,4 +52,26 @@ for (const setting of [
   );
 }
 
+for (const id of [
+  "clear-wiki-data-button",
+  "wiki-data-statistics",
+  "hybrid-chunk-lock-message",
+  "embedding-identity-lock-message",
+]) {
+  assert.ok(preferences.includes(id), `preferences UI must define ${id}`);
+}
+
+const preferenceScript = fs.readFileSync(
+  "src/modules/preferenceScript.ts",
+  "utf8",
+);
+assert.match(preferenceScript, /clearAll\(\)/u);
+assert.match(preferenceScript, /chunkLocked/u);
+assert.match(preferenceScript, /embeddingIdentityLocked/u);
+assert.doesNotMatch(
+  preferenceScript,
+  /apiKeyInput\.disabled\s*=\s*[^f]/u,
+  "API Key must remain editable when the embedding identity is locked",
+);
+
 console.log("wiki UI contract tests passed");

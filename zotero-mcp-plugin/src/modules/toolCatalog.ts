@@ -1208,7 +1208,7 @@ export function buildToolCatalog(): ToolDefinition[] {
   {
     name: 'wiki_search',
     category: 'wiki',
-    description: 'Search Alias/Concept, Claim keyword and CPU embedding indexes, Relations and one-hop neighbors, then resolve valid Evidence to Zotero documents. normalizedWikiScore is query relevance; evidenceConfidence, readDepth and epistemicStatus remain separate reliability fields.',
+    description: 'Search Alias/Concept, Claim keyword and CPU embedding indexes, Relations and one-hop neighbors, then resolve valid Evidence to a distinct-document ranking. itemKeys is applied before Claim scoring. limit caps final documents, never Claims. normalizedWikiScore is query relevance; evidenceConfidence, readDepth and epistemicStatus remain separate reliability fields.',
     inputSchema: {
       type: 'object',
       properties: {

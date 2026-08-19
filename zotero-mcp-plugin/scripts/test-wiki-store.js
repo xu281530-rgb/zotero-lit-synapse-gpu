@@ -609,7 +609,11 @@ assert.equal(claim?.evidence[0].chunkIdSnapshot, 11);
 await store.markSourceDeleted(1, "ITEMA001");
 claim = await store.getClaim(commit.refs["claim:boundary"]);
 assert.equal(claim?.evidence[0].linkState, "source_deleted");
-assert.equal(claim?.epistemicStatus, "unsupported");
+assert.equal(
+  claim?.epistemicStatus,
+  "provisional",
+  "deleting a Zotero source must not erase the historical Evidence or downgrade its Claim",
+);
 
 sqlite.close();
 sqlite = new DatabaseSync(dbPath);
@@ -621,6 +625,124 @@ assert.equal(
   1,
   "Wiki data must survive closing and reopening its independent database",
 );
+
+const corroborated = await store.commit({
+  libraryID: 1,
+  userInitiated: true,
+  actions: [
+    {
+      action: "CREATE_PAGE",
+      ref: "page:historical",
+      canonicalTitle: "Historical corroboration",
+    },
+    {
+      action: "ADD_CLAIM",
+      ref: "claim:historical",
+      pageId: "page:historical",
+      claimText: "Two independent papers corroborate the historical result.",
+      claimType: "consensus",
+      epistemicStatus: "corroborated",
+      coverageLevel: "cross_paper",
+      confidence: 0.95,
+      evidence: [
+        {
+          libraryID: 1,
+          itemKey: "HISTORY1",
+          chunkIdSnapshot: 0,
+          chunkTextHash,
+          sourceContentHash: "history-content-1",
+          sourceChunkSignature: "paragraph-v3:1000:500",
+          sourceResetGeneration: "history-reset",
+          excerpt: "First independent historical observation.",
+          evidenceRole: "SUPPORTS",
+          readDepth: "cross_paper",
+        },
+        {
+          libraryID: 1,
+          itemKey: "HISTORY2",
+          chunkIdSnapshot: 0,
+          chunkTextHash,
+          sourceContentHash: "history-content-2",
+          sourceChunkSignature: "paragraph-v3:1000:500",
+          sourceResetGeneration: "history-reset",
+          excerpt: "Second independent historical observation.",
+          evidenceRole: "SUPPORTS",
+          readDepth: "cross_paper",
+        },
+      ],
+    },
+  ],
+});
+await store.markSourceDeleted(1, "HISTORY1");
+await store.markSourceDeleted(1, "HISTORY2");
+assert.equal(
+  (await store.getClaim(corroborated.refs["claim:historical"]))
+    ?.epistemicStatus,
+  "corroborated",
+  "historical Evidence from deleted sources must not downgrade a corroborated Claim",
+);
+
+const claimEmbeddingTextHash = await hashWikiText(
+  "Cooling-rate refinement becomes weaker above the transition temperature.",
+);
+await store.saveClaimEmbedding({
+  claimId: commit.refs["claim:boundary"],
+  vector: new Float32Array([1, 0, 0]),
+  model: "embedding-model-a",
+  textHash: claimEmbeddingTextHash,
+});
+await assert.rejects(
+  () =>
+    store.saveClaimEmbedding({
+      claimId: commit.refs["claim:boundary"],
+      vector: new Float32Array([1, 0, 0]),
+      model: "embedding-model-b",
+      textHash: claimEmbeddingTextHash,
+    }),
+  /different model or dimensions/iu,
+  "Claim Embeddings must not mix model identities",
+);
+await assert.rejects(
+  () =>
+    store.saveClaimEmbedding({
+      claimId: commit.refs["claim:boundary"],
+      vector: new Float32Array([1, 0]),
+      model: "embedding-model-a",
+      textHash: claimEmbeddingTextHash,
+    }),
+  /different model or dimensions/iu,
+  "Claim Embeddings must not mix vector dimensions",
+);
+const searchDbPath = path.join(tempDir, "zotero-mcp-semantic.sqlite");
+const searchSqlite = new DatabaseSync(searchDbPath);
+searchSqlite.exec(
+  "CREATE TABLE embeddings (id INTEGER PRIMARY KEY); INSERT INTO embeddings VALUES (1)",
+);
+
+const beforeClear = await store.getStatus();
+assert.equal(beforeClear.claimEmbeddings, 1);
+const clearReport = await store.clearAll();
+assert.ok(clearReport.deletedRows > 0);
+assert.deepEqual(await store.getStatus(), {
+  database: "zotero-mcp-wiki.sqlite",
+  pages: 0,
+  claims: 0,
+  concepts: 0,
+  aliases: 0,
+  relations: 0,
+  evidence: 0,
+  claimEmbeddings: 0,
+  pendingRelink: 0,
+  validEvidence: 0,
+  staleEvidence: 0,
+  deletedSources: 0,
+});
+assert.equal(
+  searchSqlite.prepare("SELECT COUNT(*) AS count FROM embeddings").get().count,
+  1,
+  "clearing Wiki persistence must not delete the independent search index",
+);
+searchSqlite.close();
 
 sqlite.close();
 fs.rmSync(tempDir, { recursive: true, force: true });

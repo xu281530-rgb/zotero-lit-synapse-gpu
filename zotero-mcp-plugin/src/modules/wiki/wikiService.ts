@@ -318,7 +318,7 @@ export class WikiService {
     keywords?: string[];
     itemKeys?: string[];
     minScore?: number;
-    limit?: number;
+    limit?: number | null;
     useVector?: boolean;
   }): Promise<WikiServiceSearchResult> {
     const warnings: string[] = [];

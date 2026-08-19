@@ -1116,6 +1116,32 @@ export class WikiStore {
     textHash: string;
   }): Promise<void> {
     await this.initialize();
+    const claims = await this.db.queryAsync(
+      "SELECT claim_text FROM wiki_claims WHERE claim_id = ?",
+      [options.claimId],
+    );
+    if (!claims[0]) throw new Error(`Wiki claim ${options.claimId} not found`);
+    const expectedTextHash = await hashWikiText(
+      String(rowValue(claims[0], "claim_text", "claimText")),
+    );
+    if (options.textHash !== expectedTextHash) {
+      throw new Error(
+        `Claim Embedding text_hash does not match Claim ${options.claimId}`,
+      );
+    }
+    const identities = await this.db.queryAsync(
+      "SELECT DISTINCT model, dimensions FROM wiki_claim_embeddings",
+    );
+    for (const identity of identities) {
+      if (
+        String(identity.model) !== options.model ||
+        Number(identity.dimensions) !== options.vector.length
+      ) {
+        throw new Error(
+          "Wiki Claim Embeddings already use a different model or dimensions; clear Wiki data before changing the embedding space",
+        );
+      }
+    }
     const bytes = new Uint8Array(
       options.vector.buffer,
       options.vector.byteOffset,
@@ -1170,11 +1196,38 @@ export class WikiStore {
           pageParams,
         ),
       ),
+      aliases: Number(
+        await this.db.valueQueryAsync(
+          libraryID === undefined
+            ? "SELECT COUNT(*) FROM wiki_aliases"
+            : `SELECT COUNT(*) FROM wiki_aliases a JOIN wiki_concepts c ON c.concept_id = a.concept_id
+               WHERE c.library_id = ?`,
+          pageParams,
+        ),
+      ),
+      relations: Number(
+        await this.db.valueQueryAsync(
+          libraryID === undefined
+            ? "SELECT COUNT(*) FROM wiki_relations"
+            : `SELECT COUNT(*) FROM wiki_relations r JOIN wiki_concepts c ON c.concept_id = r.source_concept_id
+               WHERE c.library_id = ?`,
+          pageParams,
+        ),
+      ),
       evidence: Number(
         await this.db.valueQueryAsync(
           libraryID === undefined
             ? "SELECT COUNT(*) FROM wiki_evidence"
             : `SELECT COUNT(*) FROM wiki_evidence e JOIN wiki_claims c ON c.claim_id = e.claim_id
+               JOIN wiki_pages p ON p.page_id = c.page_id WHERE p.library_id = ?`,
+          pageParams,
+        ),
+      ),
+      claimEmbeddings: Number(
+        await this.db.valueQueryAsync(
+          libraryID === undefined
+            ? "SELECT COUNT(*) FROM wiki_claim_embeddings"
+            : `SELECT COUNT(*) FROM wiki_claim_embeddings ce JOIN wiki_claims c ON c.claim_id = ce.claim_id
                JOIN wiki_pages p ON p.page_id = c.page_id WHERE p.library_id = ?`,
           pageParams,
         ),
@@ -1212,6 +1265,46 @@ export class WikiStore {
         ),
       ),
     };
+  }
+
+  async clearAll(): Promise<{ deletedRows: number }> {
+    const before = await this.getStatus();
+    const deletedRows = [
+      before.pages,
+      before.claims,
+      before.concepts,
+      before.aliases,
+      before.relations,
+      before.evidence,
+      before.claimEmbeddings,
+    ].reduce<number>((total, value) => total + (Number(value) || 0), 0);
+    await this.db.executeTransaction(async () => {
+      for (const table of [
+        "wiki_claim_embeddings",
+        "wiki_evidence",
+        "wiki_relations",
+        "wiki_aliases",
+        "wiki_claims",
+        "wiki_pages",
+        "wiki_concepts",
+      ]) {
+        await this.db.queryAsync(`DELETE FROM ${table}`);
+      }
+    });
+    const after = await this.getStatus();
+    const remaining = [
+      after.pages,
+      after.claims,
+      after.concepts,
+      after.aliases,
+      after.relations,
+      after.evidence,
+      after.claimEmbeddings,
+    ].reduce<number>((total, value) => total + (Number(value) || 0), 0);
+    if (remaining !== 0) {
+      throw new Error(`Wiki data reset left ${remaining} persistent rows`);
+    }
+    return { deletedRows };
   }
 
   async listPages(libraryID: number): Promise<WikiPageRecord[]> {
@@ -1434,8 +1527,7 @@ export class WikiStore {
     const claimItems = new Map<number, Set<string>>();
     const claimItemRoles = new Map<number, Map<string, Set<string>>>();
     for (const row of snapshot.evidence) {
-      if (rowValue(row, "link_state", "linkState") === "source_deleted")
-        continue;
+      if (rowValue(row, "link_state", "linkState") !== "valid") continue;
       const itemKey = String(rowValue(row, "item_key", "itemKey"));
       const claimId = Number(rowValue(row, "claim_id", "claimId"));
       (
@@ -1631,13 +1723,13 @@ export class WikiStore {
       ),
     );
     if (!claimId) return;
-    const valid = Number(
+    const verifiedOrHistorical = Number(
       await this.db.valueQueryAsync(
-        "SELECT COUNT(*) FROM wiki_evidence WHERE claim_id = ? AND link_state != 'source_deleted'",
+        "SELECT COUNT(*) FROM wiki_evidence WHERE claim_id = ? AND link_state IN ('valid', 'source_deleted')",
         [claimId],
       ),
     );
-    if (valid === 0) {
+    if (verifiedOrHistorical === 0) {
       await this.db.queryAsync(
         "UPDATE wiki_claims SET epistemic_status = 'unsupported', updated_at = ?, version = version + 1 WHERE claim_id = ? AND epistemic_status != 'unsupported'",
         [Date.now(), claimId],

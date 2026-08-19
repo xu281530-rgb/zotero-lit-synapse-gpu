@@ -39,6 +39,7 @@ import {
   resumePDFSemanticIndexRefreshes,
   suspendPDFSemanticIndexRefreshes,
 } from "./pdfTextSource";
+import { getDataCompatibilityState } from "./dataCompatibilityLocks";
 
 export async function registerPrefsScripts(_window: Window) {
   // This function is called when the prefs window is opened
@@ -395,6 +396,70 @@ function bindPrefEvents() {
  * 分块相关的两项只影响新建的索引，所以顺带对比索引里记录的分块签名，不一致时
  * 提示用户重建，而不是偷偷替他重建。
  */
+async function refreshWikiDataStatistics(doc: Document): Promise<void> {
+  const element = doc.querySelector("#wiki-data-statistics") as HTMLElement;
+  if (!element) return;
+  try {
+    const { getWikiStore } = await import("./wiki/wikiStore");
+    const status = await getWikiStore().getStatus();
+    element.textContent = `${getString("pref-wiki-data-statistics" as any) || "Wiki data"}: ${status.pages} pages, ${status.claims} claims, ${status.evidence} evidence, ${status.claimEmbeddings} embeddings`;
+  } catch (error) {
+    element.textContent = `${getString("pref-wiki-data-statistics-error" as any) || "Wiki statistics unavailable"}: ${error}`;
+  }
+}
+
+async function refreshDataCompatibilityLockUI(doc: Document): Promise<void> {
+  try {
+    const state = await getDataCompatibilityState();
+    const chunkInputs = [
+      doc.querySelector(
+        `#zotero-prefpane-${config.addonRef}-hybrid-chunk-target`,
+      ) as HTMLInputElement | null,
+      doc.querySelector(
+        `#zotero-prefpane-${config.addonRef}-hybrid-chunk-tolerance`,
+      ) as HTMLInputElement | null,
+    ];
+    for (const input of chunkInputs) {
+      if (input) input.disabled = state.chunkLocked;
+    }
+    const chunkMessage = doc.querySelector(
+      "#hybrid-chunk-lock-message",
+    ) as HTMLElement | null;
+    if (chunkMessage) chunkMessage.hidden = !state.chunkLocked;
+
+    const modelInput = doc.querySelector(
+      `#zotero-prefpane-${config.addonRef}-embedding-model`,
+    ) as HTMLInputElement | null;
+    const dimensionsInput = doc.querySelector(
+      `#zotero-prefpane-${config.addonRef}-embedding-dimensions`,
+    ) as HTMLInputElement | null;
+    if (modelInput) {
+      modelInput.dataset.compatibilityLocked = String(
+        state.embeddingIdentityLocked,
+      );
+      modelInput.disabled = state.embeddingIdentityLocked;
+    }
+    if (dimensionsInput) {
+      dimensionsInput.dataset.compatibilityLocked = String(
+        state.embeddingIdentityLocked,
+      );
+      dimensionsInput.disabled =
+        state.embeddingIdentityLocked ||
+        dimensionsInput.dataset.modelSupportsCustom !== "true";
+    }
+    const embeddingMessage = doc.querySelector(
+      "#embedding-identity-lock-message",
+    ) as HTMLElement | null;
+    if (embeddingMessage)
+      embeddingMessage.hidden = !state.embeddingIdentityLocked;
+  } catch (error) {
+    ztoolkit.log(
+      `[PreferenceScript] Failed to refresh data compatibility locks: ${error}`,
+      "warn",
+    );
+  }
+}
+
 function bindWikiSettings(doc: Document) {
   const prefix = "extensions.zotero.zotero-mcp-plugin.wiki.";
   const ref = config.addonRef;
@@ -469,6 +534,31 @@ function bindWikiSettings(doc: Document) {
     60000,
     5000,
   );
+
+  const clearButton = doc.querySelector(
+    "#clear-wiki-data-button",
+  ) as HTMLButtonElement | null;
+  clearButton?.addEventListener("click", async () => {
+    const message =
+      getString("pref-wiki-clear-confirm" as any) ||
+      "This permanently deletes all Wiki data. Search indexes are not deleted. Continue?";
+    if (!addon.data.prefs!.window.confirm(message)) return;
+    clearButton.disabled = true;
+    try {
+      const { getWikiStore } = await import("./wiki/wikiStore");
+      await getWikiStore().clearAll();
+      await refreshWikiDataStatistics(doc);
+      await refreshDataCompatibilityLockUI(doc);
+    } catch (error) {
+      addon.data.prefs!.window.alert(
+        `${getString("pref-wiki-clear-error" as any) || "Failed to delete Wiki data"}: ${error}`,
+      );
+    } finally {
+      clearButton.disabled = false;
+    }
+  });
+  void refreshWikiDataStatistics(doc);
+  void refreshDataCompatibilityLockUI(doc);
 }
 
 function bindHybridSearchSettings(doc: Document) {
@@ -620,7 +710,19 @@ function bindHybridSearchSettings(doc: Document) {
     const initial =
       typeof parsed === "number" && Number.isFinite(parsed) ? parsed : fallback;
     el.value = String(initial);
-    el.addEventListener("change", () => {
+    el.addEventListener("change", async () => {
+      const changesChunkStructure =
+        prefKey.endsWith("chunkTargetChars") ||
+        prefKey.endsWith("chunkAppendToleranceChars");
+      if (
+        changesChunkStructure &&
+        (await getDataCompatibilityState()).chunkLocked
+      ) {
+        const storedValue = Zotero.Prefs.get(prefKey, true);
+        el.value = String(storedValue ?? initial);
+        await refreshDataCompatibilityLockUI(doc);
+        return;
+      }
       let value = isFloat ? parseFloat(el.value) : parseInt(el.value, 10);
       if (!Number.isFinite(value)) value = fallback;
       value = Math.min(max, Math.max(min, value));
@@ -628,10 +730,7 @@ function bindHybridSearchSettings(doc: Document) {
       // The threshold is stored as a string: Firefox preference files have no
       // float type, so a numeric pref here would not survive the defaults file.
       Zotero.Prefs.set(prefKey, isFloat ? String(value) : value, true);
-      if (
-        prefKey.endsWith("chunkTargetChars") ||
-        prefKey.endsWith("chunkAppendToleranceChars")
-      ) {
+      if (changesChunkStructure) {
         // Changing a chunk parameter never triggers a rebuild — it only makes
         // the stored index out of date, and says so.
         updateChunkStaleWarning(doc);
@@ -1420,7 +1519,10 @@ function bindEmbeddingSettings(doc: Document) {
     const supportsCustom = supportsCustomDimensions(model);
 
     if (dimensionsInput) {
-      dimensionsInput.disabled = !supportsCustom;
+      dimensionsInput.dataset.modelSupportsCustom = String(supportsCustom);
+      dimensionsInput.disabled =
+        dimensionsInput.dataset.compatibilityLocked === "true" ||
+        !supportsCustom;
       if (!supportsCustom) {
         dimensionsInput.placeholder = getString("pref-embedding-dimensions-auto" as any) || "Auto";
       } else {
@@ -1479,8 +1581,21 @@ function bindEmbeddingSettings(doc: Document) {
   }
 
   // Save preference on change
-  const bindSave = (input: HTMLInputElement, prefKey: string, isNumber = false) => {
-    input?.addEventListener("change", () => {
+  const bindSave = (
+    input: HTMLInputElement,
+    prefKey: string,
+    isNumber = false,
+    locksEmbeddingIdentity = false,
+  ) => {
+    input?.addEventListener("change", async () => {
+      if (
+        locksEmbeddingIdentity &&
+        (await getDataCompatibilityState()).embeddingIdentityLocked
+      ) {
+        input.value = String(Zotero.Prefs.get(prefKey, true) ?? "");
+        await refreshDataCompatibilityLockUI(doc);
+        return;
+      }
       const value = isNumber ? parseInt(input.value, 10) : input.value;
       Zotero.Prefs.set(prefKey, value, true);
       ztoolkit.log(`[PreferenceScript] Saved embedding pref: ${prefKey} = ${value}`);
@@ -1492,11 +1607,26 @@ function bindEmbeddingSettings(doc: Document) {
 
   bindSave(apiBaseInput, "extensions.zotero.zotero-mcp-plugin.embedding.apiBase");
   bindSave(apiKeyInput, "extensions.zotero.zotero-mcp-plugin.embedding.apiKey");
-  bindSave(dimensionsInput, "extensions.zotero.zotero-mcp-plugin.embedding.dimensions", true);
+  bindSave(
+    dimensionsInput,
+    "extensions.zotero.zotero-mcp-plugin.embedding.dimensions",
+    true,
+    true,
+  );
   bindSave(timeoutInput, "extensions.zotero.zotero-mcp-plugin.embedding.timeoutSeconds", true);
 
   // Model change handler - update dimensions visibility and clear detected dimensions
   modelInput?.addEventListener("change", async () => {
+    if ((await getDataCompatibilityState()).embeddingIdentityLocked) {
+      modelInput.value = String(
+        Zotero.Prefs.get(
+          "extensions.zotero.zotero-mcp-plugin.embedding.model",
+          true,
+        ) || "text-embedding-3-small",
+      );
+      await refreshDataCompatibilityLockUI(doc);
+      return;
+    }
     const model = modelInput.value;
     Zotero.Prefs.set("extensions.zotero.zotero-mcp-plugin.embedding.model", model, true);
     ztoolkit.log(`[PreferenceScript] Saved embedding pref: model = ${model}`);
@@ -1638,6 +1768,9 @@ function bindEmbeddingSettings(doc: Document) {
         }
 
         // Decide whether to update dimensions based on stored vectors
+        const embeddingIdentityLocked = (
+          await getDataCompatibilityState()
+        ).embeddingIdentityLocked;
         if (hasStoredVectors && storedDims && storedDims !== dims) {
           // Dimension mismatch with existing index - warn but don't auto-update
           testResult.textContent = `${getString("pref-embedding-test-success" as any)} (${dims} dims) - ⚠️ ${getString("pref-embedding-dimension-mismatch" as any) || `Index has ${storedDims} dims, API returns ${dims} dims. Rebuild index to use new dimensions.`}`;
@@ -1656,18 +1789,24 @@ function bindEmbeddingSettings(doc: Document) {
             Zotero.Prefs.set("extensions.zotero.zotero-mcp-plugin.embedding.detectedDimensions", dims, true);
 
             // Only update config dimensions for models that support custom dimensions
-            if (supportsCustomDimensions(model) && dimensionsInput) {
+            if (
+              supportsCustomDimensions(model) &&
+              dimensionsInput &&
+              !embeddingIdentityLocked
+            ) {
               dimensionsInput.value = String(dims);
               Zotero.Prefs.set("extensions.zotero.zotero-mcp-plugin.embedding.dimensions", dims, true);
             }
 
             // Update embedding service
-            try {
-              const { getEmbeddingService } = require("./semantic/embeddingService");
-              const embeddingService = getEmbeddingService();
-              embeddingService.updateConfig({ dimensions: dims });
-            } catch (e) {
-              // Ignore
+            if (!embeddingIdentityLocked) {
+              try {
+                const { getEmbeddingService } = require("./semantic/embeddingService");
+                const embeddingService = getEmbeddingService();
+                embeddingService.updateConfig({ dimensions: dims });
+              } catch (e) {
+                // Ignore
+              }
             }
           }
         }
@@ -2277,6 +2416,7 @@ function bindSemanticStatsSettings(doc: Document) {
       if (etaEl) etaEl.textContent = "-";
       await updateChunkStaleWarning(doc);
       await loadSemanticStats();
+      await refreshDataCompatibilityLockUI(doc);
 
     showMessage(getString("pref-semantic-index-cleared" as any) || "All search index data deleted", "success");
       ztoolkit.log(
@@ -2696,6 +2836,7 @@ function bindSemanticStatsSettings(doc: Document) {
       if (!silent) {
         ztoolkit.log(`[PreferenceScript] Loaded semantic stats: ${stats.indexStats.totalItems} items, ${stats.indexStats.totalVectors} vectors`);
       }
+      await refreshDataCompatibilityLockUI(doc);
 
     } catch (error) {
       ztoolkit.log(`[PreferenceScript] Failed to load semantic stats: ${error}`, "warn");

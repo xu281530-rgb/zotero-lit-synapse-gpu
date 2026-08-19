@@ -3716,6 +3716,29 @@ export class VectorStore {
     };
   }
 
+  async getPersistentIndexCounts(): Promise<{
+    semanticVectors: number;
+    keywordDocuments: number;
+    keywordChunks: number;
+  }> {
+    await this.ensureInitialized();
+    return {
+      semanticVectors: Number(
+        await this.db.valueQueryAsync("SELECT COUNT(*) FROM embeddings"),
+      ),
+      keywordDocuments: Number(
+        await this.db.valueQueryAsync(
+          "SELECT COUNT(*) FROM kw_docs WHERE alive = 1",
+        ),
+      ),
+      keywordChunks: Number(
+        await this.db.valueQueryAsync(
+          "SELECT COALESCE(SUM(indexed_chunks), 0) FROM kw_docs WHERE alive = 1",
+        ),
+      ),
+    };
+  }
+
   /**
    * Get the stored vectors of one item's chunks (for find_similar).
    *

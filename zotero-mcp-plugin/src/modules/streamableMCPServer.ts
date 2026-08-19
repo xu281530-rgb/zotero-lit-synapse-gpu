@@ -1140,7 +1140,10 @@ Nothing in this server returns a whole document in one response. Every reading t
             libraryID,
             query: args.query,
             keywords: this.coerceStringArray(args.keywords),
-            itemKeys: this.coerceStringArray(args.itemKeys),
+            itemKeys:
+              args.itemKeys === undefined
+                ? undefined
+                : this.coerceStringArray(args.itemKeys),
             minScore: args.minScore,
             limit: args.limit,
           });
@@ -1649,7 +1652,7 @@ Nothing in this server returns a whole document in one response. Every reading t
                       ? scope.itemKeys
                       : undefined,
                   minScore: 0,
-                  limit: Math.max(50, topK * 5),
+                  limit: null,
                 });
                 return wiki.documents;
               },

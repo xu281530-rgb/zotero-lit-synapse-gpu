@@ -273,6 +273,173 @@ assert.ok(
   "Wiki Evidence must be filtered through the final item scope",
 );
 
+const massPages = await store.commit({
+  libraryID: 1,
+  userInitiated: true,
+  actions: [
+    {
+      action: "CREATE_PAGE",
+      ref: "page:claim-hog",
+      canonicalTitle: "Dominant material phenomenon",
+    },
+    {
+      action: "CREATE_PAGE",
+      ref: "page:other-document",
+      canonicalTitle: "Secondary observations",
+    },
+  ],
+});
+await store.commit({
+  libraryID: 1,
+  userInitiated: true,
+  actions: [
+    ...(await Promise.all(
+      Array.from({ length: 120 }, async (_, index) => ({
+        action: "ADD_CLAIM",
+        pageId: massPages.refs["page:claim-hog"],
+        claimText: `Dominant material phenomenon repeated finding ${index}.`,
+        claimType: "mechanism",
+        epistemicStatus: "supported",
+        coverageLevel: "chunk_local",
+        confidence: 0.9,
+        evidence: [
+          await evidence(
+            "CLAIMHOG",
+            `Dominant material phenomenon repeated evidence ${index}.`,
+          ),
+        ],
+      })),
+    )),
+    {
+      action: "ADD_CLAIM",
+      pageId: massPages.refs["page:other-document"],
+      claimText: "Dominant material changes behavior under other conditions.",
+      claimType: "condition",
+      epistemicStatus: "supported",
+      coverageLevel: "chunk_local",
+      confidence: 0.8,
+      evidence: [
+        await evidence(
+          "OTHERDOC",
+          "Dominant material changes behavior under other conditions.",
+        ),
+      ],
+    },
+  ],
+});
+
+const documentLimited = await retriever.search({
+  libraryID: 1,
+  query: "dominant material phenomenon",
+  minScore: 0.5,
+  limit: 2,
+});
+assert.ok(
+  documentLimited.claims.length > 100,
+  "limit must not truncate qualified Claims before document aggregation",
+);
+assert.deepEqual(
+  documentLimited.documents.map((row) => row.itemKey),
+  ["CLAIMHOG", "OTHERDOC"],
+  "many high-scoring Claims from one paper must not evict another relevant paper",
+);
+assert.equal(
+  documentLimited.documents[0].wikiClaims.length,
+  120,
+  "all Claims for one document must aggregate into one document candidate",
+);
+
+const scopeBeforeRanking = await retriever.search({
+  libraryID: 1,
+  query: "dominant material phenomenon",
+  itemKeys: ["OTHERDOC"],
+  minScore: 0.5,
+  limit: 1,
+});
+assert.deepEqual(scopeBeforeRanking.documents.map((row) => row.itemKey), [
+  "OTHERDOC",
+]);
+assert.ok(
+  scopeBeforeRanking.claims.every((claim) =>
+    claim.evidence.some((row) => row.item_key === "OTHERDOC"),
+  ),
+  "itemKeys must constrain eligible Claims before Wiki scoring and ranking",
+);
+
+const unscoped = await retriever.search({
+  libraryID: 1,
+  query: "dominant material phenomenon",
+  minScore: 0.5,
+  limit: 10,
+});
+assert.deepEqual(
+  unscoped.documents.map((row) => row.itemKey),
+  ["CLAIMHOG", "OTHERDOC"],
+  "a whole-library Wiki search must not inherit an itemKeys filter",
+);
+
+await store.markItemsPending("content-rebuild", 1, ["CLAIMHOG"]);
+const pendingSearch = await retriever.search({
+  libraryID: 1,
+  query: "dominant material phenomenon",
+  minScore: 0.5,
+  limit: 10,
+});
+assert.ok(
+  pendingSearch.claims.some((claim) =>
+    claim.evidence.some((row) => row.link_state === "pending_relink"),
+  ),
+  "pending_relink Evidence remains visible and explicitly marked",
+);
+assert.ok(
+  pendingSearch.documents.every((row) => row.itemKey !== "CLAIMHOG"),
+  "pending_relink Evidence must not produce a verified document candidate",
+);
+assert.ok(
+  (await store.getDocumentGraph(1)).nodes.every(
+    (node) => node.itemKey !== "CLAIMHOG",
+  ),
+  "pending_relink Evidence must not act as a verified edge in the document graph",
+);
+
+await store.markSourceDeleted(1, "OUTSIDE1");
+const historicalSearch = await retriever.search({
+  libraryID: 1,
+  query: "solutal convection",
+  minScore: 0,
+  limit: 10,
+});
+assert.ok(
+  historicalSearch.claims.some((claim) =>
+    claim.evidence.some((row) => row.link_state === "source_deleted"),
+  ),
+  "source_deleted Evidence must remain part of the long-term Wiki Claim",
+);
+assert.ok(
+  historicalSearch.documents.every((row) => row.itemKey !== "OUTSIDE1"),
+  "a deleted Zotero item cannot be returned as a live document candidate",
+);
+
+const documentLevelFusion = fuseHybridSearchResultsDetailed(
+  [],
+  [],
+  documentLimited.documents,
+  {
+    topK: 2,
+    rrfK: 60,
+    keywordWeight: 0,
+    semanticWeight: 0,
+    wikiWeight: 1,
+    wikiMinScore: 0,
+    wikiShadowMode: false,
+  },
+);
+assert.deepEqual(
+  documentLevelFusion.ranked.map((row) => row.itemKey),
+  ["CLAIMHOG", "OTHERDOC"],
+  "Wiki must enter hybrid RRF as one candidate per distinct document",
+);
+
 const activeFusion = fuseHybridSearchResultsDetailed(
   [{ key: "KW", libraryID: 1, relevanceScore: 0.9 }],
   [{ itemKey: "SEM", libraryID: 1, score: 0.8 }],

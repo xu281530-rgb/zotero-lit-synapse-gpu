@@ -102,14 +102,17 @@ export class WikiRetriever {
     queryVector?: Float32Array;
     itemKeys?: string[];
     minScore?: number;
-    limit?: number;
+    limit?: number | null;
   }): Promise<WikiSearchResult> {
     const snapshot = await this.store.getRetrievalSnapshot(options.libraryID);
     const queryTerms = terms(
       [options.query, ...(options.keywords ?? [])].join(" "),
     );
     const minScore = Math.max(0, Math.min(1, options.minScore ?? 0));
-    const limit = Math.max(1, Math.min(100, Math.floor(options.limit ?? 50)));
+    const documentLimit =
+      options.limit === null
+        ? null
+        : Math.max(1, Math.min(100, Math.floor(options.limit ?? 50)));
     const pages = new Map(
       snapshot.pages.map((row) => [
         Number(column(row, "page_id", "pageId")),
@@ -130,12 +133,22 @@ export class WikiRetriever {
       aliases.set(id, list);
     }
     const claimEvidence = new Map<number, any[]>();
+    const itemScope =
+      options.itemKeys === undefined ? null : new Set(options.itemKeys);
+    const scopedClaimIds = itemScope ? new Set<number>() : null;
     for (const row of snapshot.evidence) {
-      if (column(row, "link_state", "linkState") === "source_deleted") continue;
       const id = Number(column(row, "claim_id", "claimId"));
       const list = claimEvidence.get(id) ?? [];
       list.push(row);
       claimEvidence.set(id, list);
+      if (
+        scopedClaimIds &&
+        Number(column(row, "library_id", "libraryID")) ===
+          options.libraryID &&
+        itemScope!.has(String(column(row, "item_key", "itemKey")))
+      ) {
+        scopedClaimIds.add(id);
+      }
     }
     const embeddings = new Map<number, any>(
       snapshot.embeddings.map((row) => [
@@ -226,6 +239,7 @@ export class WikiRetriever {
     const claims: WikiClaimSearchResult[] = [];
     for (const claim of snapshot.claims) {
       const claimId = Number(column(claim, "claim_id", "claimId"));
+      if (scopedClaimIds && !scopedClaimIds.has(claimId)) continue;
       const pageId = Number(column(claim, "page_id", "pageId"));
       const page = pages.get(pageId);
       const conceptId =
@@ -286,12 +300,10 @@ export class WikiRetriever {
       (a, b) =>
         b.normalizedWikiScore - a.normalizedWikiScore || a.claimId - b.claimId,
     );
-    const selectedClaims = claims.slice(0, limit);
-    const itemScope = options.itemKeys ? new Set(options.itemKeys) : null;
     const documents = new Map<string, WikiDocumentSearchResult>();
-    for (const claim of selectedClaims) {
+    for (const claim of claims) {
       for (const evidence of claim.evidence) {
-        if (column(evidence, "link_state", "linkState") === "stale") continue;
+        if (column(evidence, "link_state", "linkState") !== "valid") continue;
         const itemKey = String(column(evidence, "item_key", "itemKey"));
         const libraryID = Number(column(evidence, "library_id", "libraryID"));
         if (
@@ -325,17 +337,19 @@ export class WikiRetriever {
       }
     }
     return {
-      claims: selectedClaims,
-      documents: Array.from(documents.values()).sort(
-        (a, b) =>
-          b.normalizedWikiScore - a.normalizedWikiScore ||
-          a.itemKey.localeCompare(b.itemKey),
-      ),
+      claims,
+      documents: Array.from(documents.values())
+        .sort(
+          (a, b) =>
+            b.normalizedWikiScore - a.normalizedWikiScore ||
+            a.itemKey.localeCompare(b.itemKey),
+        )
+        .slice(0, documentLimit ?? undefined),
       relations: relationHits,
-      directCount: selectedClaims.filter(
+      directCount: claims.filter(
         (claim) => claim.matchKind === "direct",
       ).length,
-      oneHopCount: selectedClaims.filter(
+      oneHopCount: claims.filter(
         (claim) => claim.matchKind === "one_hop",
       ).length,
     };
