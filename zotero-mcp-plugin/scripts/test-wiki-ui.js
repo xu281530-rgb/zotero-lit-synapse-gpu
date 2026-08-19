@@ -2,8 +2,17 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import {
+  closeWikiTab,
+  isCurrentWikiTabRender,
+  openWikiTab,
+} from "../src/modules/wiki/wikiTabManager.ts";
 
 const panel = fs.readFileSync("src/modules/wiki/wikiPanel.ts", "utf8");
+const tabManager = fs.readFileSync(
+  "src/modules/wiki/wikiTabManager.ts",
+  "utf8",
+);
 const wikiTypes = fs.readFileSync("src/modules/wiki/wikiTypes.ts", "utf8");
 const hooks = fs.readFileSync("src/hooks.ts", "utf8");
 const css = fs.readFileSync("addon/content/wikiPanel.css", "utf8");
@@ -45,7 +54,7 @@ for (const tabBehavior of [
   /onClose/u,
 ]) {
   assert.match(
-    panel,
+    tabManager,
     tabBehavior,
     "Wiki UI must use Zotero's native tab lifecycle",
   );
@@ -62,6 +71,63 @@ assert.match(
   /\.zotero-mcp-wiki-toolbarbutton\s+\.toolbarbutton-icon\s*\{[^}]*width:\s*16px;[^}]*height:\s*16px;/su,
   "Wiki toolbar icon must render at 16 by 16 pixels",
 );
+
+const tabCalls = {
+  added: [],
+  selected: [],
+  closed: [],
+};
+const closeHandlers = [];
+const fakeWindow = {
+  Zotero_Tabs: {
+    add(options) {
+      tabCalls.added.push(options);
+      closeHandlers.push(options.onClose);
+      const id = `wiki-tab-${tabCalls.added.length}`;
+      return {
+        id,
+        container: {
+          classList: { add() {} },
+          setAttribute() {},
+        },
+      };
+    },
+    select(id) {
+      tabCalls.selected.push(id);
+    },
+    close(id) {
+      tabCalls.closed.push(id);
+    },
+  },
+};
+
+const firstRender = openWikiTab(fakeWindow, {
+  type: "zotero-mcp-wiki",
+  title: "LLM 知识库",
+});
+assert.equal(tabCalls.added.length, 1);
+assert.equal(tabCalls.added[0].select, true);
+assert.equal(isCurrentWikiTabRender(firstRender), true);
+
+const refreshedRender = openWikiTab(fakeWindow, {
+  type: "zotero-mcp-wiki",
+  title: "LLM 知识库",
+});
+assert.deepEqual(tabCalls.selected, ["wiki-tab-1"]);
+assert.equal(refreshedRender.tab, firstRender.tab);
+assert.equal(isCurrentWikiTabRender(firstRender), false);
+assert.equal(isCurrentWikiTabRender(refreshedRender), true);
+
+closeHandlers[0]();
+assert.equal(isCurrentWikiTabRender(refreshedRender), false);
+const reopenedRender = openWikiTab(fakeWindow, {
+  type: "zotero-mcp-wiki",
+  title: "LLM 知识库",
+});
+assert.equal(tabCalls.added.length, 2);
+closeWikiTab(fakeWindow);
+assert.deepEqual(tabCalls.closed, ["wiki-tab-2"]);
+assert.equal(isCurrentWikiTabRender(reopenedRender), false);
 
 for (const label of [
   "LLM 知识库",

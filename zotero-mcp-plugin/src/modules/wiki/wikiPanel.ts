@@ -1,6 +1,12 @@
 import { config } from "../../../package.json";
 import { getVectorStore } from "../semantic/vectorStore";
 import { getWikiService } from "./wikiService";
+import {
+  closeWikiTab,
+  isCurrentWikiTabRender,
+  openWikiTab,
+  type WikiTabRender,
+} from "./wikiTabManager";
 import type {
   WikiClaimType,
   WikiCoverageLevel,
@@ -18,13 +24,6 @@ const PANEL_ID = "zotero-mcp-wiki-panel";
 const STYLE_ID = "zotero-mcp-wiki-style";
 const TAB_TYPE = "zotero-mcp-wiki";
 const TAB_TITLE = "LLM 知识库";
-
-interface WikiTabState {
-  id: string;
-  container: XUL.Box;
-}
-
-const wikiTabs = new WeakMap<_ZoteroTypes.MainWindow, WikiTabState>();
 
 const CLAIM_TYPE_LABELS: Record<WikiClaimType, string> = {
   definition: "定义",
@@ -169,11 +168,7 @@ export function registerWikiPanel(win: _ZoteroTypes.MainWindow): void {
 
 export function unregisterWikiPanel(win: Window): void {
   const mainWindow = win as _ZoteroTypes.MainWindow;
-  const tab = wikiTabs.get(mainWindow);
-  if (tab) {
-    wikiTabs.delete(mainWindow);
-    mainWindow.Zotero_Tabs.close(tab.id);
-  }
+  closeWikiTab(mainWindow);
   const doc = win.document;
   doc.getElementById(BUTTON_ID)?.remove();
   doc.getElementById(PANEL_ID)?.remove();
@@ -183,33 +178,16 @@ export function unregisterWikiPanel(win: Window): void {
 export async function openWikiPanel(
   win: _ZoteroTypes.MainWindow,
 ): Promise<void> {
-  let tab = wikiTabs.get(win);
-  if (!tab || !tab.container.isConnected) {
-    let tabID = "";
-    const created = win.Zotero_Tabs.add({
-      type: TAB_TYPE,
-      title: TAB_TITLE,
-      select: true,
-      onClose: () => {
-        if (wikiTabs.get(win)?.id === tabID) wikiTabs.delete(win);
-      },
-    });
-    tabID = created.id;
-    created.container.classList.add("zotero-mcp-wiki-tab-container");
-    created.container.setAttribute("flex", "1");
-    tab = created;
-    wikiTabs.set(win, tab);
-  } else {
-    win.Zotero_Tabs.select(tab.id);
-  }
-  await renderWikiPanel(win, tab.container);
+  const render = openWikiTab(win, { type: TAB_TYPE, title: TAB_TITLE });
+  await renderWikiPanel(win, render);
 }
 
 async function renderWikiPanel(
   win: _ZoteroTypes.MainWindow,
-  container: XUL.Box,
+  render: WikiTabRender,
 ): Promise<void> {
   const doc = win.document;
+  const container = render.tab.container;
   container.querySelector(`#${PANEL_ID}`)?.remove();
   const libraryID =
     (win.ZoteroPane as any).getSelectedLibraryID?.() ??
@@ -221,6 +199,7 @@ async function renderWikiPanel(
     store.getStatus(libraryID),
     store.getRetrievalSnapshot(libraryID),
   ]);
+  if (!isCurrentWikiTabRender(render)) return;
 
   const panel = element(doc, "section", "zmp-wiki-panel");
   panel.id = PANEL_ID;
@@ -235,7 +214,7 @@ async function renderWikiPanel(
   header.append(statusText);
   const headerActions = element(doc, "div", "zmp-wiki-header-actions");
   const refresh = button(doc, "刷新", "重新加载 Wiki 数据");
-  refresh.addEventListener("click", () => void renderWikiPanel(win, container));
+  refresh.addEventListener("click", () => void openWikiPanel(win));
   const exportButton = button(doc, "导出", "导出 Markdown 文档");
   exportButton.addEventListener(
     "click",
@@ -265,6 +244,7 @@ async function renderWikiPanel(
   const graphDetails = element(doc, "div", "zmp-wiki-graph-details");
   graphPane.append(canvas, graphDetails);
   panel.append(graphPane);
+  container.querySelector(`#${PANEL_ID}`)?.remove();
   container.append(panel);
 
   const aliasesByConcept = new Map<number, any[]>();
