@@ -55,6 +55,7 @@
     "test:embedding-batching": "node --experimental-strip-types scripts/test-embedding-batching.js",
     "test:chunk-oversize": "node --experimental-strip-types scripts/test-chunk-oversize-policy.js",
     "test:index-lifecycle": "node --experimental-strip-types scripts/test-index-lifecycle.js",
+    "test:search-index-builder": "node --experimental-strip-types scripts/test-search-index-builder.js",
     "test:index-failure-semantics": "node --experimental-strip-types scripts/test-index-failure-semantics.js",
     "test:index-sync": "node --experimental-strip-types --experimental-sqlite scripts/test-index-sync.js",
     "test:persistent-delete-recovery": "node --experimental-strip-types --experimental-sqlite scripts/test-persistent-delete-recovery.js",

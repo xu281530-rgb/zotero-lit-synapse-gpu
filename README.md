@@ -522,7 +522,7 @@ old version returned `formatItem`'s full default field list, so two rows measure
   guessing), `limit`, `offset`, `libraryID`
 - Returns `location`, `parent`, `subcollections`, `items`, `itemPagination`
 
-### 3. Semantic & Reading (5 tools, can be disabled in preferences)
+### 3. Semantic & Reading (6 tools, can be disabled in preferences)
 
 `hybrid_search`, `keyword_search` and `semantic_search` return **the same
 lightweight candidate row** and share the same scoping and cursor paging, so
@@ -607,6 +607,21 @@ Timeout: no separate setting. The scan deadline is the user's single-scan `vecto
 #### `semantic_status`
 
 Get semantic search service status and index statistics. No parameters required.
+
+#### `build_search_index`
+
+Explicitly build or refresh the unified search index for one or more documents.
+The same targeted lifecycle used by Zotero's update-index command extracts and
+chunks each document once, then updates both semantic vectors and the keyword
+index. It keeps the existing build lock, pause/reset fences, failure journal,
+chunk settings and embedding compatibility checks. This can be expensive and is
+never triggered implicitly by `wiki_build_from_paper`.
+
+- `itemKeys` (required, 1-100 documents), `libraryID`
+- Returns a result for every document and aggregate counts. Semantic and keyword
+  outcomes are separate, so one branch cannot silently hide failure in the
+  other. `parse_failed` and `no_source` report the real absence of indexed body
+  text rather than claiming success.
 
 #### `get_document_chunks`
 

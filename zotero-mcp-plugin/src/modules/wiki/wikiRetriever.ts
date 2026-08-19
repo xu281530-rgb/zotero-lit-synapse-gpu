@@ -1,4 +1,5 @@
 import { hashWikiText, normalizeWikiName } from "./wikiCanonicalizer";
+import { tokenizeForIndex } from "../keyword/scientificTokenizer";
 import type { WikiReadDepth, WikiEpistemicStatus } from "./wikiTypes";
 import type { WikiStore } from "./wikiStore";
 
@@ -9,18 +10,18 @@ function column(row: any, snake: string, camel: string): any {
 }
 
 function terms(value: string): string[] {
-  const normalized = normalizeWikiName(value);
-  const words = normalized
-    .split(/[^\p{L}\p{N}]+/u)
-    .filter((term) => term.length > 1);
-  const han = normalized.match(/[\p{Script=Han}]{2,}/gu) ?? [];
-  return Array.from(new Set([...words, ...han]));
+  return Array.from(
+    new Set(tokenizeForIndex(value).map((occurrence) => occurrence.term)),
+  );
 }
 
 function lexicalScore(queryTerms: string[], value: string): number {
   const normalized = normalizeWikiName(value);
   if (!normalized || !queryTerms.length) return 0;
-  const matched = queryTerms.filter((term) => normalized.includes(term)).length;
+  const valueTerms = new Set(terms(value));
+  const matched = queryTerms.filter(
+    (term) => valueTerms.has(term) || normalized.includes(term),
+  ).length;
   return Math.min(1, matched / queryTerms.length);
 }
 

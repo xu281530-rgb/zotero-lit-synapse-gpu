@@ -133,7 +133,7 @@ export type WikiCommitAction =
       epistemicStatus?: WikiEpistemicStatus;
       coverageLevel?: WikiCoverageLevel;
       confidence?: number;
-      /** Required when promoting coverage or epistemic status. */
+      /** Required when changing Claim text or promoting coverage/status. */
       evidence?: WikiEvidenceInput[];
     }
   | {
@@ -224,4 +224,9 @@ export interface WikiSourceChunk {
 export interface WikiEvidenceSource {
   getChunks(libraryID: number, itemKey: string): Promise<WikiSourceChunk[]>;
   sourceExists(libraryID: number, itemKey: string): Promise<boolean>;
+  /** Whether a successful body index exists and an unmatched Evidence may become stale. */
+  indexReadyForRelink?(
+    libraryID: number,
+    itemKey: string,
+  ): Promise<boolean>;
 }

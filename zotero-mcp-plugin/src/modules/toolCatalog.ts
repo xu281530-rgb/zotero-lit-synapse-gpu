@@ -11,6 +11,7 @@ import {
   DEFAULT_DOCUMENT_CHUNKS_PER_PAGE,
   MAX_DOCUMENT_CHUNKS_PER_PAGE,
 } from "./documentChunks";
+import { MAX_SEARCH_INDEX_BUILD_ITEMS } from "./semantic/searchIndexBuilder";
 
 /**
  * The one and only description of what this server can do.
@@ -53,6 +54,7 @@ export const SEMANTIC_TOOL_NAMES: ReadonlySet<string> = new Set([
   "semantic_status",
   "search_fulltext",
   "get_document_chunks",
+  "build_search_index",
 ]);
 
 export const WIKI_TOOL_NAMES: ReadonlySet<string> = new Set([
@@ -1023,6 +1025,24 @@ export function buildToolCatalog(): ToolDefinition[] {
       type: 'object',
       properties: {}
     }
+  },
+  {
+    name: 'build_search_index',
+    category: 'semantic',
+    description: 'Explicitly build or refresh the unified search index for one or more Zotero documents. One targeted lifecycle builds both semantic vectors and the keyword index from the same extraction and chunks, while preserving the existing build lock, pause/reset fences, failure journal, chunk settings and compatibility checks. Returns semantic, keyword and full-text status for every item; parse_failed, no_source and partial failures are never reported as success.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        libraryID: { type: 'number' },
+        itemKeys: {
+          type: 'array',
+          minItems: 1,
+          maxItems: MAX_SEARCH_INDEX_BUILD_ITEMS,
+          items: { type: 'string' },
+        },
+      },
+      required: ['itemKeys'],
+    },
   },
   // Ordered reading of one document's indexed body
   {

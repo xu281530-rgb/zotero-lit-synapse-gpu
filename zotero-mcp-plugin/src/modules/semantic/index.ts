@@ -58,6 +58,15 @@ export {
   type FullTextCoverage
 } from './bodyIndexState';
 
+export {
+  buildSearchIndex,
+  MAX_SEARCH_INDEX_BUILD_ITEMS,
+  type SearchIndexBranchStatus,
+  type SearchIndexBuildResult,
+  type SearchIndexBuilderDeps,
+  type SearchIndexItemResult,
+} from './searchIndexBuilder';
+
 // Scan budget for multi-chunk similarity search
 export {
   resolveSimilarScanBudget,

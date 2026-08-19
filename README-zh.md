@@ -687,6 +687,17 @@ itemKeys 限定；返回的行里带**未截断的原始 chunk 正文**（在真
 
 查看语义搜索服务的状态、索引统计和覆盖率。无需参数。
 
+#### `build_search_index`
+
+为一篇或多篇文献显式建立或更新统一搜索索引。它直接复用 Zotero“更新索引”的
+targeted build 生命周期：正文只提取、切块一次，然后同时更新语义向量与关键词索引；
+现有 build lock、暂停/reset 栅栏、失败日志、Chunk 设置和嵌入兼容性检查都继续生效。
+该操作可能成本较高，`wiki_build_from_paper` 不会隐式触发它。
+
+- `itemKeys`（必需，1-100 篇）、`libraryID`
+- 逐篇返回语义索引、关键词索引和正文可用性，并给出总体统计；任一分支失败都会明确
+  标出。`parse_failed` 与 `no_source` 表示真实的正文缺失，不会伪装成索引成功。
+
 #### `get_document_chunks`
 
 **按文献原始 chunk 顺序分页读整篇正文**。`search_fulltext` 回答的是「这篇论文在

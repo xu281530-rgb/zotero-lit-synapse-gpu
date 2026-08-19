@@ -385,10 +385,10 @@ export function clearChildParentMemory(): void {
  *    it is queued forced, because the parent's own timestamps may not have
  *    moved at all and the timestamp fast path would otherwise skip it.
  */
-function queueModifiedItems(
+async function queueModifiedItems(
   numericIds: number[],
   options: { trashed?: boolean } = {},
-): void {
+): Promise<void> {
   let items: any[] = [];
   try {
     items = Zotero.Items.get(numericIds) as any[];
@@ -406,7 +406,25 @@ function queueModifiedItems(
       if (item.isAnnotation?.()) continue;
 
       if (item.isRegularItem?.()) {
-        if (item.deleted || options.trashed) continue;
+        if (item.deleted || options.trashed) {
+          if (options.trashed) {
+            try {
+              const { getWikiStore } = await import(
+                "./modules/wiki/wikiStore"
+              );
+              await getWikiStore().markSourceDeleted(
+                item.libraryID,
+                item.key,
+              );
+            } catch (wikiError) {
+              ztoolkit.log(
+                `[MCP Plugin] Could not mark trashed Wiki Evidence source_deleted for ${item.key}: ${wikiError}`,
+                "warn",
+              );
+            }
+          }
+          continue;
+        }
         scheduleAutoUpdate(item.key, item.libraryID, false);
         continue;
       }
@@ -687,12 +705,12 @@ function registerItemNotifier() {
           }
         }
       } else if (event === 'modify') {
-        queueModifiedItems(numericIds);
+        await queueModifiedItems(numericIds);
       } else if (event === 'trash') {
         // Zotero does not always pair a trash with a modify, so this branch
         // cannot rely on one arriving. It also cannot rely on item.deleted
         // being committed yet, hence the explicit flag.
-        queueModifiedItems(numericIds, { trashed: true });
+        await queueModifiedItems(numericIds, { trashed: true });
       }
     }
   }, ['item'], 'zotero-mcp-plugin-auto-update');

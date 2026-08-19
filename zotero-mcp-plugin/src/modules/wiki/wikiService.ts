@@ -1,4 +1,5 @@
 import { getStoredChunkingSignature } from "../hybridSearchSettings";
+import { bodyIndexStateFromSourceKind } from "../semantic/bodyIndexState";
 import { getEmbeddingService } from "../semantic/embeddingService";
 import { getVectorStore } from "../semantic/vectorStore";
 import {
@@ -347,6 +348,20 @@ export class WikiService {
   async reverify(libraryID?: number): Promise<any> {
     const vectorStore = getVectorStore();
     await vectorStore.initialize();
+    const deletedSources = await this.store.listDeletedEvidenceSources(libraryID);
+    for (const source of deletedSources) {
+      const item = await Zotero.Items.getByLibraryAndKeyAsync(
+        source.libraryID,
+        source.itemKey,
+      );
+      if (item && !item.deleted && item.isRegularItem?.()) {
+        await this.store.markItemsPending(
+          `restored-${Date.now()}`,
+          source.libraryID,
+          [source.itemKey],
+        );
+      }
+    }
     const relinker = new WikiEvidenceRelinker(this.store, {
       sourceExists: async (sourceLibraryID, itemKey) => {
         const item = await Zotero.Items.getByLibraryAndKeyAsync(
@@ -372,6 +387,13 @@ export class WikiService {
             getStoredChunkingSignature(sourceLibraryID) || "unknown",
           resetGeneration: generation || "none",
         }));
+      },
+      indexReadyForRelink: async (sourceLibraryID, itemKey) => {
+        const status = await vectorStore.getIndexStatus(
+          itemKey,
+          sourceLibraryID,
+        );
+        return bodyIndexStateFromSourceKind(status?.sourceKind) === "body";
       },
     });
     return relinker.relinkPending({ libraryID });

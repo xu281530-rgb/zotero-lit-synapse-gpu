@@ -39,6 +39,16 @@ assert.match(
   "permanent deletion must use its dedicated durable cleanup branch",
 );
 assert.match(hooksSource, /queueModifiedItems\(numericIds\)/);
+assert.match(
+  hooksSource,
+  /await getWikiStore\(\)\.markSourceDeleted\(\s*item\.libraryID,\s*item\.key/,
+  "trashing a top-level Zotero document must preserve its Wiki Evidence as source_deleted",
+);
+assert.match(
+  hooksSource,
+  /await queueModifiedItems\(numericIds, \{ trashed: true \}\)/,
+  "the trash notifier must wait for the Wiki Evidence transition",
+);
 // modify is queued non-forced so an unchanged item costs only a timestamp check.
 assert.match(
   hooksSource,

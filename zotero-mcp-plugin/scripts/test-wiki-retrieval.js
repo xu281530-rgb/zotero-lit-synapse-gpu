@@ -91,6 +91,11 @@ const committed = await store.commit({
         aliases: [
           { alias: "定向凝固", language: "zh", confidence: 1 },
           { alias: "DS", language: "en", confidence: 0.8 },
+          {
+            alias: "Ti-6Al-4V定向凝固",
+            language: "mixed",
+            confidence: 0.9,
+          },
         ],
       },
     },
@@ -381,6 +386,12 @@ const verificationPage = await store.commit({
   ],
 });
 await store.markItemsPending("content-rebuild", 1, ["PENDINGDEEP"]);
+assert.match(
+  (await store.getPage(verificationPage.refs["page:verification-boundary"]))
+    ?.summary ?? "",
+  /deepest chunk_local/u,
+  "pending Evidence must not elevate the Page Summary's verified depth",
+);
 const mixedVerification = await retriever.search({
   libraryID: 1,
   query: "verification boundary mixed link states",
@@ -565,6 +576,31 @@ assert.ok(
 assert.ok(
   historicalSearch.documents.every((row) => row.itemKey !== "OUTSIDE1"),
   "a deleted Zotero item cannot be returned as a live document candidate",
+);
+
+const chinesePartialPhrase = await retriever.search({
+  libraryID: 1,
+  query: "定向凝固界面稳定性",
+  minScore: 0,
+  limit: 10,
+});
+assert.ok(
+  chinesePartialPhrase.claims.some(
+    (claim) => claim.claimId === committed.refs["claim:gradient"],
+  ),
+  "Wiki lexical matching must recall a Chinese concept from overlapping Han bigrams without requiring the whole query string",
+);
+const mixedScientificTerm = await retriever.search({
+  libraryID: 1,
+  query: "Ti6Al4V定向凝固稳定性",
+  minScore: 0,
+  limit: 10,
+});
+assert.ok(
+  mixedScientificTerm.claims.some(
+    (claim) => claim.claimId === committed.refs["claim:gradient"],
+  ),
+  "Han bigrams must not split or lose a mixed-script material grade",
 );
 
 const documentLevelFusion = fuseHybridSearchResultsDetailed(

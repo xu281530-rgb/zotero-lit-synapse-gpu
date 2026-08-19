@@ -48,9 +48,11 @@ import {
   DEFAULT_EMBEDDING_TIMEOUT_MS,
   describeFullTextAvailability,
   describePageFullTextGaps,
+  buildSearchIndex,
   emptyFullTextCoverage,
   fullTextAvailabilityFromState,
   getSemanticSearchService,
+  getVectorStore,
   type BodyIndexState,
   type FullTextAvailability,
   type FullTextCoverage,
@@ -1187,7 +1189,8 @@ Nothing in this server returns a whole document in one response. Every reading t
         case 'keyword_search':
         case 'get_document_chunks':
         case 'find_similar':
-        case 'semantic_status': {
+        case 'semantic_status':
+        case 'build_search_index': {
           const semEnabled = Zotero.Prefs.get(
             'extensions.zotero.zotero-mcp-plugin.semantic.enabled',
             true,
@@ -1197,7 +1200,29 @@ Nothing in this server returns a whole document in one response. Every reading t
               'Semantic search is disabled. Enable it in Zotero MCP Plugin preferences.',
             );
           }
-          if (name === 'semantic_search') {
+          if (name === 'build_search_index') {
+            const libraryID =
+              args?.libraryID ?? Zotero.Libraries.userLibraryID;
+            const itemKeys = this.coerceStringArray(args?.itemKeys) ?? [];
+            const semanticService = getSemanticSearchService();
+            const vectorStore = getVectorStore();
+            result = await buildSearchIndex(
+              { libraryID, itemKeys },
+              {
+                buildIndex: (options) =>
+                  semanticService.buildIndex(options),
+                getIndexStatus: (itemKey, sourceLibraryID) =>
+                  vectorStore.getIndexStatus(itemKey, sourceLibraryID),
+                getKeywordItemKeys: async (sourceLibraryID) => {
+                  await vectorStore.initialize();
+                  return vectorStore
+                    .getKeywordIndexStore()
+                    .indexedItemKeys(sourceLibraryID);
+                },
+                getFailedItems: () => vectorStore.getFailedItems(),
+              },
+            );
+          } else if (name === 'semantic_search') {
             // A cursor names the search it continues, so the query is required
             // only when starting a new one.
             if (

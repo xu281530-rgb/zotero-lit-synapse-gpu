@@ -539,8 +539,8 @@ assert.match(
   "derived Page Summary must track reset-induced Evidence state",
 );
 assert.equal(
-  claim?.epistemicStatus,
-  "provisional",
+  claim?.epistemicStatus === "unsupported",
+  false,
   "a search-index reset must not make a claim unsupported",
 );
 
@@ -566,6 +566,7 @@ const exactReport = await exactRelinker.relinkPending({ libraryID: 1 });
 assert.deepEqual(exactReport, {
   checked: 1,
   relinked: 1,
+  pending: 0,
   stale: 0,
   sourceDeleted: 0,
 });
@@ -605,15 +606,46 @@ assert.equal(
 );
 claim = await store.getClaim(commit.refs["claim:boundary"]);
 assert.equal(claim?.evidence[0].chunkIdSnapshot, 11);
+const statusBeforeSourceDeletion = claim?.epistemicStatus;
 
 await store.markSourceDeleted(1, "ITEMA001");
 claim = await store.getClaim(commit.refs["claim:boundary"]);
 assert.equal(claim?.evidence[0].linkState, "source_deleted");
 assert.equal(
   claim?.epistemicStatus,
-  "provisional",
+  statusBeforeSourceDeletion,
   "deleting a Zotero source must not erase the historical Evidence or downgrade its Claim",
 );
+
+await store.markItemsPending("restore-20", 1, ["ITEMA001"]);
+claim = await store.getClaim(commit.refs["claim:boundary"]);
+assert.equal(
+  claim?.evidence[0].linkState,
+  "pending_relink",
+  "an explicitly re-indexed restored source must leave source_deleted and re-enter relinking",
+);
+const restoredRelinker = new WikiEvidenceRelinker(store, {
+  async sourceExists() {
+    return true;
+  },
+  async getChunks() {
+    return [
+      {
+        chunkId: 13,
+        text: movedText,
+        contentHash: "content-restored",
+        chunkSignature: "paragraph-v3:900:300",
+        resetGeneration: "restore-20",
+      },
+    ];
+  },
+});
+assert.equal(
+  (await restoredRelinker.relinkPending({ libraryID: 1 })).relinked,
+  1,
+);
+claim = await store.getClaim(commit.refs["claim:boundary"]);
+assert.equal(claim?.evidence[0].linkState, "valid");
 
 const orderCommit = await store.commit({
   libraryID: 1,
@@ -686,7 +718,8 @@ const orderRelinker = new WikiEvidenceRelinker(store, {
 assert.deepEqual(await orderRelinker.relinkPending({ libraryID: 1 }), {
   checked: 2,
   relinked: 1,
-  stale: 1,
+  pending: 1,
+  stale: 0,
   sourceDeleted: 0,
 });
 assert.equal(
@@ -695,6 +728,206 @@ assert.equal(
   "supported",
   "Claim status must be derived after the whole relink batch, independent of Evidence order",
 );
+await store.markSourceDeleted(1, "ORDERSTALE");
+
+const recoveryCommit = await store.commit({
+  libraryID: 1,
+  userInitiated: true,
+  actions: [
+    {
+      action: "CREATE_PAGE",
+      ref: "page:status-recovery",
+      canonicalTitle: "Claim status recovery",
+    },
+    {
+      action: "ADD_CLAIM",
+      ref: "claim:status-recovery",
+      pageId: "page:status-recovery",
+      claimText: "Recovered evidence supports this claim again.",
+      claimType: "condition",
+      epistemicStatus: "supported",
+      coverageLevel: "chunk_local",
+      confidence: 0.8,
+      evidence: [
+        {
+          libraryID: 1,
+          itemKey: "RECOVERY1",
+          chunkIdSnapshot: 0,
+          chunkTextHash: await hashWikiText("Original recovery evidence."),
+          sourceContentHash: "recovery-v1",
+          sourceChunkSignature: "paragraph-v3:1000:500",
+          sourceResetGeneration: "recovery-reset-1",
+          excerpt: "Original recovery evidence.",
+          evidenceRole: "SUPPORTS",
+          readDepth: "chunk_local",
+        },
+      ],
+    },
+  ],
+});
+await store.markItemsPending("recovery-reset-2", 1, ["RECOVERY1"]);
+const noIndexRelinker = new WikiEvidenceRelinker(store, {
+  async sourceExists() {
+    return true;
+  },
+  async getChunks() {
+    return [];
+  },
+});
+const noIndexReport = await noIndexRelinker.relinkPending({ libraryID: 1 });
+assert.equal(noIndexReport.stale, 0);
+assert.equal(noIndexReport.pending, 1);
+assert.equal(
+  (await store.getClaim(recoveryCommit.refs["claim:status-recovery"]))
+    ?.evidence[0].linkState,
+  "pending_relink",
+  "no indexed chunks means relinking is pending, not stale",
+);
+await store.markItemsPending("recovery-reset-metadata-only", 1, ["RECOVERY1"]);
+const metadataOnlyRelinker = new WikiEvidenceRelinker(store, {
+  async sourceExists() {
+    return true;
+  },
+  async getChunks() {
+    return [
+      {
+        chunkId: 0,
+        text: "Title and abstract metadata only.",
+        contentHash: "metadata-only",
+        chunkSignature: "paragraph-v3:1000:500",
+        resetGeneration: "recovery-reset-metadata-only",
+      },
+    ];
+  },
+  async indexReadyForRelink() {
+    return false;
+  },
+});
+assert.equal(
+  (await metadataOnlyRelinker.relinkPending({ libraryID: 1 })).pending,
+  1,
+  "metadata-only indexed chunks must not authorize a stale verdict",
+);
+
+const missingEvidenceRelinker = new WikiEvidenceRelinker(store, {
+  async sourceExists() {
+    return true;
+  },
+  async getChunks() {
+    return [
+      {
+        chunkId: 0,
+        text: "A complete new index that no longer contains the old evidence.",
+        contentHash: "recovery-v2",
+        chunkSignature: "paragraph-v3:1000:500",
+        resetGeneration: "recovery-reset-2",
+      },
+    ];
+  },
+});
+assert.equal(
+  (await missingEvidenceRelinker.relinkPending({ libraryID: 1 })).stale,
+  1,
+  "an unmatched Evidence becomes stale only after a non-empty new index exists",
+);
+assert.equal(
+  (await store.getClaim(recoveryCommit.refs["claim:status-recovery"]))
+    ?.epistemicStatus,
+  "unsupported",
+);
+
+await store.markItemsPending("recovery-reset-3", 1, ["RECOVERY1"]);
+const recoveredEvidenceRelinker = new WikiEvidenceRelinker(store, {
+  async sourceExists() {
+    return true;
+  },
+  async getChunks() {
+    return [
+      {
+        chunkId: 7,
+        text: "Original recovery evidence.",
+        contentHash: "recovery-v3",
+        chunkSignature: "paragraph-v3:1000:500",
+        resetGeneration: "recovery-reset-3",
+      },
+    ];
+  },
+});
+assert.equal(
+  (await recoveredEvidenceRelinker.relinkPending({ libraryID: 1 })).relinked,
+  1,
+);
+assert.equal(
+  (await store.getClaim(recoveryCommit.refs["claim:status-recovery"]))
+    ?.epistemicStatus,
+  "supported",
+  "Claim status must recover from unsupported when SUPPORTS Evidence becomes valid again",
+);
+
+const updateTarget = await store.getClaim(
+  recoveryCommit.refs["claim:status-recovery"],
+);
+await assert.rejects(
+  () =>
+    store.commit({
+      libraryID: 1,
+      userInitiated: true,
+      actions: [
+        {
+          action: "UPDATE_CLAIM",
+          claimId: recoveryCommit.refs["claim:status-recovery"],
+          expectedVersion: updateTarget.version,
+          claimText: "This is materially different knowledge.",
+        },
+      ],
+    }),
+  /knowledge text.*Evidence/iu,
+  "material Claim text changes require newly supplied Evidence",
+);
+await assert.rejects(
+  () =>
+    store.commit({
+      libraryID: 1,
+      userInitiated: true,
+      actions: [
+        {
+          action: "UPDATE_CLAIM",
+          claimId: recoveryCommit.refs["claim:status-recovery"],
+          expectedVersion: updateTarget.version,
+          claimType: "mechanism",
+        },
+      ],
+    }),
+  /knowledge text.*Evidence/iu,
+  "a Claim type change is semantic content and requires Evidence too",
+);
+const evidencedUpdate = await store.commit({
+  libraryID: 1,
+  userInitiated: true,
+  actions: [
+    {
+      action: "UPDATE_CLAIM",
+      claimId: recoveryCommit.refs["claim:status-recovery"],
+      expectedVersion: updateTarget.version,
+      claimText: "This is materially different knowledge.",
+      evidence: [
+        {
+          libraryID: 1,
+          itemKey: "RECOVERY1",
+          chunkIdSnapshot: 7,
+          chunkTextHash: await hashWikiText("Original recovery evidence."),
+          sourceContentHash: "recovery-v3",
+          sourceChunkSignature: "paragraph-v3:1000:500",
+          sourceResetGeneration: "recovery-reset-3",
+          excerpt: "Original recovery evidence.",
+          evidenceRole: "SUPPORTS",
+          readDepth: "chunk_local",
+        },
+      ],
+    },
+  ],
+});
+assert.equal(evidencedUpdate.updatedClaims, 1);
 
 sqlite.close();
 sqlite = new DatabaseSync(dbPath);

@@ -448,7 +448,7 @@ export class WikiStore {
         "paper_reviewed",
         "cross_paper",
       ];
-      let deepest = "chunk_local";
+      let deepest: string | null = null;
       for (const row of evidenceRows) {
         const count = Number(row.count ?? 0);
         const role = String(rowValue(row, "evidence_role", "evidenceRole"));
@@ -456,7 +456,11 @@ export class WikiStore {
         const depth = String(rowValue(row, "read_depth", "readDepth"));
         roleCounts.set(role, (roleCounts.get(role) ?? 0) + count);
         stateCounts.set(state, (stateCounts.get(state) ?? 0) + count);
-        if (depthOrder.indexOf(depth) > depthOrder.indexOf(deepest)) {
+        if (
+          (state === "valid" || state === "source_deleted") &&
+          (deepest === null ||
+            depthOrder.indexOf(depth) > depthOrder.indexOf(deepest))
+        ) {
           deepest = depth;
         }
       }
@@ -468,7 +472,7 @@ export class WikiStore {
         .sort(([left], [right]) => left.localeCompare(right))
         .map(([state, count]) => `${count} ${state}`)
         .join(", ");
-      parts.push(`Evidence: ${roles} (${states}; deepest ${deepest}).`);
+      parts.push(`Evidence: ${roles} (${states}; deepest ${deepest ?? "none"}).`);
     }
     if (relationRows.length) {
       const relations = relationRows
@@ -726,6 +730,20 @@ export class WikiStore {
           const claimText = normalizeWikiText(
             action.claimText ?? rowValue(existing, "claim_text", "claimText"),
           );
+          const knowledgeTextChanged =
+            normalizeWikiName(claimText) !==
+            String(
+              rowValue(
+                existing,
+                "normalized_claim_text",
+                "normalizedClaimText",
+              ),
+            );
+          const knowledgeSemanticsChanged =
+            knowledgeTextChanged ||
+            (action.claimType !== undefined &&
+              action.claimType !==
+                rowValue(existing, "claim_type", "claimType"));
           const confidence = action.confidence ?? Number(existing.confidence);
           numberInRange(confidence, "claim confidence");
           const currentCoverage = String(
@@ -756,9 +774,14 @@ export class WikiStore {
           const statusPromoted =
             (statusOrder[nextStatus] ?? 0) > (statusOrder[currentStatus] ?? 0);
           if (
-            (coveragePromoted || statusPromoted) &&
+            (knowledgeSemanticsChanged || coveragePromoted || statusPromoted) &&
             !action.evidence?.length
           ) {
+            if (knowledgeSemanticsChanged) {
+              throw new Error(
+                "Changing Claim knowledge text requires the Evidence used for the new content",
+              );
+            }
             throw new Error(
               "Claim coverage or epistemic promotion requires the Evidence used for this promotion",
             );
@@ -1652,8 +1675,7 @@ export class WikiStore {
     const count = Number(
       await this.db.valueQueryAsync(
         `SELECT COUNT(*) FROM wiki_evidence
-         WHERE library_id = ? AND item_key IN (${placeholders})
-           AND link_state != 'source_deleted'`,
+         WHERE library_id = ? AND item_key IN (${placeholders})`,
         params,
       ),
     );
@@ -1661,7 +1683,7 @@ export class WikiStore {
       `UPDATE wiki_evidence SET link_state = 'pending_relink',
        source_reset_generation = ?
        WHERE library_id = ? AND item_key IN (${placeholders})
-         AND link_state != 'source_deleted'`,
+      `,
       [resetGeneration, ...params],
     );
     await this.refreshPagesForEvidence(
@@ -1682,6 +1704,23 @@ export class WikiStore {
       libraryID === undefined ? [] : [libraryID],
     );
     return rows.map((row) => this.mapEvidence(row));
+  }
+
+  async listDeletedEvidenceSources(
+    libraryID?: number,
+  ): Promise<Array<{ libraryID: number; itemKey: string }>> {
+    await this.initialize();
+    const rows = await this.db.queryAsync(
+      `SELECT DISTINCT library_id, item_key FROM wiki_evidence
+       WHERE link_state = 'source_deleted'${
+         libraryID === undefined ? "" : " AND library_id = ?"
+       } ORDER BY library_id, item_key`,
+      libraryID === undefined ? [] : [libraryID],
+    );
+    return rows.map((row) => ({
+      libraryID: Number(rowValue(row, "library_id", "libraryID")),
+      itemKey: String(rowValue(row, "item_key", "itemKey")),
+    }));
   }
 
   async updateEvidenceLink(
@@ -1756,18 +1795,43 @@ export class WikiStore {
   }
 
   private async recomputeClaimStatus(claimId: number): Promise<void> {
-    const verifiedOrHistorical = Number(
-      await this.db.valueQueryAsync(
-        "SELECT COUNT(*) FROM wiki_evidence WHERE claim_id = ? AND link_state IN ('valid', 'source_deleted')",
-        [claimId],
-      ),
+    const rows = await this.db.queryAsync(
+      `SELECT evidence_role, library_id, item_key
+       FROM wiki_evidence
+       WHERE claim_id = ? AND link_state IN ('valid', 'source_deleted')`,
+      [claimId],
     );
-    if (verifiedOrHistorical === 0) {
-      await this.db.queryAsync(
-        "UPDATE wiki_claims SET epistemic_status = 'unsupported', updated_at = ?, version = version + 1 WHERE claim_id = ? AND epistemic_status != 'unsupported'",
-        [Date.now(), claimId],
-      );
+    const supportingSources = new Set<string>();
+    let contradicts = false;
+    for (const row of rows) {
+      const role = String(rowValue(row, "evidence_role", "evidenceRole"));
+      if (role === "SUPPORTS") {
+        supportingSources.add(
+          `${rowValue(row, "library_id", "libraryID")}:${rowValue(
+            row,
+            "item_key",
+            "itemKey",
+          )}`,
+        );
+      } else if (role === "CONTRADICTS") {
+        contradicts = true;
+      }
     }
+    const nextStatus =
+      rows.length === 0
+        ? "unsupported"
+        : contradicts
+          ? "disputed"
+          : supportingSources.size >= 2
+            ? "corroborated"
+            : supportingSources.size === 1
+              ? "supported"
+              : "provisional";
+    await this.db.queryAsync(
+      `UPDATE wiki_claims SET epistemic_status = ?, updated_at = ?, version = version + 1
+       WHERE claim_id = ? AND epistemic_status != ?`,
+      [nextStatus, Date.now(), claimId, nextStatus],
+    );
   }
 
   async markSourceDeleted(libraryID: number, itemKey: string): Promise<number> {
@@ -1812,8 +1876,13 @@ export class WikiStore {
           ),
           linkState: "source_deleted",
         },
+        { deferDerivedUpdates: true },
       );
     }
+    await this.refreshPagesForEvidence(
+      "e.library_id = ? AND e.item_key = ?",
+      [libraryID, itemKey],
+    );
     return rows.length;
   }
 

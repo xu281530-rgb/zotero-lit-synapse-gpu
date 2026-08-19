@@ -5,6 +5,7 @@ import type { WikiStore } from "./wikiStore";
 export interface WikiRelinkReport {
   checked: number;
   relinked: number;
+  pending: number;
   stale: number;
   sourceDeleted: number;
 }
@@ -60,6 +61,7 @@ export class WikiEvidenceRelinker {
     const report: WikiRelinkReport = {
       checked: evidence.length,
       relinked: 0,
+      pending: 0,
       stale: 0,
       sourceDeleted: 0,
     };
@@ -75,6 +77,16 @@ export class WikiEvidenceRelinker {
           item.libraryID,
           item.itemKey,
         );
+        const indexReady = this.source.indexReadyForRelink
+          ? await this.source.indexReadyForRelink(
+              item.libraryID,
+              item.itemKey,
+            )
+          : chunks.length > 0;
+        if (chunks.length === 0 || !indexReady) {
+          report.pending += 1;
+          continue;
+        }
         const matched = await this.chooseChunk(
           item.chunkTextHash,
           item.excerpt,

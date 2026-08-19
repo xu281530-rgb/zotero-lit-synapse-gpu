@@ -126,9 +126,14 @@ test("the new tools are present with the shapes their callers depend on", () => 
     "get_document_chunks",
     "keyword_search",
     "semantic_search",
+    "build_search_index",
   ]) {
     assert.ok(byName.has(name), `${name} is missing from the catalog`);
   }
+
+  const builder = byName.get("build_search_index");
+  assert.deepEqual(builder.inputSchema.required, ["itemKeys"]);
+  assert.ok(builder.inputSchema.properties.itemKeys.maxItems >= 2);
 
   // get_attachment_text must be able to page and to select an attachment,
   // which is the whole difference from the get_content it replaced.
