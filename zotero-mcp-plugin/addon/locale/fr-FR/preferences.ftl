@@ -291,6 +291,53 @@ pref-file-import-sub = High-risk capability; disabled by default. Enable only wh
 pref-expose-paths-text = Expose local file paths in MCP results
 pref-expose-paths-sub = Absolute paths are hidden by default to reduce local information disclosure.
 
+# ============ Lecture et traduction PDF (intégrées) ============
+pref-translation-title = Lecture et traduction PDF
+pref-translation-desc = Le lecteur, la traduction du document entier et l'index de recherche réutilisent le même Markdown MinerU généré ci-dessus. Cette section configure uniquement les modèles de traduction et la terminologie, sans créer une seconde section de réglages.
+pref-translation-provider-label = Fournisseur
+pref-translation-base-url-label = URL de l'API de traduction
+pref-translation-api-key-label = Clé API de traduction
+pref-translation-model-label = Modèle de traduction
+pref-translation-language-label = Langue cible
+pref-translation-context-text = Activer le contexte IA
+pref-translation-context-sub = Utiliser les paragraphes voisins et la structure du document pour traduire chaque bloc
+pref-translation-document-glossary-text = Générer un glossaire par document
+pref-translation-document-glossary-sub = Extraire et appliquer la terminologie propre au PDF actuel
+pref-translation-global-glossary-text = Utiliser le glossaire global
+pref-translation-global-glossary-sub = Réutiliser la terminologie gérée ci-dessous dans toutes les traductions PDF
+pref-translation-expert-label = Domaine d'expertise
+pref-translation-expert-auto = Détection automatique
+pref-translation-expert-general = Général
+pref-translation-expert-academic = Académique
+pref-translation-expert-technical = Technique
+pref-translation-expert-legal = Juridique
+pref-translation-expert-medical = Médical
+pref-translation-expert-custom = Personnalisé
+pref-translation-expert-custom-label = Instruction d'expert
+pref-translation-prompt-title = Modèle de prompt de traduction
+pref-translation-prompt-edit = Modifier le prompt
+pref-translation-prompt-reset = Restaurer la valeur par défaut
+pref-translation-prompt-hint = Variables disponibles : target_language, text, context et glossary (utilisez des doubles accolades dans le modèle).
+pref-translation-glossary-title = Glossaire global
+pref-translation-glossary-search =
+    .placeholder = Rechercher un terme
+pref-translation-glossary-add = Ajouter
+pref-translation-glossary-import = Importer
+pref-translation-glossary-export = Exporter
+pref-translation-glossary-save = Enregistrer le glossaire
+pref-translation-glossary-enabled = Activé
+pref-translation-glossary-source = Source
+pref-translation-glossary-target = Traduction
+pref-translation-glossary-language = Langue cible
+pref-translation-glossary-note = Note
+pref-translation-performance-title = Performances et fiabilité de la traduction
+pref-translation-batch-label = Blocs par lot
+pref-translation-concurrency-label = Requêtes simultanées
+pref-translation-retries-label = Nouvelles tentatives après échec
+
+# Pipeline Markdown PDF unifié
+pref-mineru-unified-flow = Flux unifié : l'indexation génère ou réutilise d'abord le Markdown MinerU. Cette même source construit l'index vectoriel sémantique et l'index de mots-clés du texte intégral, tout en alimentant les calques du lecteur PDF et la traduction. Aucune seconde analyse du PDF n'est nécessaire.
+
 # --- Hybrid search ---
 pref-hybrid-title = Hybrid Search
 pref-hybrid-desc = Keyword and semantic retrieval, each filtered against its own relevance threshold and then merged and ranked by rank fusion. The same four settings drive both library-wide search and digging into a single document.

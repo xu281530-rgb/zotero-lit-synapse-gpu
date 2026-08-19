@@ -291,6 +291,53 @@ pref-file-import-sub = High-risk capability; disabled by default. Enable only wh
 pref-expose-paths-text = Expose local file paths in MCP results
 pref-expose-paths-sub = Absolute paths are hidden by default to reduce local information disclosure.
 
+# ============ PDF の閲覧と翻訳（統合） ============
+pref-translation-title = PDF の閲覧と翻訳
+pref-translation-desc = リーダー、全文翻訳、検索インデックスは、上で生成した同じ MinerU Markdown を再利用します。このセクションでは翻訳モデルと用語だけを設定し、別の設定項目は作成しません。
+pref-translation-provider-label = プロバイダー
+pref-translation-base-url-label = 翻訳 API URL
+pref-translation-api-key-label = 翻訳 API キー
+pref-translation-model-label = 翻訳モデル
+pref-translation-language-label = 翻訳先言語
+pref-translation-context-text = AI コンテキストを有効化
+pref-translation-context-sub = 各ブロックの翻訳時に前後の段落と文書構造を参照します
+pref-translation-document-glossary-text = 文書ごとの用語集を生成
+pref-translation-document-glossary-sub = 現在の PDF に固有の用語を抽出して適用します
+pref-translation-global-glossary-text = グローバル用語集を使用
+pref-translation-global-glossary-sub = 下で管理する用語をすべての PDF 翻訳で再利用します
+pref-translation-expert-label = 専門分野
+pref-translation-expert-auto = 自動検出
+pref-translation-expert-general = 一般
+pref-translation-expert-academic = 学術
+pref-translation-expert-technical = 技術
+pref-translation-expert-legal = 法律
+pref-translation-expert-medical = 医療
+pref-translation-expert-custom = カスタム
+pref-translation-expert-custom-label = 専門家向け指示
+pref-translation-prompt-title = 翻訳プロンプトのテンプレート
+pref-translation-prompt-edit = プロンプトを編集
+pref-translation-prompt-reset = 既定値に戻す
+pref-translation-prompt-hint = 使用可能な変数: target_language、text、context、glossary（テンプレート内では二重波括弧を使用）。
+pref-translation-glossary-title = グローバル用語集
+pref-translation-glossary-search =
+    .placeholder = 用語を検索
+pref-translation-glossary-add = 追加
+pref-translation-glossary-import = インポート
+pref-translation-glossary-export = エクスポート
+pref-translation-glossary-save = 用語集を保存
+pref-translation-glossary-enabled = 有効
+pref-translation-glossary-source = 原文
+pref-translation-glossary-target = 翻訳
+pref-translation-glossary-language = 翻訳先言語
+pref-translation-glossary-note = メモ
+pref-translation-performance-title = 翻訳の性能と信頼性
+pref-translation-batch-label = バッチあたりのブロック数
+pref-translation-concurrency-label = 同時リクエスト数
+pref-translation-retries-label = 失敗時の再試行回数
+
+# 統合 PDF Markdown パイプライン
+pref-mineru-unified-flow = 統合フロー: インデックス作成時に MinerU Markdown を生成または再利用し、同じデータからセマンティックベクトルインデックスと本文キーワードインデックスを作成します。PDF リーダーのオーバーレイと翻訳にも同じデータを使うため、PDF を再解析する必要はありません。
+
 # --- Hybrid search ---
 pref-hybrid-title = Hybrid Search
 pref-hybrid-desc = Keyword and semantic retrieval, each filtered against its own relevance threshold and then merged and ranked by rank fusion. The same four settings drive both library-wide search and digging into a single document.

@@ -20,7 +20,7 @@ import {
   writeAllBytes,
 } from "./httpFraming";
 import { MAX_HYBRID_KEYWORDS } from "./hybridSearch";
-import { sanitizeForPrivacy } from "../utils/privacy";
+import { describePrivateText, sanitizeForPrivacy } from "../utils/privacy";
 import { config } from "../../package.json";
 
 declare let ztoolkit: ZToolkit;
@@ -36,13 +36,6 @@ const WRITE_SLICE_BYTES = 32 * 1024;
 /** 请求流水号：把同一次调用的读取、分发、写出三段日志串起来。 */
 let requestSequence = 0;
 
-/** 请求体的头尾预览，只用于诊断，不记录完整内容。 */
-function bodyPreview(body: string): string {
-  const clean = (value: string) => value.replace(/\s+/g, " ");
-  if (body.length <= 90) return `"${clean(body)}"`;
-  return `"${clean(body.substring(0, 60))}"..."${clean(body.substring(body.length - 30))}"`;
-}
-
 export class HttpServer {
   public static testServer() {
     Zotero.debug("Static testServer method called.");
@@ -51,10 +44,6 @@ export class HttpServer {
   private isRunning: boolean = false;
   private mcpServer: StreamableMCPServer | null = null;
   private port: number = 8080;
-  private activeSessions: Map<string, { createdAt: Date; lastActivity: Date; }> = new Map();
-  private keepAliveTimeout: number = 30000; // 30 seconds
-  private sessionTimeout: number = 300000; // 5 minutes
-  private sessionCleanupInterval: ReturnType<typeof setInterval> | null = null;
   // Track active transports to close them on shutdown
   private activeTransports: Set<any> = new Set();
   // 记录当前实际绑定的监听参数，供设置变更时判断是否需要重新绑定。
@@ -135,8 +124,6 @@ export class HttpServer {
       // Initialize integrated MCP server if enabled
       this.initializeMCPServer();
       
-      // Start session cleanup timer
-      this.startSessionCleanup();
     } catch (e) {
       const errorMsg = `[HttpServer] Failed to start server on port ${port}: ${e}`;
       Zotero.debug(errorMsg);
@@ -162,10 +149,6 @@ export class HttpServer {
       ztoolkit.log("[HttpServer] Server is not running, nothing to stop");
       return;
     }
-
-    // Stop session cleanup timer FIRST to prevent new cleanup cycles
-    ztoolkit.log("[HttpServer] Stopping session cleanup timer...");
-    this.stopSessionCleanup();
 
     // Close all active transports
     ztoolkit.log(`[HttpServer] Closing ${this.activeTransports.size} active transport connections...`);
@@ -193,9 +176,6 @@ export class HttpServer {
     this.boundPort = null;
     this.boundLoopbackOnly = null;
 
-    // Clear active sessions
-    this.activeSessions.clear();
-
     // Clean up MCP server
     this.cleanupMCPServer();
     ztoolkit.log("[HttpServer] stop() complete");
@@ -205,52 +185,6 @@ export class HttpServer {
     if (this.mcpServer) {
       this.mcpServer = null;
       ztoolkit.log("[HttpServer] MCP server cleaned up");
-    }
-  }
-
-  /**
-   * Generate a unique session ID for MCP connections
-   */
-  private generateSessionId(): string {
-    return 'mcp-' + Date.now().toString(36) + '-' + Math.random().toString(36).substr(2, 9);
-  }
-
-  /**
-   * Start session cleanup timer to remove expired sessions
-   */
-  private startSessionCleanup(): void {
-    // Clear any existing interval first
-    this.stopSessionCleanup();
-
-    this.sessionCleanupInterval = setInterval(() => {
-      const now = new Date();
-      for (const [sessionId, session] of this.activeSessions.entries()) {
-        if (now.getTime() - session.lastActivity.getTime() > this.sessionTimeout) {
-          this.activeSessions.delete(sessionId);
-          ztoolkit.log(`[HttpServer] Cleaned up expired session: ${sessionId}`);
-        }
-      }
-    }, 60000); // Check every minute
-  }
-
-  /**
-   * Stop session cleanup timer
-   */
-  private stopSessionCleanup(): void {
-    if (this.sessionCleanupInterval) {
-      clearInterval(this.sessionCleanupInterval);
-      this.sessionCleanupInterval = null;
-      ztoolkit.log(`[HttpServer] Session cleanup timer stopped`);
-    }
-  }
-
-  /**
-   * Update session activity
-   */
-  private updateSessionActivity(sessionId: string): void {
-    const session = this.activeSessions.get(sessionId);
-    if (session) {
-      session.lastActivity = new Date();
     }
   }
 
@@ -269,9 +203,9 @@ export class HttpServer {
   }
 
   /**
-   * Build appropriate HTTP headers with session and connection management
+   * Build appropriate HTTP headers with connection management
    */
-  private buildHttpHeaders(result: any, keepAlive: boolean, sessionId?: string): string {
+  private buildHttpHeaders(result: any, keepAlive: boolean): string {
     const baseHeaders = `HTTP/1.1 ${result.status} ${result.statusText}\r\n` +
       `Content-Type: ${result.headers?.["Content-Type"] || "application/json; charset=utf-8"}\r\n`;
     
@@ -288,15 +222,10 @@ export class HttpServer {
       headers += `${name}: ${String(value)}\r\n`;
     }
     
-    // Add session ID for MCP requests
-    if (sessionId) {
-      headers += `Mcp-Session-Id: ${sessionId}\r\n`;
-    }
-    
     // Add connection management headers
     if (keepAlive) {
       headers += `Connection: keep-alive\r\n` +
-        `Keep-Alive: timeout=${this.keepAliveTimeout / 1000}, max=100\r\n`;
+        `Keep-Alive: timeout=30, max=100\r\n`;
     } else {
       headers += `Connection: close\r\n`;
     }
@@ -315,7 +244,6 @@ export class HttpServer {
     output: any,
     result: { status: number; statusText: string; headers?: Record<string, string>; body: string },
     keepAlive: boolean,
-    sessionId?: string,
     requestId = 0,
     state?: { started: boolean },
   ): Promise<void> {
@@ -324,7 +252,7 @@ export class HttpServer {
     // 客户端按 Content-Length 读到的就是一段被污染的 JSON。
     if (state) state.started = true;
     const bodyBytes = utf8Encode(result.body || "");
-    const headers = this.buildHttpHeaders(result, keepAlive, sessionId) +
+    const headers = this.buildHttpHeaders(result, keepAlive) +
       `Content-Length: ${bodyBytes.length}\r\n` +
       "\r\n";
 
@@ -421,7 +349,6 @@ export class HttpServer {
               body: "Bad Request",
             },
             false,
-            undefined,
             requestId,
             responseState,
           );
@@ -464,7 +391,6 @@ export class HttpServer {
                 : JSON.stringify({ error: detail }),
             },
             false,
-            undefined,
             requestId,
             responseState,
           );
@@ -493,7 +419,6 @@ export class HttpServer {
               output,
               accessFailure,
               false,
-              undefined,
               requestId,
               responseState,
             );
@@ -504,17 +429,7 @@ export class HttpServer {
           const requestBody = method === "POST" ? utf8Decode(frame.body) : "";
           if (requestBody) {
             ztoolkit.log(
-              `[HttpServer] #${requestId} body decoded: ${frame.body.length}B -> ${requestBody.length} chars ${bodyPreview(requestBody)}`,
-            );
-          }
-
-          // Extract existing session ID or create new one for MCP requests
-          const sessionId: string | undefined = undefined;
-          const incomingSessionId = headers.get("mcp-session-id");
-          if (isMCPPath && incomingSessionId) {
-            this.updateSessionActivity(incomingSessionId.trim());
-            ztoolkit.log(
-              `[HttpServer] #${requestId} client MCP session header: ${incomingSessionId.trim()}`,
+              `[HttpServer] #${requestId} body decoded: ${frame.body.length}B -> ${describePrivateText(requestBody)}`,
             );
           }
 
@@ -596,7 +511,6 @@ export class HttpServer {
             output,
             result,
             keepAlive,
-            sessionId,
             requestId,
             responseState,
           );
@@ -629,7 +543,6 @@ export class HttpServer {
               body: errorBody,
             },
             false,
-            undefined,
             requestId,
             responseState,
           );
@@ -661,7 +574,6 @@ export class HttpServer {
               body: "Internal Server Error",
             },
             false,
-            undefined,
             requestId,
             responseState,
           );

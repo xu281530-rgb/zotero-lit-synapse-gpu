@@ -27,6 +27,32 @@ const REDACTION = "[redacted-path]";
 
 /** 路径中不会出现的终止字符，用于界定一段路径的右边界。 */
 const PATH_CHARS = String.raw`[^\s"'<>|?*,;:()\[\]{}]`;
+/** 允许文件名包含空格，但仍在日志/JSON 常见分隔符处停止。 */
+const PATH_WITH_SPACES = String.raw`[^\r\n"'<>|?*,;:()\[\]{}]`;
+/** file:// URL 内的 Windows 盘符需要冒号。 */
+const FILE_URL_WITH_SPACES = String.raw`[^\r\n"'<>|?*,;()\[\]{}]`;
+const FILE_EXTENSION = String.raw`\.[A-Za-z0-9]{1,8}\b`;
+
+/**
+ * 无扩展名目录没有天然右边界。只在闭引号或整段文本边界明确时匹配，
+ * 避免把路径后面的普通错误说明一并隐藏。
+ */
+const BOUNDED_LOCAL_PATH = [
+  String.raw`file:\/\/` + FILE_URL_WITH_SPACES + "+",
+  String.raw`[A-Za-z]:[\\/]` + PATH_WITH_SPACES + "+",
+  String.raw`\\\\` + PATH_WITH_SPACES + "+",
+  String.raw`\/(?:home|Users|users|root|tmp|var|private|mnt|media|opt|srv|Volumes|data)\/` +
+    PATH_WITH_SPACES +
+    "+",
+].join("|");
+
+const QUOTED_LOCAL_PATH_PATTERN = new RegExp(
+  String.raw`(["'])(?:` + BOUNDED_LOCAL_PATH + String.raw`)\1`,
+  "g",
+);
+const STANDALONE_LOCAL_PATH_PATTERN = new RegExp(
+  String.raw`^(?:` + BOUNDED_LOCAL_PATH + String.raw`)$`,
+);
 
 /**
  * 单遍扫描的路径识别正则。分支顺序即优先级：
@@ -50,17 +76,28 @@ const PATH_PATTERN = new RegExp(
   [
     // 1. 受保护的远程 URL
     String.raw`(?:https?|ftp):\/\/` + PATH_CHARS + "*",
-    // 2. 本机 file:// URL
+    // 2. 带空格的本机文件路径。用扩展名作右边界，避免吞掉后续错误说明。
+    String.raw`file:\/\/` + FILE_URL_WITH_SPACES + "*?" + FILE_EXTENSION,
+    String.raw`(?<![A-Za-z0-9])[A-Za-z]:[\\/]` +
+      PATH_WITH_SPACES +
+      "*?" +
+      FILE_EXTENSION,
+    String.raw`\\\\` + PATH_WITH_SPACES + "*?" + FILE_EXTENSION,
+    String.raw`(?<![\w.])\/(?:home|Users|users|root|tmp|var|private|mnt|media|opt|srv|Volumes|data)\/` +
+      PATH_WITH_SPACES +
+      "*?" +
+      FILE_EXTENSION,
+    // 3. 本机 file:// URL
     String.raw`file:\/\/` + PATH_CHARS + "*",
-    // 3. Windows 盘符
+    // 4. Windows 盘符
     String.raw`(?<![A-Za-z0-9])[A-Za-z]:[\\/]` + PATH_CHARS + "*",
-    // 4. UNC（正则源里的 \\ 表示两个字面反斜杠）
+    // 5. UNC（正则源里的 \\ 表示两个字面反斜杠）
     String.raw`\\\\` + PATH_CHARS + "+",
-    // 5. 已知 POSIX 根目录
+    // 6. 已知 POSIX 根目录
     String.raw`(?<![\w.])\/(?:home|Users|users|root|tmp|var|private|mnt|media|opt|srv|Volumes|data)\/` +
       PATH_CHARS +
       "*",
-    // 6. 兜底：/a/b.ext
+    // 7. 兜底：/a/b.ext
     String.raw`(?<![\w.])\/(?:` + PATH_CHARS + String.raw`+\/)+` + PATH_CHARS +
       String.raw`+\.[A-Za-z0-9]{1,8}\b`,
   ].join("|"),
@@ -113,6 +150,11 @@ export function redactAbsolutePaths(value: string, dataDir?: string): string {
     if (text.includes(alternate)) text = text.split(alternate).join(REDACTION);
   }
 
+  text = text.replace(QUOTED_LOCAL_PATH_PATTERN, (_match, quote: string) =>
+    `${quote}${REDACTION}${quote}`,
+  );
+  if (STANDALONE_LOCAL_PATH_PATTERN.test(text)) return REDACTION;
+
   text = text.replace(PATH_PATTERN, (match) =>
     REMOTE_URL_PATTERN.test(match) ? match : REDACTION,
   );
@@ -139,6 +181,14 @@ export function scrubPathFields<T>(result: T): T {
 export function sanitizeForPrivacy<T>(value: T): T {
   if (areFilePathsExposed()) return value;
   return walk(value, getDataDirectory(), 0) as T;
+}
+
+/**
+ * 为日志描述敏感文本，只保留定位分帧问题所需的长度。
+ * 不返回头尾片段，因为 MCP 参数可能包含检索词、笔记正文或本机路径。
+ */
+export function describePrivateText(value: string): string {
+  return `${value.length} chars; content omitted`;
 }
 
 /**

@@ -122,7 +122,11 @@ import {
   SUPPORTED_MCP_PROTOCOL_VERSIONS,
   negotiateProtocolVersion,
 } from './mcpTransport';
-import { sanitizeForPrivacy, scrubPathFields } from '../utils/privacy';
+import {
+  describePrivateText,
+  sanitizeForPrivacy,
+  scrubPathFields,
+} from '../utils/privacy';
 import { config } from '../../package.json';
 import { getWikiService } from './wiki/wikiService';
 import { getWikiSettings } from './wiki/wikiSettings';
@@ -143,13 +147,38 @@ export interface MCPResponse {
     message: string;
     data?: any;
   };
-  sessionId?: string;
 }
 
 export interface MCPNotification {
   jsonrpc: '2.0';
   method: string;
   params?: any;
+}
+
+function invalidMCPRequestMessage(value: unknown): string | null {
+  if (Array.isArray(value)) {
+    return 'Invalid Request: batch requests are not supported';
+  }
+  if (!value || typeof value !== 'object') return 'Invalid Request';
+
+  const request = value as Record<string, unknown>;
+  if (request.jsonrpc !== '2.0') {
+    return 'Invalid Request: jsonrpc must be "2.0"';
+  }
+  if (typeof request.method !== 'string' || !request.method.trim()) {
+    return 'Invalid Request: method is required';
+  }
+  if (Object.prototype.hasOwnProperty.call(request, 'id')) {
+    const id = request.id;
+    if (
+      id !== null &&
+      typeof id !== 'string' &&
+      typeof id !== 'number'
+    ) {
+      return 'Invalid Request: id must be a string, number, or null';
+    }
+  }
+  return null;
 }
 
 const PREF_WRITE_ENABLED = 'extensions.zotero.zotero-mcp-plugin.write.enabled';
@@ -419,10 +448,6 @@ export class StreamableMCPServer {
     // 与 manifest.json / 设置页脚同源，避免三处版本号各说各话。
     version: config.addonVersion,
   };
-  private clientSessions: Map<
-    string,
-    { initTime: Date; lastActivity: Date; clientInfo?: any }
-  > = new Map();
   /**
    * Paging state for hybrid_search: one entry per recent search, holding the
    * complete list of documents that cleared the relevance threshold. Page 2
@@ -499,14 +524,11 @@ export class StreamableMCPServer {
 
     try {
       parsedRequest = JSON.parse(requestBody);
-    } catch (error) {
-      // 走到这里说明收到的确实不是合法 JSON。把长度和首尾片段一起记下来，
-      // 才能区分「客户端发了坏数据」和「传输层把请求体截断了」——后者是
-      // 之前 -32700 的真正来源，现在由 httpServer 在分帧阶段就拦下。
-      const head = requestBody.slice(0, 60).replace(/\s+/g, ' ');
-      const tail = requestBody.slice(-30).replace(/\s+/g, ' ');
+    } catch {
+      // 走到这里说明收到的确实不是合法 JSON。只记录长度，足以结合
+      // httpServer 的分帧日志判断请求体是否截断，同时避免泄露请求内容。
       ztoolkit.log(
-        `[StreamableMCP] #${requestId} Parse error: ${error} (body ${requestBody.length} chars, head="${head}", tail="${tail}")`,
+        `[StreamableMCP] #${requestId} Parse error: invalid JSON (body ${describePrivateText(requestBody)})`,
         'error',
       );
 
@@ -528,25 +550,12 @@ export class StreamableMCPServer {
     }
 
     try {
-      if (Array.isArray(parsedRequest)) {
-        const batchError = this.createError(
-          null,
-          -32600,
-          'Invalid Request: batch requests are not supported',
-        );
-        return {
-          status: 400,
-          statusText: 'Bad Request',
-          headers: { 'Content-Type': 'application/json; charset=utf-8' },
-          body: this.serializeResponse(batchError),
-        };
-      }
-
-      if (!parsedRequest || typeof parsedRequest !== 'object') {
+      const invalidMessage = invalidMCPRequestMessage(parsedRequest);
+      if (invalidMessage) {
         const invalidRequest = this.createError(
           null,
           -32600,
-          'Invalid Request',
+          invalidMessage,
         );
         return {
           status: 400,
@@ -557,19 +566,6 @@ export class StreamableMCPServer {
       }
 
       const request = parsedRequest as MCPRequest;
-      if (typeof request.method !== 'string' || !request.method.trim()) {
-        const invalidRequest = this.createError(
-          null,
-          -32600,
-          'Invalid Request: method is required',
-        );
-        return {
-          status: 400,
-          statusText: 'Bad Request',
-          headers: { 'Content-Type': 'application/json; charset=utf-8' },
-          body: this.serializeResponse(invalidRequest),
-        };
-      }
 
       ztoolkit.log(
         `[StreamableMCP] #${requestId} received method=${request.method} id=${JSON.stringify(request.id ?? null)}`,
@@ -722,19 +718,13 @@ export class StreamableMCPServer {
       );
     }
 
-    // Extract client info from initialize request
+    // This transport is deliberately stateless. Streamable HTTP permits a
+    // server to omit Mcp-Session-Id; retaining an unreachable ID per reconnect
+    // only leaks memory and gives clients no capability in return.
     const clientInfo = request.params?.clientInfo || {};
-    const sessionId = this.generateSessionId();
-
-    // Store session info
-    this.clientSessions.set(sessionId, {
-      initTime: new Date(),
-      lastActivity: new Date(),
-      clientInfo,
-    });
 
     ztoolkit.log(
-      `[StreamableMCP] Client initialized with session: ${sessionId}, client: ${clientInfo.name || 'unknown'}, protocol: ${negotiatedVersion}`,
+      `[StreamableMCP] Stateless client initialized: ${clientInfo.name || 'unknown'}, protocol: ${negotiatedVersion}`,
     );
 
     // Create standard MCP initialize response (no custom fields)
@@ -787,15 +777,6 @@ BEYOND THE FUNNEL - the other tools, and when each one is the right call:
 - get_collection_items: browse the library one level at a time, like a file manager - the subfolders here and the documents filed here, with counts on each subfolder so you can choose where to descend. This is navigation. If the user is asking about a TOPIC, stop browsing and search.
 Nothing in this server returns a whole document in one response. Every reading tool pages, and continuing to page is a decision you make each time, not a default.`,
     });
-  }
-
-  private generateSessionId(): string {
-    return (
-      'mcp-session-' +
-      Date.now().toString(36) +
-      '-' +
-      Math.random().toString(36).substr(2, 9)
-    );
   }
 
   private handleResourcesList(request: MCPRequest): MCPResponse {
@@ -5283,7 +5264,6 @@ Nothing in this server returns a whole document in one response. Every reading t
   private isNotificationRequest(request: MCPRequest): boolean {
     return (
       !Object.prototype.hasOwnProperty.call(request, 'id') ||
-      request.id === null ||
       request.id === undefined
     );
   }
@@ -5314,6 +5294,7 @@ Nothing in this server returns a whole document in one response. Every reading t
       availableTools: this.getAvailableTools().map((t: any) => t.name),
       transport: {
         type: 'streamable-http',
+        sessionMode: 'stateless',
         keepAliveSupported: false,
         maxConnections: 100,
       },
