@@ -429,5 +429,5 @@ pref-embedding-identity-locked = Vector index or Wiki Claim Embedding data alrea
 pref-wiki-clear-button = Delete all Wiki data
 pref-wiki-clear-confirm = This permanently deletes all Wiki Concepts, Aliases, Pages, Claims, Relations, Evidence, and Claim Embeddings. Keyword and vector search indexes are not deleted. Continue?
 pref-wiki-clear-error = Failed to delete Wiki data
-pref-wiki-data-statistics = Wiki data
+pref-wiki-data-statistics = Wiki data: { $pages } pages, { $claims } claims, { $evidence } evidence, { $embeddings } embeddings
 pref-wiki-data-statistics-error = Wiki statistics unavailable

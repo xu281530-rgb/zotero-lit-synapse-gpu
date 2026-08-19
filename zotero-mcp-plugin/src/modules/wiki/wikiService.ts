@@ -246,7 +246,9 @@ export class WikiService {
       const claim = await this.store.getClaim(claimId);
       if (!claim) continue;
       try {
-        const embedded = await getEmbeddingService().embed(
+        const embeddingService = getEmbeddingService();
+        const embeddingModel = embeddingService.getConfig().model;
+        const embedded = await embeddingService.embed(
           claim.claimText,
           "auto",
           false,
@@ -254,12 +256,7 @@ export class WikiService {
         await this.store.saveClaimEmbedding({
           claimId,
           vector: embedded.embedding,
-          model: String(
-            Zotero.Prefs.get(
-              "extensions.zotero.zotero-mcp-plugin.embedding.model",
-              true,
-            ) || "unknown",
-          ),
+          model: embeddingModel,
           textHash: await hashWikiText(claim.claimText),
         });
       } catch (error) {
@@ -323,10 +320,13 @@ export class WikiService {
   }): Promise<WikiServiceSearchResult> {
     const warnings: string[] = [];
     let queryVector: Float32Array | undefined;
+    let queryVectorModel: string | undefined;
     if (options.useVector !== false) {
       try {
+        const embeddingService = getEmbeddingService();
+        queryVectorModel = embeddingService.getConfig().model;
         queryVector = (
-          await getEmbeddingService().embed(options.query, "auto", true)
+          await embeddingService.embed(options.query, "auto", true)
         ).embedding;
       } catch (error) {
         warnings.push(
@@ -336,7 +336,11 @@ export class WikiService {
         );
       }
     }
-    const result = await this.retriever.search({ ...options, queryVector });
+    const result = await this.retriever.search({
+      ...options,
+      queryVector,
+      queryVectorModel,
+    });
     return { ...result, vectorSearchUsed: Boolean(queryVector), warnings };
   }
 

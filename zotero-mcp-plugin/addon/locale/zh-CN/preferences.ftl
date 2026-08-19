@@ -429,5 +429,5 @@ pref-embedding-identity-locked = 当前已有文献向量索引或 Wiki Claim Em
 pref-wiki-clear-button = 删除全部 Wiki 数据
 pref-wiki-clear-confirm = 此操作将永久删除全部 Wiki Concept、Alias、Page、Claim、Relation、Evidence 与 Claim Embedding；不会删除关键词或向量搜索索引。是否继续？
 pref-wiki-clear-error = 删除 Wiki 数据失败
-pref-wiki-data-statistics = Wiki 数据
+pref-wiki-data-statistics = Wiki 数据：{ $pages } 个 Page，{ $claims } 个 Claim，{ $evidence } 条 Evidence，{ $embeddings } 条 Claim Embedding
 pref-wiki-data-statistics-error = 无法读取 Wiki 统计

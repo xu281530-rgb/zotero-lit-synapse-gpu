@@ -39,7 +39,10 @@ import {
   resumePDFSemanticIndexRefreshes,
   suspendPDFSemanticIndexRefreshes,
 } from "./pdfTextSource";
-import { getDataCompatibilityState } from "./dataCompatibilityLocks";
+import {
+  deriveEmbeddingPreferenceLocks,
+  getDataCompatibilityState,
+} from "./dataCompatibilityLocks";
 
 export async function registerPrefsScripts(_window: Window) {
   // This function is called when the prefs window is opened
@@ -402,7 +405,14 @@ async function refreshWikiDataStatistics(doc: Document): Promise<void> {
   try {
     const { getWikiStore } = await import("./wiki/wikiStore");
     const status = await getWikiStore().getStatus();
-    element.textContent = `${getString("pref-wiki-data-statistics" as any) || "Wiki data"}: ${status.pages} pages, ${status.claims} claims, ${status.evidence} evidence, ${status.claimEmbeddings} embeddings`;
+    element.textContent = getString("pref-wiki-data-statistics" as any, {
+      args: {
+        pages: status.pages,
+        claims: status.claims,
+        evidence: status.evidence,
+        embeddings: status.claimEmbeddings,
+      },
+    });
   } catch (error) {
     element.textContent = `${getString("pref-wiki-data-statistics-error" as any) || "Wiki statistics unavailable"}: ${error}`;
   }
@@ -433,18 +443,21 @@ async function refreshDataCompatibilityLockUI(doc: Document): Promise<void> {
     const dimensionsInput = doc.querySelector(
       `#zotero-prefpane-${config.addonRef}-embedding-dimensions`,
     ) as HTMLInputElement | null;
+    const embeddingLocks = deriveEmbeddingPreferenceLocks(
+      state.embeddingIdentityLocked,
+    );
     if (modelInput) {
       modelInput.dataset.compatibilityLocked = String(
-        state.embeddingIdentityLocked,
+        embeddingLocks.model,
       );
-      modelInput.disabled = state.embeddingIdentityLocked;
+      modelInput.disabled = embeddingLocks.model;
     }
     if (dimensionsInput) {
       dimensionsInput.dataset.compatibilityLocked = String(
-        state.embeddingIdentityLocked,
+        embeddingLocks.dimensions,
       );
       dimensionsInput.disabled =
-        state.embeddingIdentityLocked ||
+        embeddingLocks.dimensions ||
         dimensionsInput.dataset.modelSupportsCustom !== "true";
     }
     const embeddingMessage = doc.querySelector(
@@ -1771,13 +1784,17 @@ function bindEmbeddingSettings(doc: Document) {
         const embeddingIdentityLocked = (
           await getDataCompatibilityState()
         ).embeddingIdentityLocked;
+        const embeddingLocks = deriveEmbeddingPreferenceLocks(
+          embeddingIdentityLocked,
+        );
         if (hasStoredVectors && storedDims && storedDims !== dims) {
           // Dimension mismatch with existing index - warn but don't auto-update
           testResult.textContent = `${getString("pref-embedding-test-success" as any)} (${dims} dims) - ⚠️ ${getString("pref-embedding-dimension-mismatch" as any) || `Index has ${storedDims} dims, API returns ${dims} dims. Rebuild index to use new dimensions.`}`;
           testResult.style.color = "var(--color-warn)";
 
-          // Save detected dimensions but don't update config dimensions
-          Zotero.Prefs.set("extensions.zotero.zotero-mcp-plugin.embedding.detectedDimensions", dims, true);
+          if (!embeddingLocks.detectedDimensions) {
+            Zotero.Prefs.set("extensions.zotero.zotero-mcp-plugin.embedding.detectedDimensions", dims, true);
+          }
         } else {
           // No mismatch or no existing vectors - safe to update
           testResult.textContent = getString("pref-embedding-test-success" as any) + ` (${dims} dims)`;
@@ -1785,21 +1802,22 @@ function bindEmbeddingSettings(doc: Document) {
 
           // Update dimensions
           if (dims > 0) {
-            // Save detected dimensions
-            Zotero.Prefs.set("extensions.zotero.zotero-mcp-plugin.embedding.detectedDimensions", dims, true);
+            if (!embeddingLocks.detectedDimensions) {
+              Zotero.Prefs.set("extensions.zotero.zotero-mcp-plugin.embedding.detectedDimensions", dims, true);
+            }
 
             // Only update config dimensions for models that support custom dimensions
             if (
               supportsCustomDimensions(model) &&
               dimensionsInput &&
-              !embeddingIdentityLocked
+              !embeddingLocks.dimensions
             ) {
               dimensionsInput.value = String(dims);
               Zotero.Prefs.set("extensions.zotero.zotero-mcp-plugin.embedding.dimensions", dims, true);
             }
 
             // Update embedding service
-            if (!embeddingIdentityLocked) {
+            if (!embeddingLocks.dimensions) {
               try {
                 const { getEmbeddingService } = require("./semantic/embeddingService");
                 const embeddingService = getEmbeddingService();

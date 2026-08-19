@@ -30,6 +30,25 @@ function rowValue(row: any, snake: string, camel: string): any {
   return row?.[snake] ?? row?.[camel];
 }
 
+const WIKI_PERSISTENT_STATUS_KEYS = [
+  "pages",
+  "claims",
+  "concepts",
+  "aliases",
+  "relations",
+  "evidence",
+  "claimEmbeddings",
+] as const;
+
+export function countWikiPersistentRows(
+  status: Record<string, number | string>,
+): number {
+  return WIKI_PERSISTENT_STATUS_KEYS.reduce(
+    (total, key) => total + (Number(status[key]) || 0),
+    0,
+  );
+}
+
 export class WikiStore {
   private initialized = false;
   private readonly db: WikiDatabase;
@@ -1269,15 +1288,7 @@ export class WikiStore {
 
   async clearAll(): Promise<{ deletedRows: number }> {
     const before = await this.getStatus();
-    const deletedRows = [
-      before.pages,
-      before.claims,
-      before.concepts,
-      before.aliases,
-      before.relations,
-      before.evidence,
-      before.claimEmbeddings,
-    ].reduce<number>((total, value) => total + (Number(value) || 0), 0);
+    const deletedRows = countWikiPersistentRows(before);
     await this.db.executeTransaction(async () => {
       for (const table of [
         "wiki_claim_embeddings",
@@ -1292,15 +1303,7 @@ export class WikiStore {
       }
     });
     const after = await this.getStatus();
-    const remaining = [
-      after.pages,
-      after.claims,
-      after.concepts,
-      after.aliases,
-      after.relations,
-      after.evidence,
-      after.claimEmbeddings,
-    ].reduce<number>((total, value) => total + (Number(value) || 0), 0);
+    const remaining = countWikiPersistentRows(after);
     if (remaining !== 0) {
       throw new Error(`Wiki data reset left ${remaining} persistent rows`);
     }

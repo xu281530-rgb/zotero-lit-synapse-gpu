@@ -1,5 +1,5 @@
 import { getVectorStore } from "./semantic/vectorStore";
-import { getWikiStore } from "./wiki/wikiStore";
+import { countWikiPersistentRows, getWikiStore } from "./wiki/wikiStore";
 
 export interface DataCompatibilityCounts {
   semanticVectors: number;
@@ -12,6 +12,14 @@ export interface DataCompatibilityCounts {
 export interface DataCompatibilityLocks {
   chunkLocked: boolean;
   embeddingIdentityLocked: boolean;
+}
+
+export interface EmbeddingPreferenceLocks {
+  apiKey: boolean;
+  apiBase: boolean;
+  model: boolean;
+  dimensions: boolean;
+  detectedDimensions: boolean;
 }
 
 export function deriveDataCompatibilityLocks(
@@ -28,6 +36,18 @@ export function deriveDataCompatibilityLocks(
   };
 }
 
+export function deriveEmbeddingPreferenceLocks(
+  embeddingIdentityLocked: boolean,
+): EmbeddingPreferenceLocks {
+  return {
+    apiKey: false,
+    apiBase: false,
+    model: embeddingIdentityLocked,
+    dimensions: embeddingIdentityLocked,
+    detectedDimensions: embeddingIdentityLocked,
+  };
+}
+
 export async function getDataCompatibilityState(): Promise<
   DataCompatibilityCounts & DataCompatibilityLocks
 > {
@@ -38,15 +58,7 @@ export async function getDataCompatibilityState(): Promise<
     getWikiStore().getStatus(),
   ]);
   const wikiClaimEmbeddings = Number(wiki.claimEmbeddings) || 0;
-  const wikiRows = [
-    wiki.pages,
-    wiki.claims,
-    wiki.concepts,
-    wiki.aliases,
-    wiki.relations,
-    wiki.evidence,
-    wiki.claimEmbeddings,
-  ].reduce<number>((total, value) => total + (Number(value) || 0), 0);
+  const wikiRows = countWikiPersistentRows(wiki);
   const counts = {
     semanticVectors: search.semanticVectors,
     keywordDocuments: search.keywordDocuments,

@@ -1,4 +1,4 @@
-import { normalizeWikiName } from "./wikiCanonicalizer";
+import { hashWikiText, normalizeWikiName } from "./wikiCanonicalizer";
 import type { WikiReadDepth, WikiEpistemicStatus } from "./wikiTypes";
 import type { WikiStore } from "./wikiStore";
 
@@ -25,14 +25,20 @@ function lexicalScore(queryTerms: string[], value: string): number {
 }
 
 function floatVector(blob: unknown, dimensions: number): Float32Array | null {
+  if (!Number.isInteger(dimensions) || dimensions <= 0) return null;
+  const expectedBytes = dimensions * Float32Array.BYTES_PER_ELEMENT;
   if (blob instanceof Uint8Array) {
+    if (blob.byteLength !== expectedBytes) return null;
     return new Float32Array(
       blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength),
       0,
       dimensions,
     );
   }
-  if (blob instanceof ArrayBuffer) return new Float32Array(blob, 0, dimensions);
+  if (blob instanceof ArrayBuffer) {
+    if (blob.byteLength !== expectedBytes) return null;
+    return new Float32Array(blob, 0, dimensions);
+  }
   return null;
 }
 
@@ -100,6 +106,7 @@ export class WikiRetriever {
     query: string;
     keywords?: string[];
     queryVector?: Float32Array;
+    queryVectorModel?: string;
     itemKeys?: string[];
     minScore?: number;
     limit?: number | null;
@@ -143,8 +150,7 @@ export class WikiRetriever {
       claimEvidence.set(id, list);
       if (
         scopedClaimIds &&
-        Number(column(row, "library_id", "libraryID")) ===
-          options.libraryID &&
+        Number(column(row, "library_id", "libraryID")) === options.libraryID &&
         itemScope!.has(String(column(row, "item_key", "itemKey")))
       ) {
         scopedClaimIds.add(id);
@@ -237,6 +243,7 @@ export class WikiRetriever {
     }
 
     const claims: WikiClaimSearchResult[] = [];
+    const matchedConceptIds = new Set<number>();
     for (const claim of snapshot.claims) {
       const claimId = Number(column(claim, "claim_id", "claimId"));
       if (scopedClaimIds && !scopedClaimIds.has(claimId)) continue;
@@ -266,23 +273,45 @@ export class WikiRetriever {
       );
       const embedding = embeddings.get(claimId);
       let vectorScore = 0;
-      if (options.queryVector && embedding) {
+      if (
+        options.queryVector &&
+        options.queryVectorModel &&
+        embedding &&
+        String(column(embedding, "model", "model")) ===
+          options.queryVectorModel &&
+        Number(column(embedding, "dimensions", "dimensions")) ===
+          options.queryVector.length &&
+        String(column(embedding, "text_hash", "textHash")) ===
+          (await hashWikiText(String(column(claim, "claim_text", "claimText"))))
+      ) {
         const vector = floatVector(
           column(embedding, "embedding", "embedding"),
-          Number(embedding.dimensions),
+          Number(column(embedding, "dimensions", "dimensions")),
         );
         if (vector) vectorScore = cosine(options.queryVector, vector);
       }
       const oneHop = relatedConceptScores.get(conceptId) ?? 0;
       const normalizedWikiScore = Math.max(direct, vectorScore, oneHop);
       if (normalizedWikiScore < minScore || normalizedWikiScore <= 0) continue;
-      const evidence = claimEvidence.get(claimId) ?? [];
-      const readDepth = evidence.reduce<WikiReadDepth>((best, row) => {
-        const depth = column(row, "read_depth", "readDepth") as WikiReadDepth;
-        return DEPTH_ORDER.indexOf(depth) > DEPTH_ORDER.indexOf(best)
-          ? depth
-          : best;
-      }, "chunk_local");
+      const evidence = (claimEvidence.get(claimId) ?? []).filter(
+        (row) =>
+          !itemScope ||
+          (Number(column(row, "library_id", "libraryID")) ===
+            options.libraryID &&
+            itemScope.has(String(column(row, "item_key", "itemKey")))),
+      );
+      const readDepth = evidence
+        .filter((row) => {
+          const state = String(column(row, "link_state", "linkState"));
+          return state === "valid" || state === "source_deleted";
+        })
+        .reduce<WikiReadDepth>((best, row) => {
+          const depth = column(row, "read_depth", "readDepth") as WikiReadDepth;
+          return DEPTH_ORDER.indexOf(depth) > DEPTH_ORDER.indexOf(best)
+            ? depth
+            : best;
+        }, "chunk_local");
+      matchedConceptIds.add(conceptId);
       claims.push({
         claimId,
         pageId,
@@ -345,13 +374,23 @@ export class WikiRetriever {
             a.itemKey.localeCompare(b.itemKey),
         )
         .slice(0, documentLimit ?? undefined),
-      relations: relationHits,
-      directCount: claims.filter(
-        (claim) => claim.matchKind === "direct",
-      ).length,
-      oneHopCount: claims.filter(
-        (claim) => claim.matchKind === "one_hop",
-      ).length,
+      relations: itemScope
+        ? relationHits.filter((relation) => {
+            const source = Number(
+              column(relation, "source_concept_id", "sourceConceptId"),
+            );
+            const target = Number(
+              column(relation, "target_concept_id", "targetConceptId"),
+            );
+            return (
+              matchedConceptIds.has(source) || matchedConceptIds.has(target)
+            );
+          })
+        : relationHits,
+      directCount: claims.filter((claim) => claim.matchKind === "direct")
+        .length,
+      oneHopCount: claims.filter((claim) => claim.matchKind === "one_hop")
+        .length,
     };
   }
 }

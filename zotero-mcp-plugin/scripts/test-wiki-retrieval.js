@@ -220,6 +220,72 @@ assert.ok(
   "weak evidence must not be misreported as low query relevance",
 );
 
+const gradientClaimText =
+  "A higher thermal gradient suppresses interface instability.";
+const gradientClaimHash = await hashWikiText(gradientClaimText);
+await store.saveClaimEmbedding({
+  claimId: committed.refs["claim:gradient"],
+  vector: new Float32Array([1, 0]),
+  model: "embedding-model-a",
+  textHash: gradientClaimHash,
+});
+
+async function embeddingOnlySearch() {
+  return retriever.search({
+    libraryID: 1,
+    query: "orthogonal vector-only lookup",
+    queryVector: new Float32Array([1, 0]),
+    queryVectorModel: "embedding-model-a",
+    minScore: 0.9,
+    limit: 20,
+  });
+}
+
+assert.deepEqual(
+  (await embeddingOnlySearch()).claims.map((claim) => claim.claimId),
+  [committed.refs["claim:gradient"]],
+  "a compatible Claim Embedding must participate in Wiki scoring",
+);
+
+sqlite
+  .prepare("UPDATE wiki_claim_embeddings SET text_hash = ? WHERE claim_id = ?")
+  .run("stale-claim-text", committed.refs["claim:gradient"]);
+assert.deepEqual(
+  (await embeddingOnlySearch()).claims,
+  [],
+  "a Claim Embedding for stale Claim text must be ignored during retrieval",
+);
+
+sqlite
+  .prepare(
+    "UPDATE wiki_claim_embeddings SET text_hash = ?, model = ? WHERE claim_id = ?",
+  )
+  .run(
+    gradientClaimHash,
+    "embedding-model-b",
+    committed.refs["claim:gradient"],
+  );
+assert.deepEqual(
+  (await embeddingOnlySearch()).claims,
+  [],
+  "a Claim Embedding from another model must be ignored during retrieval",
+);
+
+sqlite
+  .prepare(
+    "UPDATE wiki_claim_embeddings SET model = ?, dimensions = ? WHERE claim_id = ?",
+  )
+  .run("embedding-model-a", 3, committed.refs["claim:gradient"]);
+assert.deepEqual(
+  (await embeddingOnlySearch()).claims,
+  [],
+  "a Claim Embedding with incompatible dimensions must be ignored without decoding its blob",
+);
+
+sqlite
+  .prepare("UPDATE wiki_claim_embeddings SET dimensions = ? WHERE claim_id = ?")
+  .run(2, committed.refs["claim:gradient"]);
+
 const relationPredicateDirect = await retriever.search({
   libraryID: 1,
   query: "is perturbed by",
@@ -271,6 +337,78 @@ assert.deepEqual(
 assert.ok(
   scoped.documents.every((row) => row.itemKey !== "OUTSIDE1"),
   "Wiki Evidence must be filtered through the final item scope",
+);
+assert.ok(
+  scoped.claims.every((claim) =>
+    claim.evidence.every((row) => row.item_key === "PAPER002"),
+  ),
+  "scoped Claim results must not expose Evidence outside itemKeys",
+);
+
+const verificationPage = await store.commit({
+  libraryID: 1,
+  userInitiated: true,
+  actions: [
+    {
+      action: "CREATE_PAGE",
+      ref: "page:verification-boundary",
+      canonicalTitle: "Evidence verification boundary",
+    },
+    {
+      action: "ADD_CLAIM",
+      ref: "claim:verification-boundary",
+      pageId: "page:verification-boundary",
+      claimText: "Verification boundary evidence has mixed link states.",
+      claimType: "condition",
+      epistemicStatus: "supported",
+      coverageLevel: "cross_paper",
+      confidence: 0.9,
+      evidence: [
+        await evidence(
+          "VERIFIEDDOC",
+          "Verified local evidence for the boundary.",
+          "SUPPORTS",
+          "chunk_local",
+        ),
+        await evidence(
+          "PENDINGDEEP",
+          "Pending cross-paper evidence for the boundary.",
+          "SUPPORTS",
+          "cross_paper",
+        ),
+      ],
+    },
+  ],
+});
+await store.markItemsPending("content-rebuild", 1, ["PENDINGDEEP"]);
+const mixedVerification = await retriever.search({
+  libraryID: 1,
+  query: "verification boundary mixed link states",
+  minScore: 0,
+  limit: 20,
+});
+const mixedClaim = mixedVerification.claims.find(
+  (claim) =>
+    claim.claimId === verificationPage.refs["claim:verification-boundary"],
+);
+assert.ok(mixedClaim, "the mixed-state Claim must remain visible");
+assert.ok(
+  mixedClaim.evidence.some((row) => row.link_state === "pending_relink"),
+  "pending Evidence remains visible for explicit re-verification",
+);
+assert.equal(
+  mixedClaim.readDepth,
+  "chunk_local",
+  "pending Evidence must not elevate verified readDepth",
+);
+assert.deepEqual(
+  mixedVerification.documents
+    .filter((row) =>
+      row.wikiClaims.some((claim) => claim.claimId === mixedClaim.claimId),
+    )
+    .map((row) => row.itemKey),
+  ["VERIFIEDDOC"],
+  "pending Evidence must not create a live document candidate",
 );
 
 const massPages = await store.commit({
@@ -356,9 +494,10 @@ const scopeBeforeRanking = await retriever.search({
   minScore: 0.5,
   limit: 1,
 });
-assert.deepEqual(scopeBeforeRanking.documents.map((row) => row.itemKey), [
-  "OTHERDOC",
-]);
+assert.deepEqual(
+  scopeBeforeRanking.documents.map((row) => row.itemKey),
+  ["OTHERDOC"],
+);
 assert.ok(
   scopeBeforeRanking.claims.every((claim) =>
     claim.evidence.some((row) => row.item_key === "OTHERDOC"),

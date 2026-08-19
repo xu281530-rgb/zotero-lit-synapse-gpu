@@ -5,9 +5,8 @@ import { register } from "node:module";
 
 register("./ts-ext-hooks.mjs", import.meta.url);
 
-const { deriveDataCompatibilityLocks } = await import(
-  "../src/modules/dataCompatibilityLocks.ts"
-);
+const { deriveDataCompatibilityLocks, deriveEmbeddingPreferenceLocks } =
+  await import("../src/modules/dataCompatibilityLocks.ts");
 
 const empty = {
   semanticVectors: 0,
@@ -53,5 +52,20 @@ assert.equal(
   false,
   "a keyword-only index does not depend on the embedding space",
 );
+
+assert.deepEqual(deriveEmbeddingPreferenceLocks(true), {
+  apiKey: false,
+  apiBase: false,
+  model: true,
+  dimensions: true,
+  detectedDimensions: true,
+});
+assert.deepEqual(deriveEmbeddingPreferenceLocks(false), {
+  apiKey: false,
+  apiBase: false,
+  model: false,
+  dimensions: false,
+  detectedDimensions: false,
+});
 
 console.log("data compatibility lock tests passed");

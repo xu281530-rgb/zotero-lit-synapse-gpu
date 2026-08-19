@@ -460,4 +460,56 @@ const FINGERPRINT = {
   );
 }
 
+// ---------------------------------------------------------------------------
+// 10. Wiki enters RRF as a document ranking. Claim volume inside each Wiki
+//     document cannot consume cursor positions or produce duplicate pages.
+// ---------------------------------------------------------------------------
+{
+  const wikiDocuments = Array.from({ length: 45 }, (_, index) => ({
+    itemKey: `WIKI${String(index).padStart(3, "0")}`,
+    libraryID: 1,
+    normalizedWikiScore: 1 - index / 100,
+    evidenceConfidence: 0.9,
+    readDepth: "paper_reviewed",
+    epistemicStatus: "supported",
+    wikiClaims: Array.from({ length: 30 }, (_, claimIndex) => ({
+      claimId: index * 100 + claimIndex,
+    })),
+  }));
+  const fusion = fuseHybridSearchResultsDetailed([], [], wikiDocuments, {
+    topK: 20,
+    rrfK: 60,
+    keywordWeight: 0,
+    semanticWeight: 0,
+    wikiWeight: 1,
+    wikiMinScore: 0,
+    wikiShadowMode: false,
+  });
+  assert.equal(fusion.ranked.length, 45);
+
+  const store = new HybridSearchPageStore();
+  const searchId = store.create(
+    { ...FINGERPRINT, wikiWeight: 1, wikiShadowMode: false },
+    fusion.ranked,
+    {},
+  );
+  let page = windowOf(fusion.ranked, 0, 20, searchId);
+  const seen = [];
+  const pageSizes = [];
+  for (;;) {
+    pageSizes.push(page.returned);
+    seen.push(...page.rows.map((row) => row.itemKey));
+    if (!page.hasMore) break;
+    page = store.read(page.nextCursor, {}, 20).window;
+  }
+
+  assert.deepEqual(pageSizes, [20, 20, 5]);
+  assert.equal(new Set(seen).size, 45);
+  assert.deepEqual(
+    seen,
+    wikiDocuments.map((row) => row.itemKey),
+    "Wiki pagination must preserve one stable cursor position per document",
+  );
+}
+
 console.log("Hybrid search pagination regression tests passed");
