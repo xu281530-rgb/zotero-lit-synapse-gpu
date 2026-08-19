@@ -20,6 +20,9 @@ const { WikiEvidenceRelinker } = await import(
 const { hashWikiText } = await import(
   "../src/modules/wiki/wikiCanonicalizer.ts"
 );
+const { getVectorStore } = await import(
+  "../src/modules/semantic/vectorStore.ts"
+);
 
 function adapt(sqlite) {
   let depth = 0;
@@ -539,9 +542,9 @@ assert.match(
   "derived Page Summary must track reset-induced Evidence state",
 );
 assert.equal(
-  claim?.epistemicStatus === "unsupported",
-  false,
-  "a search-index reset must not make a claim unsupported",
+  claim?.epistemicStatus,
+  "unsupported",
+  "a search-index reset must immediately recompute a pending-only Claim",
 );
 
 const exactRelinker = new WikiEvidenceRelinker(store, {
@@ -698,6 +701,49 @@ await store.markItemsPending("content-rebuild", 1, [
   "ORDERSTALE",
   "ORDERVALID",
 ]);
+const scopedRelinker = new WikiEvidenceRelinker(store, {
+  async sourceExists() {
+    return true;
+  },
+  async getChunks() {
+    return [
+      {
+        chunkId: 4,
+        text: "Evidence that remains valid.",
+        contentHash: "order-valid-v2",
+        chunkSignature: "paragraph-v3:1000:500",
+        resetGeneration: "reset-order-2",
+      },
+    ];
+  },
+});
+assert.deepEqual(
+  await scopedRelinker.relinkPending({
+    libraryID: 1,
+    itemKeys: ["ORDERVALID"],
+  }),
+  {
+    checked: 1,
+    relinked: 1,
+    pending: 0,
+    stale: 0,
+    sourceDeleted: 0,
+  },
+);
+const scopedClaim = await store.getClaim(
+  orderCommit.refs["claim:relink-order"],
+);
+assert.equal(
+  scopedClaim?.evidence.find((row) => row.itemKey === "ORDERSTALE")?.linkState,
+  "pending_relink",
+  "an item omitted from successful build targets must remain pending",
+);
+assert.equal(scopedClaim?.epistemicStatus, "supported");
+
+await store.markItemsPending("content-rebuild-2", 1, [
+  "ORDERSTALE",
+  "ORDERVALID",
+]);
 const orderRelinker = new WikiEvidenceRelinker(store, {
   async sourceExists() {
     return true;
@@ -766,6 +812,12 @@ const recoveryCommit = await store.commit({
   ],
 });
 await store.markItemsPending("recovery-reset-2", 1, ["RECOVERY1"]);
+assert.equal(
+  (await store.getClaim(recoveryCommit.refs["claim:status-recovery"]))
+    ?.epistemicStatus,
+  "unsupported",
+  "supported Claims must be recomputed when their Evidence becomes pending",
+);
 const noIndexRelinker = new WikiEvidenceRelinker(store, {
   async sourceExists() {
     return true;
@@ -782,6 +834,18 @@ assert.equal(
     ?.evidence[0].linkState,
   "pending_relink",
   "no indexed chunks means relinking is pending, not stale",
+);
+assert.equal(
+  (await store.getClaim(recoveryCommit.refs["claim:status-recovery"]))
+    ?.epistemicStatus,
+  "unsupported",
+  "a pending-only Claim stays recomputed when relinking has no body chunks",
+);
+assert.match(
+  (await store.getPage(recoveryCommit.refs["page:status-recovery"]))?.summary ??
+    "",
+  /1 pending_relink.*deepest none/u,
+  "the Page Summary must stay synchronized when relinking remains pending",
 );
 await store.markItemsPending("recovery-reset-metadata-only", 1, ["RECOVERY1"]);
 const metadataOnlyRelinker = new WikiEvidenceRelinker(store, {
@@ -995,6 +1059,194 @@ assert.equal(
   "corroborated",
   "historical Evidence from deleted sources must not downgrade a corroborated Claim",
 );
+
+const indexedChunks = new Map([
+  ["META1", [{ chunkId: 0, text: "Metadata abstract evidence one." }]],
+  ["META2", [{ chunkId: 0, text: "Metadata abstract evidence two." }]],
+  [
+    "UNKNOWN1",
+    [{ chunkId: 0, text: "Legacy index evidence with unknown provenance." }],
+  ],
+  [
+    "BODY1",
+    [{ chunkId: 0, text: "Confirmed body evidence from the results section." }],
+  ],
+]);
+const sourceKinds = new Map([
+  ["META1", "metadata-only"],
+  ["META2", "metadata-no-source"],
+  ["UNKNOWN1", "legacy-source-on-demand"],
+  ["BODY1", "body"],
+]);
+globalThis.Zotero.Items = {
+  async getByLibraryAndKeyAsync(libraryID, itemKey) {
+    if (libraryID !== 1 || !indexedChunks.has(itemKey)) return null;
+    return {
+      key: itemKey,
+      deleted: false,
+      isRegularItem: () => true,
+      getField: (field) => (field === "title" ? `Indexed ${itemKey}` : ""),
+    };
+  },
+};
+const vectorStore = getVectorStore();
+vectorStore.initialize = async () => {};
+vectorStore.getChunksForItem = async (itemKey) =>
+  indexedChunks.get(itemKey) ?? [];
+vectorStore.getIndexStatus = async (itemKey) => ({
+  contentHash: `content-${itemKey}`,
+  sourceKind: sourceKinds.get(itemKey),
+});
+vectorStore.getCommittedResetGeneration = async () => "wiki-depth-reset";
+const bodyAwareService = new WikiService(store);
+
+for (const itemKey of ["META1", "META2", "UNKNOWN1"]) {
+  await assert.rejects(
+    () =>
+      bodyAwareService.buildFromPaper({
+        libraryID: 1,
+        userRequested: true,
+        itemKey,
+      }),
+    /only metadata.*body.*index|body.*not confirmed/iu,
+    `${itemKey} must not pass wiki_build_from_paper as a full paper`,
+  );
+}
+const bodyBuild = await bodyAwareService.buildFromPaper({
+  libraryID: 1,
+  userRequested: true,
+  itemKey: "BODY1",
+  includeAllChunks: true,
+});
+assert.equal(bodyBuild.chunkCount, 1);
+
+const metadataDepthCommit = await bodyAwareService.commit({
+  libraryID: 1,
+  userInitiated: true,
+  actions: [
+    {
+      action: "ADD_CLAIM",
+      ref: "claim:metadata-depth",
+      pageId: commit.refs["page:cooling"],
+      claimText: "Two abstracts report a metadata-level observation.",
+      claimType: "consensus",
+      epistemicStatus: "corroborated",
+      coverageLevel: "cross_paper",
+      confidence: 0.7,
+      evidence: [
+        {
+          itemKey: "META1",
+          excerpt: "Metadata abstract evidence one.",
+          evidenceRole: "SUPPORTS",
+          readDepth: "paper_reviewed",
+        },
+        {
+          itemKey: "META2",
+          excerpt: "Metadata abstract evidence two.",
+          evidenceRole: "SUPPORTS",
+          readDepth: "section_read",
+        },
+      ],
+    },
+  ],
+});
+const metadataDepthClaim = await store.getClaim(
+  metadataDepthCommit.refs["claim:metadata-depth"],
+);
+assert.equal(metadataDepthClaim?.coverageLevel, "chunk_local");
+assert.deepEqual(
+  metadataDepthClaim?.evidence.map((row) => row.readDepth),
+  ["chunk_local", "chunk_local"],
+  "metadata and abstract Evidence must persist at chunk_local depth",
+);
+
+const bodyDepthCommit = await bodyAwareService.commit({
+  libraryID: 1,
+  userInitiated: true,
+  actions: [
+    {
+      action: "ADD_CLAIM",
+      ref: "claim:body-depth",
+      pageId: commit.refs["page:cooling"],
+      claimText: "The indexed results section supports a body-level review.",
+      claimType: "condition",
+      epistemicStatus: "supported",
+      coverageLevel: "paper_reviewed",
+      confidence: 0.8,
+      evidence: [
+        {
+          itemKey: "BODY1",
+          excerpt: "Confirmed body evidence from the results section.",
+          evidenceRole: "SUPPORTS",
+          readDepth: "paper_reviewed",
+        },
+      ],
+    },
+  ],
+});
+const bodyDepthClaim = await store.getClaim(
+  bodyDepthCommit.refs["claim:body-depth"],
+);
+assert.equal(bodyDepthClaim?.coverageLevel, "paper_reviewed");
+assert.equal(bodyDepthClaim?.evidence[0].readDepth, "paper_reviewed");
+
+await store.markItemsPending("body-commit-recovery", 1, ["BODY1"]);
+assert.equal(
+  (await store.getClaim(bodyDepthCommit.refs["claim:body-depth"]))
+    ?.epistemicStatus,
+  "unsupported",
+);
+await bodyAwareService.commit({
+  libraryID: 1,
+  userInitiated: true,
+  actions: [
+    {
+      action: "ATTACH_EVIDENCE",
+      claimId: bodyDepthCommit.refs["claim:body-depth"],
+      evidence: [
+        {
+          itemKey: "BODY1",
+          excerpt: "Confirmed body evidence from the results section.",
+          evidenceRole: "SUPPORTS",
+          readDepth: "paper_reviewed",
+        },
+      ],
+    },
+  ],
+});
+assert.equal(
+  (await store.getClaim(bodyDepthCommit.refs["claim:body-depth"]))
+    ?.epistemicStatus,
+  "supported",
+  "wiki_commit must recompute a Claim when pending Evidence becomes valid",
+);
+
+sourceKinds.set("BODY1", "metadata-only");
+await bodyAwareService.commit({
+  libraryID: 1,
+  userInitiated: true,
+  actions: [
+    {
+      action: "ATTACH_EVIDENCE",
+      claimId: bodyDepthCommit.refs["claim:body-depth"],
+      evidence: [
+        {
+          itemKey: "BODY1",
+          excerpt: "Confirmed body evidence from the results section.",
+          evidenceRole: "SUPPORTS",
+          readDepth: "paper_reviewed",
+        },
+      ],
+    },
+  ],
+});
+assert.equal(
+  (await store.getClaim(bodyDepthCommit.refs["claim:body-depth"]))?.evidence[0]
+    .readDepth,
+  "chunk_local",
+  "a metadata-only UPSERT must lower an older paper_reviewed Evidence value",
+);
+sourceKinds.set("BODY1", "body");
 
 const claimEmbeddingTextHash = await hashWikiText(
   "Cooling-rate refinement becomes weaker above the transition temperature.",

@@ -11,12 +11,14 @@ import { WikiEvidenceRelinker } from "./wikiEvidenceRelinker";
 import { renderWikiMarkdown } from "./wikiRenderer";
 import { WikiRetriever } from "./wikiRetriever";
 import { getWikiStore, type WikiStore } from "./wikiStore";
-import type {
-  WikiCommitAction,
-  WikiCommitInput,
-  WikiCommitResult,
-  WikiEvidenceInput,
-  WikiSourceChunk,
+import {
+  WIKI_READ_DEPTHS,
+  type WikiCoverageLevel,
+  type WikiCommitAction,
+  type WikiCommitInput,
+  type WikiCommitResult,
+  type WikiEvidenceInput,
+  type WikiSourceChunk,
 } from "./wikiTypes";
 
 declare let Zotero: any;
@@ -30,6 +32,35 @@ export interface WikiServiceSearchResult {
   oneHopCount: number;
   vectorSearchUsed: boolean;
   warnings: string[];
+}
+
+function clampCoverageToVerifiedEvidence(
+  coverageLevel: WikiCoverageLevel,
+  evidence: WikiEvidenceInput[],
+): WikiCoverageLevel {
+  const requestedDepth = WIKI_READ_DEPTHS.findIndex(
+    (depth) => depth === coverageLevel,
+  );
+  if (requestedDepth < 0 || !evidence.length) return coverageLevel;
+
+  let verifiedDepth = evidence.reduce((best, entry) => {
+    const depth = WIKI_READ_DEPTHS.indexOf(entry.readDepth);
+    return Math.max(best, depth);
+  }, 0);
+  if (coverageLevel === "cross_paper") {
+    const crossPaperSources = new Set(
+      evidence
+        .filter((entry) => entry.readDepth === "cross_paper")
+        .map((entry) => `${entry.libraryID}:${entry.itemKey}`),
+    );
+    if (crossPaperSources.size < 2) {
+      verifiedDepth = evidence.reduce((best, entry) => {
+        const depth = WIKI_READ_DEPTHS.indexOf(entry.readDepth);
+        return Math.max(best, Math.min(depth, 2));
+      }, 0);
+    }
+  }
+  return WIKI_READ_DEPTHS[Math.min(requestedDepth, verifiedDepth)];
 }
 
 export class WikiService {
@@ -202,6 +233,7 @@ export class WikiService {
       );
     }
     const status = await vectorStore.getIndexStatus(itemKey, libraryID);
+    const bodyState = bodyIndexStateFromSourceKind(status?.sourceKind);
     const resetGeneration = await vectorStore.getCommittedResetGeneration();
     return {
       libraryID,
@@ -213,7 +245,8 @@ export class WikiService {
       sourceResetGeneration: resetGeneration || "none",
       excerpt,
       evidenceRole: entry.evidenceRole,
-      readDepth: entry.readDepth,
+      readDepth: bodyState === "body" ? entry.readDepth : "chunk_local",
+      readDepthCeiling: bodyState === "body" ? undefined : "chunk_local",
     };
   }
 
@@ -236,7 +269,27 @@ export class WikiService {
       for (const entry of action.evidence ?? []) {
         evidence.push(await this.hydrateEvidence(entry, libraryID));
       }
-      hydrated.push({ ...action, evidence } as WikiCommitAction);
+      if (action.action === "ADD_CLAIM") {
+        hydrated.push({
+          ...action,
+          coverageLevel: clampCoverageToVerifiedEvidence(
+            action.coverageLevel,
+            evidence,
+          ),
+          evidence,
+        } as WikiCommitAction);
+      } else if (action.action === "UPDATE_CLAIM" && action.coverageLevel) {
+        hydrated.push({
+          ...action,
+          coverageLevel: clampCoverageToVerifiedEvidence(
+            action.coverageLevel,
+            evidence,
+          ),
+          evidence,
+        } as WikiCommitAction);
+      } else {
+        hydrated.push({ ...action, evidence } as WikiCommitAction);
+      }
     }
     return hydrated;
   }
@@ -345,10 +398,13 @@ export class WikiService {
     return { ...result, vectorSearchUsed: Boolean(queryVector), warnings };
   }
 
-  async reverify(libraryID?: number): Promise<any> {
+  async reverify(libraryID?: number, itemKeys?: string[]): Promise<any> {
     const vectorStore = getVectorStore();
     await vectorStore.initialize();
-    const deletedSources = await this.store.listDeletedEvidenceSources(libraryID);
+    const deletedSources = await this.store.listDeletedEvidenceSources(
+      libraryID,
+      itemKeys,
+    );
     for (const source of deletedSources) {
       const item = await Zotero.Items.getByLibraryAndKeyAsync(
         source.libraryID,
@@ -396,7 +452,7 @@ export class WikiService {
         return bodyIndexStateFromSourceKind(status?.sourceKind) === "body";
       },
     });
-    return relinker.relinkPending({ libraryID });
+    return relinker.relinkPending({ libraryID, itemKeys });
   }
 
   async exportMarkdown(libraryID: number): Promise<string> {
@@ -463,10 +519,16 @@ export class WikiService {
     }
     const vectorStore = getVectorStore();
     await vectorStore.initialize();
-    const chunks = await vectorStore.getChunksForItem(
-      item.key,
-      options.libraryID,
-    );
+    const [chunks, indexStatus] = await Promise.all([
+      vectorStore.getChunksForItem(item.key, options.libraryID),
+      vectorStore.getIndexStatus(item.key, options.libraryID),
+    ]);
+    const bodyState = bodyIndexStateFromSourceKind(indexStatus?.sourceKind);
+    if (bodyState !== "body") {
+      throw new Error(
+        `The selected paper has only metadata/abstract chunks or its body-text index is not confirmed (index state: ${bodyState}); successfully build its body search index first`,
+      );
+    }
     if (!chunks.length)
       throw new Error(
         "The selected paper has no indexed chunks; build its search index first",

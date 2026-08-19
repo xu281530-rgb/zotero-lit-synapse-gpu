@@ -55,9 +55,12 @@ export class WikiEvidenceRelinker {
   }
 
   async relinkPending(
-    options: { libraryID?: number } = {},
+    options: { libraryID?: number; itemKeys?: string[] } = {},
   ): Promise<WikiRelinkReport> {
-    const evidence = await this.store.listEvidenceForRelink(options.libraryID);
+    const evidence = await this.store.listEvidenceForRelink(
+      options.libraryID,
+      options.itemKeys,
+    );
     const report: WikiRelinkReport = {
       checked: evidence.length,
       relinked: 0,
@@ -65,7 +68,7 @@ export class WikiEvidenceRelinker {
       stale: 0,
       sourceDeleted: 0,
     };
-    const updatedEvidenceIds: number[] = [];
+    const affectedEvidenceIds = evidence.map((item) => item.evidenceId);
     try {
       for (const item of evidence) {
         if (!(await this.source.sourceExists(item.libraryID, item.itemKey))) {
@@ -78,10 +81,7 @@ export class WikiEvidenceRelinker {
           item.itemKey,
         );
         const indexReady = this.source.indexReadyForRelink
-          ? await this.source.indexReadyForRelink(
-              item.libraryID,
-              item.itemKey,
-            )
+          ? await this.source.indexReadyForRelink(item.libraryID, item.itemKey)
           : chunks.length > 0;
         if (chunks.length === 0 || !indexReady) {
           report.pending += 1;
@@ -105,7 +105,6 @@ export class WikiEvidenceRelinker {
             },
             { deferDerivedUpdates: true },
           );
-          updatedEvidenceIds.push(item.evidenceId);
           report.stale += 1;
           continue;
         }
@@ -121,11 +120,10 @@ export class WikiEvidenceRelinker {
           },
           { deferDerivedUpdates: true },
         );
-        updatedEvidenceIds.push(item.evidenceId);
         report.relinked += 1;
       }
     } finally {
-      await this.store.finalizeEvidenceRelink(updatedEvidenceIds);
+      await this.store.finalizeEvidenceRelink(affectedEvidenceIds);
     }
     return report;
   }

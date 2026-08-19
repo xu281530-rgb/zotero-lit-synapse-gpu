@@ -4,15 +4,16 @@ import {
   normalizeWikiText,
 } from "./wikiCanonicalizer";
 import { ensureWikiSchema } from "./wikiSchema";
-import type {
-  WikiClaimRecord,
-  WikiCommitAction,
-  WikiCommitInput,
-  WikiCommitResult,
-  WikiDatabase,
-  WikiEvidenceInput,
-  WikiEvidenceRecord,
-  WikiPageRecord,
+import {
+  WIKI_READ_DEPTHS,
+  type WikiClaimRecord,
+  type WikiCommitAction,
+  type WikiCommitInput,
+  type WikiCommitResult,
+  type WikiDatabase,
+  type WikiEvidenceInput,
+  type WikiEvidenceRecord,
+  type WikiPageRecord,
 } from "./wikiTypes";
 
 declare let Zotero: any;
@@ -270,6 +271,14 @@ export class WikiStore {
       const excerpt = normalizeWikiText(entry.excerpt);
       if (!excerpt) throw new Error("Evidence excerpt must not be blank");
       const excerptHash = await hashWikiText(excerpt);
+      const submittedDepth = WIKI_READ_DEPTHS.indexOf(entry.readDepth);
+      const ceilingDepth = entry.readDepthCeiling
+        ? WIKI_READ_DEPTHS.indexOf(entry.readDepthCeiling)
+        : -1;
+      const persistedReadDepth =
+        ceilingDepth >= 0 && submittedDepth > ceilingDepth
+          ? (entry.readDepthCeiling ?? entry.readDepth)
+          : entry.readDepth;
       const before = Number(
         await this.db.valueQueryAsync(
           `SELECT COUNT(*) FROM wiki_evidence
@@ -300,6 +309,7 @@ export class WikiStore {
            source_reset_generation = excluded.source_reset_generation,
            excerpt = excluded.excerpt,
            read_depth = CASE
+             WHEN ? IS NOT NULL THEN excluded.read_depth
              WHEN CASE excluded.read_depth
                WHEN 'chunk_local' THEN 0
                WHEN 'section_read' THEN 1
@@ -328,9 +338,10 @@ export class WikiStore {
           excerptHash,
           excerpt,
           forceContradiction ? "CONTRADICTS" : entry.evidenceRole,
-          entry.readDepth,
+          persistedReadDepth,
           Date.now(),
           Date.now(),
+          entry.readDepthCeiling ?? null,
         ],
       );
       const after = Number(
@@ -472,7 +483,9 @@ export class WikiStore {
         .sort(([left], [right]) => left.localeCompare(right))
         .map(([state, count]) => `${count} ${state}`)
         .join(", ");
-      parts.push(`Evidence: ${roles} (${states}; deepest ${deepest ?? "none"}).`);
+      parts.push(
+        `Evidence: ${roles} (${states}; deepest ${deepest ?? "none"}).`,
+      );
     }
     if (relationRows.length) {
       const relations = relationRows
@@ -509,6 +522,24 @@ export class WikiStore {
     }
   }
 
+  private async refreshDerivedForEvidence(
+    whereSql: string,
+    params: unknown[],
+  ): Promise<void> {
+    const rows = await this.db.queryAsync(
+      `SELECT DISTINCT e.claim_id
+       FROM wiki_evidence e
+       WHERE ${whereSql}`,
+      params,
+    );
+    for (const row of rows) {
+      await this.recomputeClaimStatus(
+        Number(rowValue(row, "claim_id", "claimId")),
+      );
+    }
+    await this.refreshPagesForEvidence(whereSql, params);
+  }
+
   async commit(input: WikiCommitInput): Promise<WikiCommitResult> {
     await this.initialize();
     if (!Number.isInteger(input.libraryID) || input.libraryID <= 0) {
@@ -536,6 +567,7 @@ export class WikiStore {
       affectedClaimIds: [],
     };
     const affectedPageIds = new Set<number>();
+    const evidenceChangedClaimIds = new Set<number>();
 
     await this.db.executeTransaction(async () => {
       for (const action of input.actions) {
@@ -690,6 +722,7 @@ export class WikiStore {
             input.libraryID,
             action.evidence,
           );
+          if (action.evidence.length) evidenceChangedClaimIds.add(claimId);
           if (!result.affectedClaimIds.includes(claimId)) {
             result.affectedClaimIds.push(claimId);
           }
@@ -708,6 +741,7 @@ export class WikiStore {
             action.evidence,
             action.action === "MARK_CONFLICT",
           );
+          if (action.evidence.length) evidenceChangedClaimIds.add(claimId);
           if (action.action === "MARK_CONFLICT") {
             await this.db.queryAsync(
               "UPDATE wiki_claims SET epistemic_status = 'disputed', updated_at = ?, version = version + 1 WHERE claim_id = ?",
@@ -838,6 +872,7 @@ export class WikiStore {
               input.libraryID,
               action.evidence,
             );
+            evidenceChangedClaimIds.add(claimId);
           }
           continue;
         }
@@ -880,6 +915,9 @@ export class WikiStore {
         }
       }
 
+      for (const claimId of evidenceChangedClaimIds) {
+        await this.recomputeClaimStatus(claimId);
+      }
       for (const pageId of affectedPageIds) {
         await this.refreshPageSummary(pageId);
       }
@@ -1653,7 +1691,7 @@ export class WikiStore {
        WHERE link_state != 'source_deleted'${where}`,
       params,
     );
-    await this.refreshPagesForEvidence(
+    await this.refreshDerivedForEvidence(
       libraryID === undefined ? "1 = 1" : "e.library_id = ?",
       libraryID === undefined ? [] : [libraryID],
     );
@@ -1686,36 +1724,68 @@ export class WikiStore {
       `,
       [resetGeneration, ...params],
     );
-    await this.refreshPagesForEvidence(
+    await this.refreshDerivedForEvidence(
       `e.library_id = ? AND e.item_key IN (${placeholders})`,
       params,
     );
     return count;
   }
 
+  private buildEvidenceScope(
+    linkStateWhere: string,
+    libraryID?: number,
+    itemKeys?: string[],
+  ): { where: string; params: unknown[] } | null {
+    const keys = itemKeys
+      ? Array.from(new Set(itemKeys.map((key) => key.trim()).filter(Boolean)))
+      : undefined;
+    if (keys && !keys.length) return null;
+    const params: unknown[] = [];
+    let where = ` WHERE ${linkStateWhere}`;
+    if (libraryID !== undefined) {
+      where += " AND library_id = ?";
+      params.push(libraryID);
+    }
+    if (keys) {
+      where += ` AND item_key IN (${keys.map(() => "?").join(",")})`;
+      params.push(...keys);
+    }
+    return { where, params };
+  }
+
   async listEvidenceForRelink(
     libraryID?: number,
+    itemKeys?: string[],
   ): Promise<WikiEvidenceRecord[]> {
     await this.initialize();
+    const scope = this.buildEvidenceScope(
+      "link_state IN ('pending_relink','stale')",
+      libraryID,
+      itemKeys,
+    );
+    if (!scope) return [];
     const rows = await this.db.queryAsync(
-      `SELECT * FROM wiki_evidence WHERE link_state IN ('pending_relink','stale')${
-        libraryID === undefined ? "" : " AND library_id = ?"
-      } ORDER BY evidence_id`,
-      libraryID === undefined ? [] : [libraryID],
+      `SELECT * FROM wiki_evidence${scope.where} ORDER BY evidence_id`,
+      scope.params,
     );
     return rows.map((row) => this.mapEvidence(row));
   }
 
   async listDeletedEvidenceSources(
     libraryID?: number,
+    itemKeys?: string[],
   ): Promise<Array<{ libraryID: number; itemKey: string }>> {
     await this.initialize();
+    const scope = this.buildEvidenceScope(
+      "link_state = 'source_deleted'",
+      libraryID,
+      itemKeys,
+    );
+    if (!scope) return [];
     const rows = await this.db.queryAsync(
       `SELECT DISTINCT library_id, item_key FROM wiki_evidence
-       WHERE link_state = 'source_deleted'${
-         libraryID === undefined ? "" : " AND library_id = ?"
-       } ORDER BY library_id, item_key`,
-      libraryID === undefined ? [] : [libraryID],
+       ${scope.where} ORDER BY library_id, item_key`,
+      scope.params,
     );
     return rows.map((row) => ({
       libraryID: Number(rowValue(row, "library_id", "libraryID")),
@@ -1753,8 +1823,7 @@ export class WikiStore {
       ],
     );
     if (!options.deferDerivedUpdates) {
-      await this.recomputeClaimStatusForEvidence(evidenceId);
-      await this.refreshPagesForEvidence("e.evidence_id = ?", [evidenceId]);
+      await this.refreshDerivedForEvidence("e.evidence_id = ?", [evidenceId]);
     }
   }
 
@@ -1765,33 +1834,10 @@ export class WikiStore {
     );
     if (!ids.length) return;
     const placeholders = ids.map(() => "?").join(",");
-    const rows = await this.db.queryAsync(
-      `SELECT DISTINCT claim_id FROM wiki_evidence
-       WHERE evidence_id IN (${placeholders})`,
-      ids,
-    );
-    for (const row of rows) {
-      await this.recomputeClaimStatus(
-        Number(rowValue(row, "claim_id", "claimId")),
-      );
-    }
-    await this.refreshPagesForEvidence(
+    await this.refreshDerivedForEvidence(
       `e.evidence_id IN (${placeholders})`,
       ids,
     );
-  }
-
-  private async recomputeClaimStatusForEvidence(
-    evidenceId: number,
-  ): Promise<void> {
-    const claimId = Number(
-      await this.db.valueQueryAsync(
-        "SELECT claim_id FROM wiki_evidence WHERE evidence_id = ?",
-        [evidenceId],
-      ),
-    );
-    if (!claimId) return;
-    await this.recomputeClaimStatus(claimId);
   }
 
   private async recomputeClaimStatus(claimId: number): Promise<void> {
@@ -1879,7 +1925,7 @@ export class WikiStore {
         { deferDerivedUpdates: true },
       );
     }
-    await this.refreshPagesForEvidence(
+    await this.refreshDerivedForEvidence(
       "e.library_id = ? AND e.item_key = ?",
       [libraryID, itemKey],
     );

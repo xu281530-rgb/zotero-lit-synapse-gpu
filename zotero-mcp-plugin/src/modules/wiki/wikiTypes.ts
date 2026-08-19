@@ -94,6 +94,8 @@ export interface WikiEvidenceInput {
   excerpt: string;
   evidenceRole: WikiEvidenceRole;
   readDepth: WikiReadDepth;
+  /** Server-derived ceiling used when the indexed source is not confirmed body text. */
+  readDepthCeiling?: WikiReadDepth;
 }
 
 export type WikiCommitAction =

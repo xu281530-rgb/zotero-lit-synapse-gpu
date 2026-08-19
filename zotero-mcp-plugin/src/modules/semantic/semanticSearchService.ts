@@ -111,9 +111,12 @@ async function markWikiItemsPending(
   }
 }
 
-function scheduleWikiReverify(libraryID: number): void {
+function scheduleWikiReverify(libraryID: number, itemKeys: string[]): void {
+  if (!itemKeys.length) return;
   void import('../wiki/wikiService')
-    .then(({ getWikiService }) => getWikiService().reverify(libraryID))
+    .then(({ getWikiService }) =>
+      getWikiService().reverify(libraryID, itemKeys),
+    )
     .catch((error) =>
       ztoolkit.log(
         `[SemanticSearch] Wiki Evidence relink failed: ${error}`,
@@ -408,6 +411,7 @@ export class SemanticSearchService {
   private _activeBuildID: string | null = null;
   private _activeFullLibraryRebuild = false;
   private _databaseResetActive = false;
+  private _wikiBodyReadyItemKeys = new Set<string>();
 
   // Error handling
   private _onErrorCallback?: (error: EmbeddingAPIError) => void;
@@ -1017,6 +1021,27 @@ export class SemanticSearchService {
 
   // ============ Indexing Methods ============
 
+  private async scheduleReadyWikiReverify(
+    buildID: string,
+    libraryID: number,
+  ): Promise<void> {
+    try {
+      const targets = await this.vectorStore.getBuildTargets(buildID);
+      const itemKeys = new Set(this._wikiBodyReadyItemKeys);
+      for (const target of targets) {
+        if (target.state === 'succeeded' && target.libraryID === libraryID) {
+          itemKeys.add(target.itemKey);
+        }
+      }
+      scheduleWikiReverify(libraryID, Array.from(itemKeys));
+    } catch (error) {
+      ztoolkit.log(
+        `[SemanticSearch] Could not select successful Wiki reverify targets: ${error}`,
+        'warn',
+      );
+    }
+  }
+
   /**
    * Build or update the search index
    */
@@ -1078,6 +1103,7 @@ export class SemanticSearchService {
       // enough to reach extractItemContent without threading force through
       // every call in between.
       this._forceRun = force;
+      this._wikiBodyReadyItemKeys = new Set();
       getMinerUService().resetRunStats();
 
       // "Skip the rest of them too" is scoped to one run. Resuming a build
@@ -1325,9 +1351,7 @@ export class SemanticSearchService {
         } else {
           this.saveIndexProgress();
         }
-        if (this.indexProgress.status === 'completed') {
-          scheduleWikiReverify(libraryID);
-        }
+        await this.scheduleReadyWikiReverify(buildID, libraryID);
         return this.indexProgress;
       }
 
@@ -1553,9 +1577,7 @@ export class SemanticSearchService {
       onProgress?.(this.indexProgress);
 
       ztoolkit.log(`[SemanticSearch] Indexing finished: ${this.indexProgress.processed} items, status=${this.indexProgress.status}`);
-      if (this.indexProgress.status === 'completed') {
-        scheduleWikiReverify(libraryID);
-      }
+      await this.scheduleReadyWikiReverify(buildID, libraryID);
       return this.indexProgress;
 
     } catch (error) {
@@ -1574,6 +1596,10 @@ export class SemanticSearchService {
           );
         }
         this.saveIndexProgress();
+        await this.scheduleReadyWikiReverify(
+          this._activeBuildID,
+          libraryID,
+        );
       }
       ztoolkit.log(`[SemanticSearch] Indexing failed: ${error}`, 'error');
       throw error;
@@ -1588,6 +1614,7 @@ export class SemanticSearchService {
       // the saving it was designed to produce. Runs even after a failed or
       // aborted build: the tombstones exist either way.
       await this.vectorStore.compactKeywordIndex();
+      this._wikiBodyReadyItemKeys.clear();
     }
   }
 
@@ -1833,6 +1860,9 @@ export class SemanticSearchService {
         if (unchangedChunks.length === 0) {
           throw new Error(`No chunks generated for ${item.key}`);
         }
+        if (bodyState === 'body') {
+          this._wikiBodyReadyItemKeys.add(item.key);
+        }
         await this.writeKeywordIndexForItem(item, unchangedChunks);
       }
       this.indexProgress.unchanged = (this.indexProgress.unchanged || 0) + 1;
@@ -1893,6 +1923,9 @@ export class SemanticSearchService {
       attachmentModified,
       bodyRetrySignature,
     });
+    if (bodyState === 'body') {
+      this._wikiBodyReadyItemKeys.add(item.key);
+    }
 
     // After the vectors, and outside their transaction: a keyword failure must
     // leave the successfully embedded vectors in place.

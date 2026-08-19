@@ -7,6 +7,8 @@ register("./index-failure-hooks.mjs", import.meta.url);
 
 const preferences = new Map();
 const items = new Map();
+const wikiReverifyCalls = [];
+globalThis.__wikiReverifyCalls = wikiReverifyCalls;
 globalThis.Zotero = {
   Libraries: { userLibraryID: 1 },
   Prefs: {
@@ -48,15 +50,21 @@ function buildStore() {
     async createBuildSession(session, identities) {
       sessions.set(session.buildID, { ...session, resetCompleted: false });
       for (const identity of identities) {
-        targets.set(`${session.buildID}:${identity.libraryID}:${identity.itemKey}`, {
-          ...identity,
-          state: "pending",
-        });
+        targets.set(
+          `${session.buildID}:${identity.libraryID}:${identity.itemKey}`,
+          {
+            ...identity,
+            state: "pending",
+          },
+        );
       }
     },
     async replaceItemIndex(options) {
       semanticWrites.push(options);
-      semanticHashes.set(`${options.libraryID}:${options.itemKey}`, options.contentHash);
+      semanticHashes.set(
+        `${options.libraryID}:${options.itemKey}`,
+        options.contentHash,
+      );
     },
     async writeKeywordIndex(options) {
       keywordWrites.push(options);
@@ -103,7 +111,12 @@ function buildStore() {
     },
     async getBuildTargetSummary(buildID) {
       const rows = await this.getBuildTargets(buildID);
-      const summary = { total: rows.length, pending: 0, succeeded: 0, failed: 0 };
+      const summary = {
+        total: rows.length,
+        pending: 0,
+        succeeded: 0,
+        failed: 0,
+      };
       for (const row of rows) summary[row.state] += 1;
       return summary;
     },
@@ -179,6 +192,13 @@ function testItem(itemKey = "ITEM", libraryID = 2) {
   };
 }
 
+async function waitForScheduledWikiReverify() {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (wikiReverifyCalls.length > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+}
+
 // A build target succeeds only after both writes. A keyword failure is durable
 // and the public retry entry point can recover it.
 {
@@ -194,21 +214,133 @@ function testItem(itemKey = "ITEM", libraryID = 2) {
     frozenChunkSettings: { target: 1000, tolerance: 500, signature: "test" },
   });
 
-  assert.equal(store.semanticWrites.length, 1, "semantic write completed first");
+  assert.equal(
+    store.semanticWrites.length,
+    1,
+    "semantic write completed first",
+  );
   assert.equal(store.keywordWrites.length, 1, "keyword write was attempted");
   assert.equal(failed.status, "failed");
   assert.equal(store.failures.has("2:ITEM"), true);
   const [buildID] = store.sessions.keys();
   assert.equal(store.targets.get(`${buildID}:2:ITEM`).state, "failed");
+  await waitForScheduledWikiReverify();
+  assert.deepEqual(
+    wikiReverifyCalls,
+    [{ libraryID: 2, itemKeys: ["ITEM"] }],
+    "a committed body index must reverify even when its keyword write fails",
+  );
+  wikiReverifyCalls.length = 0;
 
   store.allowKeywordWrites();
   const retried = await service.retryFailedItems();
+  await waitForScheduledWikiReverify();
   assert.equal(retried.status, "completed");
   assert.equal(store.failures.size, 0);
   assert.equal(store.targets.get(`${buildID}:2:ITEM`).state, "succeeded");
-  assert.equal(store.keywordWrites.length, 2, "retry rewrites the missing keyword index");
-  assert.equal(store.semanticWrites.length, 1, "retry keeps the committed semantic index");
-  assert.equal(service.embeddingBatches.length, 1, "retry spends no extra embedding quota");
+  assert.equal(
+    store.keywordWrites.length,
+    2,
+    "retry rewrites the missing keyword index",
+  );
+  assert.equal(
+    store.semanticWrites.length,
+    1,
+    "retry keeps the committed semantic index",
+  );
+  assert.equal(
+    service.embeddingBatches.length,
+    1,
+    "retry spends no extra embedding quota",
+  );
+  assert.deepEqual(wikiReverifyCalls, [{ libraryID: 2, itemKeys: ["ITEM"] }]);
+  wikiReverifyCalls.length = 0;
+}
+
+// A mixed-result build reverifies every successfully committed target without
+// letting one failed item hold the other 19 in pending_relink.
+{
+  wikiReverifyCalls.length = 0;
+  const store = buildStore();
+  store.allowKeywordWrites();
+  const service = buildService(store);
+  const itemKeys = Array.from(
+    { length: 20 },
+    (_, index) => `BATCH${String(index + 1).padStart(2, "0")}`,
+  );
+  for (const itemKey of itemKeys) items.set(`2:${itemKey}`, testItem(itemKey));
+  service.indexItemWithProcessor = async (item) => {
+    if (item.key === "BATCH20") throw new Error("simulated parse failure");
+    return { status: "succeeded" };
+  };
+
+  const result = await service.buildIndex({
+    itemKeys,
+    libraryID: 2,
+    force: true,
+    frozenChunkSettings: { target: 1000, tolerance: 500, signature: "test" },
+  });
+  await waitForScheduledWikiReverify();
+
+  assert.equal(result.status, "failed");
+  const [buildID] = store.sessions.keys();
+  const targetRows = await store.getBuildTargets(buildID);
+  assert.equal(
+    targetRows.filter((target) => target.state === "succeeded").length,
+    19,
+  );
+  assert.deepEqual(wikiReverifyCalls, [
+    { libraryID: 2, itemKeys: itemKeys.slice(0, 19) },
+  ]);
+}
+
+// Every terminal status schedules only the targets that actually succeeded.
+{
+  wikiReverifyCalls.length = 0;
+  const store = buildStore();
+  const service = buildService(store);
+  const itemKeys = ["INCOMPLETE1", "INCOMPLETE2"];
+  for (const itemKey of itemKeys) items.set(`2:${itemKey}`, testItem(itemKey));
+  service.indexItemWithProcessor = async () => {
+    service.indexProgress.chunkOversizeSkipped = 1;
+    return { status: "succeeded" };
+  };
+
+  const result = await service.buildIndex({
+    itemKeys,
+    libraryID: 2,
+    force: true,
+    frozenChunkSettings: { target: 1000, tolerance: 500, signature: "test" },
+  });
+  await waitForScheduledWikiReverify();
+
+  assert.equal(result.status, "incomplete");
+  assert.deepEqual(wikiReverifyCalls, [{ libraryID: 2, itemKeys }]);
+}
+
+{
+  wikiReverifyCalls.length = 0;
+  const store = buildStore();
+  const service = buildService(store);
+  const itemKeys = Array.from({ length: 6 }, (_, index) => `ABORT${index + 1}`);
+  for (const itemKey of itemKeys) items.set(`2:${itemKey}`, testItem(itemKey));
+  service.indexItemWithProcessor = async (item) => {
+    if (item.key === "ABORT1") service._aborted = true;
+    return { status: "succeeded" };
+  };
+
+  const result = await service.buildIndex({
+    itemKeys,
+    libraryID: 2,
+    force: true,
+    frozenChunkSettings: { target: 1000, tolerance: 500, signature: "test" },
+  });
+  await waitForScheduledWikiReverify();
+
+  assert.equal(result.status, "aborted");
+  assert.deepEqual(wikiReverifyCalls, [
+    { libraryID: 2, itemKeys: itemKeys.slice(0, 5) },
+  ]);
 }
 
 function deletionStore(events, removeItem) {

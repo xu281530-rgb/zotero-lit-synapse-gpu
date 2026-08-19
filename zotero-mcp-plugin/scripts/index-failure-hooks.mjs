@@ -3,6 +3,12 @@
 const STUBBED = new Set(["../pdfProcessor", "../mineru"]);
 
 export async function resolve(specifier, context, nextResolve) {
+  if (specifier === "../wiki/wikiService") {
+    return nextResolve("./stub-wiki-reverify.mjs", {
+      ...context,
+      parentURL: import.meta.url,
+    });
+  }
   if (STUBBED.has(specifier)) {
     return nextResolve("./fixtures/stub-build-indexing-deps.mjs", {
       ...context,
