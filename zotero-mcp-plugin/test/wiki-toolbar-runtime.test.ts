@@ -34,6 +34,14 @@ describe("Wiki toolbar runtime", function () {
     ) as XUL.ToolbarButton;
     assert.exists(button);
 
+    assert.throws(() => {
+      win.Zotero_Tabs.add({
+        type: "zotero-mcp-wiki",
+        title: "损坏的旧 Wiki 标签",
+        select: false,
+      });
+    }, /tab\.data is undefined|property ["']icon["']/u);
+
     button.dispatchEvent(
       new win.MouseEvent("click", {
         bubbles: true,
@@ -52,6 +60,11 @@ describe("Wiki toolbar runtime", function () {
     assert.equal(
       win.document.getElementById("zotero-mcp-wiki-panel")?.parentElement?.id,
       openedTabID,
+    );
+    assert.isFalse(
+      (win.Zotero_Tabs as any)._tabs.some(
+        (tab: any) => tab.type === "zotero-mcp-wiki" && tab.data === undefined,
+      ),
     );
   });
 });

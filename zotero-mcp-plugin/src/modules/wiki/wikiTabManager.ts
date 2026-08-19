@@ -15,7 +15,29 @@ interface WikiTabOptions {
   title: string;
 }
 
+interface ZoteroTabRecord {
+  id: string;
+  type: string;
+  data?: unknown;
+}
+
 const wikiTabs = new WeakMap<_ZoteroTypes.MainWindow, WikiTabState>();
+
+function closeOrphanedWikiTabs(
+  win: _ZoteroTypes.MainWindow,
+  type: string,
+): void {
+  const tabManager = win.Zotero_Tabs as typeof win.Zotero_Tabs & {
+    _tabs?: ZoteroTabRecord[];
+  };
+  const orphaned = tabManager._tabs?.filter((tab) => tab.type === type) ?? [];
+  if (!orphaned.length) return;
+
+  for (const tab of orphaned) {
+    if (!tab.data || typeof tab.data !== "object") tab.data = {};
+  }
+  tabManager.close(orphaned.map((tab) => tab.id));
+}
 
 export function openWikiTab(
   win: _ZoteroTypes.MainWindow,
@@ -23,6 +45,7 @@ export function openWikiTab(
 ): WikiTabRender {
   let tab = wikiTabs.get(win);
   if (!tab) {
+    closeOrphanedWikiTabs(win, options.type);
     let tabID = "";
     const created = win.Zotero_Tabs.add({
       type: options.type,

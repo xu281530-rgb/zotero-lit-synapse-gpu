@@ -146,7 +146,7 @@ export function registerWikiPanel(win: _ZoteroTypes.MainWindow): void {
   const style = doc.createElement("link");
   style.id = STYLE_ID;
   style.rel = "stylesheet";
-  style.href = `chrome://${config.addonRef}/content/wikiPanel.css`;
+  style.href = `chrome://${config.addonRef}/content/wikiPanel.css?version=${config.addonVersion}`;
   doc.documentElement!.appendChild(style);
 
   const toolbar =

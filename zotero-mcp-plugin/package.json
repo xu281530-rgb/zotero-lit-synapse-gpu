@@ -1,7 +1,7 @@
 {
   "name": "zotero-mcp-plugin",
   "type": "module",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Zotero MCP Plugin for Zotero 9.0.x with question-driven LLM Wiki memory, independent evidence-linked knowledge storage, hybrid keyword/semantic/Wiki retrieval, cursor pagination, and MCP 2025-06-18 Streamable HTTP",
   "config": {
     "addonName": "Zotero MCP Plugin",
@@ -9,7 +9,7 @@
     "addonRef": "zotero-mcp-plugin",
     "addonInstance": "ZoteroMCP",
     "prefsPrefix": "extensions.zotero.zotero-mcp-plugin",
-    "addonVersion": "2.0.0"
+    "addonVersion": "2.0.1"
   },
   "repository": {
     "type": "git",
@@ -66,6 +66,7 @@
     "test:wiki-store": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-store.js",
     "test:wiki-retrieval": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-retrieval.js",
     "test:wiki-ui": "node scripts/test-wiki-ui.js",
+    "test:zotero9-runtime-compat": "node scripts/test-zotero9-runtime-compat.js",
     "test:data-compatibility-locks": "node --experimental-strip-types scripts/test-data-compatibility-locks.js",
     "test:fulltext-on-demand": "node --experimental-strip-types scripts/test-fulltext-on-demand.js",
     "test:index-recovery": "node --experimental-strip-types scripts/test-index-recovery.js",
@@ -104,7 +105,7 @@
     "update-deps": "npm update --save"
   },
   "dependencies": {
-    "zotero-plugin-toolkit": "^5.1.2"
+    "zotero-plugin-toolkit": "^5.2.0"
   },
   "devDependencies": {
     "@types/chai": "^5.2.2",

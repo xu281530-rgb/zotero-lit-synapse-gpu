@@ -46,6 +46,11 @@ assert.match(hooks, /registerWikiPanel/u);
 assert.match(hooks, /unregisterWikiPanel/u);
 assert.match(css, /#zotero-mcp-wiki-panel/u);
 assert.match(css, /@media\s*\(prefers-color-scheme:\s*dark\)/u);
+assert.match(
+  panel,
+  /wikiPanel\.css\?version=\$\{config\.addonVersion\}/u,
+  "Wiki stylesheet URL must change with the add-on version",
+);
 
 for (const tabBehavior of [
   /Zotero_Tabs\.add/u,
