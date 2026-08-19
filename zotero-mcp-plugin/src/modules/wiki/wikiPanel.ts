@@ -1,6 +1,14 @@
 import { config } from "../../../package.json";
 import { getVectorStore } from "../semantic/vectorStore";
 import { getWikiService } from "./wikiService";
+import type {
+  WikiClaimType,
+  WikiCoverageLevel,
+  WikiEpistemicStatus,
+  WikiEvidenceRole,
+  WikiLinkState,
+  WikiReadDepth,
+} from "./wikiTypes";
 
 declare let Zotero: any;
 declare let IOUtils: any;
@@ -8,6 +16,75 @@ declare let IOUtils: any;
 const BUTTON_ID = "zotero-mcp-wiki-button";
 const PANEL_ID = "zotero-mcp-wiki-panel";
 const STYLE_ID = "zotero-mcp-wiki-style";
+const TAB_TYPE = "zotero-mcp-wiki";
+const TAB_TITLE = "LLM 知识库";
+
+interface WikiTabState {
+  id: string;
+  container: XUL.Box;
+}
+
+const wikiTabs = new WeakMap<_ZoteroTypes.MainWindow, WikiTabState>();
+
+const CLAIM_TYPE_LABELS: Record<WikiClaimType, string> = {
+  definition: "定义",
+  mechanism: "机制",
+  model: "模型",
+  condition: "条件",
+  comparison: "比较",
+  limitation: "局限",
+  consensus: "共识",
+  conflict: "冲突",
+};
+
+const EPISTEMIC_STATUS_LABELS: Record<WikiEpistemicStatus, string> = {
+  provisional: "暂定",
+  supported: "已支持",
+  corroborated: "已交叉印证",
+  disputed: "有争议",
+  unsupported: "未支持",
+};
+
+const READ_DEPTH_LABELS: Record<WikiReadDepth, string> = {
+  chunk_local: "局部片段",
+  section_read: "已读章节",
+  paper_reviewed: "已审阅全文",
+  cross_paper: "跨论文",
+};
+
+const COVERAGE_LEVEL_LABELS: Record<WikiCoverageLevel, string> = {
+  ...READ_DEPTH_LABELS,
+  partial: "部分",
+  incomplete: "不完整",
+};
+
+const EVIDENCE_ROLE_LABELS: Record<WikiEvidenceRole, string> = {
+  SUPPORTS: "支持",
+  CONTRADICTS: "反驳",
+  QUALIFIES: "限定",
+  EXAMPLE: "示例",
+};
+
+const LINK_STATE_LABELS: Record<WikiLinkState, string> = {
+  valid: "有效",
+  pending_relink: "等待重连",
+  stale: "已失效",
+  source_deleted: "源文献已删除",
+};
+
+function labelFor<T extends string>(
+  labels: Readonly<Record<T, string>>,
+  value: unknown,
+): string {
+  return labels[value as T] ?? String(value);
+}
+
+function evidenceRelationLabel(relation: string): string {
+  return relation
+    .split("<->")
+    .map((role) => labelFor(EVIDENCE_ROLE_LABELS, role))
+    .join(" ↔ ");
+}
 
 function element<K extends keyof HTMLElementTagNameMap>(
   doc: Document,
@@ -34,8 +111,7 @@ async function jumpToItem(
   itemKey: string,
 ): Promise<void> {
   const item = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, itemKey);
-  if (!item)
-    throw new Error(`Zotero item ${libraryID}:${itemKey} no longer exists`);
+  if (!item) throw new Error(`Zotero 条目 ${libraryID}:${itemKey} 已不存在`);
   await win.ZoteroPane.selectItem(item.id);
 }
 
@@ -43,13 +119,13 @@ async function exportMarkdown(win: any, libraryID: number): Promise<void> {
   const markdown = await getWikiService().exportMarkdown(libraryID);
   try {
     const picker = new Zotero.FilePicker();
-    picker.init(win, "Export Zotero LLM Wiki", picker.modeSave);
+    picker.init(win, "导出 Zotero LLM 知识库", picker.modeSave);
     picker.defaultString = "zotero-llm-wiki.md";
-    picker.appendFilter("Markdown", "*.md");
+    picker.appendFilter("Markdown 文档", "*.md");
     if ((await picker.show()) === picker.returnOK) {
       const target =
         typeof picker.file === "string" ? picker.file : picker.file?.path;
-      if (!target) throw new Error("The file picker returned no writable path");
+      if (!target) throw new Error("文件选择器未返回可写路径");
       await IOUtils.writeUTF8(target, markdown);
       return;
     }
@@ -58,13 +134,11 @@ async function exportMarkdown(win: any, libraryID: number): Promise<void> {
     // remains useful by opening the derived Markdown for manual saving.
   }
   Zotero.Utilities.Internal.copyTextToClipboard(markdown);
-  win.alert(
-    "Wiki Markdown was copied to the clipboard because the save dialog was unavailable.",
-  );
+  win.alert("保存对话框不可用，Wiki Markdown 已复制到剪贴板。");
 }
 
 function claimStatus(claim: any): string {
-  return `${claim.epistemicStatus} / ${claim.coverageLevel} / ${Math.round(claim.confidence * 100)}%`;
+  return `${labelFor(EPISTEMIC_STATUS_LABELS, claim.epistemicStatus)} / ${labelFor(COVERAGE_LEVEL_LABELS, claim.coverageLevel)} / 置信度 ${Math.round(claim.confidence * 100)}%`;
 }
 
 export function registerWikiPanel(win: _ZoteroTypes.MainWindow): void {
@@ -88,12 +162,18 @@ export function registerWikiPanel(win: _ZoteroTypes.MainWindow): void {
     "image",
     `chrome://${config.addonRef}/content/icons/favicon@0.5x.png`,
   );
-  entry.setAttribute("tooltiptext", "LLM Wiki");
+  entry.setAttribute("tooltiptext", "打开 LLM 知识库");
   entry.addEventListener("command", () => void openWikiPanel(win));
   toolbar.insertBefore(entry, toolbar.firstChild);
 }
 
 export function unregisterWikiPanel(win: Window): void {
+  const mainWindow = win as _ZoteroTypes.MainWindow;
+  const tab = wikiTabs.get(mainWindow);
+  if (tab) {
+    wikiTabs.delete(mainWindow);
+    mainWindow.Zotero_Tabs.close(tab.id);
+  }
   const doc = win.document;
   doc.getElementById(BUTTON_ID)?.remove();
   doc.getElementById(PANEL_ID)?.remove();
@@ -103,8 +183,34 @@ export function unregisterWikiPanel(win: Window): void {
 export async function openWikiPanel(
   win: _ZoteroTypes.MainWindow,
 ): Promise<void> {
+  let tab = wikiTabs.get(win);
+  if (!tab || !tab.container.isConnected) {
+    let tabID = "";
+    const created = win.Zotero_Tabs.add({
+      type: TAB_TYPE,
+      title: TAB_TITLE,
+      select: true,
+      onClose: () => {
+        if (wikiTabs.get(win)?.id === tabID) wikiTabs.delete(win);
+      },
+    });
+    tabID = created.id;
+    created.container.classList.add("zotero-mcp-wiki-tab-container");
+    created.container.setAttribute("flex", "1");
+    tab = created;
+    wikiTabs.set(win, tab);
+  } else {
+    win.Zotero_Tabs.select(tab.id);
+  }
+  await renderWikiPanel(win, tab.container);
+}
+
+async function renderWikiPanel(
+  win: _ZoteroTypes.MainWindow,
+  container: XUL.Box,
+): Promise<void> {
   const doc = win.document;
-  doc.getElementById(PANEL_ID)?.remove();
+  container.querySelector(`#${PANEL_ID}`)?.remove();
   const libraryID =
     (win.ZoteroPane as any).getSelectedLibraryID?.() ??
     Zotero.Libraries.userLibraryID;
@@ -119,27 +225,24 @@ export async function openWikiPanel(
   const panel = element(doc, "section", "zmp-wiki-panel");
   panel.id = PANEL_ID;
   const header = element(doc, "header", "zmp-wiki-header");
-  header.append(element(doc, "h1", "", "LLM Wiki"));
+  header.append(element(doc, "h1", "", TAB_TITLE));
   const statusText = element(
     doc,
     "span",
     "zmp-wiki-status",
-    `${status.pages} pages / ${status.claims} claims / ${status.evidence} evidence / ${status.pendingRelink} pending`,
+    `${status.pages} 个页面 / ${status.claims} 条论断 / ${status.evidence} 条证据 / ${status.pendingRelink} 条等待重连`,
   );
   header.append(statusText);
   const headerActions = element(doc, "div", "zmp-wiki-header-actions");
-  const refresh = button(doc, "Refresh", "Reload Wiki data");
-  refresh.addEventListener("click", () => void openWikiPanel(win));
-  const exportButton = button(doc, "Export", "Export Markdown");
+  const refresh = button(doc, "刷新", "重新加载 Wiki 数据");
+  refresh.addEventListener("click", () => void renderWikiPanel(win, container));
+  const exportButton = button(doc, "导出", "导出 Markdown 文档");
   exportButton.addEventListener(
     "click",
     () => void exportMarkdown(win, libraryID),
   );
-  const graphButton = button(doc, "Graph", "Show document knowledge graph");
-  const close = button(doc, "x", "Close Wiki");
-  close.classList.add("zmp-wiki-close");
-  close.addEventListener("click", () => panel.remove());
-  headerActions.append(refresh, exportButton, graphButton, close);
+  const graphButton = button(doc, "知识图谱", "显示文献知识图谱");
+  headerActions.append(refresh, exportButton, graphButton);
   header.append(headerActions);
   panel.append(header);
 
@@ -162,7 +265,7 @@ export async function openWikiPanel(
   const graphDetails = element(doc, "div", "zmp-wiki-graph-details");
   graphPane.append(canvas, graphDetails);
   panel.append(graphPane);
-  doc.documentElement!.appendChild(panel);
+  container.append(panel);
 
   const aliasesByConcept = new Map<number, any[]>();
   for (const alias of snapshot.aliases) {
@@ -180,9 +283,7 @@ export async function openWikiPanel(
 
   const showEvidence = (claim: any) => {
     evidencePane.replaceChildren();
-    evidencePane.append(
-      element(doc, "h2", "", `Evidence / Claim ${claim.claimId}`),
-    );
+    evidencePane.append(element(doc, "h2", "", `证据 / 论断 ${claim.claimId}`));
     evidencePane.append(
       element(doc, "p", "zmp-wiki-claim-text", claim.claimText),
     );
@@ -193,30 +294,27 @@ export async function openWikiPanel(
         `zmp-wiki-evidence-row role-${String(evidence.evidenceRole).toLowerCase()}`,
       );
       row.append(
-        element(doc, "strong", "", evidence.evidenceRole),
+        element(
+          doc,
+          "strong",
+          "",
+          labelFor(EVIDENCE_ROLE_LABELS, evidence.evidenceRole),
+        ),
         element(
           doc,
           "span",
           "zmp-wiki-evidence-meta",
-          `${evidence.readDepth} / ${evidence.linkState}`,
+          `${labelFor(READ_DEPTH_LABELS, evidence.readDepth)} / ${labelFor(LINK_STATE_LABELS, evidence.linkState)}`,
         ),
         element(doc, "blockquote", "", evidence.excerpt),
       );
       const actions = element(doc, "div", "zmp-wiki-row-actions");
-      const jump = button(
-        doc,
-        "Open paper",
-        "Select the source document in Zotero",
-      );
+      const jump = button(doc, "打开文献", "在 Zotero 中选中来源文献");
       jump.addEventListener(
         "click",
         () => void jumpToItem(win, evidence.libraryID, evidence.itemKey),
       );
-      const chunk = button(
-        doc,
-        "View chunk",
-        "Load the current indexed evidence chunk",
-      );
+      const chunk = button(doc, "查看片段", "加载当前索引中的证据片段");
       chunk.addEventListener("click", async () => {
         const chunks = await getVectorStore().getChunksForItem(
           evidence.itemKey,
@@ -229,8 +327,7 @@ export async function openWikiPanel(
           doc,
           "pre",
           "zmp-wiki-chunk",
-          current?.text ||
-            "Chunk is not currently available; run Wiki reverify after rebuilding the index.",
+          current?.text || "当前无法获取该片段。请在重建索引后重新验证 Wiki。",
         );
         row.append(text);
       });
@@ -246,16 +343,9 @@ export async function openWikiPanel(
     titleRow.append(element(doc, "h2", "", page.canonicalTitle));
     const concept = concepts.get(page.primaryConceptId);
     if (concept) {
-      const editTerm = button(
-        doc,
-        "Edit term",
-        "Change the canonical concept name",
-      );
+      const editTerm = button(doc, "编辑术语", "修改规范概念名称");
       editTerm.addEventListener("click", async () => {
-        const next = win.prompt(
-          "Canonical concept name",
-          concept.canonical_name,
-        );
+        const next = win.prompt("规范概念名称", concept.canonical_name);
         if (!next) return;
         await store.updateConcept({
           libraryID,
@@ -264,15 +354,11 @@ export async function openWikiPanel(
         });
         await openWikiPanel(win);
       });
-      const addAlias = button(
-        doc,
-        "Add alias",
-        "Add a Chinese, English, or abbreviation alias",
-      );
+      const addAlias = button(doc, "添加别名", "添加中文、英文或缩写别名");
       addAlias.addEventListener("click", async () => {
-        const alias = win.prompt("Alias", "");
+        const alias = win.prompt("别名", "");
         if (!alias) return;
-        const language = win.prompt("Language code", "und") || "und";
+        const language = win.prompt("语言代码", "und") || "und";
         await store.updateConcept({
           libraryID,
           conceptId: page.primaryConceptId,
@@ -282,13 +368,9 @@ export async function openWikiPanel(
       });
       titleRow.append(editTerm, addAlias);
     }
-    const merge = button(
-      doc,
-      "Merge",
-      "Merge this page into another Wiki page",
-    );
+    const merge = button(doc, "合并页面", "将当前页面合并到另一个 Wiki 页面");
     merge.addEventListener("click", async () => {
-      const target = Number(win.prompt("Target Wiki page ID", ""));
+      const target = Number(win.prompt("目标 Wiki 页面 ID", ""));
       if (!Number.isInteger(target) || target <= 0) return;
       await store.mergePages(page.pageId, target, libraryID);
       await openWikiPanel(win);
@@ -300,16 +382,12 @@ export async function openWikiPanel(
     if (concept) {
       const aliasBar = element(doc, "div", "zmp-wiki-aliases");
       aliasBar.append(
-        element(doc, "span", "", `Canonical: ${concept.canonical_name}`),
+        element(doc, "span", "", `规范术语：${concept.canonical_name}`),
       );
       for (const alias of aliasesByConcept.get(page.primaryConceptId) ?? []) {
-        const aliasButton = button(
-          doc,
-          String(alias.alias),
-          "Remove this alias",
-        );
+        const aliasButton = button(doc, String(alias.alias), "删除此别名");
         aliasButton.addEventListener("click", async () => {
-          if (!win.confirm(`Remove alias "${alias.alias}"?`)) return;
+          if (!win.confirm(`确定删除别名“${alias.alias}”吗？`)) return;
           await store.updateConcept({
             libraryID,
             conceptId: page.primaryConceptId,
@@ -326,15 +404,20 @@ export async function openWikiPanel(
       const heading = element(doc, "button", "zmp-wiki-claim-open");
       heading.type = "button";
       heading.append(
-        element(doc, "strong", "", claim.claimType),
+        element(
+          doc,
+          "strong",
+          "",
+          labelFor(CLAIM_TYPE_LABELS, claim.claimType),
+        ),
         element(doc, "span", "", claim.claimText),
         element(doc, "small", "", claimStatus(claim)),
       );
       heading.addEventListener("click", () => showEvidence(claim));
-      const remove = button(doc, "Delete", "Delete an incorrect Claim");
+      const remove = button(doc, "删除论断", "删除不正确的论断");
       remove.classList.add("danger");
       remove.addEventListener("click", async () => {
-        if (!win.confirm(`Delete Claim ${claim.claimId}?`)) return;
+        if (!win.confirm(`确定删除论断 ${claim.claimId} 吗？`)) return;
         await store.deleteClaim(claim.claimId, libraryID);
         await openWikiPanel(win);
       });
@@ -352,7 +435,7 @@ export async function openWikiPanel(
         doc,
         "small",
         "",
-        `${page.claims.length} claims / v${page.version}`,
+        `${page.claims.length} 条论断 / 版本 ${page.version}`,
       ),
     );
     entry.addEventListener("click", () => showPage(page));
@@ -361,12 +444,7 @@ export async function openWikiPanel(
   if (pages[0]) showPage(pages[0]);
   else
     claimsPane.append(
-      element(
-        doc,
-        "p",
-        "zmp-wiki-empty",
-        "No durable Wiki knowledge has been committed for this library.",
-      ),
+      element(doc, "p", "zmp-wiki-empty", "暂无已保存的长期 Wiki 知识。"),
     );
 
   const drawGraph = async () => {
@@ -451,16 +529,12 @@ export async function openWikiPanel(
           const claimButton = button(
             doc,
             claim.claimText,
-            `Open Claim ${claim.claimId}`,
+            `打开论断 ${claim.claimId}`,
           );
           claimButton.addEventListener("click", () => showEvidence(claim));
           graphDetails.append(claimButton);
         }
-        const open = button(
-          doc,
-          "Open paper",
-          "Select this document in Zotero",
-        );
+        const open = button(doc, "打开文献", "在 Zotero 中选中此文献");
         open.addEventListener(
           "click",
           () => void jumpToItem(win, libraryID, node.itemKey),
@@ -492,12 +566,12 @@ export async function openWikiPanel(
       });
       if (edge) {
         graphDetails.append(
-          element(doc, "h2", "", `${edge.source} - ${edge.target}`),
+          element(doc, "h2", "", `${edge.source} 与 ${edge.target}`),
           element(
             doc,
             "p",
             "",
-            `Strength ${edge.strength}; Evidence relations: ${edge.relations.join(", ") || "shared Claim"}`,
+            `关联强度 ${edge.strength}；证据关系：${edge.relations.map(evidenceRelationLabel).join("、") || "共享论断"}`,
           ),
         );
         const sharedClaims = pages.flatMap((page) =>
@@ -507,7 +581,7 @@ export async function openWikiPanel(
           const claimButton = button(
             doc,
             claim.claimText,
-            `View cross-paper Evidence for Claim ${claim.claimId}`,
+            `查看论断 ${claim.claimId} 的跨论文证据`,
           );
           claimButton.addEventListener("click", () => showEvidence(claim));
           graphDetails.append(claimButton);
