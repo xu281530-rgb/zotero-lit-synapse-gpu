@@ -531,6 +531,14 @@ assert.ok(
   "pending_relink Evidence remains visible and explicitly marked",
 );
 assert.ok(
+  pendingSearch.claims
+    .filter((claim) =>
+      claim.evidence.every((row) => row.link_state === "pending_relink"),
+    )
+    .every((claim) => claim.readDepth === null),
+  "a pending-only Claim must not report a verified readDepth",
+);
+assert.ok(
   pendingSearch.documents.every((row) => row.itemKey !== "CLAIMHOG"),
   "pending_relink Evidence must not produce a verified document candidate",
 );

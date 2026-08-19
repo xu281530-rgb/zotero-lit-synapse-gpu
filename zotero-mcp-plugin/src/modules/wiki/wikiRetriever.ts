@@ -64,7 +64,7 @@ export interface WikiClaimSearchResult {
   normalizedWikiScore: number;
   matchKind: "direct" | "one_hop";
   evidenceConfidence: number;
-  readDepth: WikiReadDepth;
+  readDepth: WikiReadDepth | null;
   epistemicStatus: WikiEpistemicStatus;
   evidence: any[];
 }
@@ -300,17 +300,22 @@ export class WikiRetriever {
             options.libraryID &&
             itemScope.has(String(column(row, "item_key", "itemKey")))),
       );
-      const readDepth = evidence
-        .filter((row) => {
-          const state = String(column(row, "link_state", "linkState"));
-          return state === "valid" || state === "source_deleted";
-        })
-        .reduce<WikiReadDepth>((best, row) => {
-          const depth = column(row, "read_depth", "readDepth") as WikiReadDepth;
-          return DEPTH_ORDER.indexOf(depth) > DEPTH_ORDER.indexOf(best)
-            ? depth
-            : best;
-        }, "chunk_local");
+      const verifiedEvidence = evidence.filter((row) => {
+        const state = String(column(row, "link_state", "linkState"));
+        return state === "valid" || state === "source_deleted";
+      });
+      const readDepth = verifiedEvidence.length
+        ? verifiedEvidence.reduce<WikiReadDepth>((best, row) => {
+            const depth = column(
+              row,
+              "read_depth",
+              "readDepth",
+            ) as WikiReadDepth;
+            return DEPTH_ORDER.indexOf(depth) > DEPTH_ORDER.indexOf(best)
+              ? depth
+              : best;
+          }, "chunk_local")
+        : null;
       matchedConceptIds.add(conceptId);
       claims.push({
         claimId,
@@ -348,7 +353,9 @@ export class WikiRetriever {
             libraryID,
             normalizedWikiScore: claim.normalizedWikiScore,
             evidenceConfidence: claim.evidenceConfidence,
-            readDepth: claim.readDepth,
+            readDepth:
+              claim.readDepth ??
+              (column(evidence, "read_depth", "readDepth") as WikiReadDepth),
             epistemicStatus: claim.epistemicStatus,
             wikiClaims: [claim],
           });

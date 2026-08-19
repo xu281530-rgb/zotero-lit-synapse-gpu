@@ -63,39 +63,57 @@ export class WikiEvidenceRelinker {
       stale: 0,
       sourceDeleted: 0,
     };
-    for (const item of evidence) {
-      if (!(await this.source.sourceExists(item.libraryID, item.itemKey))) {
-        await this.store.markSourceDeleted(item.libraryID, item.itemKey);
-        report.sourceDeleted += 1;
-        continue;
+    const updatedEvidenceIds: number[] = [];
+    try {
+      for (const item of evidence) {
+        if (!(await this.source.sourceExists(item.libraryID, item.itemKey))) {
+          await this.store.markSourceDeleted(item.libraryID, item.itemKey);
+          report.sourceDeleted += 1;
+          continue;
+        }
+        const chunks = await this.source.getChunks(
+          item.libraryID,
+          item.itemKey,
+        );
+        const matched = await this.chooseChunk(
+          item.chunkTextHash,
+          item.excerpt,
+          chunks,
+        );
+        if (!matched) {
+          await this.store.updateEvidenceLink(
+            item.evidenceId,
+            {
+              chunkIdSnapshot: item.chunkIdSnapshot,
+              chunkTextHash: item.chunkTextHash,
+              sourceContentHash: item.sourceContentHash,
+              sourceChunkSignature: item.sourceChunkSignature,
+              sourceResetGeneration: item.sourceResetGeneration,
+              linkState: "stale",
+            },
+            { deferDerivedUpdates: true },
+          );
+          updatedEvidenceIds.push(item.evidenceId);
+          report.stale += 1;
+          continue;
+        }
+        await this.store.updateEvidenceLink(
+          item.evidenceId,
+          {
+            chunkIdSnapshot: matched.chunkId,
+            chunkTextHash: await hashWikiText(matched.text),
+            sourceContentHash: matched.contentHash,
+            sourceChunkSignature: matched.chunkSignature,
+            sourceResetGeneration: matched.resetGeneration,
+            linkState: "valid",
+          },
+          { deferDerivedUpdates: true },
+        );
+        updatedEvidenceIds.push(item.evidenceId);
+        report.relinked += 1;
       }
-      const chunks = await this.source.getChunks(item.libraryID, item.itemKey);
-      const matched = await this.chooseChunk(
-        item.chunkTextHash,
-        item.excerpt,
-        chunks,
-      );
-      if (!matched) {
-        await this.store.updateEvidenceLink(item.evidenceId, {
-          chunkIdSnapshot: item.chunkIdSnapshot,
-          chunkTextHash: item.chunkTextHash,
-          sourceContentHash: item.sourceContentHash,
-          sourceChunkSignature: item.sourceChunkSignature,
-          sourceResetGeneration: item.sourceResetGeneration,
-          linkState: "stale",
-        });
-        report.stale += 1;
-        continue;
-      }
-      await this.store.updateEvidenceLink(item.evidenceId, {
-        chunkIdSnapshot: matched.chunkId,
-        chunkTextHash: await hashWikiText(matched.text),
-        sourceContentHash: matched.contentHash,
-        sourceChunkSignature: matched.chunkSignature,
-        sourceResetGeneration: matched.resetGeneration,
-        linkState: "valid",
-      });
-      report.relinked += 1;
+    } finally {
+      await this.store.finalizeEvidenceRelink(updatedEvidenceIds);
     }
     return report;
   }

@@ -615,6 +615,87 @@ assert.equal(
   "deleting a Zotero source must not erase the historical Evidence or downgrade its Claim",
 );
 
+const orderCommit = await store.commit({
+  libraryID: 1,
+  userInitiated: true,
+  actions: [
+    {
+      action: "CREATE_PAGE",
+      ref: "page:relink-order",
+      canonicalTitle: "Relink ordering",
+    },
+    {
+      action: "ADD_CLAIM",
+      ref: "claim:relink-order",
+      pageId: "page:relink-order",
+      claimText: "Relink status depends on the final evidence set.",
+      claimType: "condition",
+      epistemicStatus: "supported",
+      coverageLevel: "section_read",
+      confidence: 0.8,
+      evidence: [
+        {
+          libraryID: 1,
+          itemKey: "ORDERSTALE",
+          chunkIdSnapshot: 0,
+          chunkTextHash: await hashWikiText("Evidence that will go stale."),
+          sourceContentHash: "order-stale-v1",
+          sourceChunkSignature: "paragraph-v3:1000:500",
+          sourceResetGeneration: "reset-order-1",
+          excerpt: "Evidence that will go stale.",
+          evidenceRole: "SUPPORTS",
+          readDepth: "section_read",
+        },
+        {
+          libraryID: 1,
+          itemKey: "ORDERVALID",
+          chunkIdSnapshot: 0,
+          chunkTextHash: await hashWikiText("Evidence that remains valid."),
+          sourceContentHash: "order-valid-v1",
+          sourceChunkSignature: "paragraph-v3:1000:500",
+          sourceResetGeneration: "reset-order-1",
+          excerpt: "Evidence that remains valid.",
+          evidenceRole: "SUPPORTS",
+          readDepth: "section_read",
+        },
+      ],
+    },
+  ],
+});
+await store.markItemsPending("content-rebuild", 1, [
+  "ORDERSTALE",
+  "ORDERVALID",
+]);
+const orderRelinker = new WikiEvidenceRelinker(store, {
+  async sourceExists() {
+    return true;
+  },
+  async getChunks(_libraryID, itemKey) {
+    if (itemKey === "ORDERSTALE") return [];
+    return [
+      {
+        chunkId: 4,
+        text: "Evidence that remains valid.",
+        contentHash: "order-valid-v2",
+        chunkSignature: "paragraph-v3:1000:500",
+        resetGeneration: "reset-order-2",
+      },
+    ];
+  },
+});
+assert.deepEqual(await orderRelinker.relinkPending({ libraryID: 1 }), {
+  checked: 2,
+  relinked: 1,
+  stale: 1,
+  sourceDeleted: 0,
+});
+assert.equal(
+  (await store.getClaim(orderCommit.refs["claim:relink-order"]))
+    ?.epistemicStatus,
+  "supported",
+  "Claim status must be derived after the whole relink batch, independent of Evidence order",
+);
+
 sqlite.close();
 sqlite = new DatabaseSync(dbPath);
 sqlite.exec("PRAGMA foreign_keys = ON");

@@ -1694,6 +1694,7 @@ export class WikiStore {
       sourceResetGeneration: string;
       linkState: "valid" | "stale" | "source_deleted";
     },
+    options: { deferDerivedUpdates?: boolean } = {},
   ): Promise<void> {
     await this.initialize();
     await this.db.queryAsync(
@@ -1712,8 +1713,33 @@ export class WikiStore {
         evidenceId,
       ],
     );
-    await this.recomputeClaimStatusForEvidence(evidenceId);
-    await this.refreshPagesForEvidence("e.evidence_id = ?", [evidenceId]);
+    if (!options.deferDerivedUpdates) {
+      await this.recomputeClaimStatusForEvidence(evidenceId);
+      await this.refreshPagesForEvidence("e.evidence_id = ?", [evidenceId]);
+    }
+  }
+
+  async finalizeEvidenceRelink(evidenceIds: number[]): Promise<void> {
+    await this.initialize();
+    const ids = Array.from(
+      new Set(evidenceIds.filter((id) => Number.isInteger(id) && id > 0)),
+    );
+    if (!ids.length) return;
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = await this.db.queryAsync(
+      `SELECT DISTINCT claim_id FROM wiki_evidence
+       WHERE evidence_id IN (${placeholders})`,
+      ids,
+    );
+    for (const row of rows) {
+      await this.recomputeClaimStatus(
+        Number(rowValue(row, "claim_id", "claimId")),
+      );
+    }
+    await this.refreshPagesForEvidence(
+      `e.evidence_id IN (${placeholders})`,
+      ids,
+    );
   }
 
   private async recomputeClaimStatusForEvidence(
@@ -1726,6 +1752,10 @@ export class WikiStore {
       ),
     );
     if (!claimId) return;
+    await this.recomputeClaimStatus(claimId);
+  }
+
+  private async recomputeClaimStatus(claimId: number): Promise<void> {
     const verifiedOrHistorical = Number(
       await this.db.valueQueryAsync(
         "SELECT COUNT(*) FROM wiki_evidence WHERE claim_id = ? AND link_state IN ('valid', 'source_deleted')",
