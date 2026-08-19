@@ -27,6 +27,7 @@ export function openWikiTab(
     const created = win.Zotero_Tabs.add({
       type: options.type,
       title: options.title,
+      data: {},
       select: true,
       onClose: () => {
         const active = wikiTabs.get(win);

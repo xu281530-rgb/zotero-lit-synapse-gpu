@@ -156,13 +156,13 @@ export function registerWikiPanel(win: _ZoteroTypes.MainWindow): void {
   if (!toolbar) return;
   const entry = doc.createXULElement("toolbarbutton");
   entry.id = BUTTON_ID;
-  entry.setAttribute("class", "zotero-mcp-wiki-toolbarbutton");
+  entry.setAttribute("class", "zotero-tb-button zotero-mcp-wiki-toolbarbutton");
   entry.setAttribute(
     "image",
     `chrome://${config.addonRef}/content/icons/favicon@0.5x.png`,
   );
   entry.setAttribute("tooltiptext", "打开 LLM 知识库");
-  entry.addEventListener("command", () => void openWikiPanel(win));
+  entry.addEventListener("click", () => void openWikiPanel(win));
   toolbar.insertBefore(entry, toolbar.firstChild);
 }
 

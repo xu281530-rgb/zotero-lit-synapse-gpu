@@ -68,8 +68,19 @@ assert.doesNotMatch(css, /position:\s*fixed/u);
 assert.doesNotMatch(css, /z-index:\s*2147483000/u);
 assert.match(
   css,
-  /\.zotero-mcp-wiki-toolbarbutton\s+\.toolbarbutton-icon\s*\{[^}]*width:\s*16px;[^}]*height:\s*16px;/su,
-  "Wiki toolbar icon must render at 16 by 16 pixels",
+  /\.zotero-mcp-wiki-toolbarbutton\s+\.toolbarbutton-icon\s*\{[^}]*width:\s*30px;[^}]*height:\s*30px;/su,
+  "Wiki toolbar icon must render at 30 by 30 pixels",
+);
+assert.match(
+  css,
+  /\.zotero-mcp-wiki-toolbarbutton\s*\{[^}]*width:\s*36px;[^}]*height:\s*36px;/su,
+  "Wiki toolbar button must contain the enlarged icon without clipping",
+);
+assert.match(panel, /zotero-tb-button zotero-mcp-wiki-toolbarbutton/u);
+assert.match(
+  panel,
+  /entry\.addEventListener\("click", \(\) => void openWikiPanel\(win\)\)/u,
+  "Wiki toolbar click must open the native Zotero tab",
 );
 
 const tabCalls = {
@@ -107,6 +118,7 @@ const firstRender = openWikiTab(fakeWindow, {
 });
 assert.equal(tabCalls.added.length, 1);
 assert.equal(tabCalls.added[0].select, true);
+assert.deepEqual(tabCalls.added[0].data, {});
 assert.equal(isCurrentWikiTabRender(firstRender), true);
 
 const refreshedRender = openWikiTab(fakeWindow, {

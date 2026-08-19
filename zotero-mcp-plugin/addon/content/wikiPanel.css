@@ -1,14 +1,18 @@
 .zotero-mcp-wiki-toolbarbutton {
-  min-width: 28px;
-  min-height: 28px;
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  min-height: 36px;
+  max-width: 36px;
+  max-height: 36px;
 }
 .zotero-mcp-wiki-toolbarbutton .toolbarbutton-icon {
-  width: 16px;
-  height: 16px;
-  min-width: 16px;
-  min-height: 16px;
-  max-width: 16px;
-  max-height: 16px;
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  min-height: 30px;
+  max-width: 30px;
+  max-height: 30px;
 }
 
 .zotero-mcp-wiki-tab-container {
