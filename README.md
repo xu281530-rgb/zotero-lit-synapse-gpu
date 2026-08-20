@@ -5,7 +5,7 @@ _This README is also available in: [:cn: 简体中文](./README-zh.md) | :gb: En
 [![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-2.0.1-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-2.1.0-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -666,7 +666,8 @@ the user. The server performs no hidden LLM calls.
 - `wiki_status` — report Wiki and Evidence-link status
 - `wiki_export` — render derived Markdown without changing the authoritative database
 - `wiki_reverify` — relink Evidence after index rebuilds
-- `wiki_build_from_paper` — prepare an explicit, single-paper deep-reading workflow
+- `wiki_build_from_paper` — read one explicitly requested paper, one page of chunks at a time; follow `pagination.nextCursor` until `pagination.coverageComplete` is true, and finish the open paper before starting another
+- `wiki_finish_reading` — close the currently open paper without writing it up (`skipped`), so the next paper can start
 
 ### 5. Write Operations (9 tools, can be disabled in preferences)
 

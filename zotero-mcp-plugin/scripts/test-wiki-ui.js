@@ -70,6 +70,46 @@ assert.doesNotMatch(
   "Wiki content must mount in the native Zotero tab container",
 );
 assert.doesNotMatch(css, /position:\s*fixed/u);
+
+// A Wiki load that throws must not leave the tab blank: the render is wrapped,
+// the exception is logged untouched, and the tab shows what went wrong.
+assert.match(
+  panel,
+  /await renderWikiPanelContent\(win, render\);/u,
+  "the Wiki render must run inside a failure boundary",
+);
+assert.match(
+  panel,
+  /renderWikiPanelFailure\(win, render, error\)/u,
+  "a failed Wiki render must mount the failure card",
+);
+assert.match(
+  panel,
+  /Zotero\.logError\?\.\(error\)/u,
+  "a failed Wiki render must report the exception to Zotero",
+);
+assert.match(
+  panel,
+  /ztoolkit\.log\("\[wiki\] failed to render the Wiki panel", error\)/u,
+  "a failed Wiki render must log the exception",
+);
+for (const failureText of ["知识库加载失败", "重试", "zmp-wiki-error-detail"]) {
+  assert.ok(
+    panel.includes(failureText),
+    `Wiki failure card must expose: ${failureText}`,
+  );
+}
+assert.match(
+  css,
+  /\.zmp-wiki-error\b/u,
+  "the Wiki failure card must be styled",
+);
+assert.doesNotMatch(
+  panel,
+  /catch\s*\{\s*\}/u,
+  "the Wiki panel must never swallow an error silently",
+);
+
 assert.doesNotMatch(css, /z-index:\s*2147483000/u);
 assert.match(
   css,

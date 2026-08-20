@@ -226,6 +226,44 @@
   color: var(--wiki-muted);
 }
 
+/* Shown in place of the Wiki when its data cannot be loaded, so a storage
+   failure reads as a failure instead of as an empty tab. */
+.zmp-wiki-error {
+  margin: 0;
+  padding: 20px 22px;
+  overflow: auto;
+  min-width: 0;
+  min-height: 0;
+}
+.zmp-wiki-error h2 {
+  margin: 0 0 10px;
+  color: var(--wiki-danger);
+  font-size: 15px;
+}
+.zmp-wiki-error-message {
+  margin: 0 0 8px;
+  color: var(--wiki-text);
+}
+.zmp-wiki-error-hint {
+  margin: 0 0 12px;
+  color: var(--wiki-muted);
+}
+.zmp-wiki-error-detail {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  max-height: 40vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--wiki-muted);
+  background: var(--wiki-surface);
+  border: 1px solid var(--wiki-border);
+  border-radius: 4px;
+  font:
+    12px/1.5 ui-monospace,
+    monospace;
+}
+
 @media (max-width: 900px) {
   .zmp-wiki-body {
     grid-template-columns: 150px minmax(260px, 1fr);

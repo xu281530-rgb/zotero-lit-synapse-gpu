@@ -156,12 +156,25 @@ export interface WikiCommitInput {
   userInitiated: boolean;
   /** Required by WikiService when CREATE_PAGE is present. */
   prepareToken?: string;
+  /**
+   * The reading session this commit concludes.
+   *
+   * Optional: a commit that cites the open paper's evidence closes that
+   * session anyway. Passing it explicitly closes the right session even when
+   * the claims cite several papers.
+   */
+  readingSessionId?: number;
   actions: WikiCommitAction[];
 }
 
 export interface WikiCommitResult {
   createdPages: number;
   createdClaims: number;
+  /**
+   * ADD_CLAIM actions that matched a Claim already on the target Page and were
+   * folded into it instead of creating a second one.
+   */
+  reusedClaims: number;
   attachedEvidence: number;
   updatedClaims: number;
   linkedRelations: number;

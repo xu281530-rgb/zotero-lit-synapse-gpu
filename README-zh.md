@@ -5,7 +5,7 @@ _This README is also available in: [:gb: English](./README.md) | :cn: 简体中�
 [![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-2.0.1-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-2.1.0-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -734,7 +734,8 @@ Evidence，而不是再建一份论文摘要索引。普通研究采用“先检
 - `wiki_status` —— 查看 Wiki 与 Evidence 链接状态
 - `wiki_export` —— 导出派生 Markdown，不改变权威数据库
 - `wiki_reverify` —— 索引重建后重新定位 Evidence
-- `wiki_build_from_paper` —— 准备用户明确要求的单篇深度阅读流程
+- `wiki_build_from_paper` —— 分页阅读用户明确指定的单篇文献；用 `pagination.nextCursor` 逐页翻到 `pagination.coverageComplete` 为真，且必须先结束当前这篇才能开始下一篇
+- `wiki_finish_reading` —— 只读不写地结束当前打开的文献（`skipped`），以便开始下一篇
 
 ### 五、写入操作（9 个，可在偏好设置中禁用）
 

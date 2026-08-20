@@ -18,6 +18,7 @@ import {
   registerWikiPanel,
   unregisterWikiPanel,
 } from "./modules/wiki/wikiPanel";
+import { getWikiService } from "./modules/wiki/wikiService";
 
 // Preference keys for semantic search settings
 const PREF_SEMANTIC_ENABLED = 'extensions.zotero.zotero-mcp-plugin.semantic.enabled';
@@ -64,6 +65,17 @@ let semanticAutoUpdatesSuspended = false;
 // Auto index check interval (10 minutes)
 const AUTO_INDEX_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 let autoIndexCheckTimer: ReturnType<typeof setInterval> | null = null;
+/**
+ * Drains the Wiki claim-embedding queue.
+ *
+ * wiki_commit answers the caller as soon as its transaction is durable and
+ * leaves the vectors to this. The queue is a table, so anything left behind by
+ * a crash, a restart or an embedding outage is still there to be picked up -
+ * which is the point: an empty queue is the same statement as "every Wiki
+ * claim has a current vector".
+ */
+let wikiEmbeddingQueueTimer: ReturnType<typeof setInterval> | null = null;
+const WIKI_EMBEDDING_QUEUE_INTERVAL_MS = 60_000;
 let autoIndexInitialTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Track all setTimeout calls for cleanup on shutdown
@@ -719,6 +731,7 @@ function registerItemNotifier() {
 
   // Start periodic auto-index check (every 10 minutes)
   startAutoIndexCheck();
+  startWikiEmbeddingQueueDrain();
 }
 
 /**
@@ -749,6 +762,31 @@ function startAutoIndexCheck() {
   ztoolkit.log(`[MCP Plugin] Auto-index check timer started (interval: ${AUTO_INDEX_CHECK_INTERVAL_MS / 1000}s)`);
 }
 
+function startWikiEmbeddingQueueDrain() {
+  if (wikiEmbeddingQueueTimer) {
+    clearInterval(wikiEmbeddingQueueTimer);
+    wikiEmbeddingQueueTimer = null;
+  }
+  const pump = () => {
+    void getWikiService()
+      .pumpEmbeddingQueue()
+      .catch((error: unknown) => {
+        ztoolkit.log("[MCP Plugin] Wiki embedding queue drain failed", error);
+      });
+  };
+  // One pass shortly after startup clears whatever the last session left.
+  setTimeout(pump, 20000);
+  wikiEmbeddingQueueTimer = setInterval(pump, WIKI_EMBEDDING_QUEUE_INTERVAL_MS);
+  ztoolkit.log("[MCP Plugin] Wiki embedding queue drain started");
+}
+
+function stopWikiEmbeddingQueueDrain() {
+  if (wikiEmbeddingQueueTimer) {
+    clearInterval(wikiEmbeddingQueueTimer);
+    wikiEmbeddingQueueTimer = null;
+  }
+}
+
 /**
  * Stop periodic auto-index check timer
  */
@@ -761,6 +799,7 @@ function stopAutoIndexCheck() {
     clearInterval(autoIndexCheckTimer);
     autoIndexCheckTimer = null;
   }
+  stopWikiEmbeddingQueueDrain();
   ztoolkit.log("[MCP Plugin] Auto-index check timers stopped");
 }
 

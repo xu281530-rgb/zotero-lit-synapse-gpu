@@ -1,13 +1,10 @@
 import { hashWikiText, normalizeWikiName } from "./wikiCanonicalizer";
 import { tokenizeForIndex } from "../keyword/scientificTokenizer";
+import { rowColumn as column } from "./wikiRow";
 import type { WikiReadDepth, WikiEpistemicStatus } from "./wikiTypes";
 import type { WikiStore } from "./wikiStore";
 
 const ONE_HOP_DECAY = 0.72;
-
-function column(row: any, snake: string, camel: string): any {
-  return row?.[snake] ?? row?.[camel];
-}
 
 function terms(value: string): string[] {
   return Array.from(

@@ -1,6 +1,6 @@
 import type { WikiDatabase } from "./wikiTypes";
 
-export const WIKI_SCHEMA_VERSION = 1;
+export const WIKI_SCHEMA_VERSION = 2;
 
 export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
   await db.queryAsync("PRAGMA foreign_keys = ON");
@@ -102,6 +102,55 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
       updated_at INTEGER NOT NULL
     )
   `);
+  await db.queryAsync(`
+    CREATE TABLE IF NOT EXISTS wiki_reading_sessions (
+      session_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      library_id INTEGER NOT NULL,
+      item_key TEXT NOT NULL,
+      title TEXT NOT NULL DEFAULT '',
+      total_chunks INTEGER NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('reading','prepared','committed','skipped','failed')),
+      started_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      closed_at INTEGER,
+      note TEXT NOT NULL DEFAULT ''
+    )
+  `);
+  await db.queryAsync(`
+    CREATE TABLE IF NOT EXISTS wiki_reading_chunks (
+      session_id INTEGER NOT NULL REFERENCES wiki_reading_sessions(session_id) ON DELETE CASCADE,
+      chunk_index INTEGER NOT NULL,
+      chunk_id INTEGER NOT NULL,
+      delivered_at INTEGER NOT NULL,
+      PRIMARY KEY (session_id, chunk_index)
+    )
+  `);
+  await db.queryAsync(`
+    CREATE TABLE IF NOT EXISTS wiki_embedding_queue (
+      claim_id INTEGER PRIMARY KEY REFERENCES wiki_claims(claim_id) ON DELETE CASCADE,
+      text_hash TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT NOT NULL DEFAULT '',
+      enqueued_at INTEGER NOT NULL,
+      next_attempt_at INTEGER NOT NULL
+    )
+  `);
+  // At most one paper may be open per library. A partial unique index makes
+  // that the database's rule rather than a check the service could forget:
+  // the "start B while A is unfinished" case cannot be written at all.
+  await db.queryAsync(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_wiki_open_reading_session
+       ON wiki_reading_sessions(library_id)
+       WHERE state IN ('reading','prepared')`,
+  );
+  await db.queryAsync(
+    `CREATE INDEX IF NOT EXISTS idx_wiki_reading_sessions_item
+       ON wiki_reading_sessions(library_id, item_key, state)`,
+  );
+  await db.queryAsync(
+    `CREATE INDEX IF NOT EXISTS idx_wiki_embedding_queue_due
+       ON wiki_embedding_queue(next_attempt_at)`,
+  );
   await db.queryAsync(
     `CREATE INDEX IF NOT EXISTS idx_wiki_pages_library ON wiki_pages(library_id)`,
   );

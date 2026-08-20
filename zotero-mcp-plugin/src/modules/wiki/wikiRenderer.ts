@@ -1,13 +1,10 @@
 import type { WikiPageRecord } from "./wikiTypes";
+import { rowColumn as value } from "./wikiRow";
 
 interface WikiMarkdownContext {
   concepts?: any[];
   aliases?: any[];
   relations?: any[];
-}
-
-function value(row: any, snake: string, camel: string): any {
-  return row?.[snake] ?? row?.[camel];
 }
 
 export function renderWikiMarkdown(

@@ -1,5 +1,6 @@
 import { config } from "../../../package.json";
 import { getVectorStore } from "../semantic/vectorStore";
+import { rowColumn } from "./wikiRow";
 import { getWikiService } from "./wikiService";
 import {
   closeWikiTab,
@@ -18,6 +19,7 @@ import type {
 
 declare let Zotero: any;
 declare let IOUtils: any;
+declare let ztoolkit: ZToolkit;
 
 const BUTTON_ID = "zotero-mcp-wiki-button";
 const PANEL_ID = "zotero-mcp-wiki-panel";
@@ -182,7 +184,90 @@ export async function openWikiPanel(
   await renderWikiPanel(win, render);
 }
 
+/**
+ * Describe a thrown value without losing anything the log needs.
+ *
+ * The failure card shows the message; the stack goes into it too, because a
+ * Wiki load failure is almost always a storage-layer fault whose call chain is
+ * the only thing that identifies it.
+ */
+function describeError(error: unknown): { message: string; detail: string } {
+  if (error instanceof Error) {
+    return {
+      message: error.message || String(error),
+      detail: error.stack || `${error.name}: ${error.message}`,
+    };
+  }
+  return { message: String(error), detail: String(error) };
+}
+
+/**
+ * Replace the tab's contents with a legible failure card.
+ *
+ * The Wiki tab is opened before its data is loaded, so a load that throws used
+ * to leave the tab mounted and empty - a blank page with the real error visible
+ * only in the Debug Output. This renders the failure where the user is looking.
+ */
+function renderWikiPanelFailure(
+  win: _ZoteroTypes.MainWindow,
+  render: WikiTabRender,
+  error: unknown,
+): void {
+  const doc = win.document;
+  const container = render.tab.container;
+  const { message, detail } = describeError(error);
+  container.querySelector(`#${PANEL_ID}`)?.remove();
+  const panel = element(doc, "section", "zmp-wiki-panel zmp-wiki-panel-error");
+  panel.id = PANEL_ID;
+  const header = element(doc, "header", "zmp-wiki-header");
+  header.append(element(doc, "h1", "", TAB_TITLE));
+  panel.append(header);
+  const card = element(doc, "div", "zmp-wiki-error");
+  card.append(
+    element(doc, "h2", "", "知识库加载失败"),
+    element(
+      doc,
+      "p",
+      "zmp-wiki-error-message",
+      `无法读取 Wiki 数据：${message}`,
+    ),
+    element(
+      doc,
+      "p",
+      "zmp-wiki-error-hint",
+      "本次失败发生在读取阶段，尚未写入任何数据；完整堆栈已记录到 Zotero 的调试输出与错误控制台。",
+    ),
+    element(doc, "pre", "zmp-wiki-error-detail", detail),
+  );
+  const retry = button(doc, "重试", "重新加载 Wiki 数据");
+  retry.addEventListener("click", () => void openWikiPanel(win));
+  card.append(retry);
+  panel.append(card);
+  container.append(panel);
+}
+
+/**
+ * Render the Wiki tab, surfacing any failure instead of leaving a blank tab.
+ *
+ * The error is reported, never absorbed: it is logged in full through
+ * `Zotero.logError` and `ztoolkit.log` and printed into the tab, so a storage
+ * fault stays as visible as it was before this boundary existed.
+ */
 async function renderWikiPanel(
+  win: _ZoteroTypes.MainWindow,
+  render: WikiTabRender,
+): Promise<void> {
+  try {
+    await renderWikiPanelContent(win, render);
+  } catch (error) {
+    ztoolkit.log("[wiki] failed to render the Wiki panel", error);
+    Zotero.logError?.(error);
+    if (!isCurrentWikiTabRender(render)) return;
+    renderWikiPanelFailure(win, render, error);
+  }
+}
+
+async function renderWikiPanelContent(
   win: _ZoteroTypes.MainWindow,
   render: WikiTabRender,
 ): Promise<void> {
@@ -249,14 +334,14 @@ async function renderWikiPanel(
 
   const aliasesByConcept = new Map<number, any[]>();
   for (const alias of snapshot.aliases) {
-    const conceptId = Number(alias.concept_id ?? alias.conceptId);
+    const conceptId = Number(rowColumn(alias, "concept_id", "conceptId"));
     const list = aliasesByConcept.get(conceptId) ?? [];
     list.push(alias);
     aliasesByConcept.set(conceptId, list);
   }
   const concepts = new Map(
     snapshot.concepts.map((concept) => [
-      Number(concept.concept_id ?? concept.conceptId),
+      Number(rowColumn(concept, "concept_id", "conceptId")),
       concept,
     ]),
   );
@@ -574,6 +659,19 @@ async function renderWikiPanel(
     const showing = !graphPane.hidden;
     graphPane.hidden = showing;
     body.hidden = !showing;
-    if (!showing) void drawGraph();
+    if (showing) return;
+    void drawGraph().catch((error: unknown) => {
+      ztoolkit.log("[wiki] failed to draw the document graph", error);
+      Zotero.logError?.(error);
+      graphDetails.replaceChildren(
+        element(doc, "h2", "", "知识图谱加载失败"),
+        element(
+          doc,
+          "p",
+          "zmp-wiki-error-message",
+          describeError(error).message,
+        ),
+      );
+    });
   });
 }

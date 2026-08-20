@@ -67,6 +67,7 @@ export const WIKI_TOOL_NAMES: ReadonlySet<string> = new Set([
   "wiki_export",
   "wiki_reverify",
   "wiki_build_from_paper",
+  "wiki_finish_reading",
 ]);
 
 /**
@@ -1292,7 +1293,17 @@ export function buildToolCatalog(): ToolDefinition[] {
   {
     name: 'wiki_build_from_paper',
     category: 'wiki',
-    description: 'Begin an explicitly user-requested deep Wiki build for exactly one named Zotero paper. Never call automatically or in a batch. The tool invokes no LLM and writes nothing; it returns ordered indexed chunks or a reading plan plus existing Wiki candidates.',
+    description: [
+      'Read ONE explicitly user-requested Zotero paper, one page of chunks at a time, as the reading half of a Wiki build. Never call automatically or in a batch. It invokes no LLM and writes no Wiki content.',
+      '',
+      'PAGING. The first call names the paper (itemKey, DOI, URL or title) and returns the first page. Every later call passes cursor set to pagination.nextCursor from the previous response and changes nothing else. Keep going while pagination.hasMore is true. pagination reports totalChunks, the range just returned, deliveredChunks / remainingChunks for the paper as a whole, and coverageComplete once every chunk has been delivered. A short paper finishes in one call and reports hasMore false immediately.',
+      '',
+      'ONE PAPER AT A TIME. Starting a different paper while this one is unfinished is refused. Finish the open one first: call wiki_prepare_update then wiki_commit to write it up, or wiki_finish_reading with outcome "skipped" to close it without writing — reading a paper and deciding not to write it up is a normal outcome.',
+      '',
+      'READ DEPTH. The server records which chunks it actually handed you. Evidence submitted with read_depth paper_reviewed or cross_paper is stored at section_read unless pagination.coverageComplete is true for that paper, and the commit says so in its warnings. Read to the end before claiming whole-paper depth.',
+      '',
+      'includeAllChunks has been removed. It returned an entire paper in one response and made long papers unreadable; calling with it now returns an error explaining the paged replacement.'
+    ].join('\n'),
     inputSchema: {
       type: 'object',
       properties: {
@@ -1302,9 +1313,38 @@ export function buildToolCatalog(): ToolDefinition[] {
         doi: { type: 'string' },
         url: { type: 'string' },
         title: { type: 'string' },
-        includeAllChunks: { type: 'boolean' }
+        cursor: {
+          type: 'string',
+          description: 'pagination.nextCursor from the previous call, to continue reading the same paper.'
+        },
+        offset: {
+          type: 'number',
+          description: '0-based chunk index to start this page at. Prefer cursor.'
+        },
+        limit: {
+          type: 'number',
+          description: `Chunks per page, 1 to ${MAX_DOCUMENT_CHUNKS_PER_PAGE} (default ${DEFAULT_DOCUMENT_CHUNKS_PER_PAGE}).`
+        }
       },
       required: ['userRequested']
+    }
+  },
+  {
+    name: 'wiki_finish_reading',
+    category: 'wiki',
+    description: 'Close the paper currently open for Wiki reading WITHOUT writing anything, so the next paper can be started. Use outcome "skipped" for the normal case — the paper was read and judged not worth a Wiki page — and "failed" when reading could not be completed. A paper written up with wiki_commit closes itself and does not need this call.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        libraryID: { type: 'number' },
+        itemKey: {
+          type: 'string',
+          description: 'Optional guard: fails if a different paper is the open one.'
+        },
+        outcome: { type: 'string', enum: ['skipped', 'failed'] },
+        note: { type: 'string', description: 'Why, for the reading log.' }
+      },
+      required: ['outcome']
     }
   },
   // Write Tools

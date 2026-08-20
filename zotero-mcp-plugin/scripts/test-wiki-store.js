@@ -1112,13 +1112,31 @@ for (const itemKey of ["META1", "META2", "UNKNOWN1"]) {
     `${itemKey} must not pass wiki_build_from_paper as a full paper`,
   );
 }
+// includeAllChunks was removed: it returned a whole paper in one response.
+await assert.rejects(
+  () =>
+    bodyAwareService.buildFromPaper({
+      libraryID: 1,
+      userRequested: true,
+      itemKey: "BODY1",
+      includeAllChunks: true,
+    }),
+  /includeAllChunks was removed/iu,
+  "the unpaginated whole-paper read must be refused",
+);
 const bodyBuild = await bodyAwareService.buildFromPaper({
   libraryID: 1,
   userRequested: true,
   itemKey: "BODY1",
-  includeAllChunks: true,
 });
 assert.equal(bodyBuild.chunkCount, 1);
+assert.equal(bodyBuild.pagination.totalChunks, 1);
+assert.equal(bodyBuild.pagination.hasMore, false, "a 1-chunk paper is one page");
+assert.equal(
+  bodyBuild.pagination.coverageComplete,
+  true,
+  "and one page is full coverage, so paper_reviewed stays available for it",
+);
 
 const metadataDepthCommit = await bodyAwareService.commit({
   libraryID: 1,

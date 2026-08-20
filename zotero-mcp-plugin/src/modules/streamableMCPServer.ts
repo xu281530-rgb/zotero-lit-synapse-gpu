@@ -1112,6 +1112,9 @@ Nothing in this server returns a whole document in one response. Every reading t
             libraryID,
             userInitiated: true,
             prepareToken: args.prepareToken,
+            readingSessionId: Number.isInteger(args.readingSessionId)
+              ? args.readingSessionId
+              : undefined,
             actions: args.actions,
           });
           break;
@@ -1161,9 +1164,27 @@ Nothing in this server returns a whole document in one response. Every reading t
             doi: args?.doi,
             url: args?.url,
             title: args?.title,
+            cursor: args?.cursor,
+            offset: args?.offset,
+            limit: args?.limit,
             includeAllChunks: args?.includeAllChunks === true,
           });
           break;
+        case 'wiki_finish_reading': {
+          const outcome = args?.outcome;
+          if (outcome !== 'skipped' && outcome !== 'failed') {
+            throw new Error(
+              'outcome must be "skipped" (read but not written up) or "failed" (reading could not be completed). A paper written up with wiki_commit closes itself.',
+            );
+          }
+          result = await getWikiService().finishReading({
+            libraryID: args?.libraryID ?? Zotero.Libraries.userLibraryID,
+            itemKey: args?.itemKey,
+            outcome,
+            note: args?.note,
+          });
+          break;
+        }
 
         // Semantic Search Tools
         case 'semantic_search':

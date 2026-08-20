@@ -4,6 +4,9 @@ import {
   normalizeWikiText,
 } from "./wikiCanonicalizer";
 import { ensureWikiSchema } from "./wikiSchema";
+import { rowColumn as rowValue } from "./wikiRow";
+import { WikiEmbeddingQueue } from "./wikiEmbeddingQueue";
+import { WikiReadingSessions } from "./wikiReadingSession";
 import {
   WIKI_READ_DEPTHS,
   type WikiClaimRecord,
@@ -25,10 +28,6 @@ function numberInRange(value: number, label: string): number {
     throw new Error(`${label} must be between 0 and 1`);
   }
   return value;
-}
-
-function rowValue(row: any, snake: string, camel: string): any {
-  return row?.[snake] ?? row?.[camel];
 }
 
 const WIKI_PERSISTENT_STATUS_KEYS = [
@@ -54,8 +53,29 @@ export class WikiStore {
   private initialized = false;
   private readonly db: WikiDatabase;
 
+  /**
+   * The reading-session ledger and the embedding queue share this store's
+   * database and its one schema-initialisation path, so they are exposed from
+   * here rather than constructed separately. Reach them through the accessors,
+   * which guarantee the schema exists first.
+   */
+  private readonly sessions: WikiReadingSessions;
+  private readonly embeddingQueueStore: WikiEmbeddingQueue;
+
   constructor(db: WikiDatabase) {
     this.db = db;
+    this.sessions = new WikiReadingSessions(db);
+    this.embeddingQueueStore = new WikiEmbeddingQueue(db);
+  }
+
+  async readingSessions(): Promise<WikiReadingSessions> {
+    await this.initialize();
+    return this.sessions;
+  }
+
+  async embeddingQueue(): Promise<WikiEmbeddingQueue> {
+    await this.initialize();
+    return this.embeddingQueueStore;
   }
 
   async initialize(): Promise<void> {
@@ -560,6 +580,7 @@ export class WikiStore {
     const result: WikiCommitResult = {
       createdPages: 0,
       createdClaims: 0,
+      reusedClaims: 0,
       attachedEvidence: 0,
       updatedClaims: 0,
       linkedRelations: 0,
@@ -676,18 +697,61 @@ export class WikiStore {
           const claimText = normalizeWikiText(action.claimText);
           if (!claimText) throw new Error("Claim text must not be blank");
           const normalizedClaim = normalizeWikiName(claimText);
-          const duplicate = Number(
-            await this.db.valueQueryAsync(
-              `SELECT COUNT(*) FROM wiki_claims c
-               JOIN wiki_pages p ON p.page_id = c.page_id
-               WHERE p.library_id = ? AND c.normalized_claim_text = ?`,
-              [input.libraryID, normalizedClaim],
-            ),
+          // An equivalent Claim already in the library is two different
+          // situations, and they need opposite answers.
+          //
+          // On ANOTHER Page it is genuine duplication of knowledge, and the
+          // Wiki refuses it exactly as before.
+          //
+          // On THIS Page it is a re-submission, and refusing it breaks the
+          // workflow that partial commits exist to support: read part of a
+          // paper, commit what you have, read the rest, then submit the paper's
+          // claims. That second submission naturally repeats the claims already
+          // written, and a hard failure rolled back the whole commit - losing
+          // the NEW claims too, and leaving the paper permanently open because
+          // the only commit that could close it always failed. So it folds into
+          // the existing Claim: no second row, Evidence upserted onto it, and
+          // the ref resolves to the Claim that is already there.
+          const duplicateRows = await this.db.queryAsync(
+            `SELECT c.claim_id, c.page_id FROM wiki_claims c
+             JOIN wiki_pages p ON p.page_id = c.page_id
+             WHERE p.library_id = ? AND c.normalized_claim_text = ?
+             LIMIT 1`,
+            [input.libraryID, normalizedClaim],
           );
-          if (duplicate)
-            throw new Error(
-              "An equivalent Claim already exists in this Wiki library",
+          if (duplicateRows[0]) {
+            const existingClaimId = Number(
+              rowValue(duplicateRows[0], "claim_id", "claimId"),
             );
+            const existingPageId = Number(
+              rowValue(duplicateRows[0], "page_id", "pageId"),
+            );
+            if (existingPageId !== pageId) {
+              throw new Error(
+                "An equivalent Claim already exists in this Wiki library",
+              );
+            }
+            numberInRange(action.confidence, "claim confidence");
+            this.assertCoverageSupported(action.coverageLevel, action.evidence);
+            this.assertEpistemicStatusSupported(
+              action.epistemicStatus,
+              action.evidence,
+            );
+            this.assignRef(action.ref, existingClaimId, result.refs);
+            result.reusedClaims += 1;
+            result.attachedEvidence += await this.attachEvidence(
+              existingClaimId,
+              input.libraryID,
+              action.evidence,
+            );
+            if (action.evidence.length) {
+              evidenceChangedClaimIds.add(existingClaimId);
+            }
+            if (!result.affectedClaimIds.includes(existingClaimId)) {
+              result.affectedClaimIds.push(existingClaimId);
+            }
+            continue;
+          }
           numberInRange(action.confidence, "claim confidence");
           this.assertCoverageSupported(action.coverageLevel, action.evidence);
           this.assertEpistemicStatusSupported(
@@ -920,6 +984,23 @@ export class WikiStore {
       }
       for (const pageId of affectedPageIds) {
         await this.refreshPageSummary(pageId);
+      }
+
+      // Queue the derived vectors INSIDE the transaction. The intent to embed
+      // then commits atomically with the claim it describes, so there is no
+      // window in which a claim exists but nothing remembers it needs a
+      // vector - which is what used to make an embedding outage a permanent,
+      // invisible hole in Wiki retrieval.
+      for (const claimId of result.affectedClaimIds) {
+        const claim = await this.db.queryAsync(
+          "SELECT claim_text FROM wiki_claims WHERE claim_id = ?",
+          [claimId],
+        );
+        if (!claim[0]) continue;
+        await this.embeddingQueueStore.enqueue(
+          claimId,
+          String(rowValue(claim[0], "claim_text", "claimText")),
+        );
       }
     });
     return result;
