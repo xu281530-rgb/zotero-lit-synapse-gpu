@@ -329,7 +329,19 @@ export class WikiStore {
            source_reset_generation = excluded.source_reset_generation,
            excerpt = excluded.excerpt,
            read_depth = CASE
-             WHEN ? IS NOT NULL THEN excluded.read_depth
+             -- 1 when the server imposed a depth ceiling on this Evidence,
+             -- in which case excluded.read_depth is already clamped and must
+             -- win even if that lowers the stored depth. 0 otherwise, leaving
+             -- the only-ever-raise rule below in charge.
+             --
+             -- An explicit 0/1 rather than a nullable flag because Zotero.DB
+             -- cannot bind NULL in this position. Its parseQueryAndParams only
+             -- recognises a placeholder preceded by '=', ',' or '(', so a
+             -- placeholder after WHEN is invisible to it, and a NULL bound to
+             -- an invisible placeholder runs its scan off the end and throws
+             -- 'Null parameter provided for a query without placeholders'.
+             -- See scripts/zotero-db-params.mjs.
+             WHEN ? = 1 THEN excluded.read_depth
              WHEN CASE excluded.read_depth
                WHEN 'chunk_local' THEN 0
                WHEN 'section_read' THEN 1
@@ -361,7 +373,7 @@ export class WikiStore {
           persistedReadDepth,
           Date.now(),
           Date.now(),
-          entry.readDepthCeiling ?? null,
+          entry.readDepthCeiling == null ? 0 : 1,
         ],
       );
       const after = Number(

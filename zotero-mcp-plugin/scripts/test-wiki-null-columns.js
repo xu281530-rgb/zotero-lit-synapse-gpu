@@ -30,6 +30,10 @@ import { register } from "node:module";
 
 register("./ts-ext-hooks.mjs", import.meta.url);
 
+// Every query below goes through Zotero's real parameter rules, not
+// node:sqlite's permissive ones - see scripts/zotero-db-params.mjs.
+const { parseQueryAndParams } = await import("./zotero-db-params.mjs");
+
 globalThis.Zotero = { Libraries: { userLibraryID: 1 }, debug: () => undefined };
 globalThis.ztoolkit = { log: () => undefined };
 
@@ -90,7 +94,8 @@ function adapt(sqlite, rowShape) {
       typeof value === "boolean" ? (value ? 1 : 0) : value,
     );
   return {
-    async queryAsync(sql, params = []) {
+    async queryAsync(rawSql, rawParams = []) {
+      const [sql, params] = parseQueryAndParams(rawSql, rawParams);
       const statement = sqlite.prepare(sql);
       const values = normalize(params);
       if (/^\s*(select|pragma|with)\b/iu.test(sql)) {
@@ -100,7 +105,8 @@ function adapt(sqlite, rowShape) {
       statement.run(...values);
       return [];
     },
-    async valueQueryAsync(sql, params = []) {
+    async valueQueryAsync(rawSql, rawParams = []) {
+      const [sql, params] = parseQueryAndParams(rawSql, rawParams);
       const row = sqlite.prepare(sql).get(...normalize(params));
       return row ? Object.values(row)[0] : undefined;
     },

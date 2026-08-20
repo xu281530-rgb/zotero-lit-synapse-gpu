@@ -81,6 +81,8 @@ export class WikiService {
       libraryID: number;
       expiresAt: number;
       preparedPageTitles: Set<string>;
+      /** A commit holding this token is running; a second one must not start. */
+      inFlight?: boolean;
     }
   >();
 
@@ -385,6 +387,9 @@ export class WikiService {
     }
   > {
     this.prunePrepareTokens();
+    let consumedToken: string | undefined;
+    let actions: WikiCommitAction[];
+    let warnings: string[];
     if (input.actions.some((action) => action.action === "CREATE_PAGE")) {
       const prepared = input.prepareToken
         ? this.prepareTokens.get(input.prepareToken)
@@ -410,19 +415,49 @@ export class WikiService {
           );
         }
       }
-      this.prepareTokens.delete(input.prepareToken!);
+      // A token is spent by a DURABLE write, not by an attempt. It used to be
+      // deleted here, before hydration and before the transaction, so any
+      // failure on the way in - a validation error, a transient database
+      // fault - burned it and forced a fresh wiki_prepare_update even though
+      // nothing had been written. Marking it in flight instead keeps a retry
+      // possible while still making the token single-use: it is deleted the
+      // moment the transaction is durable, and a concurrent caller holding the
+      // same token is refused rather than allowed to write twice.
+      if (prepared.inFlight) {
+        throw new Error(
+          "A wiki_commit using this prepareToken is already running. Wait for it to finish; if it failed, retry with the same token.",
+        );
+      }
+      prepared.inFlight = true;
+      consumedToken = input.prepareToken!;
     }
-    const { actions, warnings } = await this.hydrateActions(
-      input.actions,
-      input.libraryID,
-    );
 
-    // THE DURABLE BOUNDARY. When this resolves the write is permanent, and the
-    // vectors those claims still need are queued in the same transaction. The
-    // caller is answered from here; embedding happens afterwards, off the
-    // request, so a slow or broken embedding backend can no longer turn a
-    // successful commit into a client-side timeout of unknown outcome.
-    const result = await this.store.commit({ ...input, actions });
+    let result: WikiCommitResult;
+    try {
+      const hydrated = await this.hydrateActions(
+        input.actions,
+        input.libraryID,
+      );
+      actions = hydrated.actions;
+      warnings = hydrated.warnings;
+
+      // THE DURABLE BOUNDARY. When this resolves the write is permanent, and
+      // the vectors those claims still need are queued in the same
+      // transaction. The caller is answered from here; embedding happens
+      // afterwards, off the request, so a slow or broken embedding backend can
+      // no longer turn a successful commit into a client-side timeout of
+      // unknown outcome.
+      result = await this.store.commit({ ...input, actions });
+    } catch (error) {
+      // Nothing was written, so hand the token back for a straight retry.
+      if (consumedToken) {
+        const prepared = this.prepareTokens.get(consumedToken);
+        if (prepared) prepared.inFlight = false;
+      }
+      throw error;
+    }
+    // Durable. The token can never be spent again.
+    if (consumedToken) this.prepareTokens.delete(consumedToken);
 
     const readingSession = await this.settleReadingSession(input, actions);
 

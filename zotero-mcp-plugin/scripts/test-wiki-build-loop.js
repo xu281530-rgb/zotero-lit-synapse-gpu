@@ -24,6 +24,12 @@ import { register } from "node:module";
 
 register("./ts-ext-hooks.mjs", import.meta.url);
 
+// Every query below goes through Zotero's real parameter rules, not
+// node:sqlite's permissive ones - see scripts/zotero-db-params.mjs.
+const { parseQueryAndParams, placeholderVisibility } = await import(
+  "./zotero-db-params.mjs",
+);
+
 globalThis.Zotero = { Libraries: { userLibraryID: 1 } };
 globalThis.ztoolkit = { log: () => undefined };
 
@@ -59,14 +65,16 @@ const indexedChunks = new Map([
 function adapt(sqlite) {
   let depth = 0;
   return {
-    async queryAsync(sql, params = []) {
+    async queryAsync(rawSql, rawParams = []) {
+      const [sql, params] = parseQueryAndParams(rawSql, rawParams);
       const statement = sqlite.prepare(sql);
       const values = params.map((v) => (typeof v === "boolean" ? (v ? 1 : 0) : v));
       if (/^\s*(select|pragma|with)\b/iu.test(sql)) return statement.all(...values);
       statement.run(...values);
       return [];
     },
-    async valueQueryAsync(sql, params = []) {
+    async valueQueryAsync(rawSql, rawParams = []) {
+      const [sql, params] = parseQueryAndParams(rawSql, rawParams);
       const row = sqlite.prepare(sql).get(...params);
       return row ? Object.values(row)[0] : undefined;
     },
@@ -901,6 +909,226 @@ for (const outcome of ["skipped", "failed"]) {
   });
   assert.equal(abandoned.outcome, "failed");
   assert.equal(await sessions.getOpen(1), null);
+}
+
+// =========================================================================
+// 3g. Evidence depth control parameter, and Zotero's real binding rules
+// =========================================================================
+
+{
+  // The statement that used to throw. Its control placeholder sits after WHEN,
+  // where Zotero's NULL rewriter cannot see it, so it must never be bound null.
+  const evidenceInsert = fs
+    .readFileSync("src/modules/wiki/wikiStore.ts", "utf8")
+    .match(/INSERT INTO wiki_evidence[\s\S]*?last_verified_at = excluded\.last_verified_at/u)[0];
+  const visibility = placeholderVisibility(evidenceInsert);
+  assert.ok(
+    visibility.invisible >= 1,
+    "the read_depth control placeholder is invisible to Zotero's NULL rewriter",
+  );
+  assert.throws(
+    () =>
+      parseQueryAndParams(evidenceInsert, [
+        ...Array.from({ length: visibility.total - 1 }, () => 1),
+        null,
+      ]),
+    /Null parameter provided for a query without placeholders/u,
+    "binding null at that placeholder is exactly the reported failure",
+  );
+  assert.doesNotThrow(
+    () =>
+      parseQueryAndParams(evidenceInsert, [
+        ...Array.from({ length: visibility.total - 1 }, () => 1),
+        0,
+      ]),
+    "an explicit 0 binds cleanly",
+  );
+
+  // --- Full-text Evidence: no ceiling. This is the case that failed. ---
+  await readToEnd("SHORTPPR");
+  const fullText = await commitClaim({
+    title: "Depth control full text",
+    itemKey: "SHORTPPR",
+    claimText: "Fully read evidence commits without a null control parameter.",
+    coverageLevel: "paper_reviewed",
+    readDepth: "paper_reviewed",
+  });
+  const fullClaim = await store.getClaim(fullText.refs["c"]);
+  assert.equal(
+    fullClaim.evidence[0].readDepth,
+    "paper_reviewed",
+    "a fully read paper stores full depth",
+  );
+
+  // --- Depth only ever rises on re-attach when there is no ceiling ---
+  const claimId = fullText.refs["c"];
+  await service.commit({
+    libraryID: 1,
+    userInitiated: true,
+    actions: [
+      {
+        action: "ATTACH_EVIDENCE",
+        claimId,
+        evidence: [
+          {
+            libraryID: 1,
+            itemKey: "SHORTPPR",
+            excerpt: "SHORTPPR passage 0",
+            evidenceRole: "SUPPORTS",
+            readDepth: "chunk_local",
+          },
+        ],
+      },
+    ],
+  });
+  const afterLower = await store.getClaim(claimId);
+  assert.equal(
+    afterLower.evidence[0].readDepth,
+    "paper_reviewed",
+    "re-attaching shallower Evidence must NOT lower the stored depth",
+  );
+  assert.equal(
+    count("SELECT COUNT(*) AS n FROM wiki_evidence WHERE claim_id = ?", claimId),
+    1,
+    "and it upserts rather than duplicating",
+  );
+
+  // --- A server-imposed ceiling DOES force the depth down ---
+  // bodyState leaves 'body', so hydrateEvidence sets readDepthCeiling and the
+  // control parameter becomes 1.
+  const healthyStatus = vectorStore.getIndexStatus;
+  vectorStore.getIndexStatus = async (k) => ({
+    contentHash: `content-${k}`,
+    sourceKind: "metadata-only",
+  });
+  await service.commit({
+    libraryID: 1,
+    userInitiated: true,
+    actions: [
+      {
+        action: "ATTACH_EVIDENCE",
+        claimId,
+        evidence: [
+          {
+            libraryID: 1,
+            itemKey: "SHORTPPR",
+            excerpt: "SHORTPPR passage 0",
+            evidenceRole: "SUPPORTS",
+            readDepth: "paper_reviewed",
+          },
+        ],
+      },
+    ],
+  });
+  vectorStore.getIndexStatus = healthyStatus;
+
+  const afterCeiling = await store.getClaim(claimId);
+  assert.equal(
+    afterCeiling.evidence[0].readDepth,
+    "chunk_local",
+    "a server-imposed ceiling must force the stored depth back down",
+  );
+  assert.equal(
+    count("SELECT COUNT(*) AS n FROM wiki_evidence WHERE claim_id = ?", claimId),
+    1,
+    "still one Evidence row",
+  );
+
+  await service.finishReading({ libraryID: 1, outcome: "skipped" }).catch(() => {});
+}
+
+// =========================================================================
+// 3h. A prepareToken survives a failure that wrote nothing
+// =========================================================================
+
+{
+  const prepared = await service.prepareUpdate({
+    libraryID: 1,
+    query: "Token retry page",
+    proposedPageTitles: ["Token retry page"],
+  });
+  const token = prepared.prepareToken;
+  const pagesBefore = count("SELECT COUNT(*) AS n FROM wiki_pages");
+
+  const actionsFor = (claimText) => [
+    { action: "CREATE_PAGE", ref: "p", canonicalTitle: "Token retry page" },
+    {
+      action: "ADD_CLAIM",
+      ref: "c",
+      pageId: "p",
+      claimText,
+      claimType: "mechanism",
+      epistemicStatus: "provisional",
+      coverageLevel: "chunk_local",
+      confidence: 0.6,
+      evidence: [
+        {
+          libraryID: 1,
+          itemKey: "PAPERB01",
+          excerpt: "PAPERB01 passage 0",
+          evidenceRole: "SUPPORTS",
+          readDepth: "chunk_local",
+        },
+      ],
+    },
+  ];
+
+  // A failure inside the transaction: nothing is written.
+  await assert.rejects(
+    () =>
+      service.commit({
+        libraryID: 1,
+        userInitiated: true,
+        prepareToken: token,
+        actions: actionsFor(""),
+      }),
+    /Claim text must not be blank/iu,
+  );
+  assert.equal(
+    count("SELECT COUNT(*) AS n FROM wiki_pages"),
+    pagesBefore,
+    "the failed attempt wrote nothing",
+  );
+
+  // The SAME token still works - no second wiki_prepare_update required.
+  const retried = await service.commit({
+    libraryID: 1,
+    userInitiated: true,
+    prepareToken: token,
+    actions: actionsFor("A transient failure must not burn the prepare token."),
+  });
+  assert.equal(retried.committed, true, "the token survives a failed attempt");
+  assert.equal(
+    count("SELECT COUNT(*) AS n FROM wiki_pages"),
+    pagesBefore + 1,
+    "and the retry writes exactly one Page",
+  );
+
+  // But a SUCCESSFUL commit spends it: it cannot be replayed.
+  await assert.rejects(
+    () =>
+      service.commit({
+        libraryID: 1,
+        userInitiated: true,
+        prepareToken: token,
+        actions: [
+          {
+            action: "CREATE_PAGE",
+            ref: "p2",
+            canonicalTitle: "Token retry page",
+          },
+        ],
+      }),
+    /requires a current wiki_prepare_update token/iu,
+    "a spent token cannot be replayed into a second write",
+  );
+  assert.equal(
+    count("SELECT COUNT(*) AS n FROM wiki_pages"),
+    pagesBefore + 1,
+    "so no duplicate Page is created",
+  );
+
+  await service.finishReading({ libraryID: 1, outcome: "skipped" }).catch(() => {});
 }
 
 // =========================================================================
