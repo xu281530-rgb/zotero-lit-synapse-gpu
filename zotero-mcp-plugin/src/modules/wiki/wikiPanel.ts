@@ -652,11 +652,17 @@ async function renderWikiPanelContent(
         element(doc, "span", "", claimStatus(claim)),
         element(doc, "span", "", `${claim.evidence.length} 条证据`),
       );
-      open.append(
+      // The stack lives in a wrapper, never on the button itself: Gecko does
+      // not honour display:grid on <button>, and drops the children into the
+      // button's own anonymous box, where they lay out side by side and spill
+      // out of the border box - the overlap this card was built to avoid.
+      const openBody = element(doc, "span", "zmp-wiki-claim-body");
+      openBody.append(
         head,
         element(doc, "p", "zmp-wiki-claim-text", claim.claimText),
         meta,
       );
+      open.append(openBody);
       open.addEventListener("click", () => showEvidence(claim, card));
       const remove = element(doc, "button", "zmp-wiki-claim-remove", "×");
       remove.type = "button";
@@ -685,7 +691,10 @@ async function renderWikiPanelContent(
     const entry = element(doc, "button", "zmp-wiki-page-entry");
     entry.type = "button";
     entry.setAttribute("aria-current", "false");
-    entry.append(
+    // Same wrapper rule as the claim card: the two rows stack inside a span,
+    // because a <button> is not a grid container in Gecko.
+    const entryBody = element(doc, "span", "zmp-wiki-entry-body");
+    entryBody.append(
       element(doc, "strong", "zmp-wiki-page-entry-title", page.canonicalTitle),
       element(
         doc,
@@ -694,6 +703,7 @@ async function renderWikiPanelContent(
         `${page.claims.length} 条论断 · 版本 ${page.version}`,
       ),
     );
+    entry.append(entryBody);
     entry.addEventListener("click", () => showPage(page, entry));
     pageList.append(entry);
     pageEntries.set(page.pageId, entry);

@@ -156,6 +156,42 @@ for (const rule of [
   assert.ok(css.includes(rule), `the Wiki stylesheet must style ${rule}`);
 }
 
+// Gecko does not lay out <button> as a grid or flex container: the children
+// fall into the button's own anonymous box, run side by side and spill out of
+// the border box. Blink honours it, so this only ever breaks inside Zotero -
+// which is exactly how it shipped once. Every element the panel builds as a
+// <button> must therefore stay display:block and keep its stack in a wrapper.
+const BUTTON_CLASSES = [
+  "zmp-wiki-page-entry",
+  "zmp-wiki-claim-open",
+  "zmp-wiki-command",
+  "zmp-wiki-alias-chip",
+  "zmp-wiki-claim-remove",
+];
+for (const name of BUTTON_CLASSES) {
+  assert.ok(
+    panel.includes(name),
+    `${name} is no longer rendered; drop it from this guard or fix the panel`,
+  );
+  assert.doesNotMatch(
+    css,
+    new RegExp(`^\\.${name}\\s*\\{[^}]*display:\\s*(grid|flex)`, "msu"),
+    `.${name} is a <button>; Gecko ignores display:grid/flex on it, so the stack must live in a wrapper`,
+  );
+}
+for (const wrapper of [".zmp-wiki-entry-body", ".zmp-wiki-claim-body"]) {
+  assert.match(
+    css,
+    new RegExp(`^\\${wrapper}\\s*\\{[^}]*display:\\s*grid`, "msu"),
+    `${wrapper} must carry the grid the button cannot`,
+  );
+}
+assert.ok(
+  panel.includes("zmp-wiki-entry-body") &&
+    panel.includes("zmp-wiki-claim-body"),
+  "the panel must render the wrappers the stylesheet lays out",
+);
+
 // Claims must never collapse into one another: each card is spaced, wraps its
 // own text, and has no fixed height to clip it.
 assert.match(
