@@ -320,7 +320,8 @@ assert.match(
 );
 for (const capability of [
   "GraphMode",
-  "setVisibleKinds",
+  "setVisibleLinkStyles",
+  "setShowIsolated",
   "resetView",
   "setAutoRotate",
   "requestAnimationFrame",
@@ -339,20 +340,39 @@ assert.match(
   /const depth = Math\.max\(60, cameraDistance - z2 \* depthScale\)/u,
   "the camera must divide by depth, which is what makes the view perspective",
 );
-for (const kind of ["page", "claim", "evidence"]) {
-  assert.match(
-    graph3D,
-    new RegExp(`^\\s*${kind}: `, "mu"),
-    `the space must distinguish ${kind} nodes`,
-  );
-}
-for (const relation of ["supports", "contradicts", "related", "structure"]) {
+
+// One node is one document, and a link is a relation between two documents.
+// Both must be selectable: "what do these two papers conclude in common" is a
+// question about the link, and answering it is the whole point of drawing one.
+assert.ok(
+  graph3D.includes("onSelectNode") && graph3D.includes("onSelectLink"),
+  "both documents and relations must report selections back to the panel",
+);
+assert.match(
+  graph3D,
+  /function pickLink\(/u,
+  "relations must be hit-tested, or a link cannot be opened",
+);
+assert.match(
+  graph3D,
+  /function distanceToCurve\(/u,
+  "a curved relation needs curve-aware hit testing, not a straight-line test",
+);
+for (const style of ["solid", "dashed"]) {
   assert.ok(
-    graph3D.includes(`${relation}:`),
-    `relations must be coloured by ${relation}`,
+    graph3D.includes(`"${style}"`),
+    `relations must distinguish the ${style} kind`,
   );
 }
-for (const control of ["重置视角", "自动旋转", "页面", "论断", "证据"]) {
+assert.ok(
+  panel.includes("getDocumentGraph") && panel.includes("claimIds"),
+  "the shared claims a relation is made of must come from the document graph",
+);
+assert.ok(
+  panel.includes("item:"),
+  "graph nodes must be keyed by Zotero item, because a node is a document",
+);
+for (const control of ["重置视角", "自动旋转", "共享论断", "同一条目", "孤立文献"]) {
   assert.ok(
     panel.includes(control),
     `the graph toolbar must expose: ${control}`,

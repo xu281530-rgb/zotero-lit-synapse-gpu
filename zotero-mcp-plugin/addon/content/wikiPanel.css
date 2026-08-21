@@ -785,14 +785,89 @@
   vertical-align: baseline;
   background: currentColor;
 }
-.zmp-wiki-graph-legend .legend-page {
+/* The legend describes links, so its swatch is a line, not a dot. */
+.zmp-wiki-graph-legend span::before {
+  width: 14px;
+  height: 0;
+  margin-bottom: 3px;
+  border-radius: 0;
+  border-top: 2px solid currentColor;
+  background: none;
+}
+.zmp-wiki-graph-legend .legend-solid {
+  color: #67727e;
+}
+.zmp-wiki-graph-legend .legend-dashed {
+  color: #8a8275;
+}
+.zmp-wiki-graph-legend .legend-dashed::before {
+  border-top-style: dashed;
+}
+.zmp-wiki-graph-legend .legend-conflict {
+  color: var(--wiki-danger);
+}
+
+/* One knowledge point in the graph rail: what it claims, and whose side the
+   document is on. */
+.zmp-wiki-graph-claim {
+  margin: 8px 0 12px;
+  padding: 9px 10px;
+  background: var(--wiki-paper);
+  border: 1px solid var(--wiki-border);
+  border-left: 2px solid var(--wiki-border-strong);
+  border-radius: var(--wiki-radius-sm);
+}
+.zmp-wiki-graph-claim.is-conflict {
+  border-left-color: rgba(164, 87, 78, 0.5);
+}
+.zmp-wiki-graph-claim-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.zmp-wiki-graph-claim .zmp-wiki-command {
+  margin: 0;
+  padding: 6px 8px;
+  background: transparent;
+  border-color: transparent;
+}
+.zmp-wiki-graph-claim .zmp-wiki-command:hover {
+  background: var(--wiki-highlight);
+  border-color: var(--wiki-border);
+}
+.zmp-wiki-role-chip {
+  flex: none;
+  padding: 1px 8px;
   color: var(--wiki-accent);
+  background: var(--wiki-accent-soft);
+  border-radius: var(--wiki-radius-pill);
+  font: 700 10.5px/1.7 var(--wiki-font-hei);
+  letter-spacing: 0.06em;
 }
-.zmp-wiki-graph-legend .legend-claim {
-  color: #8c7a5c;
+.zmp-wiki-role-chip.is-conflict {
+  color: var(--wiki-danger);
+  background: var(--wiki-danger-soft);
 }
-.zmp-wiki-graph-legend .legend-evidence {
-  color: #7e8794;
+.zmp-wiki-graph-stances {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--wiki-border);
+}
+.zmp-wiki-graph-stance {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.zmp-wiki-graph-stance-name {
+  flex: 1;
+  min-width: 0;
+  color: var(--wiki-muted);
+  font: 11.5px/1.6 var(--wiki-font-ui);
 }
 .zmp-wiki-graph-details {
   min-width: 0;
@@ -974,10 +1049,10 @@
       var(--wiki-paper) 3px
     );
   }
-  .zmp-wiki-graph-legend .legend-claim {
-    color: #c3a879;
+  .zmp-wiki-graph-legend .legend-solid {
+    color: #96a2b4;
   }
-  .zmp-wiki-graph-legend .legend-evidence {
-    color: #939dab;
+  .zmp-wiki-graph-legend .legend-dashed {
+    color: #a79e90;
   }
 }

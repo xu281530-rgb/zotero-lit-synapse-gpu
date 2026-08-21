@@ -1,61 +1,66 @@
 /**
  * A dependency-free 3D renderer for the Wiki knowledge graph.
  *
- * The graph used to be a ring of circles on a 2D canvas: every node sat on one
- * circle, edges were straight chords, and nothing about the picture said which
- * concepts were central and which were peripheral. This module replaces that
- * with a real three-dimensional layout - nodes carry x/y/z, a force pass
- * settles them onto concentric shells (Page inside, Claim in the middle,
- * Evidence outside), and every frame rotates, projects and depth-sorts them
- * through a perspective camera.
+ * The picture it draws is a network of documents. One node is one piece of
+ * literature; one link is a knowledge relation between two pieces. Both are
+ * selectable, because the question a reader asks of this graph is either "what
+ * does this paper claim?" or "what do these two papers agree and disagree
+ * about?" - and the second question lives on the link, not on either end.
  *
- * Why not Three.js: the renderer runs inside the privileged Zotero main
- * window, where a WebGL context is not guaranteed, and the whole plugin ships
- * as a single bundled script that Zotero parses at startup. Adding ~600 KB of
- * WebGL engine to every launch to draw a few hundred spheres is the wrong
- * trade, so the projection maths lives here and the drawing goes through
- * Canvas 2D, which is immediate-mode and therefore rebuilds no geometry
- * between frames.
+ * The renderer is deliberately ignorant of what any of that means. It receives
+ * nodes carrying a depth, a weight and a colour group, and links carrying a
+ * style and a tone; it settles them into a three-dimensional layout, rotates,
+ * projects and depth-sorts them through a perspective camera, and reports
+ * clicks back through callbacks. Every domain decision - which documents are
+ * central, which relation counts as a conflict - is made by the panel.
  *
- * This module is presentation only. It never touches the Wiki store, the MCP
- * protocol or any Claim/Evidence state; it receives a plain data snapshot and
- * reports clicks back through callbacks.
+ * Why not Three.js: this runs inside the privileged Zotero main window, where
+ * a WebGL context is not guaranteed, and the plugin ships as a single bundled
+ * script that Zotero parses at startup. Adding ~600 KB of WebGL engine to
+ * every launch to draw a few hundred spheres is the wrong trade, so the
+ * projection maths lives here and the drawing goes through Canvas 2D, which is
+ * immediate-mode and therefore rebuilds no geometry between frames.
  */
 
 export type GraphMode = "2d" | "3d";
 
-export type GraphNodeKind = "page" | "claim" | "evidence";
+/** Solid links are shared claims; dashed links are shared knowledge entries. */
+export type GraphLinkStyle = "solid" | "dashed";
 
-export type GraphEdgeKind =
-  | "supports"
-  | "contradicts"
-  | "related"
-  | "structure";
+/** A link carrying at least one contradiction reads as contested. */
+export type GraphLinkTone = "neutral" | "conflict";
 
 export interface GraphNodeInput {
   id: string;
-  kind: GraphNodeKind;
   label: string;
-  /** Second tooltip line: page title, claim status, source item key. */
+  /** Second tooltip line: creator, year, how many claims cite it. */
   detail?: string;
-  /** Relative importance; drives the drawn radius within its kind. */
+  /** Relative importance; drives the drawn radius. */
   weight?: number;
-  /** Marks a node whose evidence contradicts, so it reads as contested. */
-  contested?: boolean;
-  /** Opaque payload handed back through onSelect. */
+  /** 0 places the node in the core, 1 out at the rim. */
+  depth?: number;
+  /** Colour bucket, resolved against the current theme. */
+  group?: number;
+  /** Drawn faint: a document nothing else connects to. */
+  dim?: boolean;
+  /** Opaque payload handed back through onSelectNode. */
   payload?: unknown;
 }
 
-export interface GraphEdgeInput {
+export interface GraphLinkInput {
   source: string;
   target: string;
-  kind: GraphEdgeKind;
+  style?: GraphLinkStyle;
+  tone?: GraphLinkTone;
+  /** Drives line width; typically the number of shared claims. */
   strength?: number;
+  /** Opaque payload handed back through onSelectLink. */
+  payload?: unknown;
 }
 
 export interface GraphData {
   nodes: GraphNodeInput[];
-  edges: GraphEdgeInput[];
+  links: GraphLinkInput[];
 }
 
 export interface Graph3DOptions {
@@ -63,7 +68,8 @@ export interface Graph3DOptions {
   canvas: HTMLCanvasElement;
   /** Absolutely positioned overlay moved with transform on hover. */
   tooltip?: HTMLElement;
-  onSelect?: (node: GraphNodeInput | null) => void;
+  onSelectNode?: (node: GraphNodeInput | null) => void;
+  onSelectLink?: (link: GraphLinkInput) => void;
 }
 
 export interface Graph3DController {
@@ -72,8 +78,12 @@ export interface Graph3DController {
   getMode(): GraphMode;
   setAutoRotate(on: boolean): void;
   isAutoRotate(): boolean;
-  setVisibleKinds(kinds: readonly GraphNodeKind[]): void;
-  getVisibleKinds(): GraphNodeKind[];
+  /** Which link styles are drawn; hiding a style also hides its picking. */
+  setVisibleLinkStyles(styles: readonly GraphLinkStyle[]): void;
+  getVisibleLinkStyles(): GraphLinkStyle[];
+  /** Whether documents with no links at all are drawn. */
+  setShowIsolated(show: boolean): void;
+  isShowingIsolated(): boolean;
   selectNode(id: string | null): void;
   resetView(): void;
   refreshTheme(): void;
@@ -83,9 +93,11 @@ export interface Graph3DController {
 
 interface RuntimeNode {
   input: GraphNodeInput;
-  kind: GraphNodeKind;
   shell: number;
   radius: number;
+  group: number;
+  dim: boolean;
+  degree: number;
   x: number;
   y: number;
   z: number;
@@ -100,11 +112,17 @@ interface RuntimeNode {
   visible: boolean;
 }
 
-interface RuntimeEdge {
+interface RuntimeLink {
+  input: GraphLinkInput;
   source: RuntimeNode;
   target: RuntimeNode;
-  kind: GraphEdgeKind;
+  style: GraphLinkStyle;
+  tone: GraphLinkTone;
   strength: number;
+  /** Projected control point of the drawn curve, for hit testing. */
+  cx: number;
+  cy: number;
+  visible: boolean;
 }
 
 interface Palette {
@@ -112,46 +130,37 @@ interface Palette {
   backgroundEdge: string;
   text: string;
   muted: string;
-  page: string;
-  claim: string;
-  evidence: string;
-  contested: string;
-  supports: string;
-  contradicts: string;
-  related: string;
-  structure: string;
+  neutral: string;
+  conflict: string;
   halo: string;
+  groups: string[];
 }
 
 const BASE_RADIUS = 300;
-
-/** Concentric shells: the depth hierarchy the design asks for, as one number. */
-const SHELL: Record<GraphNodeKind, number> = {
-  page: 0.26,
-  claim: 0.7,
-  evidence: 1.14,
-};
-
-const NODE_RADIUS: Record<GraphNodeKind, [number, number]> = {
-  page: [11, 24],
-  claim: [7, 14],
-  evidence: [4, 7],
-};
+const NODE_RADIUS: [number, number] = [5, 21];
+/** How many documents may carry a caption before collision thinning runs. */
+const LABEL_BUDGET = 40;
+/** Core shell for the best-connected documents, rim for the loneliest. */
+const SHELL: [number, number] = [0.3, 1.06];
 
 const LIGHT_PALETTE: Palette = {
   background: "#FBF9F3",
   backgroundEdge: "#DED5C1",
   text: "#25231F",
   muted: "#777168",
-  page: "#536F62",
-  claim: "#8C7A5C",
-  evidence: "#7E8794",
-  contested: "#A4574E",
-  supports: "rgba(83, 111, 98, 0.52)",
-  contradicts: "rgba(164, 87, 78, 0.58)",
-  related: "rgba(110, 120, 135, 0.38)",
-  structure: "rgba(122, 110, 90, 0.26)",
+  neutral: "rgba(103, 114, 126, 0.42)",
+  conflict: "rgba(164, 87, 78, 0.6)",
   halo: "rgba(255, 255, 255, 0.72)",
+  groups: [
+    "#536F62",
+    "#8C7A5C",
+    "#6B7A8F",
+    "#8A6A72",
+    "#6F7B55",
+    "#7E6E8C",
+    "#94795A",
+    "#5E7C7C",
+  ],
 };
 
 const DARK_PALETTE: Palette = {
@@ -159,15 +168,19 @@ const DARK_PALETTE: Palette = {
   backgroundEdge: "#141310",
   text: "#ECE6DA",
   muted: "#A79E90",
-  page: "#8FB3A2",
-  claim: "#C3A879",
-  evidence: "#939DAB",
-  contested: "#D98C81",
-  supports: "rgba(143, 179, 162, 0.5)",
-  contradicts: "rgba(217, 140, 129, 0.55)",
-  related: "rgba(150, 162, 180, 0.34)",
-  structure: "rgba(198, 184, 158, 0.2)",
+  neutral: "rgba(150, 162, 180, 0.38)",
+  conflict: "rgba(217, 140, 129, 0.58)",
   halo: "rgba(255, 255, 255, 0.34)",
+  groups: [
+    "#8FB3A2",
+    "#C3A879",
+    "#93A3BC",
+    "#C0949C",
+    "#9EAE7C",
+    "#AC9BC0",
+    "#C6A47F",
+    "#88AEAE",
+  ],
 };
 
 function hashSeed(text: string): number {
@@ -199,15 +212,14 @@ function mix(from: number, to: number, amount: number): number {
 }
 
 /**
- * Settle the nodes into three-dimensional shells.
+ * Settle the documents into three-dimensional shells.
  *
- * Repulsion spreads them, edge springs pull related knowledge together, and a
- * radial term keeps each kind near its own shell so the hierarchy survives the
- * simulation. Iterations are capped by node count: 500 nodes still settle in a
- * few hundred milliseconds, and the pass runs once per data load, never per
- * frame.
+ * Repulsion spreads them, link springs pull related literature together, and a
+ * radial term holds each node near the shell its connectivity earned, so the
+ * well-cited core stays in the middle and isolated papers drift to the rim.
+ * The pass runs once per data load, never per frame.
  */
-function layout(nodes: RuntimeNode[], edges: RuntimeEdge[]): void {
+function layout(nodes: RuntimeNode[], links: RuntimeLink[]): void {
   const count = nodes.length;
   if (!count) return;
   const random = mulberry32(
@@ -218,7 +230,7 @@ function layout(nodes: RuntimeNode[], edges: RuntimeEdge[]): void {
     const y = 1 - (index / Math.max(1, count - 1)) * 2;
     const ring = Math.sqrt(Math.max(0, 1 - y * y));
     const theta = golden * index;
-    const jitter = 0.22;
+    const jitter = 0.24;
     const scale = node.shell * BASE_RADIUS;
     node.x = (Math.cos(theta) * ring + (random() - 0.5) * jitter) * scale;
     node.y = (y + (random() - 0.5) * jitter) * scale;
@@ -260,15 +272,19 @@ function layout(nodes: RuntimeNode[], edges: RuntimeEdge[]): void {
         b.vz -= uz;
       }
     }
-    for (const edge of edges) {
-      const a = edge.source;
-      const b = edge.target;
-      const rest = edge.kind === "structure" ? 74 : 132;
+    for (const link of links) {
+      const a = link.source;
+      const b = link.target;
+      // A shared claim is a stronger tie than a shared knowledge entry.
+      const rest = link.style === "dashed" ? 168 : 118;
       const dx = b.x - a.x;
       const dy = b.y - a.y;
       const dz = b.z - a.z;
       const distance = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
-      const pull = ((distance - rest) / distance) * 0.045 * edge.strength;
+      const pull =
+        ((distance - rest) / distance) *
+        (link.style === "dashed" ? 0.016 : 0.045) *
+        link.strength;
       a.vx += dx * pull;
       a.vy += dy * pull;
       a.vz += dz * pull;
@@ -295,14 +311,52 @@ function layout(nodes: RuntimeNode[], edges: RuntimeEdge[]): void {
   }
 }
 
+/** Distance from a point to a quadratic curve, sampled finely enough to click. */
+function distanceToCurve(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  cx: number,
+  cy: number,
+  bx: number,
+  by: number,
+): number {
+  let best = Infinity;
+  let previousX = ax;
+  let previousY = ay;
+  for (let step = 1; step <= 12; step += 1) {
+    const t = step / 12;
+    const inverse = 1 - t;
+    const x = inverse * inverse * ax + 2 * inverse * t * cx + t * t * bx;
+    const y = inverse * inverse * ay + 2 * inverse * t * cy + t * t * by;
+    const dx = x - previousX;
+    const dy = y - previousY;
+    const lengthSquared = dx * dx + dy * dy || 1;
+    const along = clamp(
+      ((px - previousX) * dx + (py - previousY) * dy) / lengthSquared,
+      0,
+      1,
+    );
+    best = Math.min(
+      best,
+      Math.hypot(px - (previousX + along * dx), py - (previousY + along * dy)),
+    );
+    previousX = x;
+    previousY = y;
+  }
+  return best;
+}
+
 export function createGraph3D(options: Graph3DOptions): Graph3DController {
   const { win, canvas } = options;
   const doc = canvas.ownerDocument as Document;
   let palette = LIGHT_PALETTE;
   let nodes: RuntimeNode[] = [];
-  let edges: RuntimeEdge[] = [];
+  let links: RuntimeLink[] = [];
   let byId = new Map<string, RuntimeNode>();
-  let visibleKinds = new Set<GraphNodeKind>(["page", "claim", "evidence"]);
+  let visibleStyles = new Set<GraphLinkStyle>(["solid", "dashed"]);
+  let showIsolated = true;
 
   let yaw = 0.6;
   let pitch = -0.32;
@@ -319,8 +373,10 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
   let dragMoved = false;
   let lastX = 0;
   let lastY = 0;
-  let hovered: RuntimeNode | null = null;
-  let selected: RuntimeNode | null = null;
+  let hoveredNode: RuntimeNode | null = null;
+  let hoveredLink: RuntimeLink | null = null;
+  let selectedNode: RuntimeNode | null = null;
+  let selectedLink: RuntimeLink | null = null;
   let frame = 0;
   let disposed = false;
 
@@ -340,6 +396,27 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
     } catch {
       palette = LIGHT_PALETTE;
     }
+  }
+
+  function applyVisibility(): void {
+    for (const node of nodes) {
+      const connected = links.some(
+        (link) =>
+          visibleStyles.has(link.style) &&
+          (link.source === node || link.target === node),
+      );
+      node.visible = connected || showIsolated;
+    }
+    for (const link of links) {
+      link.visible =
+        visibleStyles.has(link.style) &&
+        link.source.visible &&
+        link.target.visible;
+    }
+    if (hoveredNode && !hoveredNode.visible) hoveredNode = null;
+    if (selectedNode && !selectedNode.visible) selectedNode = null;
+    if (hoveredLink && !hoveredLink.visible) hoveredLink = null;
+    if (selectedLink && !selectedLink.visible) selectedLink = null;
   }
 
   function animating(): boolean {
@@ -403,8 +480,7 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
   }
 
   function nodeColor(node: RuntimeNode): string {
-    if (node.input.contested) return palette.contested;
-    return palette[node.kind];
+    return palette.groups[node.group % palette.groups.length];
   }
 
   /** Far geometry fades into the background: cheap fog, real depth cue. */
@@ -478,21 +554,25 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
     }
 
     context.lineCap = "round";
-    const visibleEdges = edges.filter(
-      (edge) => edge.source.visible && edge.target.visible,
-    );
-    visibleEdges.sort(
+    const drawable = links.filter((link) => link.visible);
+    drawable.sort(
       (a, b) =>
         (b.source.depth + b.target.depth) / 2 -
         (a.source.depth + a.target.depth) / 2,
     );
-    for (const edge of visibleEdges) {
-      const a = edge.source;
-      const b = edge.target;
-      const focused = hovered !== null && (hovered === a || hovered === b);
+    for (const link of drawable) {
+      const a = link.source;
+      const b = link.target;
+      const focused =
+        link === hoveredLink ||
+        link === selectedLink ||
+        hoveredNode === a ||
+        hoveredNode === b ||
+        selectedNode === a ||
+        selectedNode === b;
       const alpha =
         depthAlpha((a.depth + b.depth) / 2, cameraDistance) *
-        (focused ? 1 : 0.7);
+        (focused ? 1 : 0.68);
       // Bow the link away from the origin so parallel relations stay legible
       // and the space reads as curved rather than as a wire cage.
       projectPoint(
@@ -505,27 +585,38 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
         cameraDistance,
         control,
       );
+      link.cx = control.x;
+      link.cy = control.y;
       context.globalAlpha = alpha;
-      context.strokeStyle = palette[edge.kind];
+      context.strokeStyle =
+        link.tone === "conflict" ? palette.conflict : palette.neutral;
       context.lineWidth = clamp(
-        (0.7 + edge.strength * 0.45) * (focused ? 2.1 : 1),
+        (0.7 + link.strength * 0.45) * (focused ? 2.2 : 1),
         0.6,
-        4.5,
+        5,
       );
+      context.setLineDash?.(link.style === "dashed" ? [4, 5] : []);
       context.beginPath();
       context.moveTo(a.sx, a.sy);
-      context.quadraticCurveTo(control.x, control.y, b.sx, b.sy);
+      context.quadraticCurveTo(link.cx, link.cy, b.sx, b.sy);
       context.stroke();
     }
+    context.setLineDash?.([]);
     context.globalAlpha = 1;
 
     active.sort((a, b) => b.depth - a.depth);
     const labels: RuntimeNode[] = [];
     const taken: Array<[number, number, number, number]> = [];
     for (const node of active) {
-      const alpha = depthAlpha(node.depth, cameraDistance);
-      const focused = node === hovered || node === selected;
-      context.globalAlpha = focused ? 1 : alpha;
+      const alpha =
+        depthAlpha(node.depth, cameraDistance) * (node.dim ? 0.45 : 1);
+      const focused = node === hoveredNode || node === selectedNode;
+      const linked =
+        (hoveredLink !== null &&
+          (hoveredLink.source === node || hoveredLink.target === node)) ||
+        (selectedLink !== null &&
+          (selectedLink.source === node || selectedLink.target === node));
+      context.globalAlpha = focused || linked ? 1 : alpha;
       const color = nodeColor(node);
       const sphere = context.createRadialGradient(
         node.sx - node.sr * 0.34,
@@ -542,18 +633,25 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
       context.fillStyle = sphere;
       context.arc(node.sx, node.sy, node.sr, 0, Math.PI * 2);
       context.fill();
-      if (focused) {
+      if (focused || linked) {
         context.beginPath();
         context.strokeStyle = color;
         context.lineWidth = 1.6;
         context.arc(node.sx, node.sy, node.sr + 4.5, 0, Math.PI * 2);
         context.stroke();
       }
-      // Only Pages are named on the canvas. Labelling every Claim turned the
-      // space into a wall of overlapping text; the rest identify themselves
-      // through the hover tooltip and the detail rail instead.
-      if (focused || (node.kind === "page" && node.sr > 6)) labels.push(node);
+      if (focused || linked) labels.push(node);
     }
+
+    // Naming every document at once is a wall of text, but a size threshold
+    // would leave a library of evenly cited papers with no captions at all.
+    // So the most prominent handful always qualify, and collision below thins
+    // whatever still cannot fit.
+    const budget = active
+      .filter((node) => !labels.includes(node))
+      .sort((a, b) => b.sr - a.sr)
+      .slice(0, LABEL_BUDGET);
+    labels.push(...budget);
 
     // Labels last, nearest first, and a label that would land on one already
     // drawn is dropped. Text in a 3D scene cannot be spaced by the layout, so
@@ -562,14 +660,14 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
     context.textAlign = "center";
     context.textBaseline = "top";
     for (const node of labels) {
-      const focused = node === hovered || node === selected;
+      const focused = node === hoveredNode || node === selectedNode;
       context.font = `${focused ? 12 : 11.5}px "Times New Roman", "Microsoft YaHei", sans-serif`;
       const label = node.input.label;
       const text = label.length > 16 ? `${label.slice(0, 15)}…` : label;
-      const width = context.measureText(text).width;
-      const left = node.sx - width / 2 - 4;
+      const width2 = context.measureText(text).width;
+      const left = node.sx - width2 / 2 - 4;
       const top = node.sy + node.sr + 3;
-      const right = left + width + 8;
+      const right = left + width2 + 8;
       const bottom = top + 16;
       const collides = taken.some(
         (box) =>
@@ -596,10 +694,7 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
     context.globalAlpha = 1;
   }
 
-  function pick(clientX: number, clientY: number): RuntimeNode | null {
-    const bounds = canvas.getBoundingClientRect();
-    const x = clientX - bounds.left;
-    const y = clientY - bounds.top;
+  function pickNode(x: number, y: number): RuntimeNode | null {
     let best: RuntimeNode | null = null;
     for (const node of nodes) {
       if (!node.visible) continue;
@@ -609,26 +704,57 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
     return best;
   }
 
+  /** Links are pickable too: the relation between two papers is the point. */
+  function pickLink(x: number, y: number): RuntimeLink | null {
+    let best: RuntimeLink | null = null;
+    let bestDistance = 7;
+    for (const link of links) {
+      if (!link.visible) continue;
+      const distance = distanceToCurve(
+        x,
+        y,
+        link.source.sx,
+        link.source.sy,
+        link.cx,
+        link.cy,
+        link.target.sx,
+        link.target.sy,
+      );
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = link;
+      }
+    }
+    return best;
+  }
+
+  function localPoint(clientX: number, clientY: number): [number, number] {
+    const bounds = canvas.getBoundingClientRect();
+    return [clientX - bounds.left, clientY - bounds.top];
+  }
+
   function showTooltip(
-    node: RuntimeNode | null,
+    lines: string[] | null,
     clientX: number,
     clientY: number,
   ): void {
     const tooltip = options.tooltip;
     if (!tooltip) return;
-    if (!node) {
+    if (!lines) {
       tooltip.hidden = true;
       return;
     }
     const bounds = canvas.getBoundingClientRect();
     tooltip.hidden = false;
     tooltip.replaceChildren();
-    const title = doc.createElement("strong");
-    title.textContent = node.input.label;
-    tooltip.append(title);
-    if (node.input.detail) {
+    const [title, ...rest] = lines;
+    const heading = doc.createElement("strong");
+    heading.textContent = title;
+    tooltip.append(heading);
+    for (const line of rest) {
+      if (!line) continue;
       const detail = doc.createElement("span");
-      detail.textContent = node.input.detail;
+      detail.textContent = line;
       tooltip.append(detail);
     }
     // A transform keeps the overlay off the layout path, so hovering a node
@@ -663,11 +789,33 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
       schedule();
       return;
     }
-    const node = pick(event.clientX, event.clientY);
-    showTooltip(node, event.clientX, event.clientY);
-    if (node === hovered) return;
-    hovered = node;
-    canvas.style.cursor = node ? "pointer" : "grab";
+    const [x, y] = localPoint(event.clientX, event.clientY);
+    const node = pickNode(x, y);
+    const link = node ? null : pickLink(x, y);
+    if (node) {
+      showTooltip(
+        [node.input.label, node.input.detail ?? ""],
+        event.clientX,
+        event.clientY,
+      );
+    } else if (link) {
+      showTooltip(
+        [
+          `${link.source.input.label} ↔ ${link.target.input.label}`,
+          link.style === "dashed"
+            ? "同属一个知识条目"
+            : `共享 ${link.strength} 条论断${link.tone === "conflict" ? " · 含分歧" : ""}`,
+        ],
+        event.clientX,
+        event.clientY,
+      );
+    } else {
+      showTooltip(null, 0, 0);
+    }
+    if (node === hoveredNode && link === hoveredLink) return;
+    hoveredNode = node;
+    hoveredLink = link;
+    canvas.style.cursor = node || link ? "pointer" : "grab";
     schedule();
   };
 
@@ -677,8 +825,9 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
 
   const onMouseLeave = () => {
     dragging = null;
-    if (hovered) {
-      hovered = null;
+    if (hoveredNode || hoveredLink) {
+      hoveredNode = null;
+      hoveredLink = null;
       schedule();
     }
     showTooltip(null, 0, 0);
@@ -686,10 +835,27 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
 
   const onClick = (event: MouseEvent) => {
     if (dragMoved) return;
-    const node = pick(event.clientX, event.clientY);
-    selected = node;
+    const [x, y] = localPoint(event.clientX, event.clientY);
+    const node = pickNode(x, y);
+    if (node) {
+      selectedNode = node;
+      selectedLink = null;
+      schedule();
+      options.onSelectNode?.(node.input);
+      return;
+    }
+    const link = pickLink(x, y);
+    if (link) {
+      selectedLink = link;
+      selectedNode = null;
+      schedule();
+      options.onSelectLink?.(link.input);
+      return;
+    }
+    selectedNode = null;
+    selectedLink = null;
     schedule();
-    options.onSelect?.(node ? node.input : null);
+    options.onSelectNode?.(null);
   };
 
   const onWheel = (event: WheelEvent) => {
@@ -728,24 +894,27 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
 
   return {
     setData(data: GraphData) {
-      const weights = new Map<GraphNodeKind, { min: number; max: number }>();
+      let minWeight = Infinity;
+      let maxWeight = -Infinity;
       for (const input of data.nodes) {
         const weight = input.weight ?? 1;
-        const span = weights.get(input.kind) ?? { min: weight, max: weight };
-        span.min = Math.min(span.min, weight);
-        span.max = Math.max(span.max, weight);
-        weights.set(input.kind, span);
+        minWeight = Math.min(minWeight, weight);
+        maxWeight = Math.max(maxWeight, weight);
       }
+      const range = Math.max(1e-6, maxWeight - minWeight);
       nodes = data.nodes.map((input) => {
-        const [low, high] = NODE_RADIUS[input.kind];
-        const span = weights.get(input.kind)!;
-        const range = Math.max(1e-6, span.max - span.min);
-        const normalized = ((input.weight ?? 1) - span.min) / range;
+        const normalized = ((input.weight ?? 1) - minWeight) / range;
         const node: RuntimeNode = {
           input,
-          kind: input.kind,
-          shell: SHELL[input.kind],
-          radius: mix(low, high, clamp(normalized, 0, 1)),
+          shell: mix(SHELL[0], SHELL[1], clamp(input.depth ?? 0.5, 0, 1)),
+          radius: mix(
+            NODE_RADIUS[0],
+            NODE_RADIUS[1],
+            clamp(Math.sqrt(normalized), 0, 1),
+          ),
+          group: Math.max(0, Math.round(input.group ?? 0)),
+          dim: input.dim === true,
+          degree: 0,
           x: 0,
           y: 0,
           z: 0,
@@ -754,28 +923,38 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
           vz: 0,
           sx: 0,
           sy: 0,
-          sr: low,
+          sr: NODE_RADIUS[0],
           depth: 0,
-          visible: visibleKinds.has(input.kind),
+          visible: true,
         };
         return node;
       });
       byId = new Map(nodes.map((node) => [node.input.id, node]));
-      edges = [];
-      for (const edge of data.edges) {
-        const source = byId.get(edge.source);
-        const target = byId.get(edge.target);
+      links = [];
+      for (const input of data.links) {
+        const source = byId.get(input.source);
+        const target = byId.get(input.target);
         if (!source || !target || source === target) continue;
-        edges.push({
+        source.degree += 1;
+        target.degree += 1;
+        links.push({
+          input,
           source,
           target,
-          kind: edge.kind,
-          strength: clamp(edge.strength ?? 1, 0.2, 6),
+          style: input.style ?? "solid",
+          tone: input.tone ?? "neutral",
+          strength: clamp(input.strength ?? 1, 0.2, 8),
+          cx: 0,
+          cy: 0,
+          visible: true,
         });
       }
-      hovered = null;
-      selected = null;
-      layout(nodes, edges);
+      hoveredNode = null;
+      hoveredLink = null;
+      selectedNode = null;
+      selectedLink = null;
+      applyVisibility();
+      layout(nodes, links);
       readPalette();
       schedule();
     },
@@ -794,18 +973,25 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
     isAutoRotate() {
       return autoRotate;
     },
-    setVisibleKinds(kinds: readonly GraphNodeKind[]) {
-      visibleKinds = new Set(kinds);
-      for (const node of nodes) node.visible = visibleKinds.has(node.kind);
-      if (hovered && !hovered.visible) hovered = null;
-      if (selected && !selected.visible) selected = null;
+    setVisibleLinkStyles(styles: readonly GraphLinkStyle[]) {
+      visibleStyles = new Set(styles);
+      applyVisibility();
       schedule();
     },
-    getVisibleKinds() {
-      return Array.from(visibleKinds);
+    getVisibleLinkStyles() {
+      return Array.from(visibleStyles);
+    },
+    setShowIsolated(show: boolean) {
+      showIsolated = show;
+      applyVisibility();
+      schedule();
+    },
+    isShowingIsolated() {
+      return showIsolated;
     },
     selectNode(id: string | null) {
-      selected = id === null ? null : (byId.get(id) ?? null);
+      selectedNode = id === null ? null : (byId.get(id) ?? null);
+      selectedLink = null;
       schedule();
     },
     resetView() {

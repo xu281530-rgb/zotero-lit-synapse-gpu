@@ -3,10 +3,10 @@ import { getVectorStore } from "../semantic/vectorStore";
 import {
   createGraph3D,
   type GraphData,
-  type GraphEdgeInput,
+  type GraphLinkInput,
+  type GraphLinkStyle,
   type GraphMode,
   type GraphNodeInput,
-  type GraphNodeKind,
   type Graph3DController,
 } from "./graph3D";
 import { rowColumn } from "./wikiRow";
@@ -82,32 +82,42 @@ const LINK_STATE_LABELS: Record<WikiLinkState, string> = {
   source_deleted: "源文献已删除",
 };
 
-/** Evidence role -> the relation colour the knowledge space draws it in. */
-const ROLE_EDGE_KIND: Record<WikiEvidenceRole, GraphEdgeInput["kind"]> = {
-  SUPPORTS: "supports",
-  CONTRADICTS: "contradicts",
-  QUALIFIES: "related",
-  EXAMPLE: "related",
-};
-
-const GRAPH_FILTERS: Array<{ kind: GraphNodeKind; label: string }> = [
-  { kind: "page", label: "页面" },
-  { kind: "claim", label: "论断" },
-  { kind: "evidence", label: "证据" },
+/**
+ * Both kinds of relation the knowledge space draws between two documents.
+ *
+ * A solid link is the strong one: some claim cites both papers as evidence.
+ * A dashed link is the weak one: they only appear under the same knowledge
+ * entry. They are toggled separately because the dashed set is much larger
+ * and is context rather than argument.
+ */
+const GRAPH_LINK_FILTERS: Array<{
+  style: GraphLinkStyle;
+  label: string;
+  title: string;
+}> = [
+  {
+    style: "solid",
+    label: "共享论断",
+    title: "显示或隐藏共享同一条论断的连线",
+  },
+  {
+    style: "dashed",
+    label: "同一条目",
+    title: "显示或隐藏同属一个知识条目的连线",
+  },
 ];
+
+/** A page cited by more documents than this contributes no dashed clique. */
+const SAME_PAGE_CLIQUE_LIMIT = 40;
+
+const GRAPH_HINT =
+  "拖动旋转、滚轮缩放、Shift 拖动平移；点击文献查看它的全部知识点，点击连线查看两篇文献的共同结论。";
 
 function labelFor<T extends string>(
   labels: Readonly<Record<T, string>>,
   value: unknown,
 ): string {
   return labels[value as T] ?? String(value);
-}
-
-function evidenceRelationLabel(relation: string): string {
-  return relation
-    .split("<->")
-    .map((role) => labelFor(EVIDENCE_ROLE_LABELS, role))
-    .join(" ↔ ");
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -398,10 +408,13 @@ async function renderWikiPanelContent(
   const graphTooltip = element(doc, "div", "zmp-wiki-graph-tooltip");
   graphTooltip.hidden = true;
   const graphLegend = element(doc, "div", "zmp-wiki-graph-legend");
+  // The legend explains the links, because the nodes are all one thing now:
+  // every sphere is a document, and its colour is the knowledge entry it
+  // contributes most to.
   graphLegend.append(
-    element(doc, "span", "legend-page", "页面"),
-    element(doc, "span", "legend-claim", "论断"),
-    element(doc, "span", "legend-evidence", "文献证据"),
+    element(doc, "span", "legend-solid", "共享论断"),
+    element(doc, "span", "legend-dashed", "同一条目"),
+    element(doc, "span", "legend-conflict", "存在分歧"),
   );
   graphStage.append(canvas, graphToolbar, graphLegend, graphTooltip);
   const graphDetails = element(doc, "div", "zmp-wiki-graph-details");
@@ -718,22 +731,120 @@ async function renderWikiPanelContent(
       element(doc, "p", "zmp-wiki-evidence-empty", "选中论断后在此查看证据。"),
     );
   }
-
-  // ---- Knowledge space: data, controls, interaction ----------------------
+  // ---- Knowledge space: documents, relations, interaction ----------------
 
   /**
-   * Compose the three-layer space out of data the panel already holds.
+   * One node is one document; one link is a knowledge relation between two.
    *
-   * `getDocumentGraph` still supplies the cross-paper relations; Page and Claim
-   * nodes are derived from the pages that are already loaded. Nothing new is
-   * read from the store and no stored shape changes - this is a presentation
-   * projection of the same Wiki records.
-   *
-   * The Evidence layer is one node per source document rather than one per
-   * Evidence row: an Evidence record points at a Zotero item, and collapsing
-   * them keeps the outer shell readable at library scale while preserving the
-   * "open the literature" action each record exists for.
+   * Nothing new is read from the Wiki store: `getDocumentGraph` already
+   * returns exactly this shape - a node per Zotero item and an edge carrying
+   * the claim ids two items share - and the Page and Claim records the panel
+   * has already loaded supply the titles, roles and grouping. This is a
+   * projection of existing records, not a new query.
    */
+  interface DocumentFacts {
+    itemKey: string;
+    title: string;
+    detail: string;
+    /** Every claim citing this document, with the role it plays there. */
+    claims: Array<{ page: any; claim: any; roles: string[] }>;
+    /** Wiki page this document contributes most claims to; drives its colour. */
+    group: number;
+    degree: number;
+  }
+
+  const documents = new Map<string, DocumentFacts>();
+  const pageIndex = new Map<number, number>();
+  pages.forEach((page: any, index: number) =>
+    pageIndex.set(page.pageId, index),
+  );
+
+  /** Collect, per document, every claim that cites it and the role it plays. */
+  const collectDocuments = (): void => {
+    documents.clear();
+    const groupVotes = new Map<string, Map<number, number>>();
+    for (const page of pages) {
+      for (const claim of page.claims) {
+        const roleByItem = new Map<string, Set<string>>();
+        for (const evidence of claim.evidence) {
+          const key = String(evidence.itemKey);
+          const roles = roleByItem.get(key) ?? new Set<string>();
+          roles.add(String(evidence.evidenceRole));
+          roleByItem.set(key, roles);
+        }
+        for (const [itemKey, roles] of roleByItem) {
+          const facts =
+            documents.get(itemKey) ??
+            documents
+              .set(itemKey, {
+                itemKey,
+                title: itemKey,
+                detail: "",
+                claims: [],
+                group: 0,
+                degree: 0,
+              })
+              .get(itemKey)!;
+          facts.claims.push({ page, claim, roles: Array.from(roles) });
+          const votes =
+            groupVotes.get(itemKey) ??
+            groupVotes.set(itemKey, new Map()).get(itemKey)!;
+          votes.set(page.pageId, (votes.get(page.pageId) ?? 0) + 1);
+        }
+      }
+    }
+    for (const [itemKey, votes] of groupVotes) {
+      let bestPage = -1;
+      let bestCount = -1;
+      for (const [pageId, count] of votes) {
+        if (count > bestCount) {
+          bestCount = count;
+          bestPage = pageId;
+        }
+      }
+      documents.get(itemKey)!.group = pageIndex.get(bestPage) ?? 0;
+    }
+  };
+
+  /**
+   * Name the documents from the Zotero library.
+   *
+   * An item key is not a name a reader recognises, so each node is labelled
+   * with its title and described by its creator and year. The lookup is a
+   * read; a key whose item has been deleted simply keeps the key as its label.
+   */
+  const nameDocuments = async (): Promise<void> => {
+    await Promise.all(
+      Array.from(documents.values()).map(async (facts) => {
+        try {
+          const item = await Zotero.Items.getByLibraryAndKeyAsync(
+            libraryID,
+            facts.itemKey,
+          );
+          if (!item) return;
+          const title =
+            item.getDisplayTitle?.() || item.getField?.("title") || "";
+          if (title) facts.title = String(title);
+          const creator = String(item.getField?.("firstCreator") ?? "");
+          const year = String(item.getField?.("date") ?? "").slice(0, 4);
+          facts.detail = [creator, year].filter(Boolean).join(" · ");
+        } catch (error) {
+          // The item is gone from the library; the key remains a usable label.
+          ztoolkit.log("[wiki] could not name a graph document", error);
+        }
+      }),
+    );
+  };
+
+  /** A link the reader can open: which two documents, and what they share. */
+  interface LinkFacts {
+    kind: "shared-claim" | "same-page";
+    a: string;
+    b: string;
+    claimIds: number[];
+    pageId?: number;
+  }
+
   const buildGraphData = (documentGraph: {
     nodes: Array<{ itemKey: string; claimCount: number; conceptCount: number }>;
     edges: Array<{
@@ -744,92 +855,114 @@ async function renderWikiPanelContent(
       relations: string[];
     }>;
   }): GraphData => {
-    const nodes: GraphNodeInput[] = [];
-    const edges: GraphEdgeInput[] = [];
-    const itemWeights = new Map<string, number>();
-    for (const node of documentGraph.nodes) {
-      itemWeights.set(node.itemKey, node.claimCount);
-    }
-    for (const page of pages) {
-      nodes.push({
-        id: `page:${page.pageId}`,
-        kind: "page",
-        label: shorten(page.canonicalTitle, 40),
-        detail: `${page.claims.length} 条论断 · 版本 ${page.version}`,
-        weight: Math.max(1, page.claims.length),
-        payload: { kind: "page", pageId: page.pageId },
+    const links: GraphLinkInput[] = [];
+    const pairKey = (a: string, b: string) =>
+      a < b ? `${a} ${b}` : `${b} ${a}`;
+    const solidPairs = new Set<string>();
+
+    // Solid: the two documents are cited by the same claim.
+    for (const edge of documentGraph.edges) {
+      if (!documents.has(edge.source) || !documents.has(edge.target)) continue;
+      solidPairs.add(pairKey(edge.source, edge.target));
+      links.push({
+        source: `item:${edge.source}`,
+        target: `item:${edge.target}`,
+        style: "solid",
+        tone: edge.relations.some((relation) =>
+          relation.includes("CONTRADICTS"),
+        )
+          ? "conflict"
+          : "neutral",
+        strength: Math.max(1, edge.claimIds.length || edge.strength),
+        payload: {
+          kind: "shared-claim",
+          a: edge.source,
+          b: edge.target,
+          claimIds: edge.claimIds,
+        } satisfies LinkFacts,
       });
+    }
+
+    // Dashed: the two documents sit under the same knowledge entry without
+    // sharing a claim. A page contributes one clique, so a page cited by very
+    // many documents is skipped rather than burying the picture in hairlines.
+    const dashedSeen = new Set<string>();
+    for (const page of pages) {
+      const keys = new Set<string>();
       for (const claim of page.claims) {
-        const contested = claim.evidence.some(
-          (evidence: any) => String(evidence.evidenceRole) === "CONTRADICTS",
-        );
-        nodes.push({
-          id: `claim:${claim.claimId}`,
-          kind: "claim",
-          label: shorten(claim.claimText, 40),
-          detail: `${labelFor(CLAIM_TYPE_LABELS, claim.claimType)} · ${labelFor(EPISTEMIC_STATUS_LABELS, claim.epistemicStatus)}`,
-          weight: Math.max(1, claim.evidence.length),
-          contested,
-          payload: { kind: "claim", claimId: claim.claimId },
-        });
-        edges.push({
-          source: `page:${page.pageId}`,
-          target: `claim:${claim.claimId}`,
-          kind: "structure",
-          strength: 1,
-        });
-        const perItem = new Map<string, { role: string; count: number }>();
-        for (const evidence of claim.evidence) {
-          const key = String(evidence.itemKey);
-          const seen = perItem.get(key);
-          if (seen) seen.count += 1;
-          else
-            perItem.set(key, { role: String(evidence.evidenceRole), count: 1 });
-          if (!itemWeights.has(key)) itemWeights.set(key, 0);
-        }
-        for (const [itemKey, info] of perItem) {
-          edges.push({
-            source: `claim:${claim.claimId}`,
-            target: `item:${itemKey}`,
-            kind: ROLE_EDGE_KIND[info.role as WikiEvidenceRole] ?? "related",
-            strength: info.count,
+        for (const evidence of claim.evidence)
+          keys.add(String(evidence.itemKey));
+      }
+      const ordered = Array.from(keys).filter((key) => documents.has(key));
+      if (ordered.length > SAME_PAGE_CLIQUE_LIMIT) continue;
+      for (let left = 0; left < ordered.length; left += 1) {
+        for (let right = left + 1; right < ordered.length; right += 1) {
+          const key = pairKey(ordered[left], ordered[right]);
+          if (solidPairs.has(key) || dashedSeen.has(key)) continue;
+          dashedSeen.add(key);
+          links.push({
+            source: `item:${ordered[left]}`,
+            target: `item:${ordered[right]}`,
+            style: "dashed",
+            tone: "neutral",
+            strength: 1,
+            payload: {
+              kind: "same-page",
+              a: ordered[left],
+              b: ordered[right],
+              claimIds: [],
+              pageId: page.pageId,
+            } satisfies LinkFacts,
           });
         }
       }
     }
-    for (const [itemKey, weight] of itemWeights) {
-      nodes.push({
-        id: `item:${itemKey}`,
-        kind: "evidence",
-        label: itemKey,
-        detail: `${weight} 条论断引用此文献`,
-        weight: Math.max(1, weight),
-        payload: { kind: "item", itemKey },
-      });
+
+    for (const facts of documents.values()) facts.degree = 0;
+    for (const link of links) {
+      const a = String(link.source).slice(5);
+      const b = String(link.target).slice(5);
+      const factsA = documents.get(a);
+      const factsB = documents.get(b);
+      if (factsA) factsA.degree += 1;
+      if (factsB) factsB.degree += 1;
     }
-    for (const edge of documentGraph.edges) {
-      edges.push({
-        source: `item:${edge.source}`,
-        target: `item:${edge.target}`,
-        kind: edge.relations.includes("CONTRADICTS")
-          ? "contradicts"
-          : "related",
-        strength: edge.strength,
-      });
+    let maxDegree = 0;
+    for (const facts of documents.values()) {
+      maxDegree = Math.max(maxDegree, facts.degree);
     }
-    return { nodes, edges };
+
+    const nodes: GraphNodeInput[] = Array.from(documents.values()).map(
+      (facts) => ({
+        id: `item:${facts.itemKey}`,
+        label: facts.title,
+        detail: [facts.detail, `${facts.claims.length} 条论断引用`]
+          .filter(Boolean)
+          .join(" · "),
+        weight: Math.max(1, facts.claims.length),
+        // The best-connected literature sits in the core, the loneliest at
+        // the rim: depth carries how central a document is to the library.
+        depth: maxDegree ? 1 - facts.degree / maxDegree : 1,
+        group: facts.group,
+        dim: facts.degree === 0,
+        payload: { kind: "document", itemKey: facts.itemKey },
+      }),
+    );
+    return { nodes, links };
   };
 
   let graph: Graph3DController | null = null;
   let graphMode: GraphMode = "3d";
-  const visibleKinds = new Set<GraphNodeKind>(["page", "claim", "evidence"]);
+  const linkStyles = new Set<GraphLinkStyle>(["solid", "dashed"]);
+  let showIsolated = true;
   let documentGraph: Awaited<ReturnType<typeof store.getDocumentGraph>> | null =
     null;
 
   const claimsById = new Map<number, { page: any; claim: any }>();
   for (const page of pages) {
-    for (const claim of page.claims)
+    for (const claim of page.claims) {
       claimsById.set(claim.claimId, { page, claim });
+    }
   }
 
   const graphHint = (text: string) => {
@@ -838,116 +971,211 @@ async function renderWikiPanelContent(
     );
   };
 
-  /** Reveal the reading columns again, focused on whatever the user picked. */
+  /** Reveal the reading columns again, focused on whatever the reader picked. */
   const returnToReading = () => {
     graphPane.hidden = true;
     body.hidden = false;
   };
 
-  const describeItemNode = (itemKey: string) => {
-    graphDetails.replaceChildren();
-    graphDetails.append(element(doc, "h2", "", itemKey));
-    const relations = (documentGraph?.edges ?? []).filter(
-      (edge) => edge.source === itemKey || edge.target === itemKey,
+  /** Open a claim in the Wiki reading view, evidence rail and all. */
+  const openClaimInReader = (page: any, claim: any) => {
+    showPage(page, pageEntries.get(page.pageId));
+    showEvidence(claim);
+    returnToReading();
+  };
+
+  const roleChip = (roles: string[]): HTMLElement => {
+    const contested = roles.includes("CONTRADICTS");
+    const chip = element(
+      doc,
+      "span",
+      `zmp-wiki-role-chip${contested ? " is-conflict" : ""}`,
+      roles.map((role) => labelFor(EVIDENCE_ROLE_LABELS, role)).join(" / "),
     );
-    if (relations.length) {
+    return chip;
+  };
+
+  /** Every knowledge point this document carries, grouped by knowledge entry. */
+  const describeDocument = (itemKey: string) => {
+    const facts = documents.get(itemKey);
+    graphDetails.replaceChildren();
+    if (!facts) {
+      graphHint("该文献已不在知识库中。");
+      return;
+    }
+    graphDetails.append(element(doc, "h2", "", facts.title));
+    if (facts.detail) {
+      graphDetails.append(
+        element(doc, "small", "zmp-wiki-graph-context", facts.detail),
+      );
+    }
+    const byPage = new Map<number, Array<(typeof facts.claims)[number]>>();
+    for (const entry of facts.claims) {
+      const list = byPage.get(entry.page.pageId) ?? [];
+      list.push(entry);
+      byPage.set(entry.page.pageId, list);
+    }
+    for (const [pageId, entries] of byPage) {
+      const page = pagesById.get(pageId);
+      graphDetails.append(
+        element(
+          doc,
+          "small",
+          "zmp-wiki-graph-context",
+          `${page?.canonicalTitle ?? "未知条目"} · ${entries.length} 条`,
+        ),
+      );
+      for (const entry of entries) {
+        const row = element(doc, "div", "zmp-wiki-graph-claim");
+        const head = element(doc, "div", "zmp-wiki-graph-claim-head");
+        head.append(
+          element(
+            doc,
+            "span",
+            "zmp-wiki-claim-type",
+            labelFor(CLAIM_TYPE_LABELS, entry.claim.claimType),
+          ),
+          roleChip(entry.roles),
+        );
+        const open = button(
+          doc,
+          entry.claim.claimText,
+          `打开论断 ${entry.claim.claimId}`,
+        );
+        open.addEventListener("click", () =>
+          openClaimInReader(entry.page, entry.claim),
+        );
+        row.append(head, open);
+        graphDetails.append(row);
+      }
+    }
+    const jump = button(doc, "打开文献", "在 Zotero 中选中此文献");
+    jump.addEventListener(
+      "click",
+      () => void jumpToItem(win, libraryID, itemKey),
+    );
+    graphDetails.append(jump);
+  };
+
+  /** What two documents conclude in common - and where they disagree. */
+  const describeLink = (facts: LinkFacts) => {
+    const a = documents.get(facts.a);
+    const b = documents.get(facts.b);
+    graphDetails.replaceChildren();
+    graphDetails.append(
+      element(
+        doc,
+        "h2",
+        "",
+        `${a?.title ?? facts.a} ↔ ${b?.title ?? facts.b}`,
+      ),
+    );
+    if (facts.kind === "same-page") {
+      const page =
+        facts.pageId == null ? undefined : pagesById.get(facts.pageId);
       graphDetails.append(
         element(
           doc,
           "p",
           "",
-          `与 ${relations.length} 篇文献共享论断：${
-            relations
-              .map((edge) =>
-                edge.relations.map(evidenceRelationLabel).join("、"),
-              )
-              .filter(Boolean)
-              .join("；") || "共享论断"
-          }`,
+          `两篇文献同属知识条目「${page?.canonicalTitle ?? "未知"}」，但没有共享同一条论断。`,
         ),
       );
+      return;
     }
-    const related = pages.flatMap((page) =>
-      page.claims
-        .filter((claim: any) =>
-          claim.evidence.some((evidence: any) => evidence.itemKey === itemKey),
-        )
-        .map((claim: any) => ({ page, claim })),
+    const rows = facts.claimIds
+      .map((claimId) => {
+        const found = claimsById.get(claimId);
+        if (!found) return null;
+        const rolesFor = (itemKey: string) =>
+          Array.from(
+            new Set(
+              found.claim.evidence
+                .filter((evidence: any) => evidence.itemKey === itemKey)
+                .map((evidence: any) => String(evidence.evidenceRole)),
+            ),
+          ) as string[];
+        const rolesA = rolesFor(facts.a);
+        const rolesB = rolesFor(facts.b);
+        const disputed =
+          rolesA.includes("CONTRADICTS") !== rolesB.includes("CONTRADICTS");
+        return { ...found, rolesA, rolesB, disputed };
+      })
+      .filter((row): row is NonNullable<typeof row> => row !== null)
+      // Where the two papers disagree is the interesting part; put it first.
+      .sort((left, right) => Number(right.disputed) - Number(left.disputed));
+
+    graphDetails.append(
+      element(
+        doc,
+        "p",
+        "",
+        `共享 ${rows.length} 条论断，其中 ${rows.filter((row) => row.disputed).length} 条存在分歧。`,
+      ),
     );
-    for (const { page, claim } of related) {
-      const concept =
-        page.primaryConceptId == null
-          ? undefined
-          : concepts.get(page.primaryConceptId);
-      graphDetails.append(
+    for (const row of rows) {
+      const card = element(
+        doc,
+        "div",
+        `zmp-wiki-graph-claim${row.disputed ? " is-conflict" : ""}`,
+      );
+      const head = element(doc, "div", "zmp-wiki-graph-claim-head");
+      head.append(
+        element(
+          doc,
+          "span",
+          "zmp-wiki-claim-type",
+          labelFor(CLAIM_TYPE_LABELS, row.claim.claimType),
+        ),
         element(
           doc,
           "small",
           "zmp-wiki-graph-context",
-          `${page.canonicalTitle}${concept ? ` / ${concept.canonical_name}` : ""}`,
+          row.page.canonicalTitle,
         ),
       );
-      const claimButton = button(
+      const open = button(
         doc,
-        claim.claimText,
-        `打开论断 ${claim.claimId}`,
+        row.claim.claimText,
+        `打开论断 ${row.claim.claimId}`,
       );
-      claimButton.addEventListener("click", () => {
-        showPage(page, pageEntries.get(page.pageId));
-        showEvidence(claim);
-        returnToReading();
-      });
-      graphDetails.append(claimButton);
+      open.addEventListener("click", () =>
+        openClaimInReader(row.page, row.claim),
+      );
+      const stances = element(doc, "div", "zmp-wiki-graph-stances");
+      const stanceRow = (title: string, roles: string[]) => {
+        const line = element(doc, "div", "zmp-wiki-graph-stance");
+        line.append(
+          element(
+            doc,
+            "span",
+            "zmp-wiki-graph-stance-name",
+            shorten(title, 22),
+          ),
+          roleChip(roles.length ? roles : ["EXAMPLE"]),
+        );
+        return line;
+      };
+      stances.append(
+        stanceRow(a?.title ?? facts.a, row.rolesA),
+        stanceRow(b?.title ?? facts.b, row.rolesB),
+      );
+      card.append(head, open, stances);
+      graphDetails.append(card);
     }
-    const open = button(doc, "打开文献", "在 Zotero 中选中此文献");
-    open.addEventListener(
-      "click",
-      () => void jumpToItem(win, libraryID, itemKey),
-    );
-    graphDetails.append(open);
   };
 
-  const onGraphSelect = (node: GraphNodeInput | null) => {
+  const onGraphNode = (node: GraphNodeInput | null) => {
     if (!node) {
-      graphHint("拖动旋转、滚轮缩放、Shift 拖动平移；点击节点查看关联知识。");
+      graphHint(GRAPH_HINT);
       return;
     }
     const payload = node.payload as any;
-    if (payload?.kind === "page") {
-      const page = pagesById.get(payload.pageId);
-      if (!page) return;
-      showPage(page, pageEntries.get(page.pageId));
-      graphDetails.replaceChildren();
-      graphDetails.append(element(doc, "h2", "", page.canonicalTitle));
-      if (page.summary)
-        graphDetails.append(element(doc, "p", "", page.summary));
-      const openPage = button(doc, "在知识库中打开", "回到 Wiki 阅读视图");
-      openPage.addEventListener("click", returnToReading);
-      graphDetails.append(openPage);
-      return;
-    }
-    if (payload?.kind === "claim") {
-      const found = claimsById.get(payload.claimId);
-      if (!found) return;
-      showPage(found.page, pageEntries.get(found.page.pageId));
-      showEvidence(found.claim);
-      graphDetails.replaceChildren();
-      graphDetails.append(
-        element(doc, "h2", "", `论断 ${found.claim.claimId}`),
-        element(doc, "p", "", found.claim.claimText),
-        element(
-          doc,
-          "small",
-          "zmp-wiki-graph-context",
-          `${found.page.canonicalTitle} · ${claimStatus(found.claim)}`,
-        ),
-      );
-      const openClaim = button(doc, "在知识库中打开", "回到 Wiki 阅读视图");
-      openClaim.addEventListener("click", returnToReading);
-      graphDetails.append(openClaim);
-      return;
-    }
-    if (payload?.kind === "item") describeItemNode(String(payload.itemKey));
+    if (payload?.kind === "document") describeDocument(String(payload.itemKey));
+  };
+
+  const onGraphLink = (link: GraphLinkInput) => {
+    describeLink(link.payload as LinkFacts);
   };
 
   // ---- Graph toolbar -----------------------------------------------------
@@ -967,36 +1195,47 @@ async function renderWikiPanelContent(
     graph?.setAutoRotate(next);
     rotateButton.className = `zmp-wiki-command ${next ? "is-on" : "is-off"}`;
   });
-  for (const filter of GRAPH_FILTERS) {
-    const toggle = button(
-      doc,
-      filter.label,
-      `显示或隐藏${filter.label}节点`,
-      "is-on",
-    );
+  for (const filter of GRAPH_LINK_FILTERS) {
+    const toggle = button(doc, filter.label, filter.title, "is-on");
     toggle.addEventListener("click", () => {
-      if (visibleKinds.has(filter.kind)) visibleKinds.delete(filter.kind);
-      else visibleKinds.add(filter.kind);
-      toggle.className = `zmp-wiki-command ${visibleKinds.has(filter.kind) ? "is-on" : "is-off"}`;
-      graph?.setVisibleKinds(Array.from(visibleKinds));
+      if (linkStyles.has(filter.style)) linkStyles.delete(filter.style);
+      else linkStyles.add(filter.style);
+      toggle.className = `zmp-wiki-command ${linkStyles.has(filter.style) ? "is-on" : "is-off"}`;
+      graph?.setVisibleLinkStyles(Array.from(linkStyles));
     });
     graphToolbar.append(toggle);
   }
+  const isolatedButton = button(
+    doc,
+    "孤立文献",
+    "显示或隐藏没有任何关联的文献",
+    "is-on",
+  );
+  isolatedButton.addEventListener("click", () => {
+    showIsolated = !showIsolated;
+    isolatedButton.className = `zmp-wiki-command ${showIsolated ? "is-on" : "is-off"}`;
+    graph?.setShowIsolated(showIsolated);
+  });
+  graphToolbar.append(isolatedButton);
 
   const drawGraph = async () => {
     documentGraph = await store.getDocumentGraph(libraryID);
+    collectDocuments();
+    await nameDocuments();
     if (!graph) {
       graph = createGraph3D({
         win,
         canvas,
         tooltip: graphTooltip,
-        onSelect: onGraphSelect,
+        onSelectNode: onGraphNode,
+        onSelectLink: onGraphLink,
       });
     }
     graph.setMode(graphMode);
-    graph.setVisibleKinds(Array.from(visibleKinds));
+    graph.setVisibleLinkStyles(Array.from(linkStyles));
+    graph.setShowIsolated(showIsolated);
     graph.setData(buildGraphData(documentGraph));
-    graphHint("拖动旋转、滚轮缩放、Shift 拖动平移；点击节点查看关联知识。");
+    graphHint(GRAPH_HINT);
   };
 
   graphButton.addEventListener("click", () => {

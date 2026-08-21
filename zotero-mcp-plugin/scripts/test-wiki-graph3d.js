@@ -3,19 +3,19 @@
 /**
  * Drives the knowledge-space renderer over a recording canvas.
  *
- * The old graph was a ring of circles: one radius, straight chords, no depth.
- * These tests pin the three properties that make the replacement a real 3D
- * view rather than a restyled flat one.
+ * The graph draws a network of documents: one sphere per piece of literature,
+ * one curve per knowledge relation between two of them. Both are selectable,
+ * because the reader either asks "what does this paper claim?" or "what do
+ * these two papers conclude in common?", and the second question lives on the
+ * link. These tests pin that contract plus the properties that make the view
+ * genuinely three-dimensional rather than a restyled plane:
  *
- *   1. Depth exists. Nodes that share a kind and a weight - and therefore
- *      share a modelled radius - still draw at different screen radii, which
- *      can only happen if they sit at different distances from the camera.
- *   2. Flattening removes it. In 2D mode the same nodes collapse to a single
- *      screen radius, so the mode switch is a projection change, not a restyle.
- *   3. Relations are drawn. Every visible edge emits a curve, so the picture
- *      carries the network and not just its vertices.
- *
- * A filter pass and a click round-trip cover the controls the panel exposes.
+ *   1. Depth exists. Documents that share a weight - and therefore a modelled
+ *      radius - still draw at different screen radii, which can only happen if
+ *      they sit at different distances from the camera.
+ *   2. Flattening removes it. In 2D mode they collapse to a single screen
+ *      radius, so the mode switch is a projection change, not a restyle.
+ *   3. Relations are drawn, and can be clicked.
  */
 
 import assert from "node:assert/strict";
@@ -28,8 +28,16 @@ const { createGraph3D } = await import("../src/modules/wiki/graph3D.ts");
 // --- Recording canvas -----------------------------------------------------
 
 function createContext() {
-  const record = { arcs: [], curves: [], labels: [], lines: 0, fills: 0 };
+  const record = {
+    arcs: [],
+    curves: [],
+    labels: [],
+    lines: 0,
+    fills: 0,
+  };
   const gradient = { addColorStop() {} };
+  let pen = { x: 0, y: 0 };
+  let dash = [];
   return {
     record,
     canvas: null,
@@ -45,12 +53,27 @@ function createContext() {
     createRadialGradient: () => gradient,
     fillRect() {},
     beginPath() {},
-    moveTo() {},
+    moveTo(x, y) {
+      pen = { x, y };
+    },
     lineTo() {
       record.lines += 1;
     },
+    setLineDash(pattern) {
+      dash = pattern ?? [];
+    },
     quadraticCurveTo(cx, cy, x, y) {
-      record.curves.push({ cx, cy, x, y });
+      record.curves.push({
+        ax: pen.x,
+        ay: pen.y,
+        cx,
+        cy,
+        x,
+        y,
+        dashed: dash.length > 0,
+        width: this.lineWidth,
+        stroke: this.strokeStyle,
+      });
     },
     stroke() {},
     fill() {
@@ -145,50 +168,64 @@ function createWin() {
   };
 }
 
+/** Redraw once and hand back what the canvas recorded. */
+function repaint(graph, canvas, win) {
+  canvas.context.record.arcs.length = 0;
+  canvas.context.record.curves.length = 0;
+  canvas.context.record.labels.length = 0;
+  graph.invalidate();
+  win.flush();
+  return canvas.context.record;
+}
+
 // --- Data -----------------------------------------------------------------
 
-/** Same kind, same weight, so any radius spread has to come from depth. */
-function uniformPages(count) {
+/** Same weight throughout, so any radius spread has to come from depth. */
+function uniformDocuments(count) {
   const nodes = [];
-  const edges = [];
+  const links = [];
   for (let index = 0; index < count; index += 1) {
     nodes.push({
-      id: `page:${index}`,
-      kind: "page",
-      label: `页面 ${index}`,
+      id: `item:${index}`,
+      label: `文献 ${index}`,
+      detail: "Kurz 1992 · 3 条论断引用",
       weight: 1,
-      payload: { kind: "page", pageId: index },
+      depth: index / count,
+      group: index % 4,
+      payload: { kind: "document", itemKey: `ITEM${index}` },
     });
     if (index) {
-      edges.push({
-        source: `page:${index - 1}`,
-        target: `page:${index}`,
-        kind: "supports",
+      links.push({
+        source: `item:${index - 1}`,
+        target: `item:${index}`,
+        style: "solid",
+        tone: "neutral",
         strength: 1,
+        payload: { kind: "shared-claim", a: `ITEM${index - 1}` },
       });
     }
   }
-  return { nodes, edges };
+  return { nodes, links };
 }
 
 function spread(values) {
   return Math.max(...values) - Math.min(...values);
 }
 
-// --- 1. The space has depth ----------------------------------------------
+// --- 1. The space has depth, and draws relations --------------------------
 
 {
   const win = createWin();
   const canvas = createCanvas();
   const graph = createGraph3D({ win, canvas });
-  graph.setData(uniformPages(40));
+  graph.setData(uniformDocuments(40));
   win.flush();
 
   const radii = canvas.context.record.arcs.map((arc) => arc.radius);
-  assert.equal(radii.length, 40, "every node must be drawn once per frame");
+  assert.equal(radii.length, 40, "every document must be drawn once per frame");
   assert.ok(
     spread(radii) > 1,
-    "identical nodes must draw at different screen radii, which only a real z axis produces",
+    "identical documents must draw at different screen radii, which only a real z axis produces",
   );
   assert.equal(
     canvas.context.record.curves.length,
@@ -203,13 +240,13 @@ function spread(values) {
   assert.equal(canvas.width, 1000, "the backing store must follow the element");
   assert.equal(canvas.height, 600);
 
-  // Labels are dropped rather than stacked: forty page nodes crowded into the
-  // inner shell must not print forty overlapping captions.
+  // Captions are budgeted and then thinned, so a crowded core cannot print a
+  // wall of overlapping text - but an evenly weighted library still gets some.
   const labels = canvas.context.record.labels;
-  assert.ok(labels.length > 0, "page nodes must be named on the canvas");
+  assert.ok(labels.length > 0, "documents must be named on the canvas");
   assert.ok(
     labels.length < 40,
-    "colliding labels must be dropped, not drawn on top of each other",
+    "colliding captions must be dropped, not stacked",
   );
   for (let i = 0; i < labels.length; i += 1) {
     for (let j = i + 1; j < labels.length; j += 1) {
@@ -219,7 +256,7 @@ function spread(values) {
       const halfB = (String(b.text).length * 6) / 2 + 4;
       const apart =
         Math.abs(a.x - b.x) >= halfA + halfB || Math.abs(a.y - b.y) >= 16;
-      assert.ok(apart, `labels "${a.text}" and "${b.text}" overlap`);
+      assert.ok(apart, `captions "${a.text}" and "${b.text}" overlap`);
     }
   }
   graph.dispose();
@@ -231,31 +268,25 @@ function spread(values) {
   const win = createWin();
   const canvas = createCanvas();
   const graph = createGraph3D({ win, canvas });
-  graph.setData(uniformPages(40));
+  graph.setData(uniformDocuments(40));
   win.flush();
   const before = spread(canvas.context.record.arcs.map((arc) => arc.radius));
 
   graph.setMode("2d");
   win.flush();
   assert.equal(graph.getMode(), "2d");
-  canvas.context.record.arcs.length = 0;
-  graph.invalidate();
-  win.flush();
-  const after = spread(canvas.context.record.arcs.map((arc) => arc.radius));
+  const flat = spread(repaint(graph, canvas, win).arcs.map((a) => a.radius));
   assert.ok(before > 1, "3D mode must vary the drawn radius");
   assert.ok(
-    after < 0.001,
-    `2D mode must collapse every node to one scale (spread ${after})`,
+    flat < 0.001,
+    `2D mode must collapse every document to one scale (spread ${flat})`,
   );
 
   graph.setMode("3d");
   win.flush();
   assert.equal(graph.getMode(), "3d");
-  canvas.context.record.arcs.length = 0;
-  graph.invalidate();
-  win.flush();
   assert.ok(
-    spread(canvas.context.record.arcs.map((arc) => arc.radius)) > 1,
+    spread(repaint(graph, canvas, win).arcs.map((a) => a.radius)) > 1,
     "switching back must restore depth",
   );
   graph.dispose();
@@ -267,7 +298,7 @@ function spread(values) {
   const win = createWin();
   const canvas = createCanvas();
   const graph = createGraph3D({ win, canvas });
-  graph.setData(uniformPages(24));
+  graph.setData(uniformDocuments(24));
   win.flush();
   const home = canvas.context.record.arcs.map((arc) => `${arc.x}:${arc.y}`);
 
@@ -275,24 +306,15 @@ function spread(values) {
   canvas.dispatch("mousemove", { clientX: 620, clientY: 340 });
   canvas.dispatch("mouseup");
   win.flush();
-  canvas.context.record.arcs.length = 0;
-  graph.invalidate();
-  win.flush();
-  const orbited = canvas.context.record.arcs.map((arc) => `${arc.x}:${arc.y}`);
+  const orbited = repaint(graph, canvas, win).arcs.map((a) => `${a.x}:${a.y}`);
   assert.notDeepEqual(orbited, home, "dragging must rotate the space");
 
   canvas.dispatch("wheel", { deltaY: -120 });
   win.flush();
-  canvas.context.record.arcs.length = 0;
-  graph.invalidate();
-  win.flush();
-  const zoomed = canvas.context.record.arcs.map((arc) => arc.radius);
+  const zoomed = repaint(graph, canvas, win).arcs.map((a) => a.radius);
   graph.resetView();
   win.flush();
-  canvas.context.record.arcs.length = 0;
-  graph.invalidate();
-  win.flush();
-  const reset = canvas.context.record.arcs.map((arc) => arc.radius);
+  const reset = repaint(graph, canvas, win).arcs.map((a) => a.radius);
   assert.notDeepEqual(zoomed, reset, "reset must undo the zoom");
 
   graph.setAutoRotate(true);
@@ -302,73 +324,145 @@ function spread(values) {
   graph.dispose();
 }
 
-// --- 4. Filters hide a whole layer ---------------------------------------
+// --- 4. Relation filters and the isolated toggle --------------------------
+
+/**
+ * Four documents: A-B share a claim and disagree, B-C only share a knowledge
+ * entry, and D is cited by nothing else in the library.
+ */
+function mixedLibrary() {
+  return {
+    nodes: [
+      { id: "item:A", label: "定向凝固综述", weight: 4, depth: 0, group: 0 },
+      { id: "item:B", label: "柱状晶生长", weight: 3, depth: 0.2, group: 0 },
+      { id: "item:C", label: "热压定型", weight: 2, depth: 0.6, group: 1 },
+      {
+        id: "item:D",
+        label: "孤立文献",
+        weight: 1,
+        depth: 1,
+        group: 2,
+        dim: true,
+      },
+    ],
+    links: [
+      {
+        source: "item:A",
+        target: "item:B",
+        style: "solid",
+        tone: "conflict",
+        strength: 3,
+        payload: { kind: "shared-claim", a: "A", b: "B", claimIds: [1, 2, 3] },
+      },
+      {
+        source: "item:B",
+        target: "item:C",
+        style: "dashed",
+        tone: "neutral",
+        strength: 1,
+        payload: { kind: "same-page", a: "B", b: "C", claimIds: [] },
+      },
+    ],
+  };
+}
 
 {
   const win = createWin();
   const canvas = createCanvas();
   const graph = createGraph3D({ win, canvas });
-  graph.setData({
-    nodes: [
-      { id: "page:1", kind: "page", label: "页面", weight: 2 },
-      { id: "claim:1", kind: "claim", label: "论断", weight: 2 },
-      { id: "claim:2", kind: "claim", label: "论断", weight: 1 },
-      { id: "item:A", kind: "evidence", label: "ITEMA", weight: 1 },
-    ],
-    edges: [
-      { source: "page:1", target: "claim:1", kind: "structure" },
-      { source: "page:1", target: "claim:2", kind: "structure" },
-      { source: "claim:1", target: "item:A", kind: "supports" },
-      { source: "claim:2", target: "item:A", kind: "contradicts" },
-    ],
-  });
+  graph.setData(mixedLibrary());
   win.flush();
   assert.equal(canvas.context.record.arcs.length, 4);
-  assert.equal(canvas.context.record.curves.length, 4);
+  assert.equal(canvas.context.record.curves.length, 2);
+  assert.equal(
+    canvas.context.record.curves.filter((curve) => curve.dashed).length,
+    1,
+    "a shared knowledge entry must draw as a dashed line",
+  );
 
-  graph.setVisibleKinds(["page", "claim"]);
+  graph.setVisibleLinkStyles(["solid"]);
   win.flush();
-  canvas.context.record.arcs.length = 0;
-  canvas.context.record.curves.length = 0;
-  graph.invalidate();
-  win.flush();
+  let frame = repaint(graph, canvas, win);
+  assert.deepEqual(graph.getVisibleLinkStyles(), ["solid"]);
   assert.equal(
-    canvas.context.record.arcs.length,
-    3,
-    "hiding the evidence layer must drop its nodes",
+    frame.curves.length,
+    1,
+    "hiding a relation kind must drop its lines",
   );
   assert.equal(
-    canvas.context.record.curves.length,
+    frame.arcs.length,
+    4,
+    "isolated documents stay visible while the toggle is on",
+  );
+
+  graph.setShowIsolated(false);
+  win.flush();
+  frame = repaint(graph, canvas, win);
+  assert.equal(graph.isShowingIsolated(), false);
+  assert.equal(
+    frame.arcs.length,
     2,
-    "an edge with a hidden endpoint must not be drawn",
+    "hiding isolated documents must drop everything the visible relations do not reach",
   );
-  assert.deepEqual(graph.getVisibleKinds().sort(), ["claim", "page"]);
+
+  graph.setVisibleLinkStyles(["solid", "dashed"]);
+  graph.setShowIsolated(true);
+  win.flush();
+  assert.equal(repaint(graph, canvas, win).arcs.length, 4);
   graph.dispose();
 }
 
-// --- 5. Clicking a node reports it back to the panel ----------------------
+// --- 5. Clicking a document, and clicking a relation ----------------------
 
 {
   const win = createWin();
   const canvas = createCanvas();
-  const picked = [];
+  const nodePicks = [];
+  const linkPicks = [];
   const graph = createGraph3D({
     win,
     canvas,
-    onSelect: (node) => picked.push(node),
+    onSelectNode: (node) => nodePicks.push(node),
+    onSelectLink: (link) => linkPicks.push(link),
   });
-  graph.setData(uniformPages(12));
+  graph.setData(mixedLibrary());
   win.flush();
-  const target = canvas.context.record.arcs[0];
 
+  const target = canvas.context.record.arcs[0];
   canvas.dispatch("click", { clientX: target.x, clientY: target.y });
-  assert.equal(picked.length, 1, "a click on a node must report a selection");
-  assert.equal(picked[0].kind, "page");
-  assert.ok(picked[0].payload, "the panel payload must survive the round trip");
+  assert.equal(nodePicks.length, 1, "clicking a document must report it");
+  assert.ok(nodePicks[0].label, "the reported document must carry its title");
+
+  // The midpoint of a quadratic curve, which is where a reader aims.
+  const curve = canvas.context.record.curves[0];
+  const midX = 0.25 * curve.ax + 0.5 * curve.cx + 0.25 * curve.x;
+  const midY = 0.25 * curve.ay + 0.5 * curve.cy + 0.25 * curve.y;
+  canvas.dispatch("click", { clientX: midX, clientY: midY });
+  assert.equal(
+    linkPicks.length,
+    1,
+    "clicking a relation must report it - this is how shared conclusions open",
+  );
+  assert.ok(
+    Array.isArray(linkPicks[0].payload.claimIds),
+    "a relation must name the claims it is made of",
+  );
 
   canvas.dispatch("click", { clientX: 4, clientY: 4 });
-  assert.equal(picked.length, 2);
-  assert.equal(picked[1], null, "a click on empty space must clear the selection");
+  assert.equal(nodePicks.length, 2);
+  assert.equal(nodePicks[1], null, "empty space must clear the selection");
+
+  // A hidden relation is not pickable either.
+  graph.setVisibleLinkStyles([]);
+  win.flush();
+  repaint(graph, canvas, win);
+  canvas.dispatch("click", { clientX: midX, clientY: midY });
+  assert.equal(
+    linkPicks.length,
+    1,
+    "a relation that is not drawn must not be clickable",
+  );
+
   graph.dispose();
   assert.equal(
     canvas.listeners.get("click").length,
@@ -384,27 +478,37 @@ function spread(values) {
   const canvas = createCanvas();
   const graph = createGraph3D({ win, canvas });
   const nodes = [];
-  const edges = [];
+  const links = [];
   for (let index = 0; index < 240; index += 1) {
-    const kind = index < 20 ? "page" : index < 140 ? "claim" : "evidence";
-    nodes.push({ id: `${kind}:${index}`, kind, label: `n${index}`, weight: 1 });
-    if (index > 20) {
-      edges.push({
-        source: nodes[index - 1].id,
-        target: nodes[index].id,
-        kind: "related",
-        strength: 1,
+    nodes.push({
+      id: `item:${index}`,
+      label: `文献 ${index}`,
+      weight: 1 + (index % 6),
+      depth: (index % 10) / 10,
+      group: index % 8,
+    });
+    if (index > 1) {
+      links.push({
+        source: `item:${index - 1}`,
+        target: `item:${index}`,
+        style: index % 3 === 0 ? "dashed" : "solid",
+        tone: index % 7 === 0 ? "conflict" : "neutral",
+        strength: 1 + (index % 3),
       });
     }
   }
   const started = Date.now();
-  graph.setData({ nodes, edges });
+  graph.setData({ nodes, links });
   win.flush();
   const elapsed = Date.now() - started;
   assert.equal(canvas.context.record.arcs.length, 240);
   assert.ok(
+    canvas.context.record.labels.length <= 40,
+    "the caption budget must hold at library scale",
+  );
+  assert.ok(
     elapsed < 6000,
-    `a 240-node space must settle promptly (took ${elapsed}ms)`,
+    `a 240-document space must settle promptly (took ${elapsed}ms)`,
   );
   graph.dispose();
 }
