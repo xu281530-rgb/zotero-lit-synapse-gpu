@@ -7,8 +7,12 @@ import {
   normalizeWikiName,
   normalizeWikiText,
 } from "./wikiCanonicalizer";
+import {
+  mapWikiAliasRow,
+  mapWikiConceptRow,
+  mapWikiRelationRow,
+} from "./wikiDto";
 import { WikiEvidenceRelinker } from "./wikiEvidenceRelinker";
-import { rowColumn } from "./wikiRow";
 import type { WikiReadingAbandonOutcome } from "./wikiReadingSession";
 import type { WikiEmbeddingWorkUnit } from "./wikiEmbeddingQueue";
 import {
@@ -18,6 +22,10 @@ import {
 } from "../documentChunks";
 import { renderWikiMarkdown } from "./wikiRenderer";
 import { WikiRetriever } from "./wikiRetriever";
+import type {
+  WikiClaimSearchResult,
+  WikiDocumentSearchResult,
+} from "./wikiRetriever";
 import { getWikiStore, type WikiStore } from "./wikiStore";
 import {
   WIKI_READ_DEPTHS,
@@ -27,16 +35,25 @@ import {
   type WikiCommitResult,
   type WikiEvidenceInput,
   type WikiReadDepth,
+  type WikiRelationRecord,
   type WikiSourceChunk,
 } from "./wikiTypes";
 
 declare let Zotero: any;
 declare let ztoolkit: ZToolkit;
 
+/**
+ * What `wiki_search` returns, and what `wiki_prepare_update` embeds as
+ * `semanticClaims`. Every field is a plain DTO: {@link WikiRetriever.search}
+ * maps its Evidence and Relation rows at that boundary, so nothing here is a
+ * `Zotero.DB.queryAsync` row. Typing it as `any[]` is what let rows through
+ * unnoticed until `JSON.stringify` hit a row's `toJSON` probe and the tool
+ * call died with `DB column 'toJSON' not found`.
+ */
 export interface WikiServiceSearchResult {
-  claims: any[];
-  documents: any[];
-  relations: any[];
+  claims: WikiClaimSearchResult[];
+  documents: WikiDocumentSearchResult[];
+  relations: WikiRelationRecord[];
   directCount: number;
   oneHopCount: number;
   vectorSearchUsed: boolean;
@@ -195,31 +212,33 @@ export class WikiService {
     const page = await this.store.getPage(pageId);
     if (!page) return null;
     const snapshot = await this.store.getRetrievalSnapshot(page.libraryID);
+    // The snapshot holds `Zotero.DB.queryAsync` rows. `store.getPage` already
+    // returns DTOs, but the Concept, Alias and Relation rows appended here do
+    // not go through it, so they are mapped at this boundary. Handing a row to
+    // MCP fails the whole tool call at `JSON.stringify` time with
+    // `DB column 'toJSON' not found` - see ./wikiDto.
+    const conceptRecords = snapshot.concepts.map(mapWikiConceptRow);
+    const aliasRecords = snapshot.aliases.map(mapWikiAliasRow);
+    const relationRecords = snapshot.relations.map(mapWikiRelationRow);
     const concept =
       page.primaryConceptId == null
         ? null
-        : (snapshot.concepts.find(
-            (row) =>
-              Number(rowColumn(row, "concept_id", "conceptId")) ===
-              page.primaryConceptId,
+        : (conceptRecords.find(
+            (record) => record.conceptId === page.primaryConceptId,
           ) ?? null);
     const aliases =
       page.primaryConceptId == null
         ? []
-        : snapshot.aliases.filter(
-            (row) =>
-              Number(rowColumn(row, "concept_id", "conceptId")) ===
-              page.primaryConceptId,
+        : aliasRecords.filter(
+            (record) => record.conceptId === page.primaryConceptId,
           );
     const relations =
       page.primaryConceptId == null
         ? []
-        : snapshot.relations.filter(
-            (row) =>
-              Number(rowColumn(row, "source_concept_id", "sourceConceptId")) ===
-                page.primaryConceptId ||
-              Number(rowColumn(row, "target_concept_id", "targetConceptId")) ===
-                page.primaryConceptId,
+        : relationRecords.filter(
+            (record) =>
+              record.sourceConceptId === page.primaryConceptId ||
+              record.targetConceptId === page.primaryConceptId,
           );
     return { ...page, primaryConcept: concept, aliases, relations };
   }

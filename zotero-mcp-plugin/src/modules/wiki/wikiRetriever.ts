@@ -1,7 +1,13 @@
 import { hashWikiText, normalizeWikiName } from "./wikiCanonicalizer";
 import { tokenizeForIndex } from "../keyword/scientificTokenizer";
+import { mapWikiEvidenceRow, mapWikiRelationRow } from "./wikiDto";
 import { rowColumn as column } from "./wikiRow";
-import type { WikiReadDepth, WikiEpistemicStatus } from "./wikiTypes";
+import type {
+  WikiEvidenceRecord,
+  WikiReadDepth,
+  WikiEpistemicStatus,
+  WikiRelationRecord,
+} from "./wikiTypes";
 import type { WikiStore } from "./wikiStore";
 
 const ONE_HOP_DECAY = 0.72;
@@ -64,7 +70,8 @@ export interface WikiClaimSearchResult {
   evidenceConfidence: number;
   readDepth: WikiReadDepth | null;
   epistemicStatus: WikiEpistemicStatus;
-  evidence: any[];
+  /** Plain DTOs. Never the `Zotero.DB.queryAsync` rows they were read from. */
+  evidence: WikiEvidenceRecord[];
 }
 
 export interface WikiDocumentSearchResult {
@@ -80,7 +87,8 @@ export interface WikiDocumentSearchResult {
 export interface WikiSearchResult {
   claims: WikiClaimSearchResult[];
   documents: WikiDocumentSearchResult[];
-  relations: any[];
+  /** Plain DTOs, for the same reason as {@link WikiClaimSearchResult.evidence}. */
+  relations: WikiRelationRecord[];
   directCount: number;
   oneHopCount: number;
 }
@@ -137,11 +145,19 @@ export class WikiRetriever {
       list.push(String(row.alias));
       aliases.set(id, list);
     }
-    const claimEvidence = new Map<number, any[]>();
+    // Evidence and Relations are the two row kinds this result carries out of
+    // the module, so both are mapped to DTOs HERE, at the boundary, and it is
+    // the DTOs that every step below reads and returns. A Zotero row that
+    // reached an MCP response would kill the tool call at `JSON.stringify`
+    // time: the stringifier probes `toJSON`, the row's `get` trap forwards
+    // that to `getResultByName`, and the miss surfaces as
+    // `DB column 'toJSON' not found`. See ./wikiDto.
+    const claimEvidence = new Map<number, WikiEvidenceRecord[]>();
     const itemScope =
       options.itemKeys === undefined ? null : new Set(options.itemKeys);
     const scopedClaimIds = itemScope ? new Set<number>() : null;
-    for (const row of snapshot.evidence) {
+    for (const raw of snapshot.evidence) {
+      const row = mapWikiEvidenceRow(raw);
       const id = Number(column(row, "claim_id", "claimId"));
       const list = claimEvidence.get(id) ?? [];
       list.push(row);
@@ -176,9 +192,10 @@ export class WikiRetriever {
         ),
       );
     }
+    const relationRecords = snapshot.relations.map(mapWikiRelationRow);
     const directRelationConceptScores = new Map<number, number>();
-    const relationHits: any[] = [];
-    for (const relation of snapshot.relations) {
+    const relationHits: WikiRelationRecord[] = [];
+    for (const relation of relationRecords) {
       const predicateScore = lexicalScore(
         queryTerms,
         String(column(relation, "predicate", "predicate")),
@@ -201,7 +218,7 @@ export class WikiRetriever {
       relationHits.push(relation);
     }
     const relatedConceptScores = new Map<number, number>();
-    for (const relation of snapshot.relations) {
+    for (const relation of relationRecords) {
       const source = Number(
         column(relation, "source_concept_id", "sourceConceptId"),
       );

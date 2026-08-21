@@ -245,3 +245,32 @@ export interface WikiEvidenceSource {
     itemKey: string,
   ): Promise<boolean>;
 }
+
+export interface WikiConceptRecord {
+  conceptId: number;
+  libraryID: number;
+  canonicalName: string;
+  normalizedName: string;
+  conceptType: string;
+  description: string;
+}
+
+export interface WikiAliasRecord {
+  aliasId: number;
+  conceptId: number;
+  alias: string;
+  normalizedAlias: string;
+  language: string;
+  source: string;
+  confidence: number;
+}
+
+export interface WikiRelationRecord {
+  relationId: number;
+  sourceConceptId: number;
+  predicate: string;
+  normalizedPredicate: string;
+  targetConceptId: number;
+  confidence: number;
+  createdAt: number;
+}

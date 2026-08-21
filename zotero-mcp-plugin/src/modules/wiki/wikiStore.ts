@@ -4,6 +4,7 @@ import {
   normalizeWikiText,
 } from "./wikiCanonicalizer";
 import { ensureWikiSchema } from "./wikiSchema";
+import { mapWikiEvidenceRow } from "./wikiDto";
 import { rowColumn as rowValue } from "./wikiRow";
 import { WikiEmbeddingQueue } from "./wikiEmbeddingQueue";
 import { WikiReadingSessions } from "./wikiReadingSession";
@@ -1019,35 +1020,7 @@ export class WikiStore {
   }
 
   private mapEvidence(row: any): WikiEvidenceRecord {
-    return {
-      evidenceId: Number(rowValue(row, "evidence_id", "evidenceId")),
-      claimId: Number(rowValue(row, "claim_id", "claimId")),
-      libraryID: Number(rowValue(row, "library_id", "libraryID")),
-      itemKey: String(rowValue(row, "item_key", "itemKey")),
-      chunkIdSnapshot: Number(
-        rowValue(row, "chunk_id_snapshot", "chunkIdSnapshot"),
-      ),
-      chunkTextHash: String(rowValue(row, "chunk_text_hash", "chunkTextHash")),
-      sourceContentHash: String(
-        rowValue(row, "source_content_hash", "sourceContentHash"),
-      ),
-      sourceChunkSignature: String(
-        rowValue(row, "source_chunk_signature", "sourceChunkSignature"),
-      ),
-      sourceResetGeneration: String(
-        rowValue(row, "source_reset_generation", "sourceResetGeneration"),
-      ),
-      excerptHash: String(rowValue(row, "excerpt_hash", "excerptHash")),
-      excerpt: String(row.excerpt),
-      evidenceRole: rowValue(row, "evidence_role", "evidenceRole"),
-      readDepth: rowValue(row, "read_depth", "readDepth"),
-      linkState: rowValue(row, "link_state", "linkState"),
-      createdAt: Number(rowValue(row, "created_at", "createdAt")),
-      lastVerifiedAt:
-        rowValue(row, "last_verified_at", "lastVerifiedAt") == null
-          ? null
-          : Number(rowValue(row, "last_verified_at", "lastVerifiedAt")),
-    };
+    return mapWikiEvidenceRow(row);
   }
 
   async getClaim(claimId: number): Promise<WikiClaimRecord | null> {

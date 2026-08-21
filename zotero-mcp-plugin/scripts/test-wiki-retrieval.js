@@ -345,7 +345,7 @@ assert.ok(
 );
 assert.ok(
   scoped.claims.every((claim) =>
-    claim.evidence.every((row) => row.item_key === "PAPER002"),
+    claim.evidence.every((row) => row.itemKey === "PAPER002"),
   ),
   "scoped Claim results must not expose Evidence outside itemKeys",
 );
@@ -404,7 +404,7 @@ const mixedClaim = mixedVerification.claims.find(
 );
 assert.ok(mixedClaim, "the mixed-state Claim must remain visible");
 assert.ok(
-  mixedClaim.evidence.some((row) => row.link_state === "pending_relink"),
+  mixedClaim.evidence.some((row) => row.linkState === "pending_relink"),
   "pending Evidence remains visible for explicit re-verification",
 );
 assert.equal(
@@ -511,7 +511,7 @@ assert.deepEqual(
 );
 assert.ok(
   scopeBeforeRanking.claims.every((claim) =>
-    claim.evidence.some((row) => row.item_key === "OTHERDOC"),
+    claim.evidence.some((row) => row.itemKey === "OTHERDOC"),
   ),
   "itemKeys must constrain eligible Claims before Wiki scoring and ranking",
 );
@@ -537,14 +537,14 @@ const pendingSearch = await retriever.search({
 });
 assert.ok(
   pendingSearch.claims.some((claim) =>
-    claim.evidence.some((row) => row.link_state === "pending_relink"),
+    claim.evidence.some((row) => row.linkState === "pending_relink"),
   ),
   "pending_relink Evidence remains visible and explicitly marked",
 );
 assert.ok(
   pendingSearch.claims
     .filter((claim) =>
-      claim.evidence.every((row) => row.link_state === "pending_relink"),
+      claim.evidence.every((row) => row.linkState === "pending_relink"),
     )
     .every((claim) => claim.readDepth === null),
   "a pending-only Claim must not report a verified readDepth",
@@ -569,7 +569,7 @@ const historicalSearch = await retriever.search({
 });
 assert.ok(
   historicalSearch.claims.some((claim) =>
-    claim.evidence.some((row) => row.link_state === "source_deleted"),
+    claim.evidence.some((row) => row.linkState === "source_deleted"),
   ),
   "source_deleted Evidence must remain part of the long-term Wiki Claim",
 );

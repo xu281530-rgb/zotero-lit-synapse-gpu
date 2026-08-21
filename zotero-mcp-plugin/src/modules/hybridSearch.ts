@@ -35,6 +35,13 @@ export interface WikiSearchItem {
   evidenceConfidence: number;
   readDepth: string;
   epistemicStatus: string;
+  /**
+   * Carried through to the response verbatim, so the Wiki branch must hand
+   * over plain DTOs. `WikiRetriever.search` maps its rows before returning;
+   * a `Zotero.DB.queryAsync` row arriving here would fail the whole
+   * `hybrid_search` call at serialisation time with
+   * `DB column 'toJSON' not found`.
+   */
   wikiClaims?: unknown[];
 }
 
