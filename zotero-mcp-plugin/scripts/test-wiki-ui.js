@@ -156,41 +156,68 @@ for (const rule of [
   assert.ok(css.includes(rule), `the Wiki stylesheet must style ${rule}`);
 }
 
-// Gecko does not lay out <button> as a grid or flex container: the children
-// fall into the button's own anonymous box, run side by side and spill out of
-// the border box. Blink honours it, so this only ever breaks inside Zotero -
-// which is exactly how it shipped once. Every element the panel builds as a
-// <button> must therefore stay display:block and keep its stack in a wrapper.
-const BUTTON_CLASSES = [
-  "zmp-wiki-page-entry",
-  "zmp-wiki-claim-open",
-  "zmp-wiki-command",
-  "zmp-wiki-alias-chip",
-  "zmp-wiki-claim-remove",
-];
-for (const name of BUTTON_CLASSES) {
-  assert.ok(
-    panel.includes(name),
-    `${name} is no longer rendered; drop it from this guard or fix the panel`,
+// Gecko lays a <button>'s children out in an anonymous XUL box that does not
+// grow to fit them, so a button holding two rows renders one row tall and
+// spills the rest over whatever follows. Blink grows the button, so this only
+// ever breaks inside Zotero - which is exactly how it shipped twice. The rule
+// that prevents a third time: a <button> here never wraps, and anything that
+// wraps is a div with button semantics.
+assert.match(
+  panel,
+  /function clickable\(/u,
+  "the panel must provide a non-button clickable for multi-row controls",
+);
+assert.match(
+  panel,
+  /node\.setAttribute\("role", "button"\)/u,
+  "a div used as a control must announce itself as a button",
+);
+assert.match(
+  panel,
+  /node\.setAttribute\("tabindex", "0"\)/u,
+  "a div used as a control must be reachable by keyboard",
+);
+assert.match(
+  panel,
+  /key !== "Enter" && key !== " "/u,
+  "a div used as a control must activate on Enter and Space",
+);
+
+// The two controls that hold more than one row must not be <button>s.
+for (const name of ["zmp-wiki-page-entry", "zmp-wiki-claim-open"]) {
+  assert.match(
+    panel,
+    new RegExp(`clickable\\(\\s*\\n?\\s*doc,\\s*\\n?\\s*"${name}"`, "u"),
+    `${name} wraps onto several rows, so it must be a div, not a <button>`,
   );
   assert.doesNotMatch(
-    css,
-    new RegExp(`^\\.${name}\\s*\\{[^}]*display:\\s*(grid|flex)`, "msu"),
-    `.${name} is a <button>; Gecko ignores display:grid/flex on it, so the stack must live in a wrapper`,
+    panel,
+    new RegExp(`"button",\\s*\\n?\\s*"${name}"`, "u"),
+    `${name} must never be rebuilt as a <button>`,
   );
 }
-for (const wrapper of [".zmp-wiki-entry-body", ".zmp-wiki-claim-body"]) {
+// Long claim text in the graph rail wraps too, so it uses the block variant.
+assert.match(
+  panel,
+  /function commandBlock\(/u,
+  "a wrapping command must have a non-button form",
+);
+assert.match(
+  css,
+  /\.zmp-wiki-command\.is-block\s*\{[^}]*white-space:\s*normal/su,
+  "the block command is the only command allowed to wrap",
+);
+// Every real button is pinned to one line.
+for (const name of [
+  "zmp-wiki-command",
+  "zmp-wiki-alias-chip",
+]) {
   assert.match(
     css,
-    new RegExp(`^\\${wrapper}\\s*\\{[^}]*display:\\s*grid`, "msu"),
-    `${wrapper} must carry the grid the button cannot`,
+    new RegExp(`^\\.${name}\\s*\\{[^}]*white-space:\\s*nowrap`, "msu"),
+    `.${name} is a <button>; it must not wrap, or Gecko will collapse it`,
   );
 }
-assert.ok(
-  panel.includes("zmp-wiki-entry-body") &&
-    panel.includes("zmp-wiki-claim-body"),
-  "the panel must render the wrappers the stylesheet lays out",
-);
 
 // Claims must never collapse into one another: each card is spaced, wraps its
 // own text, and has no fixed height to clip it.

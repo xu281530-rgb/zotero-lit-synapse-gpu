@@ -168,9 +168,13 @@
   margin-left: auto;
 }
 
+/* Real <button> elements stay on one line, always: a button that wraps is a
+   button that collapses in Gecko. Anything that must wrap uses .is-block,
+   which is a div. */
 .zmp-wiki-command {
   min-height: 27px;
   padding: 3px 11px;
+  white-space: nowrap;
   color: var(--wiki-text);
   background: var(--wiki-paper);
   border: 1px solid var(--wiki-border-strong);
@@ -202,6 +206,18 @@
   border-color: rgba(164, 87, 78, 0.34);
   color: var(--wiki-danger);
 }
+/* A wrapping command: a div, so it grows with its text. */
+.zmp-wiki-command.is-block {
+  display: block;
+  width: 100%;
+  padding: 9px 11px;
+  text-align: left;
+  white-space: normal;
+  font-family: var(--wiki-font-song);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
 /* Secondary, text-weight actions: present but never louder than the prose. */
 .zmp-wiki-command.quiet {
   padding: 2px 8px;
@@ -273,13 +289,15 @@
 
 /* ============================ Left: index =============================== */
 
-/* A <button> is not a grid container in Gecko: it drops its children into its
-   own anonymous box, which lays them out side by side and lets them spill out
-   of the border box. Blink honours display:grid here, which is why this only
-   broke inside Zotero. Every multi-row button below therefore keeps its stack
-   in a wrapper element and stays display:block itself. */
+/* Multi-row controls are divs with role="button", never <button> elements.
+   Gecko lays a button's children out in an anonymous XUL box that does not
+   grow to fit them, so a two-row button renders one row tall and spills its
+   second row over whatever follows - which is exactly what this panel did in
+   Zotero while looking correct in Blink. A wrapper element does not help,
+   because the wrapper sits inside that same box. See `clickable()`. */
 .zmp-wiki-page-entry {
-  display: block;
+  display: grid;
+  gap: 4px;
   width: 100%;
   padding: 10px 11px;
   margin-bottom: 5px;
@@ -295,12 +313,6 @@
   -moz-appearance: none;
   appearance: none;
 }
-.zmp-wiki-entry-body {
-  display: grid;
-  gap: 4px;
-  width: 100%;
-  min-width: 0;
-}
 .zmp-wiki-page-entry:hover {
   background: var(--wiki-highlight);
   border-color: var(--wiki-border);
@@ -310,7 +322,11 @@
   border-color: var(--wiki-border-strong);
   box-shadow: inset 3px 0 0 var(--wiki-accent);
 }
+/* Explicitly block, so the two rows stack even if the grid above is ever
+   defeated by the host: <strong> and <small> are inline by default, and an
+   inline fallback is what runs them together. */
 .zmp-wiki-page-entry-title {
+  display: block;
   font-family: var(--wiki-font-hei);
   font-size: 13px;
   font-weight: 700;
@@ -320,6 +336,7 @@
   color: var(--wiki-accent);
 }
 .zmp-wiki-page-entry-meta {
+  display: block;
   color: var(--wiki-faint);
   font-family: var(--wiki-font-ui);
   font-size: 11px;
@@ -430,6 +447,7 @@
   border: 1px solid var(--wiki-border);
   border-radius: var(--wiki-radius-pill);
   font: 11.5px/1.7 var(--wiki-font-hei);
+  white-space: nowrap;
   cursor: pointer;
   transition:
     color 120ms ease,
@@ -484,7 +502,8 @@
   );
 }
 .zmp-wiki-claim-open {
-  display: block;
+  display: grid;
+  gap: 8px;
   width: 100%;
   padding: 13px 16px 14px;
   text-align: left;
@@ -495,12 +514,6 @@
   cursor: pointer;
   -moz-appearance: none;
   appearance: none;
-}
-.zmp-wiki-claim-body {
-  display: grid;
-  gap: 8px;
-  width: 100%;
-  min-width: 0;
 }
 .zmp-wiki-claim-head {
   display: flex;
@@ -894,17 +907,14 @@
   font-size: 13.5px;
   line-height: 1.8;
 }
-.zmp-wiki-graph-details .zmp-wiki-command {
-  display: block;
-  width: 100%;
+/* Only the wrapping variant goes full width here; the plain buttons in this
+   rail stay single-line commands. */
+.zmp-wiki-graph-details .zmp-wiki-command.is-block {
   margin: 6px 0;
-  padding: 9px 11px;
-  text-align: left;
-  white-space: normal;
-  font-family: var(--wiki-font-song);
-  font-size: 13px;
-  line-height: 1.7;
   border-radius: var(--wiki-radius-sm);
+}
+.zmp-wiki-graph-details > .zmp-wiki-command {
+  margin: 10px 0 0;
 }
 .zmp-wiki-graph-context {
   display: block;

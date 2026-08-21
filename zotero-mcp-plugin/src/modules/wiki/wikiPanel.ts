@@ -150,6 +150,45 @@ function button(
 }
 
 /**
+ * A clickable block that is deliberately not a `<button>`.
+ *
+ * Gecko lays a button's children out in an anonymous XUL box that does not
+ * grow to fit them: a two-row button renders one row tall and spills its
+ * second row over whatever comes next. Wrapping the rows in an inner element
+ * does not help, because the wrapper is inside that same box. So every
+ * control in this panel that holds more than one line of text is a div with
+ * button semantics instead - a normal block box, which grows.
+ *
+ * The rule that keeps this from coming back: anything built as a `<button>`
+ * here stays on one line (`white-space: nowrap`); anything that wraps is
+ * built with this helper.
+ */
+function clickable(
+  doc: Document,
+  className: string,
+  title?: string,
+): HTMLElement {
+  const node = element(doc, "div", className);
+  node.setAttribute("role", "button");
+  node.setAttribute("tabindex", "0");
+  if (title !== undefined) node.title = title;
+  node.addEventListener("keydown", (event: Event) => {
+    const key = (event as KeyboardEvent).key;
+    if (key !== "Enter" && key !== " ") return;
+    event.preventDefault();
+    node.click();
+  });
+  return node;
+}
+
+/** A wrapping, full-width command: the same look, without the button box. */
+function commandBlock(doc: Document, text: string, title: string): HTMLElement {
+  const node = clickable(doc, "zmp-wiki-command is-block", title);
+  node.textContent = text;
+  return node;
+}
+
+/**
  * A section of the reading column: a labelled heading plus its body.
  *
  * The middle column used to be one undivided stack, which is why the summary,
@@ -647,9 +686,11 @@ async function renderWikiPanelContent(
       // claims against a shared rule with no gap, which is what made long
       // passages read as one collapsed block.
       const card = element(doc, "article", "zmp-wiki-claim");
-      const open = element(doc, "button", "zmp-wiki-claim-open");
-      open.type = "button";
-      open.title = `查看论断 ${claim.claimId} 的证据`;
+      const open = clickable(
+        doc,
+        "zmp-wiki-claim-open",
+        `查看论断 ${claim.claimId} 的证据`,
+      );
       const head = element(doc, "div", "zmp-wiki-claim-head");
       head.append(
         element(
@@ -665,17 +706,11 @@ async function renderWikiPanelContent(
         element(doc, "span", "", claimStatus(claim)),
         element(doc, "span", "", `${claim.evidence.length} 条证据`),
       );
-      // The stack lives in a wrapper, never on the button itself: Gecko does
-      // not honour display:grid on <button>, and drops the children into the
-      // button's own anonymous box, where they lay out side by side and spill
-      // out of the border box - the overlap this card was built to avoid.
-      const openBody = element(doc, "span", "zmp-wiki-claim-body");
-      openBody.append(
+      open.append(
         head,
         element(doc, "p", "zmp-wiki-claim-text", claim.claimText),
         meta,
       );
-      open.append(openBody);
       open.addEventListener("click", () => showEvidence(claim, card));
       const remove = element(doc, "button", "zmp-wiki-claim-remove", "×");
       remove.type = "button";
@@ -701,13 +736,9 @@ async function renderWikiPanelContent(
   const pagesById = new Map<number, any>();
   for (const page of pages) {
     pagesById.set(page.pageId, page);
-    const entry = element(doc, "button", "zmp-wiki-page-entry");
-    entry.type = "button";
+    const entry = clickable(doc, "zmp-wiki-page-entry", page.canonicalTitle);
     entry.setAttribute("aria-current", "false");
-    // Same wrapper rule as the claim card: the two rows stack inside a span,
-    // because a <button> is not a grid container in Gecko.
-    const entryBody = element(doc, "span", "zmp-wiki-entry-body");
-    entryBody.append(
+    entry.append(
       element(doc, "strong", "zmp-wiki-page-entry-title", page.canonicalTitle),
       element(
         doc,
@@ -716,7 +747,6 @@ async function renderWikiPanelContent(
         `${page.claims.length} 条论断 · 版本 ${page.version}`,
       ),
     );
-    entry.append(entryBody);
     entry.addEventListener("click", () => showPage(page, entry));
     pageList.append(entry);
     pageEntries.set(page.pageId, entry);
@@ -1037,7 +1067,7 @@ async function renderWikiPanelContent(
           ),
           roleChip(entry.roles),
         );
-        const open = button(
+        const open = commandBlock(
           doc,
           entry.claim.claimText,
           `打开论断 ${entry.claim.claimId}`,
@@ -1134,7 +1164,7 @@ async function renderWikiPanelContent(
           row.page.canonicalTitle,
         ),
       );
-      const open = button(
+      const open = commandBlock(
         doc,
         row.claim.claimText,
         `打开论断 ${row.claim.claimId}`,
