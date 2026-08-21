@@ -38,12 +38,31 @@ function createNode(tag) {
     parent: null,
     children: [],
     listeners: new Map(),
+    attributes: new Map(),
+    style: {},
     classList: {
-      add(name) {
-        node.className = `${node.className} ${name}`.trim();
+      add(...names) {
+        const present = new Set(node.className.split(/\s+/u).filter(Boolean));
+        for (const name of names) present.add(name);
+        node.className = Array.from(present).join(" ");
+      },
+      remove(...names) {
+        const gone = new Set(names);
+        node.className = node.className
+          .split(/\s+/u)
+          .filter((name) => name && !gone.has(name))
+          .join(" ");
+      },
+      contains(name) {
+        return node.className.split(/\s+/u).includes(name);
       },
     },
-    setAttribute() {},
+    setAttribute(name, value) {
+      node.attributes.set(name, String(value));
+    },
+    getAttribute(name) {
+      return node.attributes.get(name) ?? null;
+    },
     append(...kids) {
       for (const kid of kids) {
         kid.parent = node;
@@ -92,6 +111,12 @@ function textOf(node) {
 function findByClass(node, className) {
   const hit = node.className.split(/\s+/u).includes(className) ? [node] : [];
   return hit.concat(...node.children.map((child) => findByClass(child, className)));
+}
+
+/** Fire every handler registered for `type`, awaiting async ones. */
+async function fire(node, type) {
+  const event = { stopPropagation() {}, preventDefault() {} };
+  for (const handler of node.listeners.get(type) ?? []) await handler(event);
 }
 
 // --- Fake Zotero ----------------------------------------------------------
@@ -369,6 +394,236 @@ async function seed(sqlite) {
   assert.ok(
     logged.some((entry) => String(entry[0]).includes("failed to render")),
     "the failure must also reach ztoolkit.log",
+  );
+  sqlite.close();
+}
+
+// --- A crowded page keeps every claim in its own card ---------------------
+
+/**
+ * The complaint the reading column was rebuilt for: with twenty-odd claims the
+ * old markup ran them together against one shared rule, so long passages read
+ * as a single collapsed block. These assertions pin the structure that fixes
+ * it - one card per claim, the claim text in its own element, and the delete
+ * control as a sibling of the body rather than inside it, so it can never sit
+ * on top of the prose.
+ */
+async function seedCrowded(sqlite) {
+  const store = new WikiStore(adapt(sqlite));
+  await store.initialize();
+  const actions = [
+    {
+      action: "CREATE_PAGE",
+      ref: "page:ds",
+      canonicalTitle: "定向凝固与固态相变控制柱状晶技术",
+      primaryConcept: {
+        canonicalName: "定向凝固",
+        aliases: [
+          { alias: "DS", language: "en" },
+          { alias: "Directional Solidification", language: "en" },
+        ],
+      },
+    },
+    { action: "CREATE_PAGE", ref: "page:other", canonicalTitle: "快速热压定型" },
+  ];
+  for (let index = 0; index < 24; index += 1) {
+    actions.push({
+      action: "ADD_CLAIM",
+      pageId: "page:ds",
+      ref: `claim:ds${index}`,
+      claimText:
+        `机制 ${index}：定向凝固热处理中，抽拉速率与温度梯度的比值决定固液界面形态，` +
+        "比值越低界面越趋于平面，柱状晶带随之展宽，这一段刻意写得很长以验证长文本会撑高卡片而不是彼此重叠。",
+      claimType: "mechanism",
+      epistemicStatus: "provisional",
+      coverageLevel: "chunk_local",
+      confidence: 0.6,
+      evidence: [
+        {
+          libraryID: 1,
+          itemKey: `ITEMD${String(index).padStart(3, "0")}`,
+          chunkIdSnapshot: index + 1,
+          chunkTextHash: await hashWikiText(`chunk-${index}`),
+          sourceContentHash: `content-${index}`,
+          sourceChunkSignature: `paragraph-v3:${index}:5`,
+          sourceResetGeneration: "reset-1",
+          excerpt: `当前抽拉速率过慢，柱状晶带展宽 ${index} 微米。`,
+          evidenceRole: index % 5 === 0 ? "CONTRADICTS" : "SUPPORTS",
+          readDepth: "chunk_local",
+        },
+        {
+          libraryID: 1,
+          itemKey: "ITEMSHARED",
+          chunkIdSnapshot: 900 + index,
+          chunkTextHash: await hashWikiText(`shared-${index}`),
+          sourceContentHash: "content-shared",
+          sourceChunkSignature: `paragraph-v3:${900 + index}:2`,
+          sourceResetGeneration: "reset-1",
+          excerpt: `跨论文对照片段 ${index}。`,
+          evidenceRole: "QUALIFIES",
+          readDepth: "section_read",
+        },
+      ],
+    });
+  }
+  actions.push({
+    action: "ADD_CLAIM",
+    pageId: "page:other",
+    ref: "claim:other",
+    claimText: "热压定型阶段的保压时间决定残余应力水平。",
+    claimType: "condition",
+    epistemicStatus: "supported",
+    coverageLevel: "section_read",
+    confidence: 0.8,
+    evidence: [
+      {
+        libraryID: 1,
+        itemKey: "ITEMHOT001",
+        chunkIdSnapshot: 7,
+        chunkTextHash: await hashWikiText("hot-press"),
+        sourceContentHash: "content-hot",
+        sourceChunkSignature: "paragraph-v3:7:1",
+        sourceResetGeneration: "reset-1",
+        excerpt: "保压 30 分钟后残余应力下降。",
+        evidenceRole: "SUPPORTS",
+        readDepth: "section_read",
+      },
+    ],
+  });
+  await store.commit({ libraryID: 1, userInitiated: true, actions });
+  return store;
+}
+
+{
+  const sqlite = new DatabaseSync(path.join(tempDir, "crowded.sqlite"));
+  sqlite.exec("PRAGMA foreign_keys = ON");
+  await seedCrowded(sqlite);
+  await useConnection(adapt(sqlite));
+  const win = createWindow();
+
+  await openWikiPanel(win);
+
+  const panel = win.containers[0].querySelector("#zotero-mcp-wiki-panel");
+  const entries = findByClass(panel, "zmp-wiki-page-entry");
+  assert.equal(entries.length, 2, "every page must appear in the index");
+  const activeEntries = entries.filter((entry) =>
+    entry.classList.contains("is-active"),
+  );
+  assert.equal(
+    activeEntries.length,
+    1,
+    "exactly one index entry may carry the active state",
+  );
+  assert.equal(
+    activeEntries[0].getAttribute("aria-current"),
+    "true",
+    "the active entry must announce itself to assistive technology",
+  );
+
+  // Pages are listed most-recently-updated first, so pick the crowded one by
+  // name rather than by position.
+  const crowded = entries.find((entry) =>
+    textOf(entry).includes("定向凝固与固态相变控制柱状晶技术"),
+  );
+  const sparse = entries.find((entry) => entry !== crowded);
+  await fire(crowded, "click");
+  assert.ok(
+    crowded.classList.contains("is-active"),
+    "opening a page must mark its index entry active",
+  );
+  assert.equal(
+    entries.filter((entry) => entry.classList.contains("is-active")).length,
+    1,
+    "only one index entry may be active at a time",
+  );
+
+  const cards = findByClass(panel, "zmp-wiki-claim");
+  assert.equal(cards.length, 24, "each claim must render as its own card");
+  for (const card of cards) {
+    assert.equal(
+      findByClass(card, "zmp-wiki-claim-text").length,
+      1,
+      "a claim card carries exactly one text block",
+    );
+    assert.equal(
+      findByClass(card, "zmp-wiki-claim").length,
+      1,
+      "claim cards must be siblings, never nested inside one another",
+    );
+    const [open] = findByClass(card, "zmp-wiki-claim-open");
+    const [remove] = findByClass(card, "zmp-wiki-claim-remove");
+    assert.ok(open && remove, "a claim card carries a body and a delete action");
+    assert.equal(
+      findByClass(open, "zmp-wiki-claim-remove").length,
+      0,
+      "the delete control must sit beside the prose, not inside it",
+    );
+    assert.equal(remove.title, "删除论断");
+  }
+  const rendered = textOf(panel);
+  assert.match(
+    rendered,
+    /这一段刻意写得很长以验证长文本会撑高卡片而不是彼此重叠。/u,
+    "long claim text must render in full rather than being truncated",
+  );
+  assert.equal(
+    findByClass(panel, "zmp-wiki-summary-card").length,
+    1,
+    "the summary must sit in its own paper card",
+  );
+  for (const heading of ["知识摘要", "术语与别名", "核心知识", "知识条目"]) {
+    assert.ok(rendered.includes(heading), `the document must announce ${heading}`);
+  }
+  assert.ok(
+    findByClass(panel, "zmp-wiki-alias-chip").length >= 2,
+    "aliases must render as chips",
+  );
+
+  // Clicking a claim opens its evidence and moves the active marker.
+  await fire(findByClass(cards[3], "zmp-wiki-claim-open")[0], "click");
+  assert.ok(
+    cards[3].classList.contains("is-active"),
+    "the opened claim must be marked active",
+  );
+  const evidencePane = win.containers[0].querySelector(
+    "#zotero-mcp-wiki-evidence",
+  );
+  assert.equal(
+    findByClass(evidencePane, "zmp-wiki-evidence-row").length,
+    2,
+    "the evidence rail must list every evidence record of the claim",
+  );
+  assert.equal(
+    findByClass(evidencePane, "zmp-wiki-evidence-head").length,
+    1,
+    "the evidence rail must keep its pinned heading",
+  );
+  await fire(findByClass(cards[5], "zmp-wiki-claim-open")[0], "click");
+  assert.ok(
+    !cards[3].classList.contains("is-active"),
+    "only one claim may be active at a time",
+  );
+  assert.ok(cards[5].classList.contains("is-active"));
+
+  // Switching pages moves the index selection and swaps the reading column.
+  await fire(sparse, "click");
+  assert.ok(
+    sparse.classList.contains("is-active"),
+    "the newly opened page must become the active index entry",
+  );
+  assert.ok(
+    !crowded.classList.contains("is-active"),
+    "the previously open page must lose the active state",
+  );
+  assert.equal(
+    findByClass(panel, "zmp-wiki-claim").length,
+    1,
+    "the reading column must show only the newly opened page",
+  );
+  assert.equal(
+    loggedErrors.length,
+    1,
+    "the crowded render must not add an error to the log",
   );
   sqlite.close();
 }

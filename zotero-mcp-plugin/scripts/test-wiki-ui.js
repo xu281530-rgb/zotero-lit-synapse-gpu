@@ -110,6 +110,94 @@ assert.doesNotMatch(
   "the Wiki panel must never swallow an error silently",
 );
 
+// --- The paper design system --------------------------------------------
+// Every region reads its colours and type from one token set, so a change to
+// the palette cannot leave one column on an older scheme.
+
+for (const token of [
+  "--wiki-paper",
+  "--wiki-paper-alt",
+  "--wiki-border",
+  "--wiki-shadow",
+  "--wiki-radius",
+  "--wiki-font-hei",
+  "--wiki-font-kai",
+  "--wiki-font-song",
+  "--wiki-font-serif-en",
+]) {
+  assert.ok(css.includes(`${token}:`), `the Wiki must define ${token}`);
+}
+
+// Latin glyphs come from Times New Roman and CJK falls through to the family
+// behind it, which only works if Times New Roman leads every mixed stack.
+for (const stack of ["--wiki-font-hei", "--wiki-font-kai", "--wiki-font-song"]) {
+  assert.match(
+    css,
+    new RegExp(`${stack}:\\s*\\n?\\s*"Times New Roman"`, "u"),
+    `${stack} must put Times New Roman ahead of its Chinese family`,
+  );
+}
+assert.match(css, /--wiki-font-hei:[^;]*Microsoft YaHei/su);
+assert.match(css, /--wiki-font-kai:[^;]*KaiTi/su);
+assert.match(css, /--wiki-font-song:[^;]*SimSun/su);
+
+for (const rule of [
+  ".zmp-wiki-summary-card",
+  ".zmp-wiki-claim-list",
+  ".zmp-wiki-claim-open",
+  ".zmp-wiki-claim-remove",
+  ".zmp-wiki-page-entry.is-active",
+  ".zmp-wiki-evidence-head",
+  ".zmp-wiki-alias-chip",
+  ".zmp-wiki-graph-toolbar",
+  ".zmp-wiki-graph-tooltip",
+  ".zmp-wiki-section-title",
+]) {
+  assert.ok(css.includes(rule), `the Wiki stylesheet must style ${rule}`);
+}
+
+// Claims must never collapse into one another: each card is spaced, wraps its
+// own text, and has no fixed height to clip it.
+assert.match(
+  css,
+  /\.zmp-wiki-claim-list\s*\{[^}]*gap:\s*10px/su,
+  "claim cards must keep a gap between them",
+);
+assert.match(
+  css,
+  /\.zmp-wiki-claim-text\s*\{[^}]*line-height:\s*1\.7/su,
+  "claim prose must be set with reading line height",
+);
+// The card, its body and its prose grow with the text; only the small delete
+// square is allowed a fixed size.
+for (const rule of [
+  "\\.zmp-wiki-claim",
+  "\\.zmp-wiki-claim-open",
+  "\\.zmp-wiki-claim-text",
+]) {
+  assert.doesNotMatch(
+    css,
+    new RegExp(`^${rule}\\s*\\{[^}]*(?<![-a-z])(?:max-)?height:`, "msu"),
+    `${rule} must not pin a height that could clip its text`,
+  );
+}
+// Every column scrolls on its own and none may widen the tab.
+assert.match(
+  css,
+  /\.zmp-wiki-pages,\s*\.zmp-wiki-claims,\s*\.zmp-wiki-evidence\s*\{[^}]*min-width:\s*0;[^}]*overflow-x:\s*hidden;[^}]*overflow-y:\s*auto;/su,
+  "each column must scroll vertically on its own without widening the tab",
+);
+assert.match(
+  css,
+  /overflow-wrap:\s*anywhere/u,
+  "long unbroken strings must wrap rather than stretch a column",
+);
+assert.match(
+  css,
+  /grid-template-columns:\s*\n?\s*clamp\(240px, 21%, 280px\)\s*\n?\s*minmax\(0, 1fr\)\s*\n?\s*clamp\(320px, 26%, 380px\)/u,
+  "the three columns must use bounded side rails and a flexible middle",
+);
+
 assert.doesNotMatch(css, /z-index:\s*2147483000/u);
 assert.match(
   css,
@@ -185,6 +273,60 @@ assert.equal(tabCalls.added.length, 2);
 closeWikiTab(fakeWindow);
 assert.deepEqual(tabCalls.closed, ["wiki-tab-2"]);
 assert.equal(isCurrentWikiTabRender(reopenedRender), false);
+
+// --- The 3D knowledge space ----------------------------------------------
+
+const graph3D = fs.readFileSync("src/modules/wiki/graph3D.ts", "utf8");
+assert.match(
+  panel,
+  /import \{\s*\n?\s*createGraph3D/u,
+  "the Wiki panel must render its graph through the 3D renderer",
+);
+for (const capability of [
+  "GraphMode",
+  "setVisibleKinds",
+  "resetView",
+  "setAutoRotate",
+  "requestAnimationFrame",
+  "quadraticCurveTo",
+]) {
+  assert.ok(
+    graph3D.includes(capability),
+    `the knowledge space must provide ${capability}`,
+  );
+}
+// A real z axis, not a restyled plane: nodes carry depth and the camera
+// projects it.
+assert.match(graph3D, /\bz:\s*number;/u, "graph nodes must carry a z axis");
+assert.match(
+  graph3D,
+  /const depth = Math\.max\(60, cameraDistance - z2 \* depthScale\)/u,
+  "the camera must divide by depth, which is what makes the view perspective",
+);
+for (const kind of ["page", "claim", "evidence"]) {
+  assert.match(
+    graph3D,
+    new RegExp(`^\\s*${kind}: `, "mu"),
+    `the space must distinguish ${kind} nodes`,
+  );
+}
+for (const relation of ["supports", "contradicts", "related", "structure"]) {
+  assert.ok(
+    graph3D.includes(`${relation}:`),
+    `relations must be coloured by ${relation}`,
+  );
+}
+for (const control of ["重置视角", "自动旋转", "页面", "论断", "证据"]) {
+  assert.ok(
+    panel.includes(control),
+    `the graph toolbar must expose: ${control}`,
+  );
+}
+assert.doesNotMatch(
+  graph3D,
+  /from "three"/u,
+  "the knowledge space must stay dependency free",
+);
 
 for (const label of [
   "LLM 知识库",

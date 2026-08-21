@@ -1,3 +1,16 @@
+/* ==========================================================================
+   Zotero LLM Wiki - "academic paper" surface
+   --------------------------------------------------------------------------
+   One token set drives every region: paper colours, borders, radii and the
+   four type families the Wiki mixes (Hei for navigation, Kai for prose, Song
+   for claims, Times New Roman for Latin text in all three). Nothing below
+   restates a colour or a font stack literally; regions consume the variables.
+
+   CJK/Latin mixing works by ordering: "Times New Roman" first supplies the
+   Latin glyphs, and every CJK codepoint it lacks falls through to the Chinese
+   family that follows it.
+   ========================================================================== */
+
 .zotero-mcp-wiki-toolbarbutton {
   width: 36px;
   height: 36px;
@@ -21,272 +34,935 @@
 }
 
 #zotero-mcp-wiki-panel {
-  --wiki-bg: #f7f8fa;
-  --wiki-surface: #ffffff;
-  --wiki-border: #d9dee5;
-  --wiki-text: #20252b;
-  --wiki-muted: #66717e;
-  --wiki-accent: #2f6f61;
-  --wiki-danger: #b53a34;
+  /* Paper */
+  --wiki-bg: #f3f0e8;
+  --wiki-paper: #fcfbf7;
+  --wiki-paper-alt: #f7f4ec;
+  --wiki-paper-sunk: #efebe0;
+  /* Ink */
+  --wiki-text: #25231f;
+  --wiki-muted: #777168;
+  --wiki-faint: #9a9284;
+  /* Structure */
+  --wiki-border: rgba(90, 78, 60, 0.14);
+  --wiki-border-strong: rgba(90, 78, 60, 0.26);
+  --wiki-shadow:
+    0 1px 1px rgba(64, 54, 38, 0.04), 0 8px 20px -16px rgba(64, 54, 38, 0.5);
+  --wiki-shadow-raised:
+    0 1px 2px rgba(64, 54, 38, 0.06), 0 14px 28px -20px rgba(64, 54, 38, 0.55);
+  --wiki-radius: 10px;
+  --wiki-radius-sm: 7px;
+  --wiki-radius-pill: 999px;
+  /* Accents - low saturation only */
+  --wiki-accent: #536f62;
+  --wiki-accent-soft: rgba(83, 111, 98, 0.1);
+  --wiki-accent-line: rgba(83, 111, 98, 0.32);
+  --wiki-danger: #a4574e;
+  --wiki-danger-soft: rgba(164, 87, 78, 0.1);
+  --wiki-highlight: rgba(120, 104, 74, 0.07);
+  /* Type */
+  --wiki-font-serif-en: "Times New Roman", Times, serif;
+  --wiki-font-hei:
+    "Times New Roman", "Microsoft YaHei", "PingFang SC", "Heiti SC", SimHei,
+    "Noto Sans CJK SC", sans-serif;
+  --wiki-font-kai:
+    "Times New Roman", KaiTi, STKaiti, "Kaiti SC", KaiTi_GB2312,
+    "Noto Serif CJK SC", serif;
+  --wiki-font-song:
+    "Times New Roman", SimSun, NSimSun, "Songti SC", STSong,
+    "Noto Serif CJK SC", serif;
+  --wiki-font-ui: -apple-system, "Segoe UI", system-ui, sans-serif;
+  /* Read back by the 3D graph so its canvas matches the stylesheet. */
+  --wiki-graph-scheme: light;
+
+  position: relative;
   display: grid;
   width: 100%;
   height: 100%;
   min-width: 0;
   min-height: 0;
   box-sizing: border-box;
-  grid-template-rows: 52px minmax(0, 1fr);
+  grid-template-rows: 56px minmax(0, 1fr);
   color: var(--wiki-text);
-  background: var(--wiki-bg);
-  font:
-    13px/1.45 system-ui,
-    sans-serif;
+  /* Two near-invisible gradients stand in for paper grain without an image. */
+  background-color: var(--wiki-bg);
+  background-image:
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.42),
+      rgba(255, 255, 255, 0) 220px
+    ),
+    repeating-linear-gradient(
+      98deg,
+      rgba(120, 104, 74, 0.018) 0 3px,
+      rgba(120, 104, 74, 0) 3px 7px
+    );
+  font: 13px/1.6 var(--wiki-font-hei);
   overflow: hidden;
 }
+
+#zotero-mcp-wiki-panel *,
+#zotero-mcp-wiki-panel *::before,
+#zotero-mcp-wiki-panel *::after {
+  box-sizing: border-box;
+}
+
+/* Long CJK strings, DOIs and un-spaced formulae must never widen a column. */
+#zotero-mcp-wiki-panel p,
+#zotero-mcp-wiki-panel span,
+#zotero-mcp-wiki-panel strong,
+#zotero-mcp-wiki-panel small,
+#zotero-mcp-wiki-panel h1,
+#zotero-mcp-wiki-panel h2,
+#zotero-mcp-wiki-panel h3,
+#zotero-mcp-wiki-panel blockquote,
+#zotero-mcp-wiki-panel button {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* ============================ Top bar ==================================== */
 
 .zmp-wiki-header {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 0 14px;
-  background: var(--wiki-surface);
+  gap: 18px;
+  min-width: 0;
+  padding: 0 16px;
+  background: linear-gradient(
+    180deg,
+    var(--wiki-paper) 0%,
+    var(--wiki-paper-alt) 100%
+  );
   border-bottom: 1px solid var(--wiki-border);
 }
-.zmp-wiki-header h1,
-.zmp-wiki-page-title h2,
-.zmp-wiki-evidence h2,
-.zmp-wiki-graph-details h2 {
-  margin: 0;
-  letter-spacing: 0;
+.zmp-wiki-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  min-width: 0;
+  overflow: hidden;
 }
 .zmp-wiki-header h1 {
-  font-size: 17px;
+  margin: 0;
+  flex: none;
+  font-family: var(--wiki-font-hei);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
 }
 .zmp-wiki-status {
-  color: var(--wiki-muted);
+  min-width: 0;
+  color: var(--wiki-faint);
+  font-family: var(--wiki-font-ui);
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .zmp-wiki-header-actions {
   display: flex;
-  gap: 6px;
+  flex: none;
+  gap: 7px;
   margin-left: auto;
 }
+
 .zmp-wiki-command {
-  min-height: 28px;
-  padding: 4px 9px;
+  min-height: 27px;
+  padding: 3px 11px;
   color: var(--wiki-text);
-  background: var(--wiki-surface);
-  border: 1px solid var(--wiki-border);
-  border-radius: 4px;
+  background: var(--wiki-paper);
+  border: 1px solid var(--wiki-border-strong);
+  border-radius: var(--wiki-radius-sm);
+  font: 12px/1.5 var(--wiki-font-hei);
   cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+  -moz-appearance: none;
+  appearance: none;
 }
 .zmp-wiki-command:hover {
-  border-color: var(--wiki-accent);
+  background: var(--wiki-accent-soft);
+  border-color: var(--wiki-accent-line);
+  color: var(--wiki-accent);
+}
+.zmp-wiki-command:active {
+  background: var(--wiki-paper-sunk);
 }
 .zmp-wiki-command.danger {
   color: var(--wiki-danger);
+  border-color: transparent;
+  background: transparent;
 }
+.zmp-wiki-command.danger:hover {
+  background: var(--wiki-danger-soft);
+  border-color: rgba(164, 87, 78, 0.34);
+  color: var(--wiki-danger);
+}
+/* Secondary, text-weight actions: present but never louder than the prose. */
+.zmp-wiki-command.quiet {
+  padding: 2px 8px;
+  color: var(--wiki-muted);
+  background: transparent;
+  border-color: transparent;
+  font-size: 11.5px;
+}
+.zmp-wiki-command.quiet:hover {
+  background: var(--wiki-highlight);
+  border-color: var(--wiki-border);
+  color: var(--wiki-accent);
+}
+
+/* ============================ Three columns ============================== */
+
 .zmp-wiki-body {
+  min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(180px, 22%) minmax(340px, 1fr) minmax(
-      260px,
-      32%
-    );
+  gap: 14px;
+  padding: 14px;
+  /* Narrow, stable index; generous reading column; annotation rail that stops
+     growing on wide screens instead of eating the middle. */
+  grid-template-columns:
+    clamp(240px, 21%, 280px)
+    minmax(0, 1fr)
+    clamp(320px, 26%, 380px);
+  overflow: hidden;
 }
+.zmp-wiki-body[hidden] {
+  display: none;
+}
+
 .zmp-wiki-pages,
 .zmp-wiki-claims,
 .zmp-wiki-evidence {
   min-width: 0;
-  overflow: auto;
-  padding: 12px;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius);
+  box-shadow: var(--wiki-shadow);
+  scrollbar-width: thin;
 }
-.zmp-wiki-pages,
+.zmp-wiki-pages {
+  padding: 12px 10px;
+  background: var(--wiki-paper-alt);
+}
 .zmp-wiki-claims {
-  border-right: 1px solid var(--wiki-border);
+  padding: 22px 26px 40px;
+  background: var(--wiki-paper);
 }
+.zmp-wiki-evidence {
+  padding: 0;
+  background: var(--wiki-paper-alt);
+}
+
+.zmp-wiki-column-title {
+  display: block;
+  margin: 2px 8px 10px;
+  color: var(--wiki-faint);
+  font-family: var(--wiki-font-hei);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+
+/* ============================ Left: index =============================== */
+
 .zmp-wiki-page-entry {
   display: grid;
   width: 100%;
-  gap: 3px;
-  padding: 9px;
-  margin-bottom: 4px;
+  gap: 4px;
+  padding: 10px 11px;
+  margin-bottom: 5px;
   text-align: left;
   color: var(--wiki-text);
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--wiki-radius-sm);
   cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
+  -moz-appearance: none;
+  appearance: none;
 }
 .zmp-wiki-page-entry:hover {
-  background: var(--wiki-surface);
+  background: var(--wiki-highlight);
   border-color: var(--wiki-border);
 }
-.zmp-wiki-page-entry small,
-.zmp-wiki-claim-open small,
-.zmp-wiki-evidence-meta {
-  color: var(--wiki-muted);
+.zmp-wiki-page-entry.is-active {
+  background: var(--wiki-paper);
+  border-color: var(--wiki-border-strong);
+  box-shadow: inset 3px 0 0 var(--wiki-accent);
+}
+.zmp-wiki-page-entry-title {
+  font-family: var(--wiki-font-hei);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+.zmp-wiki-page-entry.is-active .zmp-wiki-page-entry-title {
+  color: var(--wiki-accent);
+}
+.zmp-wiki-page-entry-meta {
+  color: var(--wiki-faint);
+  font-family: var(--wiki-font-ui);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+/* ============================ Middle: the document ====================== */
+
+.zmp-wiki-doc {
+  /* Keeps the measure readable at 2560px without shrinking the column. */
+  max-width: 860px;
+  margin: 0 auto;
 }
 .zmp-wiki-page-title {
   display: flex;
-  align-items: center;
-  gap: 7px;
-  margin-bottom: 10px;
-}
-.zmp-wiki-page-title h2 {
-  margin-right: auto;
-  font-size: 16px;
-}
-.zmp-wiki-summary {
-  padding-bottom: 10px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 12px;
+  margin-bottom: 18px;
   border-bottom: 1px solid var(--wiki-border);
 }
-.zmp-wiki-aliases {
+.zmp-wiki-page-title h2 {
+  margin: 0 auto 0 0;
+  font-family: var(--wiki-font-hei);
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+.zmp-wiki-page-tools {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+
+.zmp-wiki-section {
+  margin-bottom: 22px;
+}
+.zmp-wiki-section-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 10px;
+  color: var(--wiki-muted);
+  font-family: var(--wiki-font-hei);
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+.zmp-wiki-section-title::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--wiki-border);
+}
+.zmp-wiki-section-count {
+  flex: none;
+  color: var(--wiki-faint);
+  font-family: var(--wiki-font-ui);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.zmp-wiki-summary-card {
+  padding: 18px 20px;
+  background: var(--wiki-paper-alt);
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius);
+}
+.zmp-wiki-summary {
+  margin: 0;
+  font-family: var(--wiki-font-kai);
+  font-size: 15px;
+  line-height: 1.85;
+  letter-spacing: 0.01em;
+}
+
+.zmp-wiki-terms {
+  display: grid;
+  gap: 7px;
+}
+.zmp-wiki-term-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 5px;
-  margin: 9px 0;
+  gap: 7px;
+  min-width: 0;
+}
+.zmp-wiki-term-label {
+  flex: none;
+  width: 4.4em;
+  color: var(--wiki-faint);
+  font-family: var(--wiki-font-hei);
+  font-size: 11.5px;
+  letter-spacing: 0.08em;
+}
+.zmp-wiki-term-value {
+  font-family: var(--wiki-font-hei);
+  font-size: 13.5px;
+  font-weight: 700;
+}
+.zmp-wiki-alias-chip {
+  min-height: 22px;
+  padding: 1px 10px;
+  color: var(--wiki-muted);
+  background: var(--wiki-paper-alt);
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius-pill);
+  font: 11.5px/1.7 var(--wiki-font-hei);
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    border-color 120ms ease,
+    background-color 120ms ease;
+  -moz-appearance: none;
+  appearance: none;
+}
+.zmp-wiki-alias-chip:hover {
+  color: var(--wiki-danger);
+  background: var(--wiki-danger-soft);
+  border-color: rgba(164, 87, 78, 0.3);
+}
+.zmp-wiki-alias-empty {
+  color: var(--wiki-faint);
+  font-family: var(--wiki-font-ui);
+  font-size: 11.5px;
+}
+
+/* ---- Claim cards -------------------------------------------------------
+   Each claim is its own container: an independent card, spaced from its
+   neighbours, whose height follows its text. Nothing is clipped, nothing is
+   absolutely positioned over the prose, and the delete control sits in a
+   reserved gutter of the header row rather than on top of the body. */
+
+.zmp-wiki-claim-list {
+  display: grid;
+  gap: 10px;
 }
 .zmp-wiki-claim {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  border-top: 1px solid var(--wiki-border);
+  position: relative;
+  display: block;
+  background: var(--wiki-paper);
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius);
+  box-shadow: var(--wiki-shadow);
+  transition:
+    border-color 130ms ease,
+    box-shadow 130ms ease,
+    background-color 130ms ease;
+}
+.zmp-wiki-claim:hover {
+  border-color: var(--wiki-border-strong);
+  box-shadow: var(--wiki-shadow-raised);
+}
+.zmp-wiki-claim.is-active {
+  border-color: var(--wiki-accent-line);
+  background: linear-gradient(
+    90deg,
+    var(--wiki-accent-soft) 0 3px,
+    var(--wiki-paper) 3px
+  );
 }
 .zmp-wiki-claim-open {
   display: grid;
-  flex: 1;
-  gap: 4px;
-  padding: 12px 2px;
-  color: var(--wiki-text);
+  gap: 8px;
+  width: 100%;
+  padding: 13px 16px 14px;
   text-align: left;
+  color: inherit;
   background: transparent;
   border: 0;
+  border-radius: var(--wiki-radius);
   cursor: pointer;
+  -moz-appearance: none;
+  appearance: none;
 }
-.zmp-wiki-claim-open strong {
+.zmp-wiki-claim-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Reserved gutter: the delete control can never cover the type label. */
+  padding-right: 30px;
+}
+.zmp-wiki-claim-type {
+  flex: none;
+  padding: 1px 9px;
   color: var(--wiki-accent);
-  text-transform: uppercase;
-  font-size: 11px;
+  background: var(--wiki-accent-soft);
+  border: 1px solid var(--wiki-accent-line);
+  border-radius: var(--wiki-radius-pill);
+  font: 700 11px/1.7 var(--wiki-font-hei);
+  letter-spacing: 0.08em;
+}
+.zmp-wiki-claim-id {
+  color: var(--wiki-faint);
+  font: 11px/1.6 var(--wiki-font-ui);
+}
+.zmp-wiki-claim-text {
+  margin: 0;
+  font-family: var(--wiki-font-song);
+  font-size: 14.5px;
+  line-height: 1.75;
+  letter-spacing: 0.01em;
+  white-space: normal;
+}
+.zmp-wiki-claim-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  color: var(--wiki-faint);
+  font: 11px/1.6 var(--wiki-font-ui);
+}
+.zmp-wiki-claim-remove {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: var(--wiki-faint);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--wiki-radius-sm);
+  font: 13px/1 var(--wiki-font-ui);
+  opacity: 0;
+  cursor: pointer;
+  transition:
+    opacity 130ms ease,
+    color 130ms ease,
+    background-color 130ms ease;
+  -moz-appearance: none;
+  appearance: none;
+}
+.zmp-wiki-claim:hover .zmp-wiki-claim-remove,
+.zmp-wiki-claim-remove:focus {
+  opacity: 1;
+}
+.zmp-wiki-claim-remove:hover {
+  color: var(--wiki-danger);
+  background: var(--wiki-danger-soft);
+  border-color: rgba(164, 87, 78, 0.3);
+}
+
+.zmp-wiki-empty {
+  padding: 30px 0;
+  color: var(--wiki-faint);
+  font-family: var(--wiki-font-kai);
+  font-size: 15px;
+  text-align: center;
+}
+
+/* ============================ Right: annotations ======================== */
+
+.zmp-wiki-evidence-head {
+  position: sticky;
+  top: 0;
+  padding: 13px 16px 11px;
+  background: var(--wiki-paper-alt);
+  border-bottom: 1px solid var(--wiki-border);
+}
+.zmp-wiki-evidence-head h2 {
+  margin: 0;
+  color: var(--wiki-muted);
+  font-family: var(--wiki-font-hei);
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+.zmp-wiki-evidence-claim {
+  margin: 0;
+  padding: 14px 16px;
+  background: var(--wiki-paper);
+  border-bottom: 1px solid var(--wiki-border);
+  font-family: var(--wiki-font-song);
+  font-size: 13.5px;
+  line-height: 1.75;
+}
+.zmp-wiki-evidence-list {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
 }
 .zmp-wiki-evidence-row {
-  margin: 10px 0;
-  padding: 10px;
-  background: var(--wiki-surface);
-  border-left: 3px solid #538b77;
+  padding: 12px 14px;
+  background: var(--wiki-paper);
+  border: 1px solid var(--wiki-border);
+  border-left: 2px solid var(--wiki-accent-line);
+  border-radius: var(--wiki-radius-sm);
+  box-shadow: var(--wiki-shadow);
 }
 .zmp-wiki-evidence-row.role-contradicts {
-  border-left-color: var(--wiki-danger);
+  border-left-color: rgba(164, 87, 78, 0.42);
+}
+.zmp-wiki-evidence-row.role-qualifies,
+.zmp-wiki-evidence-row.role-example {
+  border-left-color: var(--wiki-border-strong);
+}
+.zmp-wiki-evidence-role {
+  display: inline-block;
+  padding: 1px 8px;
+  color: var(--wiki-accent);
+  background: var(--wiki-accent-soft);
+  border-radius: var(--wiki-radius-pill);
+  font: 700 11px/1.7 var(--wiki-font-hei);
+  letter-spacing: 0.08em;
+}
+.role-contradicts .zmp-wiki-evidence-role {
+  color: var(--wiki-danger);
+  background: var(--wiki-danger-soft);
+}
+.zmp-wiki-evidence-meta {
+  display: block;
+  margin-top: 6px;
+  color: var(--wiki-faint);
+  font: 11px/1.6 var(--wiki-font-ui);
 }
 .zmp-wiki-evidence-row blockquote {
-  margin: 8px 0;
-  padding-left: 9px;
+  margin: 9px 0 11px;
+  padding-left: 11px;
   border-left: 1px solid var(--wiki-border);
+  color: var(--wiki-text);
+  font-family: var(--wiki-font-kai);
+  font-size: 13.5px;
+  line-height: 1.85;
 }
 .zmp-wiki-row-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
 }
 .zmp-wiki-chunk {
   max-height: 220px;
+  margin: 10px 0 0;
+  padding: 9px 10px;
   overflow: auto;
   white-space: pre-wrap;
-  color: var(--wiki-text);
-  background: var(--wiki-bg);
-  padding: 8px;
+  overflow-wrap: anywhere;
+  color: var(--wiki-muted);
+  background: var(--wiki-paper-sunk);
+  border-radius: var(--wiki-radius-sm);
+  font:
+    11.5px/1.65 ui-monospace,
+    "Cascadia Mono",
+    monospace;
 }
+.zmp-wiki-evidence-empty {
+  padding: 24px 16px;
+  color: var(--wiki-faint);
+  font-family: var(--wiki-font-kai);
+  font-size: 14px;
+  text-align: center;
+}
+
+/* ============================ Knowledge space =========================== */
+
 .zmp-wiki-graph-pane {
+  min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 14px;
+  padding: 14px;
+  grid-template-columns: minmax(0, 1fr) clamp(280px, 25%, 340px);
   overflow: hidden;
 }
 .zmp-wiki-graph-pane[hidden] {
   display: none;
 }
+.zmp-wiki-graph-stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius);
+  box-shadow: var(--wiki-shadow);
+}
 .zmp-wiki-graph {
+  display: block;
   width: 100%;
   height: 100%;
-  background: var(--wiki-surface);
+}
+.zmp-wiki-graph-toolbar {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: calc(100% - 20px);
+  padding: 6px;
+  background: color-mix(in srgb, var(--wiki-paper) 88%, transparent);
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius-sm);
+  box-shadow: var(--wiki-shadow);
+}
+.zmp-wiki-graph-toolbar .zmp-wiki-command {
+  min-height: 24px;
+  padding: 2px 9px;
+  font-size: 11.5px;
+}
+.zmp-wiki-graph-toolbar .zmp-wiki-command.is-on {
+  color: var(--wiki-accent);
+  background: var(--wiki-accent-soft);
+  border-color: var(--wiki-accent-line);
+}
+.zmp-wiki-graph-toolbar .zmp-wiki-command.is-off {
+  color: var(--wiki-faint);
+  background: transparent;
+  border-color: var(--wiki-border);
+}
+.zmp-wiki-graph-tooltip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: grid;
+  gap: 2px;
+  max-width: 260px;
+  padding: 7px 10px;
+  pointer-events: none;
+  background: var(--wiki-paper);
+  border: 1px solid var(--wiki-border-strong);
+  border-radius: var(--wiki-radius-sm);
+  box-shadow: var(--wiki-shadow-raised);
+}
+.zmp-wiki-graph-tooltip[hidden] {
+  display: none;
+}
+.zmp-wiki-graph-tooltip strong {
+  font: 700 12px/1.5 var(--wiki-font-hei);
+}
+.zmp-wiki-graph-tooltip span {
+  color: var(--wiki-faint);
+  font: 11px/1.5 var(--wiki-font-ui);
+}
+.zmp-wiki-graph-legend {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 6px 10px;
+  color: var(--wiki-muted);
+  background: color-mix(in srgb, var(--wiki-paper) 80%, transparent);
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius-sm);
+  font: 11px/1.6 var(--wiki-font-ui);
+}
+.zmp-wiki-graph-legend span::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 5px;
+  border-radius: 50%;
+  vertical-align: baseline;
+  background: currentColor;
+}
+.zmp-wiki-graph-legend .legend-page {
+  color: var(--wiki-accent);
+}
+.zmp-wiki-graph-legend .legend-claim {
+  color: #8c7a5c;
+}
+.zmp-wiki-graph-legend .legend-evidence {
+  color: #7e8794;
 }
 .zmp-wiki-graph-details {
-  overflow: auto;
-  padding: 12px;
-  border-left: 1px solid var(--wiki-border);
+  min-width: 0;
+  min-height: 0;
+  padding: 14px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: var(--wiki-paper-alt);
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius);
+  box-shadow: var(--wiki-shadow);
+  scrollbar-width: thin;
+}
+.zmp-wiki-graph-details h2 {
+  margin: 0 0 10px;
+  font-family: var(--wiki-font-hei);
+  font-size: 14px;
+  font-weight: 700;
+}
+.zmp-wiki-graph-details p {
+  margin: 0 0 10px;
+  color: var(--wiki-muted);
+  font-family: var(--wiki-font-kai);
+  font-size: 13.5px;
+  line-height: 1.8;
 }
 .zmp-wiki-graph-details .zmp-wiki-command {
   display: block;
   width: 100%;
   margin: 6px 0;
+  padding: 9px 11px;
   text-align: left;
   white-space: normal;
+  font-family: var(--wiki-font-song);
+  font-size: 13px;
+  line-height: 1.7;
+  border-radius: var(--wiki-radius-sm);
 }
 .zmp-wiki-graph-context {
   display: block;
-  margin-top: 9px;
-  color: var(--wiki-muted);
+  margin-top: 12px;
+  color: var(--wiki-faint);
+  font: 11px/1.6 var(--wiki-font-ui);
+}
+.zmp-wiki-graph-hint {
+  color: var(--wiki-faint);
+  font: 11.5px/1.7 var(--wiki-font-ui);
 }
 
-/* Shown in place of the Wiki when its data cannot be loaded, so a storage
+/* ============================ Failure card ==============================
+   Shown in place of the Wiki when its data cannot be loaded, so a storage
    failure reads as a failure instead of as an empty tab. */
+
 .zmp-wiki-error {
-  margin: 0;
-  padding: 20px 22px;
+  max-width: 780px;
+  margin: 22px;
+  padding: 22px 24px;
   overflow: auto;
   min-width: 0;
   min-height: 0;
+  background: var(--wiki-paper);
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius);
+  box-shadow: var(--wiki-shadow);
 }
 .zmp-wiki-error h2 {
   margin: 0 0 10px;
   color: var(--wiki-danger);
+  font-family: var(--wiki-font-hei);
   font-size: 15px;
+  font-weight: 700;
 }
 .zmp-wiki-error-message {
   margin: 0 0 8px;
   color: var(--wiki-text);
+  font-family: var(--wiki-font-song);
+  font-size: 13.5px;
+  line-height: 1.75;
 }
 .zmp-wiki-error-hint {
-  margin: 0 0 12px;
+  margin: 0 0 14px;
   color: var(--wiki-muted);
+  font-family: var(--wiki-font-kai);
+  font-size: 13px;
+  line-height: 1.8;
 }
 .zmp-wiki-error-detail {
   margin: 0 0 14px;
-  padding: 10px 12px;
+  padding: 11px 13px;
   max-height: 40vh;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--wiki-muted);
-  background: var(--wiki-surface);
+  background: var(--wiki-paper-sunk);
   border: 1px solid var(--wiki-border);
-  border-radius: 4px;
+  border-radius: var(--wiki-radius-sm);
   font:
-    12px/1.5 ui-monospace,
+    11.5px/1.6 ui-monospace,
     monospace;
+}
+
+/* ============================ Narrow windows ============================ */
+
+@media (max-width: 1180px) {
+  .zmp-wiki-claims {
+    padding: 18px 20px 32px;
+  }
 }
 
 @media (max-width: 900px) {
   .zmp-wiki-body {
-    grid-template-columns: 150px minmax(260px, 1fr);
+    grid-template-columns: clamp(170px, 26%, 220px) minmax(0, 1fr);
   }
+  /* Evidence becomes a paper drawer over the reading column. */
   .zmp-wiki-evidence {
     position: absolute;
-    right: 0;
-    width: min(46vw, 380px);
-    height: calc(100% - 52px);
-    background: var(--wiki-bg);
-    border-left: 1px solid var(--wiki-border);
-    box-sizing: border-box;
+    right: 14px;
+    top: 70px;
+    width: min(52vw, 360px);
+    height: calc(100% - 84px);
+    background: var(--wiki-paper-alt);
+    border: 1px solid var(--wiki-border-strong);
+    border-radius: var(--wiki-radius);
+    box-shadow: var(--wiki-shadow-raised);
+  }
+  .zmp-wiki-graph-pane {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(120px, 34%);
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  #zotero-mcp-wiki-panel * {
+    transition: none !important;
+  }
+}
+
+/* ============================ Dark paper ================================
+   Warm dark greys, never pure black: the reading feel survives the theme. */
+
 @media (prefers-color-scheme: dark) {
   #zotero-mcp-wiki-panel {
-    --wiki-bg: #1f2226;
-    --wiki-surface: #292d32;
-    --wiki-border: #414850;
-    --wiki-text: #eef1f4;
-    --wiki-muted: #a1abb5;
-    --wiki-accent: #74b6a1;
-    --wiki-danger: #ef7770;
+    --wiki-bg: #23211e;
+    --wiki-paper: #2c2a26;
+    --wiki-paper-alt: #322f2a;
+    --wiki-paper-sunk: #1e1c19;
+    --wiki-text: #ece6da;
+    --wiki-muted: #a79e90;
+    --wiki-faint: #8a8275;
+    --wiki-border: rgba(230, 215, 185, 0.13);
+    --wiki-border-strong: rgba(230, 215, 185, 0.24);
+    --wiki-shadow: 0 1px 1px rgba(0, 0, 0, 0.3), 0 10px 24px -18px #000;
+    --wiki-shadow-raised: 0 2px 4px rgba(0, 0, 0, 0.34), 0 18px 34px -22px #000;
+    --wiki-accent: #8fb3a2;
+    --wiki-accent-soft: rgba(143, 179, 162, 0.13);
+    --wiki-accent-line: rgba(143, 179, 162, 0.34);
+    --wiki-danger: #d98c81;
+    --wiki-danger-soft: rgba(217, 140, 129, 0.14);
+    --wiki-highlight: rgba(236, 230, 218, 0.05);
+    --wiki-graph-scheme: dark;
+
+    background-image:
+      linear-gradient(
+        180deg,
+        rgba(255, 250, 236, 0.035),
+        rgba(255, 250, 236, 0) 220px
+      ),
+      repeating-linear-gradient(
+        98deg,
+        rgba(255, 250, 236, 0.014) 0 3px,
+        rgba(255, 250, 236, 0) 3px 7px
+      );
+  }
+  .zmp-wiki-claim.is-active {
+    background: linear-gradient(
+      90deg,
+      var(--wiki-accent-soft) 0 3px,
+      var(--wiki-paper) 3px
+    );
+  }
+  .zmp-wiki-graph-legend .legend-claim {
+    color: #c3a879;
+  }
+  .zmp-wiki-graph-legend .legend-evidence {
+    color: #939dab;
   }
 }
