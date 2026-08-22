@@ -28,6 +28,7 @@ import type {
 
 declare let Zotero: any;
 declare let IOUtils: any;
+declare const ChromeUtils: any;
 declare let ztoolkit: ZToolkit;
 
 const BUTTON_ID = "zotero-mcp-wiki-button";
@@ -349,26 +350,93 @@ async function jumpToItem(
   await win.ZoteroPane.selectItem(item.id);
 }
 
+/**
+ * Zotero's file picker.
+ *
+ * The class lives only in this module - there is no FilePicker hanging off the
+ * `Zotero` object in Zotero 9 - and this is how Zotero's own export flows, and
+ * this plugin's glossary import/export, reach it. Reaching for one on `Zotero`
+ * instead throws "not a constructor" on every call, which is what used to send
+ * the Wiki export straight into its clipboard fallback and made
+ * "保存对话框不可用" the only outcome this button could produce.
+ */
+function createFilePicker(): any {
+  const { FilePicker } = ChromeUtils.importESModule(
+    "chrome://zotero/content/modules/filePicker.mjs",
+  );
+  return new FilePicker();
+}
+
+/**
+ * Save the derived Wiki Markdown where the user chooses.
+ *
+ * Three outcomes, kept distinct because conflating them is what made this
+ * unusable:
+ *
+ *   - the user picks a path, new or existing. `returnReplace` is the code for
+ *     "existing file, overwrite confirmed", and it means save, exactly as it
+ *     does in every save dialog Zotero itself drives. Treating only
+ *     `returnOK` as success silently discards every overwrite.
+ *   - the user cancels. Cancelling is an answer, not a fault: nothing is
+ *     written, nothing is copied, nothing is announced.
+ *   - something actually fails. Only a picker that cannot be loaded falls back
+ *     to the clipboard, because then there is no other way to hand the text
+ *     over. A write that fails is reported with its reason rather than
+ *     papered over with a copy the user did not ask for.
+ *
+ * Never throws: it is called from a click handler, where a rejection would be
+ * swallowed as an unhandled promise and the user would see nothing at all.
+ */
 async function exportMarkdown(win: any, libraryID: number): Promise<void> {
-  const markdown = await getWikiService().exportMarkdown(libraryID);
+  let markdown: string;
   try {
-    const picker = new Zotero.FilePicker();
-    picker.init(win, "导出 Zotero LLM 知识库", picker.modeSave);
-    picker.defaultString = "zotero-llm-wiki.md";
-    picker.appendFilter("Markdown 文档", "*.md");
-    if ((await picker.show()) === picker.returnOK) {
-      const target =
-        typeof picker.file === "string" ? picker.file : picker.file?.path;
-      if (!target) throw new Error("文件选择器未返回可写路径");
-      await IOUtils.writeUTF8(target, markdown);
-      return;
-    }
-  } catch {
-    // Older Zotero builds expose no FilePicker in plugin sandboxes. The panel
-    // remains useful by opening the derived Markdown for manual saving.
+    markdown = await getWikiService().exportMarkdown(libraryID);
+  } catch (error) {
+    ztoolkit.log("[wiki] could not render the Wiki Markdown", error);
+    Zotero.logError?.(error);
+    win.alert(`导出失败：无法生成 Markdown（${describeError(error).message}）`);
+    return;
   }
-  Zotero.Utilities.Internal.copyTextToClipboard(markdown);
-  win.alert("保存对话框不可用，Wiki Markdown 已复制到剪贴板。");
+
+  let picker: any;
+  try {
+    picker = createFilePicker();
+    picker.init(win, "导出 Zotero LLM 知识库", picker.modeSave);
+    picker.appendFilter("Markdown 文档", "*.md");
+    // `defaultExtension` is what appends ".md" when the user types a bare
+    // name; `defaultString` only seeds the field.
+    picker.defaultString = "zotero-llm-wiki.md";
+    picker.defaultExtension = "md";
+  } catch (error) {
+    ztoolkit.log("[wiki] the Zotero file picker is unavailable", error);
+    Zotero.logError?.(error);
+    Zotero.Utilities.Internal.copyTextToClipboard(markdown);
+    win.alert("保存对话框不可用，Wiki Markdown 已复制到剪贴板。");
+    return;
+  }
+
+  let target: string;
+  try {
+    const result = await picker.show();
+    if (result !== picker.returnOK && result !== picker.returnReplace) return;
+    target = String(picker.file || "");
+    if (!target) throw new Error("文件选择器未返回可写路径");
+  } catch (error) {
+    ztoolkit.log("[wiki] the Wiki export dialog failed", error);
+    Zotero.logError?.(error);
+    win.alert(`导出失败：${describeError(error).message}`);
+    return;
+  }
+
+  try {
+    await IOUtils.writeUTF8(target, markdown);
+  } catch (error) {
+    ztoolkit.log("[wiki] could not write the Wiki Markdown", error);
+    Zotero.logError?.(error);
+    win.alert(
+      `导出失败，文件未写入：${describeError(error).message}\n目标路径：${target}`,
+    );
+  }
 }
 
 function claimStatus(claim: any): string {

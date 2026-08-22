@@ -905,6 +905,180 @@ async function settleFor(read, what) {
   sqlite.close();
 }
 
+// --- Markdown export: save, overwrite, cancel -----------------------------
+
+/**
+ * The export button, driven through a stand-in for Zotero's file picker.
+ *
+ * The picker is reached with
+ * `ChromeUtils.importESModule("chrome://zotero/content/modules/filePicker.mjs")`,
+ * so staging a module here exercises the real lookup rather than a seam added
+ * for testing. The three outcomes are the ones that were conflated before:
+ * a plain save, an overwrite - which the picker reports as `returnReplace`,
+ * never as `returnOK` - and a cancel, which must write nothing, copy nothing
+ * and say nothing.
+ */
+{
+  const sqlite = new DatabaseSync(path.join(tempDir, "export.sqlite"));
+  sqlite.exec("PRAGMA foreign_keys = ON");
+  await seed(sqlite);
+  await useConnection(adapt(sqlite));
+  const win = createWindow();
+  const alerts = [];
+  win.alert = (message) => alerts.push(String(message));
+
+  // The staged picker. `outcome` is what show() reports; `file` is the path
+  // it hands back, exactly as Zotero's module does - a string, never nsIFile.
+  const picker = {
+    outcome: 0,
+    modeSave: 1,
+    returnOK: 0,
+    returnCancel: 1,
+    returnReplace: 2,
+    file: "",
+    initArgs: null,
+    filters: [],
+    defaultString: "",
+    defaultExtension: "",
+    init(...args) {
+      this.initArgs = args;
+    },
+    appendFilter(...args) {
+      this.filters.push(args);
+    },
+    async show() {
+      return this.outcome;
+    },
+  };
+  globalThis.ChromeUtils = {
+    importESModule(url) {
+      assert.equal(
+        url,
+        "chrome://zotero/content/modules/filePicker.mjs",
+        "the export must load Zotero 9's own file picker module",
+      );
+      return { FilePicker: function () { return picker; } };
+    },
+  };
+  const written = [];
+  globalThis.IOUtils = {
+    writeUTF8: async (target, text) => {
+      written.push([target, text]);
+    },
+  };
+  const copied = [];
+  globalThis.Zotero.Utilities = {
+    Internal: { copyTextToClipboard: (text) => copied.push(String(text)) },
+  };
+
+  await openWikiPanel(win);
+  const panel = win.containers[0].querySelector("#zotero-mcp-wiki-panel");
+  const exportButton = findByClass(panel, "zmp-wiki-command").find(
+    (node) => node.textContent === "导出",
+  );
+  assert.ok(exportButton, "the panel must offer an export command");
+
+  // The export runs from a fire-and-forget click handler, so let it finish.
+  const exportOnce = async () => {
+    await fire(exportButton, "click");
+    for (let tick = 0; tick < 50; tick += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
+
+  // --- 1. A plain save ----------------------------------------------------
+  picker.outcome = picker.returnOK;
+  picker.file = path.join(tempDir, "wiki-export.md");
+  await exportOnce();
+  assert.equal(written.length, 1, "accepting the dialog must write the file");
+  assert.equal(written[0][0], picker.file, "to the path the user picked");
+  assert.match(
+    written[0][1],
+    /^# Zotero LLM Wiki/u,
+    "with the rendered Wiki Markdown",
+  );
+  assert.match(
+    written[0][1],
+    /Columnar band control/u,
+    "which must contain the library's page",
+  );
+  assert.deepEqual(copied, [], "a successful save must not touch the clipboard");
+  assert.deepEqual(alerts, [], "and must not interrupt the user");
+  assert.equal(
+    picker.initArgs?.[2],
+    picker.modeSave,
+    "the dialog must open in save mode",
+  );
+  assert.equal(
+    picker.defaultExtension,
+    "md",
+    "a bare filename must still land as .md",
+  );
+  assert.deepEqual(picker.filters, [["Markdown 文档", "*.md"]]);
+
+  // --- 2. Overwriting an existing file ------------------------------------
+  // The picker reports an acknowledged overwrite as returnReplace. Checking
+  // only returnOK is what used to make "save over the file I exported last
+  // week" do nothing at all.
+  picker.outcome = picker.returnReplace;
+  picker.file = path.join(tempDir, "wiki-export.md");
+  await exportOnce();
+  assert.equal(written.length, 2, "an accepted overwrite must write the file");
+  assert.equal(written[1][0], picker.file);
+  assert.deepEqual(copied, [], "an overwrite must not touch the clipboard");
+  assert.deepEqual(alerts, [], "and must not interrupt the user");
+
+  // --- 3. Cancelling ------------------------------------------------------
+  // Cancelling is an answer, not a fault.
+  picker.outcome = picker.returnCancel;
+  await exportOnce();
+  assert.equal(written.length, 2, "cancelling must write nothing");
+  assert.deepEqual(copied, [], "cancelling must not copy to the clipboard");
+  assert.deepEqual(
+    alerts,
+    [],
+    "cancelling must not claim the save dialog was unavailable",
+  );
+
+  // --- 4. A picker that genuinely cannot be loaded ------------------------
+  // The one case the clipboard fallback is for.
+  globalThis.ChromeUtils = {
+    importESModule() {
+      throw new Error("filePicker.mjs is unavailable");
+    },
+  };
+  await exportOnce();
+  assert.equal(written.length, 2, "a missing picker must write no file");
+  assert.equal(copied.length, 1, "it must fall back to the clipboard");
+  assert.match(copied[0], /^# Zotero LLM Wiki/u);
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0], /保存对话框不可用/u);
+
+  // --- 5. A write that fails is reported, not papered over ----------------
+  globalThis.ChromeUtils = {
+    importESModule: () => ({ FilePicker: function () { return picker; } }),
+  };
+  globalThis.IOUtils = {
+    writeUTF8: async () => {
+      throw new Error("拒绝访问");
+    },
+  };
+  picker.outcome = picker.returnOK;
+  picker.file = path.join(tempDir, "read-only.md");
+  await exportOnce();
+  assert.equal(copied.length, 1, "a failed write must not silently copy");
+  assert.equal(alerts.length, 2);
+  assert.match(
+    alerts[1],
+    /导出失败，文件未写入：拒绝访问/u,
+    "the user must be told the save failed, and why",
+  );
+  assert.match(alerts[1], /read-only\.md/u, "and where it was going");
+
+  globalThis.IOUtils = { writeUTF8: async () => undefined };
+  sqlite.close();
+}
+
 fs.rmSync(tempDir, { recursive: true, force: true });
 
 console.log("wiki panel render tests passed");

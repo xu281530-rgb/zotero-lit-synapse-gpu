@@ -90,6 +90,37 @@ assert.doesNotMatch(
   "the delete control must never appear on hover - that is the misclick",
 );
 
+// Markdown export must go through Zotero 9's file picker module. There is no
+// `Zotero.FilePicker`: constructing one throws on every call, which is what
+// used to make "保存对话框不可用" the only outcome the export button had.
+assert.match(
+  panel,
+  /chrome:\/\/zotero\/content\/modules\/filePicker\.mjs/u,
+  "the Wiki export must load FilePicker from Zotero's own module",
+);
+assert.match(
+  panel,
+  /ChromeUtils\.importESModule\(/u,
+  "and must import it the way Zotero and this plugin's other pickers do",
+);
+assert.doesNotMatch(
+  panel,
+  /new Zotero\.FilePicker\(/u,
+  "Zotero.FilePicker does not exist in Zotero 9",
+);
+// A save dialog reports an accepted overwrite as returnReplace, never as
+// returnOK, so a flow that only checks returnOK discards every overwrite.
+assert.match(
+  panel,
+  /picker\.returnOK && result !== picker\.returnReplace/u,
+  "an accepted overwrite must count as a save",
+);
+assert.match(
+  panel,
+  /picker\.defaultExtension = "md"/u,
+  "a bare filename must still be saved as .md",
+);
+
 assert.match(hooks, /registerWikiPanel/u);
 assert.match(hooks, /unregisterWikiPanel/u);
 assert.match(css, /#zotero-mcp-wiki-panel/u);
