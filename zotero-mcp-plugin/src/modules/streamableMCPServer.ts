@@ -1168,6 +1168,35 @@ Nothing in this server returns a whole document in one response. Every reading t
             offset: args?.offset,
             limit: args?.limit,
             includeAllChunks: args?.includeAllChunks === true,
+            includeReadingNote:
+              typeof args?.includeReadingNote === 'boolean'
+                ? args.includeReadingNote
+                : undefined,
+          });
+          break;
+        case 'wiki_set_reading_expert':
+          result = await getWikiService().setReadingExpert({
+            libraryID: args?.libraryID ?? Zotero.Libraries.userLibraryID,
+            itemKey: args?.itemKey,
+            persona: args?.persona,
+            focus: this.coerceStringArray(args?.focus) ?? [],
+          });
+          break;
+        case 'wiki_update_reading_note':
+          result = await getWikiService().updateReadingNote({
+            libraryID: args?.libraryID ?? Zotero.Libraries.userLibraryID,
+            itemKey: args?.itemKey,
+            markdown: args?.markdown,
+            unchanged: args?.unchanged === true,
+            unchangedReason: args?.unchangedReason,
+            finalSynthesis: args?.finalSynthesis === true,
+          });
+          break;
+        case 'wiki_get_reading_note':
+          result = await getWikiService().getReadingNote({
+            libraryID: args?.libraryID ?? Zotero.Libraries.userLibraryID,
+            itemKey: args?.itemKey,
+            includeMarkdown: args?.includeMarkdown !== false,
           });
           break;
         case 'wiki_finish_reading': {

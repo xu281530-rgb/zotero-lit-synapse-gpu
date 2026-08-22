@@ -32,7 +32,8 @@ for (const id of [
 
 for (const behavior of [
   "updateConcept",
-  "mergePages",
+  "deletePage",
+  "describePageDeletion",
   "deleteClaim",
   "exportMarkdown",
   "selectItem",
@@ -41,6 +42,53 @@ for (const behavior of [
 ]) {
   assert.ok(panel.includes(behavior), `Wiki UI must expose ${behavior}`);
 }
+
+// Page merging is gone: no entry point, no call, no leftover label.
+for (const removed of [/mergePages/u, /合并页面/u, /目标 Wiki 页面 ID/u]) {
+  assert.doesNotMatch(
+    panel,
+    removed,
+    "the Wiki panel must not offer page merging any more",
+  );
+}
+
+// The delete drawer must stay a deliberate gesture. These pin the parts that
+// make it one: a hidden, unclickable drawer at rest, revealed only by the
+// `is-drawer-open` state the drag sets - never by hovering - and a confirmation
+// dialog between the icon and the delete.
+for (const piece of [
+  "zmp-wiki-page-row",
+  "zmp-wiki-page-drawer",
+  "zmp-wiki-page-delete",
+  "is-drawer-open",
+  "zmp-wiki-modal-overlay",
+  "zmp-wiki-modal-warning",
+  "confirmPageDeletion",
+]) {
+  assert.ok(panel.includes(piece), `the delete drawer must define ${piece}`);
+}
+for (const gesture of [/mousedown/u, /mousemove/u, /mouseup/u, /mouseleave/u]) {
+  assert.match(
+    panel,
+    gesture,
+    "the drawer must open by dragging, so it must track the pointer",
+  );
+}
+const drawerCss = css.slice(
+  css.indexOf(".zmp-wiki-page-drawer {"),
+  css.indexOf(".zmp-wiki-page-delete {"),
+);
+assert.match(drawerCss, /opacity:\s*0;/u, "the drawer must be hidden at rest");
+assert.match(
+  drawerCss,
+  /pointer-events:\s*none;/u,
+  "the hidden drawer must not be clickable",
+);
+assert.doesNotMatch(
+  css,
+  /\.zmp-wiki-page-(row|entry):hover[^{]*\{[^}]*opacity:\s*1/u,
+  "the delete control must never appear on hover - that is the misclick",
+);
 
 assert.match(hooks, /registerWikiPanel/u);
 assert.match(hooks, /unregisterWikiPanel/u);
@@ -311,15 +359,17 @@ const fakeWindow = {
 const firstRender = openWikiTab(fakeWindow, {
   type: "zotero-mcp-wiki",
   title: "LLM 知识库",
+  icon: "zotero-mcp-wiki",
 });
 assert.equal(tabCalls.added.length, 1);
 assert.equal(tabCalls.added[0].select, true);
-assert.deepEqual(tabCalls.added[0].data, {});
+assert.deepEqual(tabCalls.added[0].data, { icon: "zotero-mcp-wiki" });
 assert.equal(isCurrentWikiTabRender(firstRender), true);
 
 const refreshedRender = openWikiTab(fakeWindow, {
   type: "zotero-mcp-wiki",
   title: "LLM 知识库",
+  icon: "zotero-mcp-wiki",
 });
 assert.deepEqual(tabCalls.selected, ["wiki-tab-1"]);
 assert.equal(refreshedRender.tab, firstRender.tab);
@@ -420,7 +470,9 @@ for (const label of [
   "查看片段",
   "编辑术语",
   "添加别名",
-  "合并页面",
+  "删除知识条目",
+  "永久删除",
+  "删除后不可恢复",
   "删除论断",
   "暂无已保存的长期 Wiki 知识",
 ]) {

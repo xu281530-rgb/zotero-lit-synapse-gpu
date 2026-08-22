@@ -35,6 +35,13 @@ const PANEL_ID = "zotero-mcp-wiki-panel";
 const STYLE_ID = "zotero-mcp-wiki-style";
 const TAB_TYPE = "zotero-mcp-wiki";
 const TAB_TITLE = "LLM 知识库";
+/**
+ * Zotero paints every tab icon as `.icon-item-type[data-item-type=…]`, filled
+ * in from `tab.data.icon`. Claiming an item type of our own lets wikiPanel.css
+ * paint the plugin icon there instead of the blank document Zotero falls back
+ * to for tab types it does not know.
+ */
+const TAB_ICON = "zotero-mcp-wiki";
 
 const CLAIM_TYPE_LABELS: Record<WikiClaimType, string> = {
   definition: "定义",
@@ -109,6 +116,123 @@ const GRAPH_LINK_FILTERS: Array<{
 
 /** A page cited by more documents than this contributes no dashed clique. */
 const SAME_PAGE_CLIQUE_LIMIT = 40;
+
+/**
+ * The delete drawer, in pixels.
+ *
+ * `DRAWER_WIDTH` is how far the index entry slides left, and therefore how
+ * much of the drawer behind it is uncovered. `DRAG_SLOP` is the travel that
+ * separates a click from a drag - below it the pointer is still selecting an
+ * entry, not opening anything. `DRAWER_OPEN_THRESHOLD` is the travel that
+ * latches the drawer open on release; a shorter drag springs back, so a
+ * hesitant gesture never leaves a delete control sitting under the cursor.
+ */
+const DRAWER_WIDTH = 64;
+const DRAG_SLOP = 6;
+const DRAWER_OPEN_THRESHOLD = 34;
+
+/**
+ * The point of no return, stated before it is passed.
+ *
+ * Deleting a knowledge entry is physical and permanent, so the dialog reads
+ * out what is about to be destroyed - the entry's name and how many claims and
+ * evidence records go with it - rather than asking a bare yes/no question. The
+ * counts come from the store's own deletion plan, not from what the panel
+ * happens to have loaded, so they describe the delete that will actually run.
+ *
+ * Resolves `true` only when the user picks the destructive button. Escape, the
+ * backdrop and the cancel button all resolve `false`, and a failure to read the
+ * plan is shown in the dialog rather than swallowed.
+ */
+async function confirmPageDeletion(
+  win: any,
+  panel: HTMLElement,
+  page: any,
+  libraryID: number,
+): Promise<boolean> {
+  const doc: Document = win.document;
+  let plan: {
+    canonicalTitle: string;
+    claims: number;
+    evidence: number;
+    concepts: number;
+    aliases: number;
+    relations: number;
+  };
+  try {
+    plan = await getWikiService()
+      .getStore()
+      .describePageDeletion(page.pageId, libraryID);
+  } catch (error) {
+    ztoolkit.log("[wiki] could not describe a page deletion", error);
+    win.alert(`无法读取该知识条目的删除范围：${describeError(error).message}`);
+    return false;
+  }
+
+  const overlay = element(doc, "div", "zmp-wiki-modal-overlay");
+  const dialog = element(doc, "div", "zmp-wiki-modal");
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.append(
+    element(doc, "h2", "zmp-wiki-modal-title", "删除知识条目"),
+    element(doc, "p", "zmp-wiki-modal-name", plan.canonicalTitle),
+  );
+
+  const facts = element(doc, "div", "zmp-wiki-modal-facts");
+  const fact = (label: string, value: string): void => {
+    const rowNode = element(doc, "div", "zmp-wiki-modal-fact");
+    rowNode.append(
+      element(doc, "span", "zmp-wiki-modal-fact-label", label),
+      element(doc, "span", "zmp-wiki-modal-fact-value", value),
+    );
+    facts.append(rowNode);
+  };
+  fact("论断（Claim）", `${plan.claims} 条`);
+  fact("证据（Evidence）", `${plan.evidence} 条`);
+  if (plan.concepts) {
+    fact("术语与别名", `1 个术语 · ${plan.aliases} 个别名`);
+    fact("概念关系", `${plan.relations} 条`);
+  } else {
+    fact("术语与别名", "保留（其他条目仍在使用该术语）");
+  }
+  dialog.append(facts);
+
+  dialog.append(
+    element(
+      doc,
+      "p",
+      "zmp-wiki-modal-warning",
+      "删除后不可恢复：以上内容将从知识库中彻底移除，无法撤销，也无法从回收站找回。其他知识条目不受影响。",
+    ),
+  );
+
+  let settle: (confirmed: boolean) => void = () => undefined;
+  const finish = (confirmed: boolean): void => {
+    overlay.remove();
+    settle(confirmed);
+  };
+  const actions = element(doc, "div", "zmp-wiki-modal-actions");
+  const cancel = button(doc, "取消", "保留这个知识条目", "quiet");
+  cancel.addEventListener("click", () => finish(false));
+  const confirm = button(doc, "永久删除", "彻底删除这个知识条目", "danger");
+  confirm.addEventListener("click", () => finish(true));
+  actions.append(cancel, confirm);
+  dialog.append(actions);
+
+  overlay.addEventListener("click", (event: Event) => {
+    if (event.target === overlay) finish(false);
+  });
+  overlay.addEventListener("keydown", (event: Event) => {
+    if ((event as KeyboardEvent).key === "Escape") finish(false);
+  });
+  overlay.append(dialog);
+  panel.append(overlay);
+  cancel.focus?.();
+
+  return new Promise<boolean>((resolve) => {
+    settle = resolve;
+  });
+}
 
 const GRAPH_HINT =
   "拖动旋转、滚轮缩放、Shift 拖动平移；点击文献查看它的全部知识点，点击连线查看两篇文献的共同结论。";
@@ -289,7 +413,11 @@ export function unregisterWikiPanel(win: Window): void {
 export async function openWikiPanel(
   win: _ZoteroTypes.MainWindow,
 ): Promise<void> {
-  const render = openWikiTab(win, { type: TAB_TYPE, title: TAB_TITLE });
+  const render = openWikiTab(win, {
+    type: TAB_TYPE,
+    title: TAB_TITLE,
+    icon: TAB_ICON,
+  });
   await renderWikiPanel(win, render);
 }
 
@@ -609,19 +737,6 @@ async function renderWikiPanelContent(
       });
       tools.append(editTerm, addAlias);
     }
-    const merge = button(
-      doc,
-      "合并页面",
-      "将当前页面合并到另一个 Wiki 页面",
-      "quiet",
-    );
-    merge.addEventListener("click", async () => {
-      const target = Number(win.prompt("目标 Wiki 页面 ID", ""));
-      if (!Number.isInteger(target) || target <= 0) return;
-      await store.mergePages(page.pageId, target, libraryID);
-      await openWikiPanel(win);
-    });
-    tools.append(merge);
     titleRow.append(tools);
     article.append(titleRow);
 
@@ -734,8 +849,45 @@ async function renderWikiPanelContent(
 
   const pageEntries = new Map<number, HTMLElement>();
   const pagesById = new Map<number, any>();
+  /** The one index row whose delete drawer is currently open, if any. */
+  let openDrawerRow: HTMLElement | null = null;
+  let openDrawerEntry: HTMLElement | null = null;
+
+  /** Slide every open drawer shut. Called whenever attention moves away. */
+  const closeDrawers = (except?: HTMLElement): void => {
+    if (!openDrawerRow || openDrawerRow === except) return;
+    openDrawerRow.classList.remove("is-drawer-open");
+    if (openDrawerEntry) openDrawerEntry.style.transform = "";
+    openDrawerRow = null;
+    openDrawerEntry = null;
+  };
+
+  // A click anywhere else in the panel puts the drawer back. Listening on the
+  // panel rather than the document keeps this from outliving the render: the
+  // panel is replaced wholesale on every refresh, and its listeners go with it.
+  panel.addEventListener("mousedown", (event: Event) => {
+    if (!openDrawerRow) return;
+    const target = event.target as Node | null;
+    if (target && openDrawerRow.contains?.(target)) return;
+    closeDrawers();
+  });
+  panel.addEventListener("keydown", (event: Event) => {
+    if ((event as KeyboardEvent).key === "Escape") closeDrawers();
+  });
+
   for (const page of pages) {
     pagesById.set(page.pageId, page);
+    // The row is the clipping frame: the drawer sits underneath it on the
+    // right, and the entry slides left to uncover it. Nothing about the
+    // delete action is visible - or reachable - until the user drags.
+    const row = element(doc, "div", "zmp-wiki-page-row");
+    const drawer = element(doc, "div", "zmp-wiki-page-drawer");
+    const remove = element(doc, "button", "zmp-wiki-page-delete", "🗑");
+    remove.type = "button";
+    remove.title = "删除知识条目";
+    remove.setAttribute("aria-label", `删除知识条目：${page.canonicalTitle}`);
+    drawer.append(remove);
+
     const entry = clickable(doc, "zmp-wiki-page-entry", page.canonicalTitle);
     entry.setAttribute("aria-current", "false");
     entry.append(
@@ -747,8 +899,107 @@ async function renderWikiPanelContent(
         `${page.claims.length} 条论断 · 版本 ${page.version}`,
       ),
     );
-    entry.addEventListener("click", () => showPage(page, entry));
-    pageList.append(entry);
+
+    // ---- Drag left to reveal, anything else to put it back ---------------
+    //
+    // The gesture is tracked on the entry itself rather than on the document,
+    // so the listeners die with the render and there is nothing to unhook.
+    // `mouseleave` settles a drag that walks out of the row, which is easy to
+    // do in a column this narrow.
+    let dragOriginX: number | null = null;
+    let dragOffset = 0;
+    let dragged = false;
+    const settle = (): void => {
+      if (dragOriginX === null) return;
+      dragOriginX = null;
+      if (dragOffset <= -DRAWER_OPEN_THRESHOLD) {
+        closeDrawers(row);
+        row.classList.add("is-drawer-open");
+        entry.style.transform = `translateX(${-DRAWER_WIDTH}px)`;
+        openDrawerRow = row;
+        openDrawerEntry = entry;
+      } else {
+        entry.style.transform = row.classList.contains("is-drawer-open")
+          ? `translateX(${-DRAWER_WIDTH}px)`
+          : "";
+      }
+      dragOffset = 0;
+    };
+    entry.addEventListener("mousedown", (event: Event) => {
+      const mouse = event as MouseEvent;
+      if (mouse.button !== 0) return;
+      dragOriginX = mouse.clientX;
+      dragOffset = 0;
+      dragged = false;
+    });
+    entry.addEventListener("mousemove", (event: Event) => {
+      if (dragOriginX === null) return;
+      const mouse = event as MouseEvent;
+      const delta = mouse.clientX - dragOriginX;
+      if (!dragged && delta > -DRAG_SLOP) return;
+      // Past the slop this is a drag, not a click: suppress the text selection
+      // Gecko would otherwise start, and remember to swallow the click.
+      dragged = true;
+      event.preventDefault?.();
+      dragOffset = Math.min(0, Math.max(-DRAWER_WIDTH, delta));
+      entry.style.transform = `translateX(${dragOffset}px)`;
+    });
+    entry.addEventListener("mouseup", () => settle());
+    entry.addEventListener("mouseleave", () => settle());
+    // The same drawer, without a mouse. Delete opens it and puts focus on the
+    // icon; it does not delete, so the gesture keeps both of its steps.
+    entry.addEventListener("keydown", (event: Event) => {
+      const key = (event as KeyboardEvent).key;
+      if (key !== "Delete" && key !== "Backspace") return;
+      event.preventDefault?.();
+      closeDrawers(row);
+      row.classList.add("is-drawer-open");
+      entry.style.transform = `translateX(${-DRAWER_WIDTH}px)`;
+      openDrawerRow = row;
+      openDrawerEntry = entry;
+      remove.focus?.();
+    });
+    entry.addEventListener("click", (event: Event) => {
+      // The click that ends a drag must not also open the page, or every
+      // reveal would double as a navigation.
+      if (dragged) {
+        dragged = false;
+        event.stopPropagation?.();
+        return;
+      }
+      if (openDrawerRow) {
+        closeDrawers();
+        return;
+      }
+      showPage(page, entry);
+    });
+
+    remove.addEventListener("click", async (event: Event) => {
+      event.stopPropagation?.();
+      const confirmed = await confirmPageDeletion(win, panel, page, libraryID);
+      if (!confirmed) {
+        closeDrawers();
+        return;
+      }
+      try {
+        await store.deletePage(page.pageId, libraryID);
+      } catch (error) {
+        // A delete that fails has rolled itself back, so the entry is still
+        // there - and the user has to be told, or the drawer just springs shut
+        // and the page looks deleted until the next refresh.
+        ztoolkit.log("[wiki] deleting a knowledge entry failed", error);
+        Zotero.logError?.(error);
+        closeDrawers();
+        win.alert(
+          `删除失败，知识库未发生任何改动：${describeError(error).message}`,
+        );
+        return;
+      }
+      await openWikiPanel(win);
+    });
+
+    row.append(drawer, entry);
+    pageList.append(row);
     pageEntries.set(page.pageId, entry);
   }
   if (pages[0]) showPage(pages[0], pageEntries.get(pages[0].pageId));

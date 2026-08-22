@@ -5,7 +5,7 @@ _This README is also available in: [:cn: 简体中文](./README-zh.md) | :gb: En
 [![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-2.3.1-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-2.4.2-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -650,13 +650,43 @@ being answered with its title and abstract dressed up as body text.
 > bypass around the retrieval funnel every other tool enforces. Index
 > maintenance now lives only in the plugin's preferences UI.
 
-### 4. LLM Wiki (9 tools, can be disabled independently)
+### 4. LLM Wiki (12 tools, can be disabled independently)
 
 The Wiki is an independent long-term knowledge database. It stores reusable
 Pages, Claims, Concepts, Relations and traceable Evidence rather than another
 paper-summary index. Normal research uses a prepare/controlled-commit flow;
 `wiki_build_from_paper` is allowed only for one paper explicitly requested by
 the user. The server performs no hidden LLM calls.
+
+**Reading one paper deeply.** A paper is read in a fixed order, and the server
+enforces it. The opening `wiki_build_from_paper` call returns the paper's
+metadata and abstract and no body text; `wiki_set_reading_expert` answers it
+with the one domain expert who will read this paper, which also creates a
+persistent Markdown **reading note** as an attachment on the Zotero item. Body
+chunks then flow one page at a time, and after each page the whole note is
+rewritten with `wiki_update_reading_note` — merged, reordered and corrected, not
+appended to. Notes organised by delivery batch (`Chunks 8-15`, `New in this
+batch`) are refused: a chunk is how text is transported, not a way to organise
+knowledge. At most one delivered batch may be outstanding before the next page
+is refused; a batch that genuinely adds nothing can be answered with
+`unchanged`, but not twice running.
+
+The note's top block — `paperKey`, `title`, `abstract`, `expert`, `readChunks`,
+`totalChunks`, `nextChunk`, `coverage`, `status`, `updatedAt` — is maintained by
+the server from the reading ledger, never by the model, so nothing written in
+the note can make the paper look further along than it is. Because the note is a
+real file on the item, a Zotero restart, an MCP disconnect or a context
+compaction costs nothing: `wiki_get_reading_note` hands back the note, the
+expert and the chunk index to resume at.
+
+Once every chunk has been delivered, one more pass over the whole paper is
+required (`finalSynthesis`) before `wiki_prepare_update` will start the write-up,
+and Evidence reaches `paper_reviewed` or `cross_paper` depth only when both are
+true: every chunk delivered **and** that final pass recorded. Delivery is not
+understanding. The note itself is never Evidence — Claims still cite excerpts
+verified against the paper's own indexed chunks — and the note is excluded from
+the search index, so a summary of a paper can never be retrieved as if it were
+the paper.
 
 - `wiki_prepare_update` — search existing knowledge before proposing changes; pass up to two exact `proposedPageTitles` so its short-lived token can authorize only the Page titles that were actually searched
 - `wiki_commit` — apply validated `SKIP`, Evidence, Claim, Page, Relation or conflict actions
@@ -666,7 +696,10 @@ the user. The server performs no hidden LLM calls.
 - `wiki_status` — report Wiki and Evidence-link status
 - `wiki_export` — render derived Markdown without changing the authoritative database
 - `wiki_reverify` — relink Evidence after index rebuilds
-- `wiki_build_from_paper` — read one explicitly requested paper, one page of chunks at a time; follow `pagination.nextCursor` until `pagination.coverageComplete` is true, and finish the open paper before starting another
+- `wiki_build_from_paper` — read one explicitly requested paper: metadata and abstract first, then one page of chunks at a time; follow `pagination.nextCursor` until `pagination.coverageComplete` is true, and finish the open paper before starting another
+- `wiki_set_reading_expert` — generate this paper's one domain expert from its metadata and abstract, and create its persistent Markdown reading note on the Zotero item
+- `wiki_update_reading_note` — replace the whole reading note with your current understanding of the paper; `finalSynthesis` marks the whole-paper pass once every chunk has been delivered
+- `wiki_get_reading_note` — read back a paper's note, expert and exact resume point; the recovery path after a restart or a context compaction
 - `wiki_finish_reading` — close the currently open paper without writing it up (`skipped`), so the next paper can start
 
 ### 5. Write Operations (9 tools, can be disabled in preferences)

@@ -17,6 +17,7 @@ import {
   type WikiDatabase,
   type WikiEvidenceInput,
   type WikiEvidenceRecord,
+  type WikiPageDeletion,
   type WikiPageRecord,
 } from "./wikiTypes";
 
@@ -30,6 +31,14 @@ function numberInRange(value: number, label: string): number {
   }
   return value;
 }
+
+/**
+ * How many ids one verification statement may bind.
+ *
+ * SQLite refuses a statement with more than 32766 bound parameters, and a
+ * page's claim count has no ceiling, so the residue checks run in batches.
+ */
+const ID_BATCH = 500;
 
 const WIKI_PERSISTENT_STATUS_KEYS = [
   "pages",
@@ -1554,79 +1563,368 @@ export class WikiStore {
     });
   }
 
-  async mergePages(
-    sourcePageId: number,
-    targetPageId: number,
+  /**
+   * The claim ids of one page, read before anything is deleted.
+   *
+   * Every child table reaches a page through `wiki_claims.page_id`, so once
+   * the claims are gone there is no query left that can find their rows. The
+   * ids are captured up front, and the deletes and the verification both work
+   * from that list rather than from a join that stops matching halfway
+   * through.
+   */
+  private async claimIdsOfPage(pageId: number): Promise<number[]> {
+    const rows = await this.db.queryAsync(
+      "SELECT claim_id FROM wiki_claims WHERE page_id = ?",
+      [pageId],
+    );
+    return rows.map((row: any) => Number(rowValue(row, "claim_id", "claimId")));
+  }
+
+  /**
+   * Work out exactly what deleting one page would destroy.
+   *
+   * The concept question is the whole reason this is a separate step. A page
+   * points at `primary_concept_id`, and `wiki_aliases` and `wiki_relations`
+   * hang off that concept - not off the page. If another page shares the
+   * concept, none of it may be touched: the delete would silently strip a
+   * second knowledge entry of its terminology. So the concept, its aliases and
+   * every relation that ends on it are in scope only when this page is the
+   * last one using it.
+   *
+   * Relations that are in scope may still be quoted in another page's summary,
+   * because `refreshPageSummary` writes the relations of a page's concept into
+   * its summary text. Those pages are collected here and rewritten after the
+   * delete, so no summary outlives the relation it describes.
+   */
+  private async planPageDeletion(
+    pageId: number,
     libraryID: number,
-  ): Promise<void> {
-    if (sourcePageId === targetPageId)
-      throw new Error("Cannot merge a Wiki page into itself");
-    await this.requirePage(sourcePageId, libraryID);
-    await this.requirePage(targetPageId, libraryID);
-    await this.db.executeTransaction(async () => {
-      const claims = await this.db.queryAsync(
-        "SELECT claim_id, normalized_claim_text FROM wiki_claims WHERE page_id = ?",
-        [sourcePageId],
+  ): Promise<{ plan: WikiPageDeletion; conceptId: number | null }> {
+    const rows = await this.db.queryAsync(
+      "SELECT canonical_title, primary_concept_id FROM wiki_pages WHERE page_id = ? AND library_id = ?",
+      [pageId, libraryID],
+    );
+    if (!rows[0]) {
+      throw new Error(
+        `Wiki page ${pageId} does not exist in library ${libraryID}`,
       );
-      for (const row of claims) {
-        const claimId = Number(rowValue(row, "claim_id", "claimId"));
-        const duplicate = await this.db.valueQueryAsync(
-          "SELECT claim_id FROM wiki_claims WHERE page_id = ? AND normalized_claim_text = ?",
-          [
-            targetPageId,
-            rowValue(row, "normalized_claim_text", "normalizedClaimText"),
-          ],
-        );
-        if (!duplicate) {
-          await this.db.queryAsync(
-            "UPDATE wiki_claims SET page_id = ?, updated_at = ?, version = version + 1 WHERE claim_id = ?",
-            [targetPageId, Date.now(), claimId],
-          );
-          continue;
-        }
-        const evidence = await this.db.queryAsync(
-          "SELECT * FROM wiki_evidence WHERE claim_id = ?",
-          [claimId],
-        );
-        for (const item of evidence) {
-          await this.db.queryAsync(
-            `INSERT OR IGNORE INTO wiki_evidence
-             (claim_id, library_id, item_key, chunk_id_snapshot, chunk_text_hash,
-              source_content_hash, source_chunk_signature, source_reset_generation,
-              excerpt_hash, excerpt, evidence_role, read_depth, link_state,
-              created_at, last_verified_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-              Number(duplicate),
-              rowValue(item, "library_id", "libraryID"),
-              rowValue(item, "item_key", "itemKey"),
-              rowValue(item, "chunk_id_snapshot", "chunkIdSnapshot"),
-              rowValue(item, "chunk_text_hash", "chunkTextHash"),
-              rowValue(item, "source_content_hash", "sourceContentHash"),
-              rowValue(item, "source_chunk_signature", "sourceChunkSignature"),
-              rowValue(
-                item,
-                "source_reset_generation",
-                "sourceResetGeneration",
-              ),
-              rowValue(item, "excerpt_hash", "excerptHash"),
-              item.excerpt,
-              rowValue(item, "evidence_role", "evidenceRole"),
-              rowValue(item, "read_depth", "readDepth"),
-              rowValue(item, "link_state", "linkState"),
-              rowValue(item, "created_at", "createdAt"),
-              rowValue(item, "last_verified_at", "lastVerifiedAt"),
-            ],
-          );
-        }
-        await this.db.queryAsync("DELETE FROM wiki_claims WHERE claim_id = ?", [
-          claimId,
-        ]);
+    }
+    const canonicalTitle = String(
+      rowValue(rows[0], "canonical_title", "canonicalTitle"),
+    );
+    const rawConceptId = rowValue(
+      rows[0],
+      "primary_concept_id",
+      "primaryConceptId",
+    );
+    const primaryConceptId =
+      rawConceptId === null || rawConceptId === undefined
+        ? null
+        : Number(rawConceptId);
+
+    const claimIds = await this.claimIdsOfPage(pageId);
+    const countForClaims = async (table: string): Promise<number> => {
+      if (!claimIds.length) return 0;
+      const slots = claimIds.map(() => "?").join(", ");
+      return Number(
+        await this.db.valueQueryAsync(
+          `SELECT COUNT(*) FROM ${table} WHERE claim_id IN (${slots})`,
+          claimIds,
+        ),
+      );
+    };
+
+    let conceptId: number | null = null;
+    if (primaryConceptId !== null) {
+      const shared = Number(
+        await this.db.valueQueryAsync(
+          "SELECT COUNT(*) FROM wiki_pages WHERE primary_concept_id = ? AND page_id != ?",
+          [primaryConceptId, pageId],
+        ),
+      );
+      if (!shared) conceptId = primaryConceptId;
+    }
+
+    let aliases = 0;
+    let relations = 0;
+    const refreshedPages: number[] = [];
+    if (conceptId !== null) {
+      aliases = Number(
+        await this.db.valueQueryAsync(
+          "SELECT COUNT(*) FROM wiki_aliases WHERE concept_id = ?",
+          [conceptId],
+        ),
+      );
+      relations = Number(
+        await this.db.valueQueryAsync(
+          `SELECT COUNT(*) FROM wiki_relations
+           WHERE source_concept_id = ? OR target_concept_id = ?`,
+          [conceptId, conceptId],
+        ),
+      );
+      const neighbours = await this.db.queryAsync(
+        `SELECT DISTINCT p.page_id
+         FROM wiki_pages p
+         JOIN wiki_relations r
+           ON r.source_concept_id = p.primary_concept_id
+           OR r.target_concept_id = p.primary_concept_id
+         WHERE p.page_id != ?
+           AND (r.source_concept_id = ? OR r.target_concept_id = ?)`,
+        [pageId, conceptId, conceptId],
+      );
+      for (const row of neighbours) {
+        refreshedPages.push(Number(rowValue(row, "page_id", "pageId")));
       }
-      await this.refreshPageSummary(targetPageId);
-      await this.db.queryAsync("DELETE FROM wiki_pages WHERE page_id = ?", [
-        sourcePageId,
+    }
+
+    return {
+      conceptId,
+      plan: {
+        pageId,
+        canonicalTitle,
+        claims: claimIds.length,
+        evidence: await countForClaims("wiki_evidence"),
+        claimEmbeddings: await countForClaims("wiki_claim_embeddings"),
+        queuedEmbeddings: await countForClaims("wiki_embedding_queue"),
+        concepts: conceptId === null ? 0 : 1,
+        aliases,
+        relations,
+        refreshedPages,
+      },
+    };
+  }
+
+  /**
+   * What deleting this page would destroy, without destroying anything.
+   *
+   * The confirmation dialog is only honest if it counts the rows the delete
+   * will actually remove, so it reads this rather than assembling its own
+   * totals from whatever the panel happens to have loaded.
+   */
+  async describePageDeletion(
+    pageId: number,
+    libraryID: number,
+  ): Promise<WikiPageDeletion> {
+    await this.initialize();
+    const { plan } = await this.planPageDeletion(pageId, libraryID);
+    return plan;
+  }
+
+  /**
+   * Which concept every other page in the database is bound to.
+   *
+   * Read before the delete and compared after it. `wiki_pages.primary_concept_id`
+   * is declared `ON DELETE SET NULL`, so removing a concept silently rebinds
+   * any page still pointing at it - the one way this delete could reach into
+   * another knowledge entry without issuing a statement against it. A concept
+   * is only ever removed when no other page uses it, so this snapshot must
+   * come back identical; if it does not, the delete is refused.
+   */
+  private async conceptBindings(
+    pageId: number,
+  ): Promise<Array<[number, number | null]>> {
+    const rows = await this.db.queryAsync(
+      "SELECT page_id, primary_concept_id FROM wiki_pages WHERE page_id != ? ORDER BY page_id",
+      [pageId],
+    );
+    return rows.map((row: any) => {
+      const bound = rowValue(row, "primary_concept_id", "primaryConceptId");
+      return [
+        Number(rowValue(row, "page_id", "pageId")),
+        bound === null || bound === undefined ? null : Number(bound),
+      ] as [number, number | null];
+    });
+  }
+
+  /**
+   * Refuse to commit a delete that left anything behind - or took too much.
+   *
+   * This runs inside the transaction, so anything it finds aborts the whole
+   * delete rather than reporting a page that is half gone. It asks two
+   * questions, both scoped to this delete and nothing else:
+   *
+   *   - is there any row left anywhere that refers to this page, its claims or
+   *     its concept? Asked table by table against the captured ids, rather
+   *     than trusting the DELETE statements above to have covered every table.
+   *   - did any other page change? No page outside this one may vanish or be
+   *     rebound to a different concept.
+   *
+   * Deliberately *not* asked: whether the database contains orphan rows in
+   * general. Rows that belong to nothing are a pre-existing condition of the
+   * file, not something one page's delete created, and this operation neither
+   * reports nor repairs them - see the note on `deletePage`.
+   */
+  private async assertPageFullyDeleted(
+    pageId: number,
+    claimIds: number[],
+    conceptId: number | null,
+    bindingsBefore: Array<[number, number | null]>,
+  ): Promise<void> {
+    const residue: string[] = [];
+    const check = async (
+      label: string,
+      sql: string,
+      params: unknown[],
+    ): Promise<void> => {
+      const left = Number(await this.db.valueQueryAsync(sql, params));
+      if (left) residue.push(`${label}=${left}`);
+    };
+    await check(
+      "wiki_pages",
+      "SELECT COUNT(*) FROM wiki_pages WHERE page_id = ?",
+      [pageId],
+    );
+    await check(
+      "wiki_claims.page_id",
+      "SELECT COUNT(*) FROM wiki_claims WHERE page_id = ?",
+      [pageId],
+    );
+    // In batches, because SQLite binds at most 32766 parameters per statement
+    // and a page's claim count has no ceiling.
+    for (let start = 0; start < claimIds.length; start += ID_BATCH) {
+      const batch = claimIds.slice(start, start + ID_BATCH);
+      const slots = batch.map(() => "?").join(", ");
+      for (const table of [
+        "wiki_claims",
+        "wiki_evidence",
+        "wiki_claim_embeddings",
+        "wiki_embedding_queue",
+      ]) {
+        await check(
+          table,
+          `SELECT COUNT(*) FROM ${table} WHERE claim_id IN (${slots})`,
+          batch,
+        );
+      }
+    }
+    if (conceptId !== null) {
+      await check(
+        "wiki_concepts",
+        "SELECT COUNT(*) FROM wiki_concepts WHERE concept_id = ?",
+        [conceptId],
+      );
+      await check(
+        "wiki_aliases",
+        "SELECT COUNT(*) FROM wiki_aliases WHERE concept_id = ?",
+        [conceptId],
+      );
+      await check(
+        "wiki_relations",
+        `SELECT COUNT(*) FROM wiki_relations
+         WHERE source_concept_id = ? OR target_concept_id = ?`,
+        [conceptId, conceptId],
+      );
+      await check(
+        "wiki_pages.primary_concept_id",
+        "SELECT COUNT(*) FROM wiki_pages WHERE primary_concept_id = ?",
+        [conceptId],
+      );
+    }
+    if (residue.length) {
+      throw new Error(
+        `Deleting Wiki page ${pageId} left referencing rows behind (${residue.join(", ")}); the delete was rolled back`,
+      );
+    }
+
+    const bindingsAfter = await this.conceptBindings(pageId);
+    const describe = (bindings: Array<[number, number | null]>): string =>
+      bindings.map(([page, concept]) => `${page}:${concept ?? "-"}`).join(",");
+    if (describe(bindingsAfter) !== describe(bindingsBefore)) {
+      throw new Error(
+        `Deleting Wiki page ${pageId} altered other pages (before ${describe(bindingsBefore)}; after ${describe(bindingsAfter)}); the delete was rolled back`,
+      );
+    }
+  }
+
+  /**
+   * Delete one knowledge entry and everything that belongs to it, for good.
+   *
+   * Physical deletion, not a status flag: the page row, its claims, their
+   * evidence, their embeddings and their queued embedding work all leave the
+   * database, and so do the page's concept, aliases and relations when no
+   * other page shares that concept. Every statement runs in one transaction
+   * that is verified before it commits, so a fault at any step leaves the Wiki
+   * exactly as it was rather than half deleted.
+   *
+   * Nothing outside this page is removed. Other pages change in one way only:
+   * a summary that quoted a relation to the deleted concept is rewritten
+   * without it, because that relation no longer exists.
+   *
+   * That includes rows the database may already hold that belong to nothing -
+   * evidence whose claim is missing, an alias whose concept is missing. This
+   * used to sweep those away database-wide while it was here anyway, which
+   * made deleting one entry silently rewrite unrelated history: the scope of
+   * the operation stopped being predictable from what the user asked for, and
+   * a row that looked like debris - a `pending_relink` evidence waiting on a
+   * rebuild, a queue entry mid-flight - was destroyed without a word. Such
+   * rows are a property of the file, not of this page, and repairing them is a
+   * maintenance action a user should invoke deliberately. `clearAll()` is the
+   * one that exists today.
+   */
+  async deletePage(
+    pageId: number,
+    libraryID: number,
+  ): Promise<WikiPageDeletion> {
+    await this.initialize();
+    await this.requirePage(pageId, libraryID);
+    return this.db.executeTransaction(async () => {
+      const { plan, conceptId } = await this.planPageDeletion(
+        pageId,
+        libraryID,
+      );
+      const claimIds = await this.claimIdsOfPage(pageId);
+      const bindings = await this.conceptBindings(pageId);
+      if (claimIds.length) {
+        // Children before parents, so the delete rests on its own statements
+        // rather than on whether this connection has foreign keys enabled.
+        //
+        // Scoped by `page_id` through a subquery rather than by binding the
+        // captured ids: the reach is identical - these claims and no others -
+        // but it costs no bound parameters, and SQLite refuses a statement
+        // with more than 32766 of them. The ids are still captured, because
+        // the verification below has to run after the claims are gone, when
+        // this subquery would return nothing.
+        for (const table of [
+          "wiki_embedding_queue",
+          "wiki_claim_embeddings",
+          "wiki_evidence",
+        ]) {
+          await this.db.queryAsync(
+            `DELETE FROM ${table}
+             WHERE claim_id IN (SELECT claim_id FROM wiki_claims WHERE page_id = ?)`,
+            [pageId],
+          );
+        }
+      }
+      await this.db.queryAsync("DELETE FROM wiki_claims WHERE page_id = ?", [
+        pageId,
       ]);
+      await this.db.queryAsync("DELETE FROM wiki_pages WHERE page_id = ?", [
+        pageId,
+      ]);
+      if (conceptId !== null) {
+        await this.db.queryAsync(
+          `DELETE FROM wiki_relations
+           WHERE source_concept_id = ? OR target_concept_id = ?`,
+          [conceptId, conceptId],
+        );
+        await this.db.queryAsync(
+          "DELETE FROM wiki_aliases WHERE concept_id = ?",
+          [conceptId],
+        );
+        await this.db.queryAsync(
+          "DELETE FROM wiki_concepts WHERE concept_id = ?",
+          [conceptId],
+        );
+      }
+      // The neighbours were read before the relations went; refreshing them
+      // now is what keeps a surviving page's summary from quoting a relation
+      // that no longer exists.
+      for (const neighbour of plan.refreshedPages) {
+        await this.refreshPageSummary(neighbour);
+      }
+      await this.assertPageFullyDeleted(pageId, claimIds, conceptId, bindings);
+      return plan;
     });
   }
 

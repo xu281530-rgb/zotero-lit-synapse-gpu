@@ -5,7 +5,7 @@ _This README is also available in: [:gb: English](./README.md) | :cn: 简体中�
 [![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-2.3.1-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-2.4.2-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -720,11 +720,32 @@ targeted build 生命周期：正文只提取、切块一次，然后同时更�
 > 正文——那是全服务器唯一一条绕开检索漏斗的旁路。数据库维护能力保留在插件设置
 > 界面内部，不再对外暴露。
 
-### 四、LLM Wiki（9 个，可独立禁用）
+### 四、LLM Wiki（12 个，可独立禁用）
 
 Wiki 使用独立长期知识数据库，保存可复用的 Page、Claim、Concept、Relation 和可回溯
 Evidence，而不是再建一份论文摘要索引。普通研究采用“先检索、后受控提交”的流程；
 `wiki_build_from_paper` 仅允许用户明确指定单篇文献时使用。服务器不会隐藏调用 LLM。
+
+**单篇文献深度阅读。** 阅读顺序由服务器强制。首次调用 `wiki_build_from_paper`
+只返回该文献的元数据与摘要，不返回任何正文；随后用 `wiki_set_reading_expert`
+生成这篇文献专属的领域专家角色，同时在该 Zotero 条目下创建一份持久化的 Markdown
+**阅读总结**附件。之后正文按页下发，每读完一批，用 `wiki_update_reading_note`
+重写**整份**总结——新增、删除、合并、移动、改写，而不是往后追加。按分页组织的笔记
+（`Chunks 8-15`、`本页新增`）会被拒绝：chunk 只是正文的传输单位，不是知识的组织
+方式。未回写的批次最多允许积压 1 批，第 2 批未回写就拒绝继续下发；若某一批确实没有
+新内容，可用 `unchanged` 说明原因，但不允许连续两次。
+
+总结顶部的机器可读区——`paperKey`、`title`、`abstract`、`expert`、`readChunks`、
+`totalChunks`、`nextChunk`、`coverage`、`status`、`updatedAt`——由服务器依据阅读台账
+写入，AI 不能修改，因此总结里的任何措辞都无法让这篇文献看起来读得比实际更多。由于
+它是条目下的真实文件，Zotero 重启、MCP 断线、对话中断与 context compaction 都不会
+造成损失：`wiki_get_reading_note` 会交回总结、专家角色和应当续读的 chunk 序号。
+
+全部 chunk 交付完成后，还必须再做一次覆盖全文的整体重构（`finalSynthesis`），
+`wiki_prepare_update` 才会开始写入阶段；Evidence 只有在**全部 chunk 已交付**且
+**该次整体重构已记录**时，才能达到 `paper_reviewed` / `cross_paper` 深度——交付不等于
+读懂。总结本身永远不是 Evidence：Claim 仍必须引用能在该文献真实 chunk 中校验通过的
+原文摘录。该附件也被排除在检索索引之外，避免一篇论文的总结被当作论文原文检索出来。
 
 - `wiki_prepare_update` —— 写入前搜索已有知识；可传入最多两个准确的 `proposedPageTitles`，短期 token 只能授权真正搜索过的 Page 标题
 - `wiki_commit` —— 提交经过验证的 SKIP、Evidence、Claim、Page、Relation 或冲突动作
@@ -734,7 +755,10 @@ Evidence，而不是再建一份论文摘要索引。普通研究采用“先检
 - `wiki_status` —— 查看 Wiki 与 Evidence 链接状态
 - `wiki_export` —— 导出派生 Markdown，不改变权威数据库
 - `wiki_reverify` —— 索引重建后重新定位 Evidence
-- `wiki_build_from_paper` —— 分页阅读用户明确指定的单篇文献；用 `pagination.nextCursor` 逐页翻到 `pagination.coverageComplete` 为真，且必须先结束当前这篇才能开始下一篇
+- `wiki_build_from_paper` —— 阅读用户明确指定的单篇文献：先给元数据与摘要，再分页下发正文；用 `pagination.nextCursor` 逐页翻到 `pagination.coverageComplete` 为真，且必须先结束当前这篇才能开始下一篇
+- `wiki_set_reading_expert` —— 依据元数据与摘要生成该文献专属的领域专家角色，并在条目下创建持久化 Markdown 阅读总结
+- `wiki_update_reading_note` —— 用当前对全文的理解整体替换阅读总结；`finalSynthesis` 表示全文交付后的最终整体重构
+- `wiki_get_reading_note` —— 取回某篇文献的总结、专家角色与准确续读位置；重启或对话中断后的恢复入口
 - `wiki_finish_reading` —— 只读不写地结束当前打开的文献（`skipped`），以便开始下一篇
 
 ### 五、写入操作（9 个，可在偏好设置中禁用）

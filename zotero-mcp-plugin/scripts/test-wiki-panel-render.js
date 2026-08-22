@@ -89,6 +89,11 @@ function createNode(tag) {
       );
       node.parent = null;
     },
+    contains(other) {
+      if (other === node) return true;
+      return node.children.some((child) => child.contains(other));
+    },
+    focus() {},
     querySelector(selector) {
       const wanted = selector.replace(/^#/u, "");
       for (const child of node.children) {
@@ -113,10 +118,30 @@ function findByClass(node, className) {
   return hit.concat(...node.children.map((child) => findByClass(child, className)));
 }
 
-/** Fire every handler registered for `type`, awaiting async ones. */
-async function fire(node, type) {
-  const event = { stopPropagation() {}, preventDefault() {} };
+/**
+ * Fire every handler registered for `type`, awaiting async ones.
+ *
+ * `detail` carries whatever the handler reads off the event - `clientX` and
+ * `button` for the drawer's drag gesture, `target` for the dismiss handlers.
+ * There is no bubbling here, which is deliberate: a listener that only works
+ * because an ancestor caught the event would not be pinned by these tests.
+ */
+async function fire(node, type, detail = {}) {
+  const event = {
+    target: node,
+    button: 0,
+    stopPropagation() {},
+    preventDefault() {},
+    ...detail,
+  };
   for (const handler of node.listeners.get(type) ?? []) await handler(event);
+}
+
+/** Drag `entry` horizontally by `dx` pixels and release. */
+async function drag(entry, dx) {
+  await fire(entry, "mousedown", { clientX: 200, button: 0 });
+  await fire(entry, "mousemove", { clientX: 200 + dx });
+  await fire(entry, "mouseup", { clientX: 200 + dx });
 }
 
 // --- Fake Zotero ----------------------------------------------------------
@@ -624,6 +649,258 @@ async function seedCrowded(sqlite) {
     loggedErrors.length,
     1,
     "the crowded render must not add an error to the log",
+  );
+  sqlite.close();
+}
+
+// --- The delete drawer: hidden at rest, dragged open, confirmed -----------
+
+/**
+ * Deleting a knowledge entry is permanent, so the index must not put a delete
+ * control anywhere a stray click can reach. These tests drive the gesture the
+ * panel actually implements: the drawer is invisible and unclickable until an
+ * entry is dragged far enough to the left, a short drag springs back, a click
+ * anywhere else puts it away, and the icon opens a confirmation that reads out
+ * what is about to be destroyed before anything is written.
+ */
+
+/** Wait until `read()` returns something truthy, or give up. */
+async function settleFor(read, what) {
+  for (let tick = 0; tick < 50; tick += 1) {
+    const value = read();
+    if (value) return value;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+{
+  const sqlite = new DatabaseSync(path.join(tempDir, "drawer.sqlite"));
+  sqlite.exec("PRAGMA foreign_keys = ON");
+  await seedCrowded(sqlite);
+  await useConnection(adapt(sqlite));
+  const win = createWindow();
+  const errorsBefore = loggedErrors.length;
+
+  await openWikiPanel(win);
+  const container = win.containers[0];
+  let panel = container.querySelector("#zotero-mcp-wiki-panel");
+
+  const rows = findByClass(panel, "zmp-wiki-page-row");
+  assert.equal(rows.length, 2, "every index entry must sit in a drawer row");
+  for (const row of rows) {
+    assert.equal(
+      findByClass(row, "zmp-wiki-page-delete").length,
+      1,
+      "each row must carry exactly one delete control",
+    );
+    assert.ok(
+      !row.classList.contains("is-drawer-open"),
+      "no drawer may be open when the panel first renders",
+    );
+  }
+
+  const target = rows.find((row) =>
+    textOf(row).includes("定向凝固与固态相变控制柱状晶技术"),
+  );
+  const [targetEntry] = findByClass(target, "zmp-wiki-page-entry");
+  const [targetDelete] = findByClass(target, "zmp-wiki-page-delete");
+
+  // A short drag is a click that wandered: it must spring back.
+  await drag(targetEntry, -12);
+  assert.ok(
+    !target.classList.contains("is-drawer-open"),
+    "a drag shorter than the threshold must not open the drawer",
+  );
+
+  // A real drag left opens it, and only it.
+  await drag(targetEntry, -60);
+  assert.ok(
+    target.classList.contains("is-drawer-open"),
+    "dragging an entry left must open its drawer",
+  );
+  assert.equal(
+    rows.filter((row) => row.classList.contains("is-drawer-open")).length,
+    1,
+    "at most one drawer may be open at a time",
+  );
+
+  // A click anywhere else in the panel puts it back.
+  await fire(panel, "mousedown", { target: panel });
+  assert.ok(
+    !target.classList.contains("is-drawer-open"),
+    "clicking elsewhere must close the drawer",
+  );
+  assert.equal(
+    targetEntry.style.transform,
+    "",
+    "and must slide the entry back to its resting position",
+  );
+
+  // The keyboard reaches the same drawer, and only the drawer.
+  await fire(targetEntry, "keydown", { key: "Delete" });
+  assert.ok(
+    target.classList.contains("is-drawer-open"),
+    "Delete on a focused entry must open its drawer",
+  );
+  assert.equal(
+    findByClass(panel, "zmp-wiki-modal").length,
+    0,
+    "and must not skip straight to the confirmation",
+  );
+  await fire(panel, "mousedown", { target: panel });
+
+  // --- The confirmation reads out what will be destroyed -------------------
+  await drag(targetEntry, -60);
+  let pending = fire(targetDelete, "click");
+  let dialog = await settleFor(
+    () => findByClass(panel, "zmp-wiki-modal")[0],
+    "the delete confirmation",
+  );
+  const dialogText = textOf(dialog);
+  assert.match(
+    dialogText,
+    /定向凝固与固态相变控制柱状晶技术/u,
+    "the confirmation must name the entry being deleted",
+  );
+  assert.match(dialogText, /24 条/u, "and count its claims");
+  assert.match(dialogText, /48 条/u, "and count its evidence");
+  assert.match(
+    dialogText,
+    /删除后不可恢复/u,
+    "and say plainly that this cannot be undone",
+  );
+  assert.ok(
+    dialogText.includes("取消") && dialogText.includes("永久删除"),
+    "and offer both a way out and the destructive choice",
+  );
+
+  // Cancelling must write nothing.
+  const [cancel, confirm] = findByClass(dialog, "zmp-wiki-command").filter(
+    (node) => node.textContent === "取消" || node.textContent === "永久删除",
+  );
+  assert.equal(cancel.textContent, "取消");
+  assert.equal(confirm.textContent, "永久删除");
+  await fire(cancel, "click");
+  await pending;
+  assert.equal(
+    findByClass(panel, "zmp-wiki-modal").length,
+    0,
+    "cancelling must take the dialog down",
+  );
+  assert.equal(
+    Number(
+      Object.values(
+        sqlite.prepare("SELECT COUNT(*) FROM wiki_pages").get(),
+      )[0],
+    ),
+    2,
+    "cancelling must delete nothing",
+  );
+
+  // Confirming deletes the entry and re-renders the index without it.
+  await drag(targetEntry, -60);
+  pending = fire(targetDelete, "click");
+  dialog = await settleFor(
+    () => findByClass(panel, "zmp-wiki-modal")[0],
+    "the delete confirmation",
+  );
+  const [, destroy] = findByClass(dialog, "zmp-wiki-command").filter(
+    (node) => node.textContent === "取消" || node.textContent === "永久删除",
+  );
+  await fire(destroy, "click");
+  await pending;
+
+  panel = container.querySelector("#zotero-mcp-wiki-panel");
+  const remaining = findByClass(panel, "zmp-wiki-page-entry");
+  assert.equal(
+    remaining.length,
+    1,
+    "the deleted entry must be gone from the index",
+  );
+  assert.ok(
+    !textOf(panel).includes("定向凝固与固态相变控制柱状晶技术"),
+    "and its title must not be anywhere in the panel",
+  );
+  for (const [table, expected] of [
+    ["wiki_pages", 1],
+    ["wiki_claims", 1],
+    ["wiki_evidence", 1],
+  ]) {
+    assert.equal(
+      Number(
+        Object.values(
+          sqlite.prepare(`SELECT COUNT(*) FROM ${table}`).get(),
+        )[0],
+      ),
+      expected,
+      `${table} must keep only the surviving page's rows`,
+    );
+  }
+  assert.equal(
+    loggedErrors.length,
+    errorsBefore,
+    "deleting through the panel must not log an error",
+  );
+  sqlite.close();
+}
+
+// --- A delete that fails must say so, and change nothing ------------------
+
+{
+  const sqlite = new DatabaseSync(path.join(tempDir, "delete-fail.sqlite"));
+  sqlite.exec("PRAGMA foreign_keys = ON");
+  await seed(sqlite);
+  // Reads succeed - the panel renders and the confirmation can count rows -
+  // but the delete itself faults, exactly as a locked database would.
+  await useConnection(adapt(sqlite, /^\s*DELETE FROM wiki_claims/u));
+  const win = createWindow();
+  const alerts = [];
+  win.alert = (message) => alerts.push(String(message));
+  const errorsBefore = loggedErrors.length;
+
+  await openWikiPanel(win);
+  const panel = win.containers[0].querySelector("#zotero-mcp-wiki-panel");
+  const [row] = findByClass(panel, "zmp-wiki-page-row");
+  const [entry] = findByClass(row, "zmp-wiki-page-entry");
+  const [remove] = findByClass(row, "zmp-wiki-page-delete");
+
+  await drag(entry, -60);
+  const pending = fire(remove, "click");
+  const dialog = await settleFor(
+    () => findByClass(panel, "zmp-wiki-modal")[0],
+    "the delete confirmation",
+  );
+  const [, destroy] = findByClass(dialog, "zmp-wiki-command").filter(
+    (node) => node.textContent === "取消" || node.textContent === "永久删除",
+  );
+  await fire(destroy, "click");
+  await pending;
+
+  assert.equal(alerts.length, 1, "a failed delete must be reported to the user");
+  assert.match(
+    alerts[0],
+    /删除失败，知识库未发生任何改动/u,
+    "and must say the Wiki was left untouched",
+  );
+  assert.equal(
+    loggedErrors.length,
+    errorsBefore + 1,
+    "and the untouched exception must still reach Zotero.logError",
+  );
+  assert.equal(
+    Number(
+      Object.values(sqlite.prepare("SELECT COUNT(*) FROM wiki_pages").get())[0],
+    ),
+    1,
+    "and the page must still be there",
+  );
+  assert.equal(
+    Number(
+      Object.values(sqlite.prepare("SELECT COUNT(*) FROM wiki_claims").get())[0],
+    ),
+    1,
+    "with its claim",
   );
   sqlite.close();
 }

@@ -30,8 +30,13 @@ const { parseQueryAndParams, placeholderVisibility } = await import(
   "./zotero-db-params.mjs",
 );
 
-globalThis.Zotero = { Libraries: { userLibraryID: 1 } };
-globalThis.ztoolkit = { log: () => undefined };
+// The reading note is a file on a Zotero item, so the fake has to be able to
+// hold one: attachments, IOUtils and a real temp directory. See
+// ./wiki-reading-fixtures.mjs.
+const { createZoteroFake } = await import("./wiki-reading-fixtures.mjs");
+const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "zmp-wiki-loop-"));
+const fake = createZoteroFake({ rootDir: tempDir });
+fake.install();
 
 const { WikiStore } = await import("../src/modules/wiki/wikiStore.ts");
 const { WikiService } = await import("../src/modules/wiki/wikiService.ts");
@@ -96,17 +101,13 @@ function adapt(sqlite) {
   };
 }
 
-globalThis.Zotero.Items = {
-  async getByLibraryAndKeyAsync(libraryID, itemKey) {
-    if (libraryID !== 1 || !indexedChunks.has(itemKey)) return null;
-    return {
-      key: itemKey,
-      deleted: false,
-      isRegularItem: () => true,
-      getField: (f) => (f === "title" ? `Paper ${itemKey}` : ""),
-    };
-  },
-};
+for (const itemKey of indexedChunks.keys()) {
+  fake.createPaper({
+    key: itemKey,
+    title: `Paper ${itemKey}`,
+    abstract: `Abstract of paper ${itemKey}: directional solidification of columnar arrays.`,
+  });
+}
 
 const vectorStore = getVectorStore();
 vectorStore.initialize = async () => {};
@@ -135,7 +136,6 @@ embeddingService.embed = async (_text, _language, isQuery) => {
   return { embedding: new Float32Array([1, 0]) };
 };
 
-const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "zmp-wiki-loop-"));
 const dbPath = path.join(tempDir, "wiki.sqlite");
 let sqlite = new DatabaseSync(dbPath);
 sqlite.exec("PRAGMA foreign_keys = ON");
@@ -145,24 +145,84 @@ let service = new WikiService(store);
 
 const count = (sql, ...p) => Number(sqlite.prepare(sql).get(...p).n);
 
-/** Read a paper to the end, following the cursor. Returns every page. */
-async function readToEnd(itemKey, limit = 20) {
-  const pages = [];
-  let page = await service.buildFromPaper({
+/**
+ * A reading note that satisfies the shape rules, for tests whose subject is
+ * something else.
+ *
+ * These blocks are about paging, sessions, commits and idempotency; what the
+ * note SAYS is tested in test-wiki-reading-note.js. It still has to be a real
+ * note rather than a stub, because the server refuses a placeholder.
+ */
+const NOTE = [
+  "# Directional solidification of columnar arrays",
+  "",
+  "## Research question",
+  "Whether an imposed thermal gradient fixes the width of the columnar band, and under what conditions the band collapses to equiaxed grains.",
+  "",
+  "## Method and conditions",
+  "Solidification runs at a series of imposed gradients, with the band width measured at fixed stations along the rig.",
+  "",
+  "## Results and mechanism",
+  "Band width narrows monotonically with increasing gradient over the range studied, consistent with a growth-front stability argument.",
+  "",
+  "## Scope and limits",
+  "One alloy, one rig geometry; the transition threshold is reported but not independently verified here.",
+].join("\n");
+
+/** Give the open paper the one expert it needs before body text will flow. */
+async function grantExpert(itemKey) {
+  return service.setReadingExpert({
+    libraryID: 1,
+    itemKey,
+    persona:
+      "A solidification metallurgist who evaluates columnar grain array processing and the conditions under which the columnar band collapses.",
+    focus: [
+      "the process chain and its parameters",
+      "the criterion for the columnar-to-equiaxed transition",
+    ],
+  });
+}
+
+/**
+ * Deliver one page and fold it into the reading note, the way a reader does.
+ *
+ * Every block below that reads body text goes through this, so none of them
+ * has to restate the two-phase opening or the integration gate. A first call
+ * lands in the expert phase and is retried once the expert exists.
+ */
+async function read(args) {
+  const page = await service.buildFromPaper({
     libraryID: 1,
     userRequested: true,
-    itemKey,
-    limit,
+    ...args,
   });
+  if (page.phase === "expert_briefing") {
+    await grantExpert(page.target.itemKey);
+    return read(args);
+  }
+  await service.updateReadingNote({
+    libraryID: 1,
+    itemKey: page.target.itemKey,
+    markdown: NOTE,
+  });
+  return page;
+}
+
+/** Read a paper to the end, then do the whole-paper pass. Returns every page. */
+async function readToEnd(itemKey, limit = 20) {
+  const pages = [];
+  let page = await read({ itemKey, limit });
   pages.push(page);
   while (page.pagination.hasMore) {
-    page = await service.buildFromPaper({
-      libraryID: 1,
-      userRequested: true,
-      cursor: page.pagination.nextCursor,
-    });
+    page = await read({ cursor: page.pagination.nextCursor });
     pages.push(page);
   }
+  await service.updateReadingNote({
+    libraryID: 1,
+    itemKey,
+    finalSynthesis: true,
+    markdown: NOTE,
+  });
   return pages;
 }
 
@@ -219,12 +279,19 @@ async function commitClaim(options) {
     "includeAllChunks must be refused with the paged replacement spelled out",
   );
 
-  const first = await service.buildFromPaper({
+  // The opening call carries metadata and no body text: the expert who will
+  // read the paper is decided before the paper is read.
+  const briefing = await service.buildFromPaper({
     libraryID: 1,
     userRequested: true,
     itemKey: "LONGPAPR",
     limit: 999,
   });
+  assert.equal(briefing.phase, "expert_briefing");
+  assert.deepEqual(briefing.chunks, []);
+  assert.ok(briefing.metadata.abstract, "the abstract is what the expert is built from");
+
+  const first = await read({ itemKey: "LONGPAPR", limit: 999 });
   assert.equal(
     first.chunks.length,
     MAX_DOCUMENT_CHUNKS_PER_PAGE,
@@ -270,11 +337,7 @@ async function commitClaim(options) {
 
 // A short paper must still be cheap: one call, done.
 {
-  const page = await service.buildFromPaper({
-    libraryID: 1,
-    userRequested: true,
-    itemKey: "SHORTPPR",
-  });
+  const page = await read({ itemKey: "SHORTPPR" });
   assert.equal(page.chunks.length, 3);
   assert.equal(page.pagination.hasMore, false, "3 chunks is a single page");
   assert.equal(page.pagination.nextCursor, undefined);
@@ -291,17 +354,8 @@ async function commitClaim(options) {
 // =========================================================================
 
 {
-  let page = await service.buildFromPaper({
-    libraryID: 1,
-    userRequested: true,
-    itemKey: "LONGPAPR",
-    limit: 20,
-  });
-  page = await service.buildFromPaper({
-    libraryID: 1,
-    userRequested: true,
-    cursor: page.pagination.nextCursor,
-  });
+  let page = await read({ itemKey: "LONGPAPR", limit: 20 });
+  page = await read({ cursor: page.pagination.nextCursor });
   assert.equal(page.pagination.deliveredChunks, 40);
   const resumeCursor = page.pagination.nextCursor;
 
@@ -313,11 +367,7 @@ async function commitClaim(options) {
   await store.initialize();
   service = new WikiService(store);
 
-  const afterRestart = await service.buildFromPaper({
-    libraryID: 1,
-    userRequested: true,
-    cursor: resumeCursor,
-  });
+  const afterRestart = await read({ cursor: resumeCursor });
   assert.equal(
     afterRestart.pagination.deliveredChunks,
     60,
@@ -385,18 +435,9 @@ async function commitClaim(options) {
 
 {
   // Fresh session on a paper we will deliberately not finish.
-  let page = await service.buildFromPaper({
-    libraryID: 1,
-    userRequested: true,
-    itemKey: "LONGPAPR",
-    limit: 20,
-  });
+  let page = await read({ itemKey: "LONGPAPR", limit: 20 });
   for (let i = 0; i < 2; i += 1) {
-    page = await service.buildFromPaper({
-      libraryID: 1,
-      userRequested: true,
-      cursor: page.pagination.nextCursor,
-    });
+    page = await read({ cursor: page.pagination.nextCursor });
   }
   assert.equal(page.pagination.deliveredChunks, 60);
   assert.equal(page.pagination.coverageComplete, false);
@@ -510,11 +551,7 @@ async function commitClaim(options) {
   );
 
   // Which means the next paper can now start.
-  await service.buildFromPaper({
-    libraryID: 1,
-    userRequested: true,
-    itemKey: "PAPERB01",
-  });
+  await read({ itemKey: "PAPERB01" });
   await service.finishReading({ libraryID: 1, outcome: "skipped" });
 }
 
@@ -523,12 +560,7 @@ async function commitClaim(options) {
 // =========================================================================
 
 for (const outcome of ["skipped", "failed"]) {
-  let page = await service.buildFromPaper({
-    libraryID: 1,
-    userRequested: true,
-    itemKey: "LONGPAPR",
-    limit: 20,
-  });
+  const page = await read({ itemKey: "LONGPAPR", limit: 20 });
   assert.equal(page.pagination.coverageComplete, false);
 
   const closed = await service.finishReading({
@@ -544,11 +576,7 @@ for (const outcome of ["skipped", "failed"]) {
     "the paper really was unfinished",
   );
 
-  const next = await service.buildFromPaper({
-    libraryID: 1,
-    userRequested: true,
-    itemKey: "PAPERB01",
-  });
+  const next = await read({ itemKey: "PAPERB01" });
   assert.equal(
     next.target.itemKey,
     "PAPERB01",
@@ -562,12 +590,7 @@ for (const outcome of ["skipped", "failed"]) {
 // =========================================================================
 
 {
-  await service.buildFromPaper({
-    libraryID: 1,
-    userRequested: true,
-    itemKey: "LONGPAPR",
-    limit: 20,
-  });
+  await read({ itemKey: "LONGPAPR", limit: 20 });
   const elsewhere = await commitClaim({
     title: "Unrelated page",
     itemKey: "PAPERB01",
@@ -591,17 +614,8 @@ for (const outcome of ["skipped", "failed"]) {
   const CLAIM_B = "The transition temperature bounds that effect.";
 
   // Read 40 of 181 and commit claim A from what has been read.
-  let page = await service.buildFromPaper({
-    libraryID: 1,
-    userRequested: true,
-    itemKey: "LONGPAPR",
-    limit: 20,
-  });
-  page = await service.buildFromPaper({
-    libraryID: 1,
-    userRequested: true,
-    cursor: page.pagination.nextCursor,
-  });
+  let page = await read({ itemKey: "LONGPAPR", limit: 20 });
+  page = await read({ cursor: page.pagination.nextCursor });
   assert.equal(page.pagination.coverageComplete, false);
 
   const prepared = await service.prepareUpdate({
@@ -824,12 +838,7 @@ for (const outcome of ["skipped", "failed"]) {
 // =========================================================================
 
 {
-  await service.buildFromPaper({
-    libraryID: 1,
-    userRequested: true,
-    itemKey: "LONGPAPR",
-    limit: 20,
-  });
+  await read({ itemKey: "LONGPAPR", limit: 20 });
   const sessions = await store.readingSessions();
   const before = await sessions.getOpen(1);
   assert.ok(before);
@@ -876,12 +885,7 @@ for (const outcome of ["skipped", "failed"]) {
   );
 
   // Reading simply resumes.
-  const resumed = await service.buildFromPaper({
-    libraryID: 1,
-    userRequested: true,
-    itemKey: "LONGPAPR",
-    limit: 20,
-  });
+  const resumed = await read({ itemKey: "LONGPAPR", limit: 20 });
   assert.ok(
     resumed.pagination.deliveredChunks >= deliveredBefore,
     "reading resumes with progress intact",
@@ -1137,12 +1141,7 @@ for (const outcome of ["skipped", "failed"]) {
 
 {
   // The previous block's commit closed LONGPAPR. Open it again.
-  await service.buildFromPaper({
-    libraryID: 1,
-    userRequested: true,
-    itemKey: "LONGPAPR",
-    limit: 20,
-  });
+  await read({ itemKey: "LONGPAPR", limit: 20 });
 
   await assert.rejects(
     () =>
@@ -1156,12 +1155,7 @@ for (const outcome of ["skipped", "failed"]) {
   );
 
   // Re-reading the SAME paper is not a conflict.
-  const again = await service.buildFromPaper({
-    libraryID: 1,
-    userRequested: true,
-    itemKey: "LONGPAPR",
-    limit: 20,
-  });
+  const again = await read({ itemKey: "LONGPAPR", limit: 20 });
   assert.equal(again.target.itemKey, "LONGPAPR");
 
   // The read-but-do-not-write exit.
@@ -1174,11 +1168,7 @@ for (const outcome of ["skipped", "failed"]) {
   assert.equal(closed.closed, true);
   assert.equal(closed.outcome, "skipped");
 
-  const paperB = await service.buildFromPaper({
-    libraryID: 1,
-    userRequested: true,
-    itemKey: "PAPERB01",
-  });
+  const paperB = await read({ itemKey: "PAPERB01" });
   assert.equal(
     paperB.target.itemKey,
     "PAPERB01",

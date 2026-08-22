@@ -417,7 +417,7 @@ for (const rowShape of ["proxy", "plain"]) {
     `${label} the document graph must build`,
   );
 
-  // --- CRUD must not regress: delete a claim, merge the pages ---
+  // --- CRUD must not regress: delete a claim, then delete a whole page ---
   await store.deleteClaim(loadedWithout.claims[0].claimId, 1);
   const afterDelete = await store.getPage(pageWithout);
   assert.equal(
@@ -425,20 +425,34 @@ for (const rowShape of ["proxy", "plain"]) {
     0,
     `${label} deleteClaim must remove the claim`,
   );
-  await store.mergePages(pageWithout, pageWith, 1);
-  const merged = await store.listPages(1);
+  // The concept-less page is the awkward one: `primary_concept_id` is SQL
+  // NULL, so the deletion plan has to decide "no concept to remove" from a
+  // null column rather than tripping over it.
+  const removed = await store.deletePage(pageWithout, 1);
+  assert.equal(removed.pageId, pageWithout);
   assert.equal(
-    merged.length,
-    1,
-    `${label} mergePages must leave a single active page`,
+    removed.concepts,
+    0,
+    `${label} a page without a primary concept must remove no concept`,
   );
-  assert.equal(merged[0].pageId, pageWith);
+  const survivors = await store.listPages(1);
   assert.equal(
-    merged[0].claims.length,
+    survivors.length,
+    1,
+    `${label} deletePage must leave exactly the other page`,
+  );
+  assert.equal(survivors[0].pageId, pageWith);
+  assert.equal(
+    survivors[0].claims.length,
     1,
     `${label} the surviving page must keep its claim and evidence`,
   );
-  assert.equal(merged[0].claims[0].evidence.length, 1);
+  assert.equal(survivors[0].claims[0].evidence.length, 1);
+  assert.equal(
+    await store.getPage(pageWithout),
+    null,
+    `${label} the deleted page must be gone`,
+  );
 
   sqlite.close();
   covered.push(rowShape);

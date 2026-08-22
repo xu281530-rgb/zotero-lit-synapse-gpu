@@ -1,6 +1,36 @@
 import type { WikiDatabase } from "./wikiTypes";
 
-export const WIKI_SCHEMA_VERSION = 2;
+export const WIKI_SCHEMA_VERSION = 3;
+
+/**
+ * Add a column an older database does not have yet.
+ *
+ * `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so every
+ * column added after a release has to be migrated in separately or it exists
+ * only for users who installed after it. Checked against `table_info` rather
+ * than by catching "duplicate column name", so a genuine ALTER failure - a
+ * locked database, a typo in the DDL - still surfaces instead of being
+ * swallowed as "already there".
+ */
+async function addColumnIfMissing(
+  db: WikiDatabase,
+  table: string,
+  column: string,
+  definition: string,
+): Promise<void> {
+  const rows = await db.queryAsync(`PRAGMA table_info(${table})`);
+  const present = rows.some((row: any) => {
+    try {
+      return String(row.name) === column;
+    } catch {
+      return false;
+    }
+  });
+  if (present) return;
+  await db.queryAsync(
+    `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`,
+  );
+}
 
 export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
   await db.queryAsync("PRAGMA foreign_keys = ON");
@@ -113,9 +143,31 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
       started_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       closed_at INTEGER,
-      note TEXT NOT NULL DEFAULT ''
+      note TEXT NOT NULL DEFAULT '',
+      expert TEXT NOT NULL DEFAULT '',
+      note_key TEXT NOT NULL DEFAULT '',
+      delivered_batches INTEGER NOT NULL DEFAULT 0,
+      integrated_batches INTEGER NOT NULL DEFAULT 0,
+      integrated_chunks INTEGER NOT NULL DEFAULT 0,
+      last_integration_unchanged INTEGER NOT NULL DEFAULT 0,
+      final_synthesis_at INTEGER
     )
   `);
+  // The reading-note columns, for databases created before schema 3. Their
+  // defaults are the pre-note state exactly: no expert, no note, nothing
+  // delivered and nothing integrated, so an interrupted 2.x read resumes as a
+  // paper whose note has not been started rather than as one that is finished.
+  for (const [column, definition] of [
+    ["expert", "TEXT NOT NULL DEFAULT ''"],
+    ["note_key", "TEXT NOT NULL DEFAULT ''"],
+    ["delivered_batches", "INTEGER NOT NULL DEFAULT 0"],
+    ["integrated_batches", "INTEGER NOT NULL DEFAULT 0"],
+    ["integrated_chunks", "INTEGER NOT NULL DEFAULT 0"],
+    ["last_integration_unchanged", "INTEGER NOT NULL DEFAULT 0"],
+    ["final_synthesis_at", "INTEGER"],
+  ] as const) {
+    await addColumnIfMissing(db, "wiki_reading_sessions", column, definition);
+  }
   await db.queryAsync(`
     CREATE TABLE IF NOT EXISTS wiki_reading_chunks (
       session_id INTEGER NOT NULL REFERENCES wiki_reading_sessions(session_id) ON DELETE CASCADE,

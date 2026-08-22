@@ -274,3 +274,31 @@ export interface WikiRelationRecord {
   confidence: number;
   createdAt: number;
 }
+
+/**
+ * Everything one Wiki page owns, counted.
+ *
+ * The same shape answers two questions: what a delete is about to destroy -
+ * which is what the confirmation dialog reads out - and what it actually
+ * destroyed. Producing both from one type is deliberate: a preview that could
+ * drift from the deletion it describes would be worse than no preview.
+ *
+ * `concepts`, `aliases` and `relations` are zero whenever the page's primary
+ * concept is still the primary concept of another page. Aliases and relations
+ * hang off `wiki_concepts`, not off `wiki_pages`, so a shared concept is left
+ * exactly as it was rather than taken down with one of its pages.
+ */
+export interface WikiPageDeletion {
+  pageId: number;
+  canonicalTitle: string;
+  claims: number;
+  evidence: number;
+  claimEmbeddings: number;
+  queuedEmbeddings: number;
+  /** 1 when the primary concept is removed with the page, otherwise 0. */
+  concepts: number;
+  aliases: number;
+  relations: number;
+  /** Pages whose summary mentioned a relation this delete removed. */
+  refreshedPages: number[];
+}

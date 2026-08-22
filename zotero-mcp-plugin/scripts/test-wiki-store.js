@@ -13,8 +13,12 @@ register("./ts-ext-hooks.mjs", import.meta.url);
 // node:sqlite's permissive ones - see scripts/zotero-db-params.mjs.
 const { parseQueryAndParams } = await import("./zotero-db-params.mjs");
 
-globalThis.Zotero = { Libraries: { userLibraryID: 1 } };
-globalThis.ztoolkit = { log: () => undefined };
+// The reading-note half of a Wiki build writes a Markdown attachment onto the
+// Zotero item, so the fake has to carry items, attachments and a filesystem.
+const { createZoteroFake } = await import("./wiki-reading-fixtures.mjs");
+const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "zmp-wiki-store-"));
+const fake = createZoteroFake({ rootDir: tempDir });
+fake.install();
 
 const { WikiStore } = await import("../src/modules/wiki/wikiStore.ts");
 const { WikiService } = await import("../src/modules/wiki/wikiService.ts");
@@ -68,7 +72,6 @@ function adapt(sqlite) {
   };
 }
 
-const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "zmp-wiki-store-"));
 const dbPath = path.join(tempDir, "zotero-mcp-wiki.sqlite");
 let sqlite = new DatabaseSync(dbPath);
 sqlite.exec("PRAGMA foreign_keys = ON");
@@ -1084,17 +1087,13 @@ const sourceKinds = new Map([
   ["UNKNOWN1", "legacy-source-on-demand"],
   ["BODY1", "body"],
 ]);
-globalThis.Zotero.Items = {
-  async getByLibraryAndKeyAsync(libraryID, itemKey) {
-    if (libraryID !== 1 || !indexedChunks.has(itemKey)) return null;
-    return {
-      key: itemKey,
-      deleted: false,
-      isRegularItem: () => true,
-      getField: (field) => (field === "title" ? `Indexed ${itemKey}` : ""),
-    };
-  },
-};
+for (const itemKey of indexedChunks.keys()) {
+  fake.createPaper({
+    key: itemKey,
+    title: `Indexed ${itemKey}`,
+    abstract: `Abstract of ${itemKey}.`,
+  });
+}
 const vectorStore = getVectorStore();
 vectorStore.initialize = async () => {};
 vectorStore.getChunksForItem = async (itemKey) =>
@@ -1130,6 +1129,21 @@ await assert.rejects(
   /includeAllChunks was removed/iu,
   "the unpaginated whole-paper read must be refused",
 );
+// The opening call is the expert briefing: metadata and abstract, no body.
+const bodyBriefing = await bodyAwareService.buildFromPaper({
+  libraryID: 1,
+  userRequested: true,
+  itemKey: "BODY1",
+});
+assert.equal(bodyBriefing.phase, "expert_briefing");
+assert.deepEqual(bodyBriefing.chunks, []);
+await bodyAwareService.setReadingExpert({
+  libraryID: 1,
+  itemKey: "BODY1",
+  persona:
+    "A thermal processing specialist reading for the conditions under which the reported cooling behaviour holds.",
+  focus: ["the reported conditions", "what the results do not cover"],
+});
 const bodyBuild = await bodyAwareService.buildFromPaper({
   libraryID: 1,
   userRequested: true,
@@ -1141,8 +1155,25 @@ assert.equal(bodyBuild.pagination.hasMore, false, "a 1-chunk paper is one page")
 assert.equal(
   bodyBuild.pagination.coverageComplete,
   true,
-  "and one page is full coverage, so paper_reviewed stays available for it",
+  "and one page is full delivery",
 );
+
+// Delivery is not understanding: whole-paper depth also needs the pass over
+// the whole reading note, which is a call the server watched happen.
+await bodyAwareService.updateReadingNote({
+  libraryID: 1,
+  itemKey: "BODY1",
+  finalSynthesis: true,
+  markdown: [
+    "# Confirmed body evidence",
+    "",
+    "## What the paper establishes",
+    "The results section reports a cooling behaviour under stated conditions, and the paper is short enough that the single indexed passage carries all of it.",
+    "",
+    "## Scope and limits",
+    "Nothing outside the reported condition range is demonstrated, and no independent replication is offered.",
+  ].join(String.fromCharCode(10)),
+});
 
 const metadataDepthCommit = await bodyAwareService.commit({
   libraryID: 1,

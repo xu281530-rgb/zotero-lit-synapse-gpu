@@ -13,6 +13,8 @@ export interface WikiTabRender {
 interface WikiTabOptions {
   type: string;
   title: string;
+  /** Item type the tab bar renders its icon from; styled in wikiPanel.css. */
+  icon: string;
 }
 
 interface ZoteroTabRecord {
@@ -50,7 +52,9 @@ export function openWikiTab(
     const created = win.Zotero_Tabs.add({
       type: options.type,
       title: options.title,
-      data: {},
+      // Zotero fills `data.icon` in itself for tabs it recognises, and leaves
+      // it blank otherwise; seeding it keeps the plugin icon on the tab.
+      data: { icon: options.icon },
       select: true,
       onClose: () => {
         const active = wikiTabs.get(win);

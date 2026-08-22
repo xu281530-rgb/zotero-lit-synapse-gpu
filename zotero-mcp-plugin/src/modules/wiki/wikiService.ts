@@ -13,7 +13,26 @@ import {
   mapWikiRelationRow,
 } from "./wikiDto";
 import { WikiEvidenceRelinker } from "./wikiEvidenceRelinker";
-import type { WikiReadingAbandonOutcome } from "./wikiReadingSession";
+import {
+  WIKI_MAX_OUTSTANDING_BATCHES,
+  WikiReadingIntegrationRequired,
+  integrationDebt,
+  type WikiReadingAbandonOutcome,
+  type WikiReadingSessionRecord,
+} from "./wikiReadingSession";
+import {
+  WIKI_EXPERT_OPEN_SCOPE_MANDATE,
+  WIKI_READING_NOTE_SCHEMA,
+  WikiReadingNoteStore,
+  assertHolisticBody,
+  formatChunkRanges,
+  parseReadingNote,
+  renderReadingNote,
+  stripMachineBlock,
+  type WikiReadingExpert,
+  type WikiReadingNoteMetadata,
+  type WikiReadingNoteStatus,
+} from "./wikiReadingNote";
 import type { WikiEmbeddingWorkUnit } from "./wikiEmbeddingQueue";
 import {
   decodeChunkCursor,
@@ -89,9 +108,20 @@ function clampCoverageToVerifiedEvidence(
   return WIKI_READ_DEPTHS[Math.min(requestedDepth, verifiedDepth)];
 }
 
+/**
+ * The shortest reading note the server will accept as a reading.
+ *
+ * Not a quality measure - nothing here can judge one - but a floor under the
+ * degenerate answer. "Updated." and a two-line stub are what a model returns
+ * when it is treating the write-back as a formality to get the next page, and
+ * accepting them would make the whole integration gate ceremonial.
+ */
+const MIN_READING_NOTE_BODY_CHARS = 200;
+
 export class WikiService {
   private readonly store: WikiStore;
   private readonly retriever: WikiRetriever;
+  private readonly notes: WikiReadingNoteStore;
   private readonly prepareTokens = new Map<
     string,
     {
@@ -103,9 +133,13 @@ export class WikiService {
     }
   >();
 
-  constructor(store: WikiStore = getWikiStore()) {
+  constructor(
+    store: WikiStore = getWikiStore(),
+    notes: WikiReadingNoteStore = new WikiReadingNoteStore(),
+  ) {
     this.store = store;
     this.retriever = new WikiRetriever(store);
+    this.notes = notes;
   }
 
   private prunePrepareTokens(): void {
@@ -122,6 +156,7 @@ export class WikiService {
     proposedPageTitles?: string[];
   }): Promise<any> {
     this.prunePrepareTokens();
+    await this.assertReadyToWriteUp(options.libraryID);
     const exactCandidates = await this.store.prepareUpdate(options);
     const semanticCandidates = await this.search({
       ...options,
@@ -206,6 +241,35 @@ export class WikiService {
           }
         : {}),
     };
+  }
+
+  /**
+   * Refuse to start the write-up of a paper that has been read but not
+   * understood as a whole.
+   *
+   * Narrow on purpose. A commit made PARTWAY through a paper is a checkpoint
+   * and stays allowed - evidence already read is real evidence, and holding it
+   * hostage to finishing the paper is how a crash loses a day's reading. What
+   * is refused is the one moment this rule is about: every chunk has been
+   * delivered, so the model is about to write the paper's final claims, and it
+   * has not yet reread its own note as a single account of the whole paper.
+   * That pass is where a reading stops being a sequence of impressions - it is
+   * also the only chance to notice that the conclusion contradicts something
+   * accepted on page 4.
+   */
+  private async assertReadyToWriteUp(libraryID: number): Promise<void> {
+    const sessions = await this.store.readingSessions();
+    const open = await sessions.getOpen(libraryID);
+    if (!open || !open.expert) return;
+    const coverage = await sessions.coverage(open.sessionId);
+    if (!coverage.complete || open.finalSynthesisAt !== null) return;
+    throw new Error(
+      `Every chunk of ${open.itemKey} has been delivered, but its reading note has not been rewritten ` +
+        "as one account of the complete paper. Do that pass first: call wiki_update_reading_note with " +
+        "finalSynthesis true and the whole note, reconciling anything the later sections corrected, " +
+        "then come back to wiki_prepare_update. (Committing PART of a paper you are still reading is " +
+        "always allowed - this only applies once the whole paper has been delivered.)",
+    );
   }
 
   async getPage(pageId: number): Promise<any> {
@@ -316,9 +380,16 @@ export class WikiService {
    * actually DELIVERED, and a whole-paper depth is only honoured when delivery
    * covered the document.
    *
-   * This does not claim to measure comprehension - nothing can. It proves the
-   * one thing that is provable: the model was given every chunk. Anything
-   * short of that is clamped to `section_read` and reported, rather than
+   * This still does not claim to measure comprehension - nothing can. It
+   * checks the two things that ARE checkable, and they are different claims.
+   * Delivery says every chunk was handed over. The final synthesis says the
+   * model then rewrote its note as one account of the whole paper, in a call
+   * the server watched happen. Delivery alone was never enough: a model that
+   * pages to the end and writes a summary from whatever survived in context
+   * has been given the paper, not read it, and the depth label is supposed to
+   * mean the second thing.
+   *
+   * Anything short is clamped to `section_read` and reported, rather than
    * rejected, so a partially-read paper still contributes its real evidence
    * instead of losing the whole commit.
    */
@@ -335,15 +406,20 @@ export class WikiService {
     }
     const sessions = await this.store.readingSessions();
     const coverage = await sessions.coverageForItem(libraryID, itemKey);
-    if (coverage.complete) return requested;
+    if (coverage.complete && coverage.finalSynthesisAt !== null) {
+      return requested;
+    }
     const read =
       coverage.sessionId === null
         ? "no reading session recorded"
-        : `only ${coverage.deliveredChunks} of ${coverage.totalChunks} chunks delivered`;
+        : coverage.complete
+          ? "every chunk delivered but no whole-paper synthesis of the reading note"
+          : `only ${coverage.deliveredChunks} of ${coverage.totalChunks} chunks delivered`;
     warnings.push(
       `Evidence from ${itemKey} asked for read_depth "${requested}", but the server has ${read}. ` +
-        `It was stored as "section_read". Read the whole paper through wiki_build_from_paper ` +
-        `(follow pagination.nextCursor to the end) before claiming whole-paper depth.`,
+        `It was stored as "section_read". Whole-paper depth needs both: read every chunk through ` +
+        `wiki_build_from_paper (follow pagination.nextCursor to the end), then rewrite the reading ` +
+        `note as one account of the complete paper with wiki_update_reading_note and finalSynthesis true.`,
     );
     return "section_read";
   }
@@ -564,11 +640,15 @@ export class WikiService {
 
     if (coverage.complete) {
       await sessions.close(open.sessionId, "committed");
+      // The note is kept permanently, so it becomes this paper's long-term
+      // reading memory rather than scaffolding: a later re-read continues it,
+      // and a person can open it in Zotero. Only its status changes here.
+      await this.syncNoteStatus(open, "completed");
       return {
         ...base,
         state: "committed",
         released: true,
-        note: `Paper ${open.itemKey} was fully read and is now closed. The library is free for the next paper.`,
+        note: `Paper ${open.itemKey} was fully read and is now closed. Its reading note stays on the Zotero item, marked completed. The library is free for the next paper.`,
       };
     }
 
@@ -618,14 +698,491 @@ export class WikiService {
     }
     const coverage = await sessions.coverage(open.sessionId);
     await sessions.close(open.sessionId, options.outcome, options.note ?? "");
+    // The note stays on the item - it records a real reading even when the
+    // paper was not written up - but its status has to stop saying "reading",
+    // or a later resume would trust a progress line that nothing is advancing.
+    const noteResult = await this.syncNoteStatus(
+      open,
+      options.outcome === "skipped" ? "skipped" : "failed",
+    );
     return {
       closed: true,
       itemKey: open.itemKey,
       outcome: options.outcome,
       chunksRead: coverage.deliveredChunks,
       totalChunks: coverage.totalChunks,
+      ...(noteResult ? { readingNote: noteResult } : {}),
       message: `Paper ${open.itemKey} closed as ${options.outcome}. The library is free for the next paper.`,
     };
+  }
+
+  // =====================================================================
+  // Reading note: the model's understanding of the paper being read.
+  //
+  // Three calls, in the order the reading happens. `setReadingExpert` decides
+  // who is reading and opens the document. `updateReadingNote` rewrites it -
+  // once per batch of new text, and once more over the whole paper at the end.
+  // `getReadingNote` hands it back, which is how a read survives a restart or
+  // a context compaction: the note holds the understanding, the session row
+  // holds where the understanding got to, and neither lives in the transcript.
+  // =====================================================================
+
+  /**
+   * Generate this paper's expert reader, once, from its metadata and abstract.
+   *
+   * Once, and before any body text: a persona written after reading half the
+   * paper is a description of what was already found, and it is the priorities
+   * of the reader that are supposed to shape the reading rather than the other
+   * way round. The server pins {@link WIKI_EXPERT_OPEN_SCOPE_MANDATE} to
+   * whatever focus the model proposes, so a narrow focus cannot become a
+   * filter that quietly discards the paper's actual contribution.
+   */
+  async setReadingExpert(options: {
+    libraryID: number;
+    itemKey?: string;
+    persona: string;
+    focus: string[];
+  }): Promise<any> {
+    const sessions = await this.store.readingSessions();
+    const session = await this.requireOpenSession(options.libraryID, options.itemKey);
+    if (session.expert) {
+      throw new Error(
+        `Paper ${session.itemKey} already has its expert profile ("${session.expert.persona}"), ` +
+          "and it is generated once per paper on purpose so the rest of the reading is done by " +
+          "one consistent reader. Continue with wiki_build_from_paper, or call wiki_get_reading_note " +
+          "to see the profile and the note so far.",
+      );
+    }
+    const persona = String(options.persona ?? "").trim();
+    if (persona.length < 20) {
+      throw new Error(
+        "persona must describe who is reading this paper and why they are the right reader for it " +
+          "(field, sub-speciality, what they already know), in at least 20 characters.",
+      );
+    }
+    const focus = (options.focus ?? [])
+      .map((entry) => String(entry ?? "").trim())
+      .filter(Boolean);
+    if (focus.length < 2 || focus.length > 8) {
+      throw new Error(
+        "focus must list 2 to 8 things this paper in particular makes worth watching for. " +
+          "They set priority, not scope: material outside them still has to be captured.",
+      );
+    }
+    const expert: WikiReadingExpert = {
+      persona,
+      focus,
+      openScopeMandate: WIKI_EXPERT_OPEN_SCOPE_MANDATE,
+      createdAt: Date.now(),
+    };
+    await sessions.setExpert(session.sessionId, expert);
+
+    const item = await this.requirePaperItem(session.libraryID, session.itemKey);
+    const refreshed = (await sessions.get(session.sessionId)) ?? session;
+    const existingBody = await this.readNoteBody(item);
+    const written = await this.writeNote(item, refreshed, existingBody ?? "", "reading");
+
+    return {
+      itemKey: session.itemKey,
+      expert,
+      readingSession: { sessionId: session.sessionId, state: refreshed.state },
+      readingNote: written,
+      nextStep:
+        "The reading note now exists on the Zotero item and will survive a restart, a dropped " +
+        "connection and a context compaction. Read the body with wiki_build_from_paper, and after " +
+        "each batch call wiki_update_reading_note with the WHOLE note rewritten to account for the " +
+        "new text - not with an appended section for it.",
+    };
+  }
+
+  /**
+   * Replace the reading note with the model's current understanding.
+   *
+   * The whole document every time. That is the point rather than an
+   * inconvenience: an append-only note is a transcript of the delivery order,
+   * and the order chunks arrive in has nothing to do with how a paper's
+   * argument is organised. Rewriting lets section 5 correct the sentence
+   * written for section 2 instead of contradicting it three headings later.
+   *
+   * `unchanged` is the honest escape hatch for a batch that genuinely adds
+   * nothing - front matter, a reference list, a repeated figure caption - and
+   * it may not be used twice running, so "nothing new" cannot quietly become
+   * the way the whole paper gets read.
+   */
+  async updateReadingNote(options: {
+    libraryID: number;
+    itemKey?: string;
+    markdown?: string;
+    unchanged?: boolean;
+    unchangedReason?: string;
+    finalSynthesis?: boolean;
+  }): Promise<any> {
+    const sessions = await this.store.readingSessions();
+    const session = await this.requireOpenSession(options.libraryID, options.itemKey);
+    if (!session.expert) {
+      throw new Error(
+        `Paper ${session.itemKey} has no expert profile yet. Call wiki_set_reading_expert first; ` +
+          "the note is written by that reader and does not exist before it.",
+      );
+    }
+    const item = await this.requirePaperItem(session.libraryID, session.itemKey);
+    const coverage = await sessions.coverage(session.sessionId);
+    const finalSynthesis = options.finalSynthesis === true;
+    const unchanged = options.unchanged === true;
+
+    if (finalSynthesis && unchanged) {
+      throw new Error(
+        "The final synthesis is a rewrite of the whole paper's account in one pass, so it cannot be " +
+          'submitted as "unchanged". Send the full markdown.',
+      );
+    }
+    if (finalSynthesis && !coverage.complete) {
+      throw new Error(
+        `The final synthesis is only available once every chunk has been delivered: ` +
+          `${coverage.deliveredChunks} of ${coverage.totalChunks} so far` +
+          (coverage.firstMissingIndex === null
+            ? ""
+            : `, resume at chunk index ${coverage.firstMissingIndex}`) +
+          ". Keep reading with wiki_build_from_paper, integrating each batch as it arrives.",
+      );
+    }
+
+    const previousBody = (await this.readNoteBody(item)) ?? "";
+    let body: string;
+    if (unchanged) {
+      if (!previousBody.trim()) {
+        throw new Error(
+          'There is no reading note yet, so there is nothing that can be "unchanged". ' +
+            "Submit the first version of the note as markdown.",
+        );
+      }
+      if (session.lastIntegrationUnchanged) {
+        throw new Error(
+          'The previous batch was also recorded as "unchanged". Two in a row is how a paper ends up ' +
+            "unread, so this one has to be answered with the rewritten note. If the new text really " +
+            "adds nothing, say so inside the note - a sentence about what the section does and why it " +
+            "does not change the account is itself part of understanding the paper.",
+        );
+      }
+      if (!String(options.unchangedReason ?? "").trim()) {
+        throw new Error(
+          'unchangedReason is required with unchanged: say what was in the batch (references, ' +
+            "acknowledgements, a repeated figure caption) that leaves the account of the paper intact.",
+        );
+      }
+      body = previousBody;
+    } else {
+      const submitted = stripMachineBlock(String(options.markdown ?? ""));
+      if (!submitted.trim()) {
+        throw new Error(
+          "markdown is required: send the entire reading note as it now stands, not a diff and not " +
+            'only the new part. Use unchanged: true with unchangedReason if the batch truly changes nothing.',
+        );
+      }
+      if (submitted.length < MIN_READING_NOTE_BODY_CHARS) {
+        throw new Error(
+          `The reading note is ${submitted.length} characters. It is meant to be a complete account of ` +
+            "the paper - question, materials, full method chain, models and parameters, conditions, " +
+            "results, mechanism, validation, contribution, limits - carried forward and improved after " +
+            `every batch, so anything under ${MIN_READING_NOTE_BODY_CHARS} characters is a placeholder ` +
+            "rather than a reading.",
+        );
+      }
+      assertHolisticBody(submitted);
+      body = submitted;
+    }
+
+    await sessions.recordIntegration(session.sessionId, {
+      unchanged,
+      integratedChunks: coverage.deliveredChunks,
+      finalSynthesis,
+    });
+    const refreshed = (await sessions.get(session.sessionId)) ?? session;
+    const written = await this.writeNote(
+      item,
+      refreshed,
+      body,
+      finalSynthesis ? "synthesized" : "reading",
+    );
+
+    return {
+      itemKey: session.itemKey,
+      integrated: true,
+      unchanged,
+      finalSynthesis,
+      readingNote: written,
+      readingSession: {
+        sessionId: session.sessionId,
+        state: refreshed.state,
+        deliveredChunks: coverage.deliveredChunks,
+        totalChunks: coverage.totalChunks,
+        coverageComplete: coverage.complete,
+        integrationDebt: integrationDebt(refreshed),
+      },
+      nextStep: finalSynthesis
+        ? "The whole-paper synthesis is recorded. Now build the Wiki from it: call wiki_prepare_update, " +
+          "then wiki_commit. Every Claim still needs Evidence quoted from the paper's own chunks - the " +
+          "note is your understanding, not a source - so re-read the chunks a claim rests on with " +
+          "wiki_build_from_paper (offset) and take the excerpt from there. Re-reading a chunk you have " +
+          "already been given costs nothing against the integration gate."
+        : coverage.complete
+          ? "Every chunk has been delivered. Do the whole-paper pass now: call wiki_update_reading_note " +
+            "once more with finalSynthesis true and the note rewritten as a single coherent reading of " +
+            "the complete paper. Claims cannot be recorded at paper_reviewed depth until that is done."
+          : `Keep reading: ${coverage.remainingChunks} chunk(s) left, resume at chunk index ` +
+            `${coverage.firstMissingIndex ?? coverage.deliveredChunks}.`,
+    };
+  }
+
+  /**
+   * Hand back the reading note and where the reading got to.
+   *
+   * The recovery entry point. After a restart or a compaction the model has
+   * lost the note, the expert and the page it was on; all three are here, and
+   * reading resumes from `nextChunk` rather than from the beginning.
+   */
+  async getReadingNote(options: {
+    libraryID: number;
+    itemKey?: string;
+    includeMarkdown?: boolean;
+  }): Promise<any> {
+    const sessions = await this.store.readingSessions();
+    const requestedKey = String(options.itemKey ?? "").trim();
+    const session = requestedKey
+      ? await sessions.latestForItem(options.libraryID, requestedKey)
+      : await sessions.getOpen(options.libraryID);
+    if (!session) {
+      return {
+        found: false,
+        message: requestedKey
+          ? `No Wiki reading session has ever been opened for ${requestedKey} in this library.`
+          : "No paper is currently open for Wiki reading in this library.",
+      };
+    }
+    const item = await Zotero.Items.getByLibraryAndKeyAsync(
+      session.libraryID,
+      session.itemKey,
+    );
+    const attachment = item ? await this.notes.findAttachment(item) : null;
+    const raw = attachment ? await this.notes.read(attachment) : null;
+    const parsed = raw ? parseReadingNote(raw) : { metadata: null, body: "" };
+    const coverage = await sessions.coverage(session.sessionId);
+    return {
+      found: true,
+      itemKey: session.itemKey,
+      libraryID: session.libraryID,
+      title: session.title,
+      readingSession: {
+        sessionId: session.sessionId,
+        state: session.state,
+        startedAt: session.startedAt,
+        updatedAt: session.updatedAt,
+      },
+      expert: session.expert,
+      progress: this.noteProgress(session, coverage),
+      readingNote: {
+        exists: Boolean(attachment),
+        attachmentKey: attachment?.key ?? session.noteKey ?? "",
+        bodyChars: parsed.body.length,
+        metadata: parsed.metadata,
+        ...(options.includeMarkdown === false ? {} : { markdown: parsed.body }),
+      },
+      nextStep: this.resumeInstruction(session, coverage),
+    };
+  }
+
+  /** The open session, checked against an optional itemKey guard. */
+  private async requireOpenSession(
+    libraryID: number,
+    itemKey?: string,
+  ): Promise<WikiReadingSessionRecord> {
+    const sessions = await this.store.readingSessions();
+    const open = await sessions.getOpen(libraryID);
+    if (!open) {
+      throw new Error(
+        "No paper is open for Wiki reading in this library. Start one with wiki_build_from_paper, " +
+          "which returns the paper's metadata and abstract so an expert reader can be generated for it.",
+      );
+    }
+    const wanted = String(itemKey ?? "").trim();
+    if (wanted && wanted !== open.itemKey) {
+      throw new Error(
+        `The open paper is ${open.itemKey}, not ${wanted}. Finish it first, or omit itemKey to act on whatever is open.`,
+      );
+    }
+    return open;
+  }
+
+  private async requirePaperItem(
+    libraryID: number,
+    itemKey: string,
+  ): Promise<any> {
+    const item = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, itemKey);
+    if (!item || item.deleted || !item.isRegularItem?.()) {
+      throw new Error(
+        `The paper being read (${libraryID}:${itemKey}) is no longer an available Zotero document. ` +
+          'Close the session with wiki_finish_reading and outcome "failed".',
+      );
+    }
+    return item;
+  }
+
+  /** The model's half of the existing note, or null when there is none. */
+  private async readNoteBody(item: any): Promise<string | null> {
+    const attachment = await this.notes.findAttachment(item);
+    if (!attachment) return null;
+    const raw = await this.notes.read(attachment);
+    return raw === null ? null : parseReadingNote(raw).body;
+  }
+
+  /**
+   * Write the note: machine block regenerated from the ledger, body as given.
+   *
+   * The block is never taken from what the model submitted, so no wording in
+   * the note can make the server believe the paper is further along than the
+   * database says it is.
+   */
+  private async writeNote(
+    item: any,
+    session: WikiReadingSessionRecord,
+    body: string,
+    status: WikiReadingNoteStatus,
+  ): Promise<{
+    attachmentKey: string;
+    status: WikiReadingNoteStatus;
+    bodyChars: number;
+  }> {
+    const sessions = await this.store.readingSessions();
+    const [coverage, delivered] = await Promise.all([
+      sessions.coverage(session.sessionId),
+      sessions.deliveredIndexes(session.sessionId),
+    ]);
+    const metadata: WikiReadingNoteMetadata = {
+      schema: WIKI_READING_NOTE_SCHEMA,
+      paperKey: session.itemKey,
+      libraryID: session.libraryID,
+      title: String(item.getField?.("title") || session.title || ""),
+      abstract: String(item.getField?.("abstractNote") || ""),
+      expert: session.expert,
+      readChunks: formatChunkRanges(delivered),
+      totalChunks: coverage.totalChunks,
+      nextChunk: coverage.complete
+        ? null
+        : (coverage.firstMissingIndex ?? coverage.deliveredChunks),
+      coverage: {
+        deliveredChunks: coverage.deliveredChunks,
+        totalChunks: coverage.totalChunks,
+        complete: coverage.complete,
+        integratedChunks: session.integratedChunks,
+        finalSynthesis: session.finalSynthesisAt !== null,
+      },
+      status,
+      updatedAt: new Date().toISOString(),
+    };
+    const markdown = renderReadingNote(metadata, body);
+    const attachment = await this.notes.ensureAttachment(item, markdown);
+    await this.notes.write(attachment, markdown);
+    if (attachment?.key && attachment.key !== session.noteKey) {
+      await sessions.setNoteKey(session.sessionId, String(attachment.key));
+    }
+    return {
+      attachmentKey: String(attachment?.key ?? ""),
+      status,
+      bodyChars: stripMachineBlock(body).length,
+    };
+  }
+
+  /**
+   * Stamp a terminal status onto the note when its session closes.
+   *
+   * Best effort by design: the Wiki write is already durable when this runs,
+   * and a missing attachment or an unwritable file is not a reason to turn a
+   * successful commit into an error.
+   */
+  private async syncNoteStatus(
+    session: WikiReadingSessionRecord,
+    status: WikiReadingNoteStatus,
+  ): Promise<{ attachmentKey: string; status: WikiReadingNoteStatus } | null> {
+    try {
+      const item = await Zotero.Items.getByLibraryAndKeyAsync(
+        session.libraryID,
+        session.itemKey,
+      );
+      if (!item) return null;
+      const body = await this.readNoteBody(item);
+      if (body === null) return null;
+      const written = await this.writeNote(item, session, body, status);
+      return { attachmentKey: written.attachmentKey, status };
+    } catch (error) {
+      ztoolkit?.log?.(
+        `[WikiService] could not stamp reading note status for ${session.itemKey}: ${error}`,
+        "warn",
+      );
+      return null;
+    }
+  }
+
+  private noteProgress(
+    session: WikiReadingSessionRecord,
+    coverage: {
+      deliveredChunks: number;
+      totalChunks: number;
+      complete: boolean;
+      remainingChunks: number;
+      firstMissingIndex: number | null;
+    },
+  ): Record<string, unknown> {
+    return {
+      deliveredChunks: coverage.deliveredChunks,
+      totalChunks: coverage.totalChunks,
+      remainingChunks: coverage.remainingChunks,
+      coverageComplete: coverage.complete,
+      nextChunk: coverage.complete
+        ? null
+        : (coverage.firstMissingIndex ?? coverage.deliveredChunks),
+      integratedChunks: session.integratedChunks,
+      integrationDebt: integrationDebt(session),
+      maxOutstandingBatches: WIKI_MAX_OUTSTANDING_BATCHES,
+      lastIntegrationUnchanged: session.lastIntegrationUnchanged,
+      finalSynthesisDone: session.finalSynthesisAt !== null,
+    };
+  }
+
+  private resumeInstruction(
+    session: WikiReadingSessionRecord,
+    coverage: {
+      deliveredChunks: number;
+      totalChunks: number;
+      complete: boolean;
+      remainingChunks: number;
+      firstMissingIndex: number | null;
+    },
+  ): string {
+    if (!session.expert) {
+      return (
+        "This paper has no expert reader yet. Call wiki_set_reading_expert with a persona drawn from " +
+        "the title, metadata and abstract, and 2 to 8 focus areas; the body text opens after that."
+      );
+    }
+    if (!coverage.complete) {
+      const resume = coverage.firstMissingIndex ?? coverage.deliveredChunks;
+      return (
+        `Resume reading at chunk index ${resume} of ${coverage.totalChunks}: call wiki_build_from_paper ` +
+        `with itemKey "${session.itemKey}" and offset ${resume}. Rewrite the whole note after each batch ` +
+        "with wiki_update_reading_note."
+      );
+    }
+    if (session.finalSynthesisAt === null) {
+      return (
+        "Every chunk has been delivered but the whole-paper synthesis has not been done. Call " +
+        "wiki_update_reading_note with finalSynthesis true and the note rewritten as one coherent " +
+        "reading of the complete paper, then build the Wiki from it."
+      );
+    }
+    return (
+      "The paper has been read and synthesised. Build the Wiki: wiki_prepare_update, then wiki_commit, " +
+      "with every Claim's Evidence quoted from the paper's own chunks rather than from this note."
+    );
   }
 
   /**
@@ -773,6 +1330,20 @@ export class WikiService {
    * `paper_reviewed` becomes a fact the server can check rather than a claim it
    * has to take on faith. Opening a second paper while one is unfinished is
    * refused, with the open paper named.
+   *
+   * Reading now happens in two phases, and the first one carries no body text
+   * at all. The opening call returns the paper's metadata and abstract and
+   * asks for an expert reader; chunks start flowing only once
+   * `wiki_set_reading_expert` has answered. Ordering it that way is the whole
+   * point - a persona written after the fact describes what was already found,
+   * whereas one written from the title and abstract decides what to look for.
+   *
+   * From then on the reading is paced by the note rather than by the cursor.
+   * A batch that carried new text is owed an integration, and asking for more
+   * while {@link WIKI_MAX_OUTSTANDING_BATCHES} are already outstanding is
+   * refused. Without that gate nothing stops the old failure mode: page to the
+   * end, then write one summary out of whatever survived in context - which is
+   * exactly what "read the whole paper" was supposed to stop meaning.
    */
   async buildFromPaper(options: {
     libraryID: number;
@@ -785,6 +1356,12 @@ export class WikiService {
     offset?: unknown;
     limit?: unknown;
     includeAllChunks?: boolean;
+    /**
+     * Return the reading note's markdown with this page. Defaults to true on a
+     * call that is not continuing a cursor - which is what resuming looks like
+     * - and false while paging, where the model already has it.
+     */
+    includeReadingNote?: boolean;
   }): Promise<any> {
     if (options.userRequested !== true) {
       throw new Error(
@@ -864,6 +1441,70 @@ export class WikiService {
       totalChunks: chunks.length,
     });
 
+    const target = {
+      libraryID,
+      itemKey,
+      title,
+      doi: String(item.getField("DOI") || ""),
+      url: String(item.getField("url") || ""),
+    };
+
+    // Phase one: no expert, no body text. The metadata and the abstract are
+    // everything needed to decide who should be reading this paper, and they
+    // are all that is handed over until that decision is made.
+    if (!session.expert) {
+      if (servedFromCursor) {
+        throw new Error(
+          `Paper ${itemKey} has no expert reader yet, so no body text has been delivered and this ` +
+            "cursor cannot be continued. Call wiki_set_reading_expert with a persona and 2-8 focus " +
+            "areas drawn from the metadata and abstract, then read from the beginning.",
+        );
+      }
+      return {
+        explicitUserRequestVerified: true,
+        phase: "expert_briefing",
+        target,
+        metadata: await this.paperBriefing(item),
+        readingSession: {
+          sessionId: session.sessionId,
+          state: session.state,
+          startedAt: session.startedAt,
+          itemKey,
+        },
+        chunkCount: chunks.length,
+        chunks: [],
+        pagination: {
+          totalChunks: chunks.length,
+          returned: 0,
+          offset: 0,
+          range: "none",
+          pageSize,
+          hasMore: chunks.length > 0,
+          servedFromCursor: false,
+          deliveredChunks: 0,
+          remainingChunks: chunks.length,
+          coverageComplete: false,
+          blocked: "expert_required",
+        },
+        readingNote: {
+          status: "awaiting_expert" as WikiReadingNoteStatus,
+          exists: false,
+        },
+        expertInstruction:
+          "Before any body text is delivered, decide who is reading this paper. From the title, " +
+          "metadata and abstract above, write the persona of a domain expert who is the right reader " +
+          "for THIS paper - their field and sub-speciality, and what they already know that makes " +
+          "them able to judge it - and 2 to 8 focus areas this paper in particular makes worth " +
+          "watching for. The focus sets priority, never scope: the server attaches a standing mandate " +
+          "that anything important outside it must be captured too, because an expert who only finds " +
+          "what they were looking for has not read the paper.",
+        nextStep:
+          `Call wiki_set_reading_expert with libraryID ${libraryID}, itemKey "${itemKey}", persona and ` +
+          "focus. It creates the persistent Markdown reading note on this Zotero item, and the body " +
+          "text opens immediately afterwards.",
+      };
+    }
+
     if (!servedFromCursor) {
       const requested = Number(options.offset);
       offset =
@@ -880,11 +1521,44 @@ export class WikiService {
       text: chunk.text,
     }));
 
+    // The integration gate. Only NEW text is gated: re-reading a chunk already
+    // delivered is how an excerpt gets checked against the source before it
+    // becomes Evidence, and that must stay free.
+    const deliveredAlready = new Set(
+      await sessions.deliveredIndexes(session.sessionId),
+    );
+    const carriesNewText = rows.some(
+      (row) => !deliveredAlready.has(row.chunkIndex),
+    );
+    const debt = integrationDebt(session);
+    if (carriesNewText && debt > WIKI_MAX_OUTSTANDING_BATCHES) {
+      throw new WikiReadingIntegrationRequired(
+        `${debt} batches of ${itemKey} have been delivered without being folded into its reading ` +
+          `note, and at most ${WIKI_MAX_OUTSTANDING_BATCHES} may be outstanding. Chunks are a way to ` +
+          "transport the text, not a way to organise what it says: call wiki_update_reading_note with " +
+          "the WHOLE note rewritten to account for everything delivered so far - adding, merging, " +
+          "moving, and correcting earlier passages that the newer text has overtaken - and reading " +
+          "resumes at chunk index " +
+          `${(await sessions.coverage(session.sessionId)).firstMissingIndex ?? deliveredAlready.size}. ` +
+          "If a batch genuinely changed nothing, send unchanged: true with unchangedReason instead; " +
+          "that cannot be used twice in a row.",
+        {
+          itemKey,
+          integrationDebt: debt,
+          maxOutstandingBatches: WIKI_MAX_OUTSTANDING_BATCHES,
+        },
+      );
+    }
+
     await sessions.recordDelivery(
       session.sessionId,
       rows.map((row) => ({ chunkIndex: row.chunkIndex, chunkId: row.chunkId })),
     );
-    const coverage = await sessions.coverage(session.sessionId);
+    const [coverage, afterDelivery] = await Promise.all([
+      sessions.coverage(session.sessionId),
+      sessions.get(session.sessionId),
+    ]);
+    const current = afterDelivery ?? session;
 
     const end = offset + rows.length;
     const hasMore = end < chunks.length;
@@ -896,20 +1570,24 @@ export class WikiService {
       limit: 20,
     });
 
+    // Resuming looks exactly like a call without a cursor, and a resuming
+    // model has lost the note, so it comes back with the page by default.
+    const includeNote = options.includeReadingNote ?? !servedFromCursor;
+    const noteAttachment = await this.notes.findAttachment(item);
+    const noteBody = noteAttachment
+      ? parseReadingNote((await this.notes.read(noteAttachment)) ?? "").body
+      : "";
+
     return {
       explicitUserRequestVerified: true,
-      target: {
-        libraryID,
-        itemKey,
-        title,
-        doi: String(item.getField("DOI") || ""),
-        url: String(item.getField("url") || ""),
-      },
+      phase: "reading",
+      target,
       readingSession: {
         sessionId: session.sessionId,
         state: session.state,
         startedAt: session.startedAt,
       },
+      expert: current.expert,
       chunkCount: chunks.length,
       pagination: {
         totalChunks: chunks.length,
@@ -938,13 +1616,86 @@ export class WikiService {
           : { firstMissingChunkIndex: coverage.firstMissingIndex }),
       },
       chunks: rows,
+      readingNote: {
+        exists: Boolean(noteAttachment),
+        attachmentKey: noteAttachment?.key ?? current.noteKey ?? "",
+        bodyChars: noteBody.length,
+        ...this.noteProgress(current, coverage),
+        ...(includeNote ? { markdown: noteBody } : {}),
+      },
+      integrationInstruction:
+        "Rewrite the whole reading note now, as this paper's expert, from the note above plus the " +
+        "chunks just delivered. Not an appended section: revise the single continuous account of the " +
+        "paper - merge the new material into whichever part of it belongs to, and where this text " +
+        "corrects or sharpens something written earlier, rewrite that passage rather than leaving " +
+        "both versions standing. Then send it with wiki_update_reading_note." +
+        (integrationDebt(current) >= WIKI_MAX_OUTSTANDING_BATCHES
+          ? ` ${integrationDebt(current)} batch(es) are outstanding; the next page is refused once more than ${WIKI_MAX_OUTSTANDING_BATCHES} is.`
+          : ""),
       coverageInstruction: coverage.complete
-        ? "Every chunk of this paper has been delivered, so paper_reviewed is available for evidence from it. Use it only if you actually read them."
+        ? "Every chunk of this paper has been delivered. That is delivery, not understanding: " +
+          "paper_reviewed also requires the whole-paper pass, so call wiki_update_reading_note with " +
+          "finalSynthesis true once the note reads as one coherent account of the complete paper."
         : `${coverage.deliveredChunks} of ${coverage.totalChunks} chunks delivered. wiki_commit will store evidence from this paper as section_read at best until the whole paper has been delivered; keep paging with pagination.nextCursor, or submit chunk_local / section_read / partial / incomplete now.`,
       nextStep: hasMore
-        ? `You have read chunks ${range} of ${chunks.length}. Continue with cursor set to pagination.nextCursor and nothing else changed. When you are done reading — whether or not you read it all — finish this paper before starting another: call wiki_prepare_update then wiki_commit to write it, or wiki_finish_reading with outcome "skipped" to close it without writing.`
-        : `That is the whole paper: ${chunks.length} chunk(s). Call wiki_prepare_update, then submit only controlled actions to wiki_commit. If you decide not to write it up, close it with wiki_finish_reading and outcome "skipped".`,
+        ? `You have read chunks ${range} of ${chunks.length}. Update the reading note, then continue with cursor set to pagination.nextCursor and nothing else changed. When you are done reading — whether or not you read it all — finish this paper before starting another: call wiki_prepare_update then wiki_commit to write it, or wiki_finish_reading with outcome "skipped" to close it without writing.`
+        : `That is the whole paper: ${chunks.length} chunk(s). Fold this last batch in, then call wiki_update_reading_note once more with finalSynthesis true. Only after that: wiki_prepare_update and wiki_commit, with every Claim's Evidence quoted from these chunks rather than from the note. If you decide not to write it up, close it with wiki_finish_reading and outcome "skipped".`,
       existingWikiCandidates: existing,
+    };
+  }
+
+  /** Title, creators, venue and abstract: everything the expert is built from. */
+  private async paperBriefing(item: any): Promise<Record<string, unknown>> {
+    const field = (name: string): string => {
+      try {
+        return String(item.getField?.(name) ?? "");
+      } catch {
+        return "";
+      }
+    };
+    let creators: string[] = [];
+    try {
+      creators = (item.getCreators?.() ?? []).map((creator: any) =>
+        [creator?.lastName, creator?.firstName].filter(Boolean).join(", ") ||
+        String(creator?.name ?? ""),
+      );
+    } catch {
+      creators = [];
+    }
+    let tags: string[] = [];
+    try {
+      tags = (item.getTags?.() ?? []).map((tag: any) => String(tag?.tag ?? ""));
+    } catch {
+      tags = [];
+    }
+    const abstract = field("abstractNote");
+    return {
+      title: field("title"),
+      creators,
+      date: field("date"),
+      itemType: String(item.itemType ?? ""),
+      publication:
+        field("publicationTitle") ||
+        field("proceedingsTitle") ||
+        field("bookTitle") ||
+        field("publisher"),
+      volume: field("volume"),
+      issue: field("issue"),
+      pages: field("pages"),
+      doi: field("DOI"),
+      url: field("url"),
+      language: field("language"),
+      tags,
+      abstract,
+      abstractAvailable: Boolean(abstract.trim()),
+      ...(abstract.trim()
+        ? {}
+        : {
+            abstractNote:
+              "This item has no abstract. Build the expert from the title, venue and item type, and " +
+              "revise your priorities in the note itself once the opening chunks make the paper's " +
+              "actual subject clear.",
+          }),
     };
   }
 

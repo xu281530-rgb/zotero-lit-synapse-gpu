@@ -67,6 +67,9 @@ export const WIKI_TOOL_NAMES: ReadonlySet<string> = new Set([
   "wiki_export",
   "wiki_reverify",
   "wiki_build_from_paper",
+  "wiki_set_reading_expert",
+  "wiki_update_reading_note",
+  "wiki_get_reading_note",
   "wiki_finish_reading",
 ]);
 
@@ -1294,13 +1297,19 @@ export function buildToolCatalog(): ToolDefinition[] {
     name: 'wiki_build_from_paper',
     category: 'wiki',
     description: [
-      'Read ONE explicitly user-requested Zotero paper, one page of chunks at a time, as the reading half of a Wiki build. Never call automatically or in a batch. It invokes no LLM and writes no Wiki content.',
+      'Read ONE explicitly user-requested Zotero paper for a Wiki build. Never call automatically or in a batch. It invokes no LLM and writes no Wiki content.',
       '',
-      'PAGING. The first call names the paper (itemKey, DOI, URL or title) and returns the first page. Every later call passes cursor set to pagination.nextCursor from the previous response and changes nothing else. Keep going while pagination.hasMore is true. pagination reports totalChunks, the range just returned, deliveredChunks / remainingChunks for the paper as a whole, and coverageComplete once every chunk has been delivered. A short paper finishes in one call and reports hasMore false immediately.',
+      'TWO PHASES. The first call names the paper (itemKey, DOI, URL or title) and returns NO body text: it returns the metadata and abstract and asks you to generate this paper\'s expert reader with wiki_set_reading_expert. Chunks start only after that. This order is deliberate — a persona written after reading half the paper just describes what you already found.',
       '',
-      'ONE PAPER AT A TIME. Starting a different paper while this one is unfinished is refused. Finish the open one first: call wiki_prepare_update then wiki_commit to write it up, or wiki_finish_reading with outcome "skipped" to close it without writing — reading a paper and deciding not to write it up is a normal outcome.',
+      'PAGING. Once the expert exists, each call returns one page of chunks and the reading note as it currently stands. Pass cursor set to pagination.nextCursor from the previous response and change nothing else. pagination reports totalChunks, the range just returned, deliveredChunks / remainingChunks, and coverageComplete once every chunk has been delivered.',
       '',
-      'READ DEPTH. The server records which chunks it actually handed you. Evidence submitted with read_depth paper_reviewed or cross_paper is stored at section_read unless pagination.coverageComplete is true for that paper, and the commit says so in its warnings. Read to the end before claiming whole-paper depth.',
+      'INTEGRATION GATE. After each page, rewrite the WHOLE reading note with wiki_update_reading_note — merging the new text into one continuous account of the paper and correcting whatever the new text overtakes. Do not write per-page notes: "new in chunks 8-15" headings are refused. At most one delivered batch may be outstanding; asking for another page while two are is refused. A batch that genuinely adds nothing can be answered with unchanged: true and unchangedReason, but not twice in a row. Re-reading a chunk you were already given (to quote Evidence) is free and never counts against the gate.',
+      '',
+      'ONE PAPER AT A TIME. Starting a different paper while this one is unfinished is refused. Finish the open one first: read it out, do the final synthesis, then wiki_prepare_update and wiki_commit — or wiki_finish_reading with outcome "skipped" to close it without writing.',
+      '',
+      'READ DEPTH. Evidence submitted with read_depth paper_reviewed or cross_paper is stored at section_read unless BOTH pagination.coverageComplete is true for that paper AND the whole-paper final synthesis has been recorded. Delivery is not understanding.',
+      '',
+      'RESUMING. The reading note lives as a Markdown attachment on the Zotero item, so a restart, a dropped connection or a context compaction loses nothing. Call this tool without a cursor (or wiki_get_reading_note) and it hands back the note, the expert and the chunk to resume at.',
       '',
       'includeAllChunks has been removed. It returned an entire paper in one response and made long papers unreadable; calling with it now returns an error explaining the paged replacement.'
     ].join('\n'),
@@ -1319,14 +1328,117 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         offset: {
           type: 'number',
-          description: '0-based chunk index to start this page at. Prefer cursor.'
+          description: '0-based chunk index to start this page at. Prefer cursor. Use it to re-read a chunk when quoting Evidence.'
         },
         limit: {
           type: 'number',
           description: `Chunks per page, 1 to ${MAX_DOCUMENT_CHUNKS_PER_PAGE} (default ${DEFAULT_DOCUMENT_CHUNKS_PER_PAGE}).`
+        },
+        includeReadingNote: {
+          type: 'boolean',
+          description: 'Return the reading note markdown with this page. Defaults to true when no cursor was passed (which is what resuming looks like) and false while paging.'
         }
       },
       required: ['userRequested']
+    }
+  },
+  {
+    name: 'wiki_set_reading_expert',
+    category: 'wiki',
+    description: [
+      'Generate the one domain expert who reads the paper currently open for Wiki reading, from its title, metadata and abstract, and create its persistent Markdown reading note on the Zotero item.',
+      '',
+      'Called once per paper, before any body text is delivered. persona says who is reading it — field, sub-speciality, what they already know that lets them judge this work. focus lists 2 to 8 things this paper in particular makes worth watching for.',
+      '',
+      'focus sets PRIORITY, never scope. The server attaches a standing mandate you cannot edit: anything important the paper establishes outside those areas must be captured too and flagged as outside the initial focus. An expert who only ever finds what they were looking for has not read the paper.'
+    ].join('\n'),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        libraryID: { type: 'number' },
+        itemKey: {
+          type: 'string',
+          description: 'Optional guard: fails if a different paper is the open one.'
+        },
+        persona: {
+          type: 'string',
+          description: "Who is reading this paper and why they are the right reader for it. At least 20 characters."
+        },
+        focus: {
+          type: 'array',
+          items: { type: 'string' },
+          minItems: 2,
+          maxItems: 8,
+          description: 'What this paper in particular makes worth watching for.'
+        }
+      },
+      required: ['persona', 'focus']
+    }
+  },
+  {
+    name: 'wiki_update_reading_note',
+    category: 'wiki',
+    description: [
+      'Replace the open paper\'s reading note with your current understanding of the whole paper. This is how each batch of chunks is actually read, and it is what the integration gate in wiki_build_from_paper waits for.',
+      '',
+      'SEND THE WHOLE NOTE, every time. Not a diff, not only the new part. Rewriting is the point: add, delete, merge, move, correct. When a later section overturns something an earlier one implied, rewrite that passage rather than leaving both standing. The note must always read as one continuous, self-consistent account of the paper.',
+      '',
+      'NOT A PAGE LOG. Headings like "Chunks 8-15", "本页新增" or "New in this batch" are refused with the offending lines named. Chunks are how the text is transported; they are not a way to organise knowledge.',
+      '',
+      'NO FIXED TEMPLATE. Structure it as this paper deserves, but keep what a reader would need to reproduce the work: research question, materials and objects, the full method chain, models/equations and their parameters, experimental conditions, key results, mechanisms, variable relationships, validation, contribution, scope and limits. Do not compress the method chain into a summary sentence.',
+      '',
+      'unchanged: true (with unchangedReason) records that a batch — references, acknowledgements, a repeated caption — leaves the account intact. It cannot be used twice in a row and cannot be used for the final synthesis.',
+      '',
+      'finalSynthesis: true is the whole-paper pass, available only once every chunk has been delivered. It is required before wiki_prepare_update will start the write-up, and before Evidence can be stored at paper_reviewed or cross_paper depth.',
+      '',
+      'The note is your reading memory, never Evidence. Claims still need excerpts quoted from the paper\'s own chunks.'
+    ].join('\n'),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        libraryID: { type: 'number' },
+        itemKey: {
+          type: 'string',
+          description: 'Optional guard: fails if a different paper is the open one.'
+        },
+        markdown: {
+          type: 'string',
+          description: 'The ENTIRE reading note as it now stands. The machine-maintained metadata block is written by the server; anything you include of it is ignored.'
+        },
+        unchanged: {
+          type: 'boolean',
+          description: 'This batch leaves the account of the paper intact. Requires unchangedReason; not allowed twice in a row.'
+        },
+        unchangedReason: {
+          type: 'string',
+          description: 'What was in the batch that changes nothing.'
+        },
+        finalSynthesis: {
+          type: 'boolean',
+          description: 'The whole-paper pass, once every chunk has been delivered.'
+        }
+      },
+      required: []
+    }
+  },
+  {
+    name: 'wiki_get_reading_note',
+    category: 'wiki',
+    description: 'Read back a paper\'s Wiki reading note, its expert profile and its exact reading progress. This is the recovery path: after a Zotero restart, an MCP disconnect or a context compaction, call it to get the note, the expert and the chunk index to resume at, then continue with wiki_build_from_paper — never start the paper over. Without itemKey it reports the paper currently open in the library.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        libraryID: { type: 'number' },
+        itemKey: {
+          type: 'string',
+          description: 'A specific paper, open or already finished. Omit for whatever is open.'
+        },
+        includeMarkdown: {
+          type: 'boolean',
+          description: 'Include the note body. Default true.'
+        }
+      },
+      required: []
     }
   },
   {

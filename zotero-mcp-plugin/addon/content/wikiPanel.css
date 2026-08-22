@@ -33,6 +33,31 @@
   min-height: 0;
 }
 
+/* The Wiki tab's icon in the tab bar and in the tabs menu. Zotero renders
+   every tab icon as `.icon-item-type[data-item-type=…]` and fills the item
+   type in from `tab.data.icon`, so the tab claims an item type of its own
+   (wikiTabManager) and this rule paints the plugin icon into it. The URLs are
+   relative to this stylesheet, which lives beside the icons in content/. */
+.icon-item-type[data-item-type="zotero-mcp-wiki"] {
+  background: image-set(
+      url("icons/favicon@0.5x.png") 1x,
+      url("icons/favicon.png") 2x
+    )
+    no-repeat center/contain;
+}
+
+/* Zotero sizes every tab icon at 16px, which leaves this one too small to
+   read as the plugin's mark. 24px is 1.5x that, and still well inside the
+   36px tab. The whole `flex` shorthand is restated because the tab lays its
+   icon out as `flex: 0 0 16px`, whose basis would otherwise squeeze the wider
+   image back; `.tab` is in the selector to outweigh that rule. Only the tab
+   bar grows - the tabs menu keeps its list-sized icon. */
+.tab .tab-icon.icon-item-type[data-item-type="zotero-mcp-wiki"] {
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+}
+
 #zotero-mcp-wiki-panel {
   /* Paper */
   --wiki-bg: #f3f0e8;
@@ -341,6 +366,161 @@
   font-family: var(--wiki-font-ui);
   font-size: 11px;
   font-weight: 400;
+}
+
+/* ---- The delete drawer -------------------------------------------------
+   The delete control is never on screen at rest. Each index entry sits in a
+   clipping row with the drawer behind its right edge; dragging the entry left
+   uncovers it, clicking anywhere else slides it back. Nothing here is a hover
+   affordance: a control that appears under the pointer is exactly what makes
+   a permanent delete easy to hit by accident. */
+.zmp-wiki-page-row {
+  position: relative;
+  margin-bottom: 5px;
+  border-radius: var(--wiki-radius-sm);
+  overflow: hidden;
+}
+.zmp-wiki-page-drawer {
+  position: absolute;
+  inset: 0 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  background: var(--wiki-danger-soft);
+  /* Nothing in the drawer is reachable until the entry has slid off it. */
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+.zmp-wiki-page-row.is-drawer-open .zmp-wiki-page-drawer {
+  opacity: 1;
+  pointer-events: auto;
+}
+.zmp-wiki-page-delete {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--wiki-danger);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--wiki-radius-sm);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  -moz-appearance: none;
+  appearance: none;
+}
+.zmp-wiki-page-delete:hover {
+  background: var(--wiki-paper);
+  border-color: rgba(164, 87, 78, 0.34);
+}
+.zmp-wiki-page-row .zmp-wiki-page-entry {
+  position: relative;
+  margin-bottom: 0;
+  background: var(--wiki-paper-alt);
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    transform 140ms ease;
+}
+/* While the drawer is open the entry is a lid, not a target: it must not
+   invite a click that would only slide it shut. */
+.zmp-wiki-page-row.is-drawer-open .zmp-wiki-page-entry {
+  cursor: default;
+}
+
+/* ---- The confirmation dialog -------------------------------------------
+   Deleting a knowledge entry is physical and permanent, so the decision gets
+   a modal of its own rather than a line of text in a system prompt: the name,
+   the counts and the warning have to be readable at a glance. */
+.zmp-wiki-modal-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(35, 33, 30, 0.42);
+}
+.zmp-wiki-modal {
+  width: 100%;
+  max-width: 420px;
+  padding: 22px 24px 18px;
+  color: var(--wiki-text);
+  background: var(--wiki-paper);
+  border: 1px solid var(--wiki-border-strong);
+  border-radius: var(--wiki-radius);
+  box-shadow: var(--wiki-shadow-raised);
+}
+.zmp-wiki-modal-title {
+  margin: 0 0 10px;
+  color: var(--wiki-danger);
+  font-family: var(--wiki-font-hei);
+  font-size: 15px;
+  font-weight: 700;
+}
+.zmp-wiki-modal-name {
+  margin: 0 0 14px;
+  font-family: var(--wiki-font-song);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.6;
+}
+.zmp-wiki-modal-facts {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  background: var(--wiki-paper-sunk);
+  border-radius: var(--wiki-radius-sm);
+}
+.zmp-wiki-modal-fact {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  justify-content: space-between;
+  font-family: var(--wiki-font-ui);
+  font-size: 12px;
+}
+.zmp-wiki-modal-fact-label {
+  color: var(--wiki-muted);
+}
+.zmp-wiki-modal-fact-value {
+  flex: none;
+  font-weight: 700;
+}
+.zmp-wiki-modal-warning {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  color: var(--wiki-danger);
+  background: var(--wiki-danger-soft);
+  border-radius: var(--wiki-radius-sm);
+  font-family: var(--wiki-font-kai);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.zmp-wiki-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+/* The destructive choice is the loud one here, because in this dialog it is
+   the answer to the question being asked - not an escape hatch. */
+.zmp-wiki-modal-actions .zmp-wiki-command.danger {
+  color: var(--wiki-paper);
+  background: var(--wiki-danger);
+  border-color: var(--wiki-danger);
+  font-weight: 700;
+}
+.zmp-wiki-modal-actions .zmp-wiki-command.danger:hover {
+  color: var(--wiki-paper);
+  background: #8f4740;
+  border-color: #8f4740;
 }
 
 /* ============================ Middle: the document ====================== */

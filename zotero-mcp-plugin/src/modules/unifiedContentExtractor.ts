@@ -15,6 +15,7 @@ import {
   getPDFTextFromMarkdown,
   isGeneratedMarkdownAttachment,
 } from "./pdfTextSource";
+import { isWikiReadingNoteAttachment } from "./wiki/wikiReadingNote";
 
 declare let Zotero: any;
 declare let ztoolkit: ZToolkit;
@@ -224,6 +225,10 @@ export class UnifiedContentExtractor {
         // MinerU 生成的 .md 附件与其源 PDF 内容完全重复，
         // PDF 分支返回的就是这份 Markdown 的纯文本。
         if (isGeneratedMarkdownAttachment(attachment)) continue;
+
+        // The Wiki reading note is the model's summary OF this paper, kept on
+        // the item; it is not one of the paper's own texts.
+        if (isWikiReadingNoteAttachment(attachment)) continue;
 
         // Filter by type based on options
         const isPDF = this.isPDF(attachment, contentType);

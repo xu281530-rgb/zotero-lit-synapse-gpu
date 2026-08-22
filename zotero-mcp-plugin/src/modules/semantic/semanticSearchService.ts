@@ -42,6 +42,7 @@ import {
   getOriginalPDFAttachmentsForItem,
   markdownToIndexText,
 } from '../mineru';
+import { isWikiReadingNoteAttachment } from '../wiki/wikiReadingNote';
 import {
   bodyIndexStateFromSourceKind,
   sourceKindForBodyState,
@@ -1698,6 +1699,12 @@ export class SemanticSearchService {
       for (const attId of attachmentIds) {
         try {
           const att = await Zotero.Items.getAsync(attId);
+          // The reading note contributes nothing to the index, so its mtime
+          // must not decide whether the index is stale: it is rewritten after
+          // every batch of chunks, and counting it here would force a full
+          // re-extraction of the paper — PDF parse, embeddings and all — a
+          // dozen times while reading a single long document.
+          if (att && isWikiReadingNoteAttachment(att)) continue;
           if (att?.dateModified && att.dateModified > attachmentModified) {
             attachmentModified = att.dateModified;
           }
@@ -2778,6 +2785,16 @@ export class SemanticSearchService {
           try {
             const attachment = await Zotero.Items.getAsync(attachmentId);
             if (!attachment) continue;
+            /*
+             * The Wiki reading note is the model's own summary of THIS paper,
+             * kept on the item as Markdown. Indexing it would put a paraphrase
+             * of the paper into the paper's own index — retrieval would return
+             * the summary as if it were the source, and every Evidence excerpt
+             * checked against "the paper's chunks" could match text no author
+             * ever wrote. It is skipped here, before classification, so no
+             * branch below can pick it up.
+             */
+            if (isWikiReadingNoteAttachment(attachment)) continue;
             if (attachment.isPDFAttachment?.()) {
               presentPDFKeys.add(attachment.key);
               if (originalPDFIds.has(attachment.id)) {

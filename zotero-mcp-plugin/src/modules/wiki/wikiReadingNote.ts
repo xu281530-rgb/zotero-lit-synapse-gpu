@@ -1,0 +1,491 @@
+/**
+ * The per-paper reading note: a single Markdown document that IS the model's
+ * understanding of one paper while it is being read.
+ *
+ * The problem it solves. Reading a long paper used to be nothing but paging:
+ * `wiki_build_from_paper` handed over chunks and the model was left to hold a
+ * hundred-and-eighty of them in its head until the end. Two things went wrong
+ * every time. The model's notes drifted into a per-page shape - "chunks 0-7:
+ * new concepts", "chunks 8-15: new methods" - which is a transcript of the
+ * TRANSPORT, not an understanding of the paper; and a context compaction or a
+ * dropped connection destroyed everything it had understood, because none of
+ * it was written anywhere.
+ *
+ * So the note is deliberately not a log. A chunk is a unit of delivery and
+ * nothing else. After every batch the model rewrites this document as a whole:
+ * adding, deleting, merging, moving, correcting. When section 5 overturns what
+ * section 2 implied, the sentence written for section 2 is rewritten, not
+ * annotated. What the file holds at any moment is one continuous, self-
+ * consistent account of the paper - the same shape it would have if the paper
+ * had been read in one sitting.
+ *
+ * Two halves, two owners:
+ *
+ *   - The machine block at the top belongs to the PROGRAM. Paper key, title,
+ *     abstract, expert, chunk progress, coverage, status, timestamp. The model
+ *     never writes it; it is regenerated from the reading-session ledger on
+ *     every save, so it cannot drift from the database and cannot be talked
+ *     into saying the paper was finished.
+ *   - Everything after the block belongs to the MODEL. No template is imposed:
+ *     a method paper and a review need different shapes, and forcing headings
+ *     is how a full method chain gets compressed into a heading that says
+ *     "Methods".
+ *
+ * The file lives as a Markdown attachment on the Zotero item itself, so it
+ * survives a Zotero restart, an MCP disconnect and a compaction, and so a
+ * person can read it. It is written atomically (temp file, then rename) - a
+ * crash mid-write leaves the previous version intact rather than a half
+ * document, which for a document that is only ever rewritten in full is the
+ * difference between losing one batch and losing the whole read.
+ *
+ * It is NOT evidence. Evidence is still an excerpt verified against a real
+ * indexed chunk of the real paper; see WikiService.hydrateEvidence, which
+ * refuses an excerpt that cannot be found in the source. This document is the
+ * reading memory that decides WHAT to claim, never the proof of it.
+ */
+
+declare const IOUtils: any;
+declare const PathUtils: any;
+declare let Zotero: any;
+declare let ztoolkit: ZToolkit;
+
+export const WIKI_READING_NOTE_SCHEMA = 1;
+
+/**
+ * Attachment title prefix. Also the first half of the indexing exclusion: a
+ * reading note is a paraphrase of the paper it hangs on, so indexing it would
+ * feed the model's own summary back into retrieval as if it were the source.
+ */
+export const WIKI_READING_NOTE_TITLE_PREFIX = "Wiki Reading Note";
+
+/** Filename prefix. The other half of the exclusion, and harder to rename. */
+export const WIKI_READING_NOTE_FILENAME_PREFIX = "zotero-mcp-reading-note-";
+
+const BLOCK_OPEN =
+  "<!-- ZOTERO-MCP-WIKI-READING-NOTE: machine-maintained, do not edit -->";
+const BLOCK_CLOSE = "<!-- /ZOTERO-MCP-WIKI-READING-NOTE -->";
+
+/**
+ * The standing instruction attached to every expert profile, written by the
+ * server rather than by the model.
+ *
+ * An expert persona focuses attention, and focused attention is exactly what
+ * produces confirmation bias: a model told to watch for solidification
+ * parameters will come back with solidification parameters and will not
+ * mention that the paper's real contribution was a calibration method. The
+ * model proposes the focus; this sentence, which it cannot edit or omit, keeps
+ * the focus from becoming a filter.
+ */
+export const WIKI_EXPERT_OPEN_SCOPE_MANDATE =
+  "Standing mandate (server-imposed, not editable): the focus areas above set " +
+  "priority, never scope. Anything this paper establishes that falls outside " +
+  "them - an unexpected method, a negative result, a boundary condition, a " +
+  "contribution in another subfield - must be captured in the note with the " +
+  "same care as the focus areas, and flagged as outside the initial focus. " +
+  "A note that only ever confirms the initial focus is a failed reading.";
+
+export interface WikiReadingExpert {
+  /** Who is reading this paper, in this paper's own field. */
+  persona: string;
+  /** What this paper in particular makes worth watching for. */
+  focus: string[];
+  /** Server-owned; see WIKI_EXPERT_OPEN_SCOPE_MANDATE. */
+  openScopeMandate: string;
+  createdAt: number;
+}
+
+export type WikiReadingNoteStatus =
+  | "awaiting_expert"
+  | "reading"
+  | "synthesized"
+  | "completed"
+  | "skipped"
+  | "failed";
+
+export interface WikiReadingNoteMetadata {
+  schema: number;
+  paperKey: string;
+  libraryID: number;
+  title: string;
+  abstract: string;
+  expert: WikiReadingExpert | null;
+  /** Compact ranges of chunk indexes actually delivered, e.g. "0-7,12-19". */
+  readChunks: string;
+  totalChunks: number;
+  /** Where reading resumes. null once every chunk has been delivered. */
+  nextChunk: number | null;
+  coverage: {
+    deliveredChunks: number;
+    totalChunks: number;
+    complete: boolean;
+    /** Delivered chunks the model has folded into this document. */
+    integratedChunks: number;
+    /** The whole-document rewrite done after the last chunk. */
+    finalSynthesis: boolean;
+  };
+  status: WikiReadingNoteStatus;
+  updatedAt: string;
+}
+
+/** Collapse delivered chunk indexes into "0-7,12-19". */
+export function formatChunkRanges(indexes: readonly number[]): string {
+  const sorted = [...new Set(indexes.map((n) => Math.floor(n)))].sort(
+    (a, b) => a - b,
+  );
+  const parts: string[] = [];
+  let start: number | null = null;
+  let previous: number | null = null;
+  for (const index of sorted) {
+    if (start === null) {
+      start = index;
+      previous = index;
+      continue;
+    }
+    if (index === (previous as number) + 1) {
+      previous = index;
+      continue;
+    }
+    parts.push(start === previous ? `${start}` : `${start}-${previous}`);
+    start = index;
+    previous = index;
+  }
+  if (start !== null) {
+    parts.push(start === previous ? `${start}` : `${start}-${previous}`);
+  }
+  return parts.join(",");
+}
+
+/**
+ * Headings that describe the DELIVERY rather than the paper.
+ *
+ * This is the one structural rule imposed on the model's half of the document,
+ * and it exists because the failure it catches is the default behaviour: asked
+ * to update a summary after a batch of chunks, a model appends "New in chunks
+ * 8-15" and calls it an update. That document can never become a reading of
+ * the paper, because its skeleton is the page boundary. Rejecting it at the
+ * write, with the reason, is the only point where it can still be fixed
+ * cheaply.
+ *
+ * Deliberately narrow: it matches HEADINGS and standalone emphasised lines,
+ * never prose. A sentence that says "the chunk boundary split table 3" is a
+ * legitimate observation and passes.
+ */
+const DELIVERY_SHAPED_LINE: readonly RegExp[] = [
+  /\bchunks?\s*#?\s*\d/i,
+  /\bpages?\s*\d+\s*(?:[-–—]|to)\s*\d+/i,
+  /\bbatch\s*#?\s*\d/i,
+  /第\s*\d+\s*(?:页|批|块|轮|段)/,
+  /(?:本页|本批|本轮|本次|这一页|这一批|该批)\s*(?:新增|新知识|要点|内容|小结|总结|阅读)/,
+  /(?:新增知识|增量知识|增量小结|分页笔记|分批笔记|阅读日志|本页笔记)/,
+  /\b(?:new|newly\s+added|added|updates?|updated)\b[^\n]{0,48}\b(?:in|from)\s+(?:this|these|the\s+current|the\s+latest)\s+(?:page|pages|batch|batches|chunk|chunks|delivery|round|pass)\b/i,
+  /\b(?:incremental|per-page|per-batch|running)\s+(?:notes?|summary|summaries|update|log)\b/i,
+];
+
+function structuralLineText(line: string): string | null {
+  const heading = /^\s{0,3}#{1,6}\s+(.*\S)\s*$/u.exec(line);
+  if (heading) return heading[1];
+  const emphasised = /^\s{0,3}\*\*(.+?)\*\*\s*[:：]?\s*$/u.exec(line);
+  if (emphasised) return emphasised[1];
+  const listHeading = /^\s{0,3}[-*+]\s+\*\*(.+?)\*\*\s*[:：]?\s*$/u.exec(
+    line,
+  );
+  if (listHeading) return listHeading[1];
+  return null;
+}
+
+export class WikiReadingNoteShapeError extends Error {
+  readonly offendingLines: string[];
+
+  constructor(message: string, offendingLines: string[]) {
+    super(message);
+    this.name = "WikiReadingNoteShapeError";
+    this.offendingLines = offendingLines;
+  }
+}
+
+/**
+ * Refuse a note organised by delivery batch instead of by the paper.
+ *
+ * @throws WikiReadingNoteShapeError naming the lines, because the model has to
+ *   fix them without being able to ask what was wrong.
+ */
+export function assertHolisticBody(body: string): void {
+  const offending: string[] = [];
+  let inFence = false;
+  for (const rawLine of String(body ?? "").split(/\r?\n/u)) {
+    if (/^\s{0,3}(?:`{3,}|~{3,})/u.test(rawLine)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const structural = structuralLineText(rawLine);
+    if (!structural) continue;
+    if (DELIVERY_SHAPED_LINE.some((pattern) => pattern.test(structural))) {
+      offending.push(rawLine.trim());
+    }
+  }
+  if (!offending.length) return;
+  throw new WikiReadingNoteShapeError(
+    "The reading note is organised by delivery batch, not by the paper. " +
+      "Chunks are how the text is transported; they are not a way to organise " +
+      "knowledge. Rewrite these section headings so the document reads as one " +
+      "continuous account of the paper - research question, materials, method " +
+      "chain, model and parameters, conditions, results, mechanism, validation, " +
+      "contribution, limits - with the new material merged into whichever " +
+      "section it belongs to, and nothing left saying which page it arrived on. " +
+      `Offending heading(s): ${offending.slice(0, 6).join(" | ")}`,
+    offending,
+  );
+}
+
+/** The model's half of the document, with any machine block removed. */
+export function stripMachineBlock(markdown: string): string {
+  const text = String(markdown ?? "");
+  const open = text.indexOf(BLOCK_OPEN);
+  if (open === -1) return text.trim();
+  const close = text.indexOf(BLOCK_CLOSE, open);
+  if (close === -1) return text.slice(open + BLOCK_OPEN.length).trim();
+  const rest = text.slice(close + BLOCK_CLOSE.length);
+  // The rendered file puts the expert brief and a rule between the block and
+  // the model's document; both are regenerated on every save, so they are not
+  // part of the body either.
+  const afterBrief = rest.replace(
+    /^\s*(?:>[^\n]*\n?)*\s*(?:-{3,}\s*\n)?/u,
+    "",
+  );
+  return (text.slice(0, open) + afterBrief).trim();
+}
+
+/** Read back the machine block. Returns null when the file has none. */
+export function parseMachineBlock(
+  markdown: string,
+): WikiReadingNoteMetadata | null {
+  const text = String(markdown ?? "");
+  const open = text.indexOf(BLOCK_OPEN);
+  if (open === -1) return null;
+  const close = text.indexOf(BLOCK_CLOSE, open);
+  if (close === -1) return null;
+  const inner = text.slice(open + BLOCK_OPEN.length, close);
+  const fenced = /`{3}json\s*([\s\S]*?)`{3}/u.exec(inner);
+  if (!fenced) return null;
+  try {
+    return JSON.parse(fenced[1]) as WikiReadingNoteMetadata;
+  } catch {
+    return null;
+  }
+}
+
+export function parseReadingNote(markdown: string): {
+  metadata: WikiReadingNoteMetadata | null;
+  body: string;
+} {
+  return {
+    metadata: parseMachineBlock(markdown),
+    body: stripMachineBlock(markdown),
+  };
+}
+
+/** Compose the file: machine block, then the model's document. */
+export function renderReadingNote(
+  metadata: WikiReadingNoteMetadata,
+  body: string,
+): string {
+  const expertBrief = metadata.expert
+    ? [
+        `> **Reading as:** ${metadata.expert.persona}`,
+        `> **Priority focus:** ${metadata.expert.focus.join("; ")}`,
+        `> **${metadata.expert.openScopeMandate}**`,
+      ].join("\n>\n")
+    : "> No expert profile yet: the body text has not been opened.";
+  return [
+    BLOCK_OPEN,
+    "",
+    "```json",
+    JSON.stringify(metadata, null, 2),
+    "```",
+    "",
+    BLOCK_CLOSE,
+    "",
+    expertBrief,
+    "",
+    "---",
+    "",
+    stripMachineBlock(body),
+    "",
+  ].join("\n");
+}
+
+/**
+ * Is this attachment a reading note?
+ *
+ * Load-bearing for indexing: `extractItemContent` classifies any `.md` child
+ * as a body source, so without this test a paper's own index would be built
+ * partly from the model's summary of that paper - the summary would be
+ * retrievable as if it were the paper's text, and every rewrite would change
+ * the item's newest attachment mtime and force a full re-index of the item on
+ * every batch. Both halves of the identity are checked, so renaming the
+ * attachment in Zotero's UI does not silently re-enable indexing.
+ */
+export function isWikiReadingNoteAttachment(attachment: any): boolean {
+  try {
+    if (!attachment?.isAttachment?.()) return false;
+    const title = String(attachment.getField?.("title") ?? "");
+    if (title.startsWith(WIKI_READING_NOTE_TITLE_PREFIX)) return true;
+    const filename = String(
+      attachment.attachmentFilename ?? attachment.getFilePath?.() ?? "",
+    );
+    const base = filename.split(/[\\/]/u).pop() ?? "";
+    return base.startsWith(WIKI_READING_NOTE_FILENAME_PREFIX);
+  } catch {
+    return false;
+  }
+}
+
+export function readingNoteAttachmentTitle(itemKey: string): string {
+  return `${WIKI_READING_NOTE_TITLE_PREFIX} (${itemKey}).md`;
+}
+
+export function readingNoteFileName(itemKey: string): string {
+  return `${WIKI_READING_NOTE_FILENAME_PREFIX}${itemKey}.md`;
+}
+
+/**
+ * The Zotero side: find, create and rewrite the note attachment.
+ *
+ * Every method takes the parent item rather than looking it up, so the service
+ * resolves a paper once and this class never has to guess which library it is
+ * in.
+ */
+export class WikiReadingNoteStore {
+  /** The note attachment on this item, by identity rather than by key. */
+  async findAttachment(item: any): Promise<any | null> {
+    const ids: number[] = item?.getAttachments?.() ?? [];
+    for (const id of ids) {
+      try {
+        const attachment = await Zotero.Items.getAsync(id);
+        if (attachment && isWikiReadingNoteAttachment(attachment)) {
+          return attachment;
+        }
+      } catch {
+        // A broken child attachment is not a reason to lose the note.
+      }
+    }
+    return null;
+  }
+
+  async getByKey(
+    libraryID: number,
+    attachmentKey: string,
+  ): Promise<any | null> {
+    if (!attachmentKey) return null;
+    try {
+      const attachment = await Zotero.Items.getByLibraryAndKeyAsync(
+        libraryID,
+        attachmentKey,
+      );
+      return attachment && isWikiReadingNoteAttachment(attachment)
+        ? attachment
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The whole file, or null when it is missing or unreadable. */
+  async read(attachment: any): Promise<string | null> {
+    try {
+      const filePath = await this.filePath(attachment);
+      if (!filePath) return null;
+      return await IOUtils.readUTF8(filePath);
+    } catch (error) {
+      ztoolkit?.log?.(
+        `[WikiReadingNote] could not read ${attachment?.key}: ${error}`,
+        "warn",
+      );
+      return null;
+    }
+  }
+
+  private async filePath(attachment: any): Promise<string | null> {
+    const viaAsync = await attachment?.getFilePathAsync?.();
+    if (viaAsync) return String(viaAsync);
+    const viaSync = attachment?.getFilePath?.();
+    return viaSync ? String(viaSync) : null;
+  }
+
+  /**
+   * Replace the file's contents atomically.
+   *
+   * The document is only ever rewritten in full, so a torn write is not a
+   * partially updated note - it is an unparseable one, and the whole read is
+   * lost with it. Writing beside the file and renaming makes the previous
+   * version the worst case.
+   */
+  async write(attachment: any, markdown: string): Promise<void> {
+    const filePath = await this.filePath(attachment);
+    if (!filePath) {
+      throw new Error(
+        `Reading note attachment ${attachment?.key} has no file on disk`,
+      );
+    }
+    await IOUtils.writeUTF8(filePath, markdown, {
+      tmpPath: `${filePath}.tmp`,
+    });
+    // Zotero keeps a stored hash for sync; a file changed underneath it
+    // otherwise looks unmodified. Best effort only: a sync-bookkeeping failure
+    // must not discard a write that already landed.
+    try {
+      const toUpload = Zotero?.Sync?.Storage?.Local?.SYNC_STATE_TO_UPLOAD;
+      if (toUpload !== undefined && attachment) {
+        attachment.attachmentSyncState = toUpload;
+        await attachment.saveTx?.({ skipDateModifiedUpdate: true });
+      }
+    } catch (error) {
+      ztoolkit?.log?.(
+        `[WikiReadingNote] sync state update failed for ${attachment?.key}: ${error}`,
+        "warn",
+      );
+    }
+  }
+
+  /**
+   * The note attachment for this paper, created on first use.
+   *
+   * Re-reading a paper reuses the note that is already there: these are kept
+   * permanently, so the note is this paper's long-term reading memory and a
+   * second pass continues it rather than starting from a blank page.
+   */
+  async ensureAttachment(item: any, initialMarkdown: string): Promise<any> {
+    const existing = await this.findAttachment(item);
+    if (existing) return existing;
+    const stagingDir = PathUtils.join(
+      Zotero.DataDirectory.dir,
+      "zotero-mcp",
+      "wiki-reading-notes",
+    );
+    await IOUtils.makeDirectory(stagingDir, {
+      ignoreExisting: true,
+      createAncestors: true,
+    });
+    const stagingPath = PathUtils.join(
+      stagingDir,
+      readingNoteFileName(item.key),
+    );
+    await IOUtils.writeUTF8(stagingPath, initialMarkdown, {
+      tmpPath: `${stagingPath}.tmp`,
+    });
+    const imported = await Zotero.Attachments.importFromFile({
+      file: stagingPath,
+      parentItemID: item.id,
+      title: readingNoteAttachmentTitle(item.key),
+      contentType: "text/markdown",
+      charset: "utf-8",
+    });
+    try {
+      await IOUtils.remove(stagingPath, { ignoreAbsent: true });
+    } catch {
+      // A leftover staging file is harmless.
+    }
+    return imported;
+  }
+}

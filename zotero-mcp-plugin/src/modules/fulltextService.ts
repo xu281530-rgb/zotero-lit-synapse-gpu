@@ -7,6 +7,7 @@ import {
   getPDFTextFromMarkdown,
   isGeneratedMarkdownAttachment,
 } from "./pdfTextSource";
+import { isWikiReadingNoteAttachment } from "./wiki/wikiReadingNote";
 
 declare let Zotero: any;
 declare let ztoolkit: ZToolkit;
@@ -54,6 +55,12 @@ export class FulltextService {
           // MinerU 生成的 .md 附件与其源 PDF 内容完全重复，跳过以免同一段
           // 文字被计两次命中。PDF 分支本身返回的就是这份 Markdown 的纯文本。
           if (isGeneratedMarkdownAttachment(attachment)) {
+            continue;
+          }
+          // The Wiki reading note is a summary the model wrote ABOUT this
+          // paper, not a copy of it. Returning it as full text would present
+          // a paraphrase as the paper's own words.
+          if (isWikiReadingNoteAttachment(attachment)) {
             continue;
           }
           const attachmentText = await this.getAttachmentContent(attachment);
