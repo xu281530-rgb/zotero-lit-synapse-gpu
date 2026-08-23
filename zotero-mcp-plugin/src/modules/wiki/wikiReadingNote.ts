@@ -92,6 +92,20 @@ export interface WikiReadingExpert {
   /** Server-owned; see WIKI_EXPERT_OPEN_SCOPE_MANDATE. */
   openScopeMandate: string;
   createdAt: number;
+  /**
+   * Derived from a retrieval call's `domain` and `expertRole` rather than
+   * written deliberately.
+   *
+   * A question-driven read needs a reader - the note is written by someone -
+   * but it cannot be worth an extra round trip per question to compose one,
+   * and the retrieval call has already declared a field and a perspective
+   * fitted to this paper. So one is assembled from those and marked
+   * provisional, which means exactly one thing: `wiki_set_reading_expert` may
+   * still replace it. A profile written properly, before a full-text read of
+   * the whole paper, is the considered one, and the full-text pass still asks
+   * for it even on a paper questions have already been asking about.
+   */
+  provisional?: boolean;
 }
 
 export type WikiReadingNoteStatus =
@@ -109,8 +123,22 @@ export interface WikiReadingNoteMetadata {
   title: string;
   abstract: string;
   expert: WikiReadingExpert | null;
-  /** Compact ranges of chunk indexes actually delivered, e.g. "0-7,12-19". */
+  /** Compact ranges of chunk indexes actually read, e.g. "0-7,12-19". */
   readChunks: string;
+  /**
+   * The same fact as a picture: one cell per chunk, filled where it has been
+   * read.
+   *
+   * `readChunks` is exact and `coverage` is countable, but neither answers the
+   * question a person actually has when they open this file - "how much of
+   * this paper has been read, and is it the front of it or scattered through
+   * it?" - at a glance. A question-driven read produces coverage like
+   * `{7,8,42,70}`, which reads as "0-7,42,70" and means nothing until it is
+   * drawn.
+   */
+  coverageMap: string;
+  /** How this reading is being done: a full-text pass, or questions. */
+  mode: "fulltext" | "qa";
   totalChunks: number;
   /** Where reading resumes. null once every chunk has been delivered. */
   nextChunk: number | null;
@@ -153,6 +181,155 @@ export function formatChunkRanges(indexes: readonly number[]): string {
     parts.push(start === previous ? `${start}` : `${start}-${previous}`);
   }
   return parts.join(",");
+}
+
+/**
+ * Widest coverage bar drawn one-cell-per-chunk.
+ *
+ * Beyond this a bar would wrap in any reader, so cells start standing for
+ * several chunks each and a third, half-filled state appears for a cell whose
+ * span is partly read. Under the cap every cell is exactly one chunk and the
+ * bar is strictly filled-or-empty.
+ */
+export const WIKI_COVERAGE_MAP_CELLS = 100;
+
+/**
+ * Draw the read/unread map: filled square read, hollow square unread.
+ *
+ * @param delivered chunk indexes actually read, in any order, duplicates fine
+ * @param totalChunks the document's chunk count
+ */
+export function formatCoverageMap(
+  delivered: readonly number[],
+  totalChunks: number,
+): string {
+  const total = Math.max(0, Math.floor(totalChunks));
+  if (!total) return "";
+  const read = new Set(delivered.map((n) => Math.floor(n)));
+  if (total <= WIKI_COVERAGE_MAP_CELLS) {
+    let bar = "";
+    for (let index = 0; index < total; index += 1) {
+      bar += read.has(index) ? "\u25a0" : "\u25a1";
+    }
+    return bar;
+  }
+  const cells = WIKI_COVERAGE_MAP_CELLS;
+  let bar = "";
+  for (let cell = 0; cell < cells; cell += 1) {
+    const start = Math.floor((cell * total) / cells);
+    const end = Math.floor(((cell + 1) * total) / cells);
+    let hits = 0;
+    for (let index = start; index < end; index += 1) {
+      if (read.has(index)) hits += 1;
+    }
+    const span = Math.max(1, end - start);
+    bar += hits === 0 ? "\u25a1" : hits >= span ? "\u25a0" : "\u25e7";
+  }
+  return bar;
+}
+
+/**
+ * Chunk citations in the model's half of the note.
+ *
+ * The note is reading memory, never evidence, so every fact it carries has to
+ * name the chunk it came from or the trail back to the source is lost - and a
+ * fact whose source cannot be found again is a fact that cannot become
+ * Evidence. Matched in PROSE, not in headings: a heading that says "chunk 12"
+ * is a page log and is refused by `assertHolisticBody` a few lines below, so
+ * the two rules pull in opposite directions on purpose. `(chunk 42)` after a
+ * measured value is what this is asking for.
+ */
+const CHUNK_CITATION =
+  /(?:chunks?|\u5757|\u6bb5)\s*#?\s*\d+|#\s*chunks?\s*\d+|\u7b2c\s*\d+\s*(?:\u5757|\u6bb5)/iu;
+
+export class WikiReadingNoteCitationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WikiReadingNoteCitationError";
+  }
+}
+
+/**
+ * Refuse a note that records reading without recording where it came from.
+ *
+ * @throws WikiReadingNoteCitationError
+ */
+export function assertChunkCitations(body: string): void {
+  if (CHUNK_CITATION.test(String(body ?? ""))) return;
+  throw new WikiReadingNoteCitationError(
+    "The reading note cites no chunk. Every fact, parameter, result and figure in it has to name the " +
+      "chunk it came from - write the number in the prose, like \"the melt-pool depth reaches 1.2 mm " +
+      "(chunk 42)\" - because this note is reading memory and never evidence: a Claim built on it still " +
+      "has to quote the paper's own chunk, and without the number that chunk cannot be found again. " +
+      "Put the citations in the TEXT, never in a heading: a heading naming chunks is a page log and is " +
+      "refused separately.",
+  );
+}
+
+export class WikiReadingNoteRegressionError extends Error {
+  readonly details: { previousChars: number; submittedChars: number };
+
+  constructor(
+    message: string,
+    details: { previousChars: number; submittedChars: number },
+  ) {
+    super(message);
+    this.name = "WikiReadingNoteRegressionError";
+    this.details = details;
+  }
+}
+
+/**
+ * How much of the note may disappear in one rewrite.
+ *
+ * The note is rewritten in full every time, and a model asked to rewrite a
+ * summary while adding to it will, left alone, produce a SHORTER one every
+ * round: old paragraphs get compressed to make room, then compressed again,
+ * and by the twentieth question the parameters read on page 3 are gone. That
+ * is the failure mode this whole file exists to prevent, and it is invisible -
+ * every individual rewrite looks like a reasonable edit.
+ *
+ * Some contraction is real work: merging two paragraphs that said the same
+ * thing, cutting a hedge that a later section settled. So it is bounded rather
+ * than banned. A rewrite that is ADDING new reading may lose a tenth of the
+ * document; the whole-paper synthesis, which genuinely reorganises everything
+ * at once, may lose a third.
+ */
+export const WIKI_NOTE_KEEP_RATIO = 0.9;
+export const WIKI_NOTE_SYNTHESIS_KEEP_RATIO = 0.7;
+
+/**
+ * Refuse a rewrite that quietly drops what earlier reading established.
+ *
+ * @throws WikiReadingNoteRegressionError
+ */
+export function assertNoNoteRegression(
+  previousBody: string,
+  submittedBody: string,
+  options: { finalSynthesis: boolean },
+): void {
+  const previousChars = String(previousBody ?? "").trim().length;
+  const submittedChars = String(submittedBody ?? "").trim().length;
+  if (!previousChars) return;
+  const ratio = options.finalSynthesis
+    ? WIKI_NOTE_SYNTHESIS_KEEP_RATIO
+    : WIKI_NOTE_KEEP_RATIO;
+  const floor = Math.floor(previousChars * ratio);
+  if (submittedChars >= floor) return;
+  throw new WikiReadingNoteRegressionError(
+    `The rewritten note is ${submittedChars} characters where the previous one was ${previousChars}. ` +
+      "This note is a progressive reading that gets FULLER as more of the paper is read, never a summary " +
+      "re-summarised: facts, parameters, results and mechanisms already established stay in it, and their " +
+      "chunk citations stay with them. Restructuring, merging duplicated passages and cutting a hedge a " +
+      "later section settled are all fine - losing what earlier reading established is not. Send the note " +
+      "again with the earlier material still present, reorganised as you see fit, plus what you have just " +
+      `read. (Limit: a rewrite may drop at most ${Math.round((1 - ratio) * 100)}% of the note` +
+      (options.finalSynthesis
+        ? ", the wider allowance the whole-paper synthesis gets."
+        : "; the whole-paper synthesis gets a wider one.") +
+      ")",
+    { previousChars, submittedChars },
+  );
 }
 
 /**
@@ -246,14 +423,33 @@ export function stripMachineBlock(markdown: string): string {
   const close = text.indexOf(BLOCK_CLOSE, open);
   if (close === -1) return text.slice(open + BLOCK_OPEN.length).trim();
   const rest = text.slice(close + BLOCK_CLOSE.length);
-  // The rendered file puts the expert brief and a rule between the block and
-  // the model's document; both are regenerated on every save, so they are not
-  // part of the body either.
-  const afterBrief = rest.replace(
-    /^\s*(?:>[^\n]*\n?)*\s*(?:-{3,}\s*\n)?/u,
-    "",
-  );
+  // Everything the SERVER renders between the machine block and the model's
+  // document - the expert brief, the coverage map, and the rule that closes
+  // them off - is regenerated on every save and is not part of the body.
+  //
+  // Cut at the rule rather than by walking quote lines. The walk worked while
+  // there was exactly one quoted paragraph; the coverage map made it two,
+  // separated by a blank line, and a blank line ends the walk - so half the
+  // server's own preamble started coming back as though the model had written
+  // it. Every rendered note has the rule, so finding it is exact, and it moves
+  // whenever the preamble grows again. The quote-walk stays as the fallback
+  // for a file written before the rule existed.
+  const afterBrief = stripServerPreamble(rest);
   return (text.slice(0, open) + afterBrief).trim();
+}
+
+/** Drop the server-rendered preamble that follows the machine block. */
+function stripServerPreamble(rest: string): string {
+  const lines = rest.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (!line) continue;
+    if (/^-{3,}$/u.test(line)) return lines.slice(index + 1).join("\n");
+    // Anything that is not blank, not quoted and not the rule is already the
+    // model's document: this file predates the rule, so nothing is dropped.
+    if (!line.startsWith(">")) break;
+  }
+  return rest.replace(/^\s*(?:>[^\n]*\n?)*\s*/u, "");
 }
 
 /** Read back the machine block. Returns null when the file has none. */
@@ -290,6 +486,20 @@ export function renderReadingNote(
   metadata: WikiReadingNoteMetadata,
   body: string,
 ): string {
+  const coverageLine = metadata.totalChunks
+    ? [
+        `> **Reading coverage:** \`${metadata.coverageMap}\``,
+        `> ${metadata.coverage.deliveredChunks} of ${metadata.totalChunks} chunks read` +
+          ` (\u25a0 read, \u25a1 unread` +
+          (metadata.totalChunks > WIKI_COVERAGE_MAP_CELLS
+            ? `, \u25e7 partly read \u2014 one cell spans several chunks in a document this long`
+            : "") +
+          `). Read: ${metadata.readChunks || "none"}.` +
+          (metadata.mode === "qa"
+            ? " Read so far by answering questions, not by a full-text pass."
+            : ""),
+      ].join("\n>\n")
+    : "";
   const expertBrief = metadata.expert
     ? [
         `> **Reading as:** ${metadata.expert.persona}`,
@@ -307,6 +517,7 @@ export function renderReadingNote(
     BLOCK_CLOSE,
     "",
     expertBrief,
+    ...(coverageLine ? ["", coverageLine] : []),
     "",
     "---",
     "",

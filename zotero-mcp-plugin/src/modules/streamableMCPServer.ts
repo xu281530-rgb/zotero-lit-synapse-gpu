@@ -804,6 +804,13 @@ STAGE 3 - dig into one paper (search_fulltext, one document per call):
 13. Call search_fulltext with that one itemKey, plus the re-fitted domain and expertRole. It runs keyword matching and semantic retrieval across that paper's passages and applies EXACTLY the same rule one level down - the same two user thresholds, each on its own branch, union of the survivors, weighted RRF over within-branch ranks - and returns at most the user's configured number of passages.
 14. Read those passages. If the evidence answers the question, STOP. Only if a passage is missing its cause, its consequence, its experimental conditions or its mechanism context, call search_fulltext again with chunkIds set to that passage's chunkId to pull in its immediate neighbours, within the user's radius limit. Never request neighbouring text by default.
 
+STAGE 4 - keep what you just learned (wiki_update_reading_note, then wiki_prepare_update + wiki_commit):
+15. Answer the user first. Then, for EACH paper whose passages you genuinely read and used, call wiki_update_reading_note with that paper's itemKey, readChunkIds listing the chunkId of every passage you actually used, the same domain and expertRole you searched it with, and the paper's WHOLE reading note rewritten to include what you have just understood. Three papers read means three calls. The note lives on the Zotero item and is that paper's long-term memory across every question ever asked of it - so extend and reorganise it, never replace it with a shorter summary, and cite the chunk number beside every fact in the prose so the trail back to the source survives.
+16. List only what you READ. Retrieval returning a passage is not reading it: a chunk you skimmed past, or that turned out to be about something else, is not in readChunkIds. The server counts what you declare and will stand behind exactly that. Re-listing a chunk you had already read is free and never double-counted.
+17. Then update the Wiki from those notes, in that order, every time reading actually added something: wiki_prepare_update, then wiki_commit. Extend the Page, Claim, Concept and relations that already exist rather than creating parallel ones beside them, and quote every Evidence excerpt from the paper's own chunks - never from the note, which is your memory of the paper rather than the paper. Evidence from this kind of reading is chunk_local or section_read; paper_reviewed belongs to a full-text read alone.
+18. A turn that read nothing new - the answer came from what was already understood, or nothing retrieved was relevant - skips both calls. Say so and move on. What is NOT optional is the order: a paper whose last reading is still only in its note refuses to be read again until a commit cites it, because a conversation that improves ten notes and writes no Claims has left nothing behind.
+19. Reading a paper END TO END is a different act and a different tool: wiki_build_from_paper, only on explicit user request. It continues this same note and this same chunk ledger, asks only for what questions never reached, and is the only path to the whole-paper synthesis that whole-paper depth requires.
+
 Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accepted, at both stage 1 and stage 3. If you omit keywords the server falls back to mechanical tokenization, returns keywordSource "fallback" with degraded: true, and you should redo that call ONCE with proper terms. Never perform unscoped whole-library full-text search.
 BEYOND THE FUNNEL - the other tools, and when each one is the right call:
 - keyword_search: lexical-only retrieval, no embeddings. It covers the metadata of the whole library plus the body text of every document in the keyword index, and a body-only hit is returned with bodyEvidence explaining it. Use it for an exact term you must not miss, or as a COARSE FILTER whose itemKeys you then hand to semantic_search for a fine pass over just that shortlist. Its score is a real 0-1 relevance (one branch, nothing to fuse), unlike hybrid_search's rank-fusion score - never compare the two.
@@ -811,7 +818,8 @@ BEYOND THE FUNNEL - the other tools, and when each one is the right call:
 - get_item_details: bibliographic metadata for citing a paper. It never returns abstract text, note bodies, annotation text or full text.
 - get_annotations / search_annotations: YOUR OWN marks - PDF highlights, comments, and notes you typed in Zotero. get_annotations reads documents you name (itemKeys takes several); search_annotations finds marks when you do not know which document holds them. Everything they return is the user's own reading, never the paper's words: quote it verbatim and attribute it to the user.
 - get_attachment_text: the text of ONE attachment, in character windows, with textSource.method naming where it came from (doc2x, mineru, zotero_fulltext_cache, ...). Text from Zotero's flat cache has no layout - never rebuild a table from it.
-- get_document_chunks: read one paper's indexed body straight through, in order, a few chunks per page. Use it when the question is about the whole argument; use search_fulltext when it is about one fact.
+- get_document_chunks: read one paper's indexed body straight through, in order, a few chunks per page. Use it when the question is about the whole argument; use search_fulltext when it is about one fact. What you read here counts as reading too - pass those chunkIds to wiki_update_reading_note like any others.
+- wiki_get_reading_note: what is already understood about one paper, before you read any more of it. Call it when a question lands on a paper the library has read before - the answer may already be in the note, and if it is not, the note is what you are about to extend rather than rewrite.
 - get_collection_items: browse the library one level at a time, like a file manager - the subfolders here and the documents filed here, with counts on each subfolder so you can choose where to descend. This is navigation. If the user is asking about a TOPIC, stop browsing and search.
 Nothing in this server returns a whole document in one response. Every reading tool pages, and continuing to page is a decision you make each time, not a default.`,
     });
@@ -1140,6 +1148,10 @@ Nothing in this server returns a whole document in one response. Every reading t
             query: args.query,
             limit: args.limit,
             proposedPageTitles: this.coerceStringArray(args.proposedPageTitles),
+            wikiReview:
+              args.wikiReview && typeof args.wikiReview === 'object'
+                ? args.wikiReview
+                : undefined,
           });
           break;
         }
@@ -1256,6 +1268,13 @@ Nothing in this server returns a whole document in one response. Every reading t
             unchanged: args?.unchanged === true,
             unchangedReason: args?.unchangedReason,
             finalSynthesis: args?.finalSynthesis === true,
+            // The presence of readChunkIds is what selects the question-driven
+            // path, so an empty array must not be mistaken for one: a caller
+            // that read nothing new is on the full-text path, where a batch was
+            // already booked when it was handed over.
+            readChunkIds: this.coerceChunkIds(args?.readChunkIds),
+            domain: args?.domain,
+            expertRole: args?.expertRole,
           });
           break;
         case 'wiki_get_reading_note':
@@ -3236,6 +3255,24 @@ Nothing in this server returns a whole document in one response. Every reading t
    * Accept arrays that some MCP clients serialize as strings, e.g.
    * '["KEY1","KEY2"]' or 'KEY1,KEY2' (#71).
    */
+  /**
+   * Chunk ids from a tool call, as numbers.
+   *
+   * Returns undefined for anything empty so the caller can test presence
+   * rather than length: `readChunkIds` is a MODE selector, and `[]` means "no
+   * question-driven reading here", not "a question that read nothing".
+   * Non-numeric entries are dropped here so the service reports the real
+   * problem - ids that are not passages of this paper - rather than NaN.
+   */
+  private coerceChunkIds(value: unknown): number[] | undefined {
+    if (!Array.isArray(value) || value.length === 0) return undefined;
+    const ids = value
+      .map((entry) => Number(entry))
+      .filter((entry) => Number.isFinite(entry) && entry >= 0)
+      .map((entry) => Math.floor(entry));
+    return ids.length ? ids : undefined;
+  }
+
   private coerceStringArray(value: unknown): string[] | undefined {
     if (Array.isArray(value)) {
       return value.map(String);

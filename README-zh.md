@@ -5,7 +5,7 @@ _This README is also available in: [:gb: English](./README.md) | :cn: 简体中�
 [![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-2.4.4-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-2.5.0-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -726,7 +726,37 @@ Wiki 使用独立长期知识数据库，保存可复用的 Page、Claim、Conce
 Evidence，而不是再建一份论文摘要索引。普通研究采用“先检索、后受控提交”的流程；
 `wiki_build_from_paper` 仅允许用户明确指定单篇文献时使用。服务器不会隐藏调用 LLM。
 
-**单篇文献深度阅读。** 阅读顺序由服务器强制。首次调用 `wiki_build_from_paper`
+**两种阅读，同一份阅读总结。** 一篇文献有两种被读的方式，它们写进同一份 Markdown
+阅读总结，共用同一份已读 chunk 台账。
+
+*问答式渐进阅读*是日常路径：用户提问，`hybrid_search` → `search_fulltext` 找到相关
+段落，AI 真正读懂其中一部分并作答，随后对**每一篇真正读过的文献**调用
+`wiki_update_reading_note`，传入 `readChunkIds`（本轮真正读过并用于作答的 chunk）、
+检索时用的 `domain` / `expertRole`，以及整份重写后的阅读总结。检索命中但没有真正阅读
+的 chunk 不能列进去——检索返回不等于阅读，服务器只为你申报的部分背书。
+
+已读 chunk 是**集合**而不是游标：第一次读 `{7,8,42}`、第二次读 `{15,42,70}`，累计为
+`{7,8,15,42,70}` 共 5 个，重复的 42 不会重复计数，同一次调用里重复申报也不会。总结
+顶部会画出覆盖情况，实心方块表示已读、空心方块表示未读（超过 100 个 chunk 时一格代表
+若干 chunk，部分已读用半实心方块表示）。
+
+顺序是**先总结、后 Wiki**，并且由服务器强制：某篇文献上一轮读到的内容还没写进 Wiki
+时，这篇文献拒绝被再次阅读，直到一次 `wiki_commit` 引用了它。同一轮问答读了三篇文献，
+就可以由一次提交同时结清三篇。真正读到新内容才需要写 Wiki；本轮没读到新内容就明确
+跳过，不必为了凑流程往 Wiki 里塞重复条目。写入时应当优先扩充已有的 Page、Claim、
+Concept 与关系，而不是在旁边新建一份近似的。
+
+阅读总结只增不减：每次重写允许重组、合并、修正，但整体缩水超过一成会被拒绝——每轮
+悄悄压缩一点，二十轮之后早期读到的参数就全没了，而这种退化单看任何一次重写都很合理。
+总结里的每一条事实、参数、结论、机制和图表都必须在正文中标注对应 chunk 编号（如
+「熔池深度 1.2 mm（chunk 42）」），否则无法保存；但标题里出现 chunk 编号仍然会被
+拒绝，那是分页日志。
+
+问答式阅读**永远不会**获得 `paper_reviewed`：即使零散读遍全文，`finalSynthesis` 在这条
+路径上被拒绝，Evidence 一律停留在 `chunk_local` / `section_read`。全文深度是一个动作
+——从头读到尾，再把它作为一个整体重新梳理——零散片段无论累计多少都没有执行过它。
+
+*全文深度阅读*仍是原来的路径，且会**继承**问答阶段的成果。阅读顺序由服务器强制。首次调用 `wiki_build_from_paper`
 只返回该文献的元数据与摘要，不返回任何正文；随后用 `wiki_set_reading_expert`
 生成这篇文献专属的领域专家角色，同时在该 Zotero 条目下创建一份持久化的 Markdown
 **阅读总结**附件。之后正文按页下发，每读完一批，用 `wiki_update_reading_note`
@@ -741,19 +771,42 @@ Evidence，而不是再建一份论文摘要索引。普通研究采用“先检
 它是条目下的真实文件，Zotero 重启、MCP 断线、对话中断与 context compaction 都不会
 造成损失：`wiki_get_reading_note` 会交回总结、专家角色和应当续读的 chunk 序号。
 
-全部 chunk 交付完成后，还必须再做两次覆盖全文的复盘，`wiki_prepare_update` 才会开始
+若这篇文献此前已被问答读过，`wiki_build_from_paper` 不会从头再来：同一个阅读会话被
+就地提升为全文模式，已读 chunk 台账与阅读总结原样保留，翻页会跳过开头已读的连续区段，
+只补读问答没有覆盖到的部分，响应中的 `carriedOverFromQuestionAnswering` 说明继承了
+多少。唯一仍会重新要求的是那份**慎重**的专家角色——问答阶段由检索参数临时拼出的角色
+标记为 provisional，可以被正式角色替换，因为从头读完一篇文献值得先认真决定由谁来读。
+显式传入 `offset` 时不会跳读，这样为了核对引文而回读某一段仍然可用，且不计入整合闸门。
+
+全部 chunk 交付完成后，还必须再做三次覆盖全文的复盘，`wiki_prepare_update` 才会开始
 写入阶段：一次是整体重构阅读总结（`finalSynthesis`），一次是复盘该文献确立的术语
-（`wiki_record_concepts` 且 `final` 为真）。后者构建独立术语库：一个概念一个实体，
+（`wiki_record_concepts` 且 `final` 为真），最后一次是对**整个 Wiki** 的系统性复盘
+（`wiki_prepare_update` 的 `wikiReview`）。后者构建独立术语库：一个概念一个实体，
 含一个主术语与任意别名术语，每组术语都由中文全称、英文全称、简称构成，且硬性规则是
 简称禁止独立存在；确实没有新术语时，用空清单加理由作答。有效名称不会被静默吞掉：
 两篇文献对同一术语给出不同拼写时，两个名称都作为该概念的两条术语保留；只有 AI 推断
 出来、又被文献否定的字段才会按文献修正。用户手动修改过的字段与手动锁定的主术语，
-AI 之后都不再改动。此外，Evidence 只有在**全部 chunk 已交付**且
+AI 之后都不再改动。
+
+第三道门是 2.5.0 新增的。前两道看的都是**这篇文献**：总结是否连贯，术语是否梳理过。
+但 Wiki 是在阅读过程中一路增量长出来的，到读完时往往已经漂移——早期依据某个 chunk
+写下的 Claim 被后面的 chunk 限定了范围，隔了几轮写下的两个 Concept 其实是同一个，
+早期画出的关系已经不再成立。所以最后要求以读完的全文为依据，对已有内容做一次五个
+维度的复盘：Page 是否需要补充、调整或新建；Claim 需要新增、合并、修正还是被推翻；
+Evidence 是否单薄、哪些可以提升到全文深度；Concept / Term 需要补充、纠错还是去重；
+已有关系需要新增还是撤销。每个维度都必须作答，「无需改动，因为……」是完全合格的答案，
+也是最常见的答案；不作答则不放行，因为空白与「没看过」无法区分。复盘一篇文献只需
+提交一次，校验失败后重试不必重复提交。
+
+此外，Evidence 只有在**全部 chunk 已交付**且
 **该次整体重构已记录**时，才能达到 `paper_reviewed` / `cross_paper` 深度——交付不等于
 读懂。总结本身永远不是 Evidence：Claim 仍必须引用能在该文献真实 chunk 中校验通过的
-原文摘录。该附件也被排除在检索索引之外，避免一篇论文的总结被当作论文原文检索出来。
+原文摘录，而且该 chunk 必须**已经被记录为读过**——由 `wiki_build_from_paper` 下发，
+或由 `wiki_update_reading_note` 的 `readChunkIds` 申报。引用一段没人读过的原文会被
+指名拒绝：摘录确实在文献里，缺的是对它的阅读。这也是「先总结、后 Wiki」的另一半——
+Claim 只能建立在阅读总结已经涵盖的内容之上。该附件也被排除在检索索引之外，避免一篇论文的总结被当作论文原文检索出来。
 
-- `wiki_prepare_update` —— 写入前搜索已有知识；可传入最多两个准确的 `proposedPageTitles`，短期 token 只能授权真正搜索过的 Page 标题
+- `wiki_prepare_update` —— 写入前搜索已有知识；可传入最多两个准确的 `proposedPageTitles`，短期 token 只能授权真正搜索过的 Page 标题；`pendingWikiWriteUp` 列出阅读总结已领先于 Wiki 的文献；文献读完全文后还需传入 `wikiReview`（Page / Claim / Evidence / Concept / 关系五个维度的整体复盘）
 - `wiki_commit` —— 提交经过验证的 SKIP、Evidence、Claim、Page、Relation 或冲突动作
 - `wiki_search` —— 检索 Concept/Alias、Claim、Relation 与一跳 Evidence 关联
 - `wiki_get_page` —— 查看 Page、Claim 与 Evidence
@@ -764,11 +817,11 @@ AI 之后都不再改动。此外，Evidence 只有在**全部 chunk 已交付**
 - `wiki_list_concepts` —— 列出独立术语库，含全部术语与来源
 - `wiki_export_concepts` —— 单独导出术语库 Markdown
 - `wiki_reverify` —— 索引重建后重新定位 Evidence
-- `wiki_build_from_paper` —— 阅读用户明确指定的单篇文献：先给元数据与摘要，再分页下发正文；用 `pagination.nextCursor` 逐页翻到 `pagination.coverageComplete` 为真，且必须先结束当前这篇才能开始下一篇
+- `wiki_build_from_paper` —— 阅读用户明确指定的单篇文献：先给元数据与摘要，再分页下发正文；用 `pagination.nextCursor` 逐页翻到 `pagination.coverageComplete` 为真，且必须先结束当前这篇才能开始下一篇；继承该文献问答阶段已读的 chunk 与阅读总结，只补读未读部分。这个「一次一篇」的独占限制只针对全文阅读，问答式阅读不受限，可同时累积多篇
 - `wiki_set_reading_expert` —— 依据元数据与摘要生成该文献专属的领域专家角色，并在条目下创建持久化 Markdown 阅读总结
-- `wiki_update_reading_note` —— 用当前对全文的理解整体替换阅读总结；`finalSynthesis` 表示全文交付后的最终整体重构
+- `wiki_update_reading_note` —— 用当前对该文献的理解整体替换阅读总结。全文阅读时每读完一批调用一次；问答后对每篇真正读过的文献调用一次，并传入 `readChunkIds`（本轮真正读过并用于作答的 chunk）与检索时的 `domain` / `expertRole`。`finalSynthesis` 表示全文交付后的最终整体重构，问答路径不可用
 - `wiki_get_reading_note` —— 取回某篇文献的总结、专家角色与准确续读位置；重启或对话中断后的恢复入口
-- `wiki_finish_reading` —— 只读不写地结束当前打开的文献（`skipped`），以便开始下一篇
+- `wiki_finish_reading` —— 只读不写地结束一篇打开的文献（`skipped`）。不传 `itemKey` 时结束当前全文阅读的那篇；传 `itemKey` 时也可结束一篇问答式阅读的文献，同时解除它「未写入 Wiki」的阻塞
 
 ### 五、写入操作（9 个，可在偏好设置中禁用）
 

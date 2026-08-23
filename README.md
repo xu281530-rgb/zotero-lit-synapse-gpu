@@ -5,7 +5,7 @@ _This README is also available in: [:cn: 简体中文](./README-zh.md) | :gb: En
 [![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-2.4.4-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-2.5.0-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -658,8 +658,52 @@ paper-summary index. Normal research uses a prepare/controlled-commit flow;
 `wiki_build_from_paper` is allowed only for one paper explicitly requested by
 the user. The server performs no hidden LLM calls.
 
-**Reading one paper deeply.** A paper is read in a fixed order, and the server
-enforces it. The opening `wiki_build_from_paper` call returns the paper's
+**Two ways of reading, one reading note.** A paper gets read in two different
+ways, and both write into the same Markdown note and the same ledger of chunks
+actually read.
+
+*Question-driven reading* is the everyday path. The user asks something,
+`hybrid_search` then `search_fulltext` find the relevant passages, the model
+genuinely reads some of them and answers — and then, for **every paper it really
+read**, calls `wiki_update_reading_note` with `readChunkIds` (the chunks it
+actually used to answer), the `domain` and `expertRole` it searched that paper
+with, and the paper's whole note rewritten to include what it just learned. A
+chunk that retrieval returned but nobody engaged with is not listed: retrieval is
+not reading, and the server only stands behind what was declared.
+
+Chunks read this way accumulate as a SET, not a cursor. `{7,8,42}` then
+`{15,42,70}` is five distinct chunks, not six; the repeated 42 is not counted
+twice, and neither is a repeat inside one call. The note's header draws the
+coverage: a filled square per chunk read, a hollow one per chunk unread (past a
+hundred chunks one cell spans several, and a partly-read cell is drawn
+half-filled).
+
+The order is **note first, Wiki second**, and the server enforces it rather than
+asking: a paper whose last reading has not reached the Wiki refuses to be read
+again until a `wiki_commit` cites it. One question that read three papers is
+settled by one commit citing all three. Only a turn that actually read something
+new owes a Wiki update — a turn that answered from what was already understood
+says so and skips it, rather than padding the Wiki with duplicates. What is
+written should extend the Page, Claim, Concept and relations that already exist
+instead of creating near-duplicates beside them.
+
+The note only grows. Each rewrite may reorganise, merge and correct, but one
+that loses more than a tenth of the document is refused — compress a little
+every turn and by the twentieth question the parameters read on page 3 are gone,
+and no single rewrite ever looks unreasonable. Every fact, parameter, result,
+mechanism and figure in it names the chunk it came from, in the prose ("melt-pool
+depth reaches 1.2 mm (chunk 42)"), or the note will not save; a chunk number in a
+*heading* is still refused, because that is a page log.
+
+Question-driven reading **never** reaches `paper_reviewed`. Even if scattered
+questions happen to touch every chunk, `finalSynthesis` is refused on this path
+and Evidence stays at `chunk_local` or `section_read`. Whole-paper depth names an
+act — reading it through, then reconciling it as one thing — that scattered
+passages never perform, however many of them there are.
+
+*Reading one paper deeply* is the original path, and it now INHERITS what the
+questions read. A paper is read in a fixed order, and the server enforces it.
+The opening `wiki_build_from_paper` call returns the paper's
 metadata and abstract and no body text; `wiki_set_reading_expert` answers it
 with the one domain expert who will read this paper, which also creates a
 persistent Markdown **reading note** as an attachment on the Zotero item. Body
@@ -679,26 +723,60 @@ real file on the item, a Zotero restart, an MCP disconnect or a context
 compaction costs nothing: `wiki_get_reading_note` hands back the note, the
 expert and the chunk index to resume at.
 
-Once every chunk has been delivered, two more passes are required before
+If questions had already been asking about this paper, `wiki_build_from_paper`
+does not start over: the same session is promoted in place to full-text mode,
+keeping its chunk ledger and its note, paging skips runs of already-read text at
+the head of a page and asks only for what the questions never reached, and
+`carriedOverFromQuestionAnswering` says how much was inherited. The one thing
+still asked for is a *considered* expert profile: the reader a question
+assembles on the fly from its retrieval parameters is marked provisional and may
+be replaced, because who reads a paper end to end is a decision worth making
+properly. An explicit `offset` is never skipped ahead of, so re-reading a passage
+to check a quotation still works and still costs nothing against the integration
+gate.
+
+Once every chunk has been delivered, three more passes are required before
 `wiki_prepare_update` will start the write-up: one over the whole paper
-(`finalSynthesis`), and one over the terminology it established
-(`wiki_record_concepts` with `final`). The second builds the independent concept
+(`finalSynthesis`), one over the terminology it established
+(`wiki_record_concepts` with `final`), and one over the **whole Wiki**
+(`wikiReview` on `wiki_prepare_update`). The second builds the independent concept
 library: one entity per concept, one primary term and any number of alias terms,
 every term carrying a Chinese full name, an English full name and an
 abbreviation — with the hard rule that an abbreviation may never stand alone. A
 paper that introduced nothing new answers with an empty list and a reason. Names
 are never overwritten away: two papers that spell the same term differently keep
 both spellings as two term rows of one concept, and only a value the model had
-merely inferred is replaced when a paper contradicts it. The
-first pass
-and Evidence reaches `paper_reviewed` or `cross_paper` depth only when both are
-true: every chunk delivered **and** that final pass recorded. Delivery is not
-understanding. The note itself is never Evidence — Claims still cite excerpts
-verified against the paper's own indexed chunks — and the note is excluded from
-the search index, so a summary of a paper can never be retrieved as if it were
-the paper.
+merely inferred is replaced when a paper contradicts it.
 
-- `wiki_prepare_update` — search existing knowledge before proposing changes; pass up to two exact `proposedPageTitles` so its short-lived token can authorize only the Page titles that were actually searched
+The third pass is new in 2.5.0. The first two both look at the PAPER: is the
+note coherent, has the terminology been reviewed. But the Wiki has been growing
+incrementally the whole time and has usually drifted by the end — a Claim
+written from an early chunk that a later one bounds, two Concepts written turns
+apart that are really one, a relation drawn early that no longer holds. So the
+last gate asks, with the finished paper in hand, what it means for what is
+already stored, on five axes: does a Page need adjusting or creating; which
+Claims does the complete reading confirm, qualify, merge or contradict; which
+Claims are thin on Evidence and which Evidence can now be carried at full-paper
+depth; which terms need adding, correcting or de-duplicating; which relations
+should be drawn or withdrawn. Every axis must be answered — "nothing to change
+here, because ..." is a perfectly good answer and the commonest one — and
+silence is not accepted, because it cannot be told apart from not having looked.
+It is asked once per paper, and a retry after a validation error does not
+re-ask.
+
+Evidence reaches `paper_reviewed` or `cross_paper` depth only when both are
+true: every chunk delivered by a full-text read **and** that final pass
+recorded. Delivery is not understanding. The note itself is never Evidence —
+Claims still cite excerpts verified against the paper's own indexed chunks, and
+that chunk must already be recorded as READ, whether delivered by
+`wiki_build_from_paper` or declared through `readChunkIds`. Quoting a passage
+nobody read is refused by name: the excerpt is genuinely in the paper, what is
+missing is a reading of it. That is the other half of "note first, Wiki second"
+— a Claim can only rest on something the note already accounts for. The note is
+also excluded from the search index, so a summary of a paper can never be
+retrieved as if it were the paper.
+
+- `wiki_prepare_update` — search existing knowledge before proposing changes; pass up to two exact `proposedPageTitles` so its short-lived token can authorize only the Page titles that were actually searched. `pendingWikiWriteUp` names the papers whose reading notes have moved ahead of the Wiki. Once a paper has been read in full it also requires `wikiReview`, a pass over the whole Wiki on five axes: pages, claims, evidence, concepts, relations
 - `wiki_commit` — apply validated `SKIP`, Evidence, Claim, Page, Relation or conflict actions
 - `wiki_search` — search Concept/Alias, Claim, Relation and one-hop Evidence links
 - `wiki_get_page` — read a Page with its Claims and Evidence
@@ -709,11 +787,11 @@ the paper.
 - `wiki_list_concepts` — list the independent concept library, with every term and its sources
 - `wiki_export_concepts` — export the concept library on its own as Markdown
 - `wiki_reverify` — relink Evidence after index rebuilds
-- `wiki_build_from_paper` — read one explicitly requested paper: metadata and abstract first, then one page of chunks at a time; follow `pagination.nextCursor` until `pagination.coverageComplete` is true, and finish the open paper before starting another
+- `wiki_build_from_paper` — read one explicitly requested paper: metadata and abstract first, then one page of chunks at a time; follow `pagination.nextCursor` until `pagination.coverageComplete` is true, and finish the open paper before starting another. It inherits whatever questions already read of that paper — same note, same ledger — and asks only for the rest. The one-paper-at-a-time lock applies to full-text reading alone; question-driven reading takes no slot and may accumulate several papers at once
 - `wiki_set_reading_expert` — generate this paper's one domain expert from its metadata and abstract, and create its persistent Markdown reading note on the Zotero item
-- `wiki_update_reading_note` — replace the whole reading note with your current understanding of the paper; `finalSynthesis` marks the whole-paper pass once every chunk has been delivered
+- `wiki_update_reading_note` — replace the whole reading note with your current understanding of the paper. Called once per page during a full-text read; called once per paper actually read after answering a question, with `readChunkIds` naming the chunks that were genuinely used and the `domain` / `expertRole` the paper was searched with. `finalSynthesis` marks the whole-paper pass once every chunk has been delivered, and is not available on the question-driven path
 - `wiki_get_reading_note` — read back a paper's note, expert and exact resume point; the recovery path after a restart or a context compaction
-- `wiki_finish_reading` — close the currently open paper without writing it up (`skipped`), so the next paper can start
+- `wiki_finish_reading` — close an open paper without writing it up (`skipped`). Without `itemKey` it closes the paper being read in full; with one it can also close a paper that questions have been reading, which releases the block on reading it further
 
 ### 5. Write Operations (9 tools, can be disabled in preferences)
 

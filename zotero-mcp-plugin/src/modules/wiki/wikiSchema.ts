@@ -8,7 +8,7 @@ import {
 } from "./wikiConceptTerms";
 import { rowColumn } from "./wikiRow";
 
-export const WIKI_SCHEMA_VERSION = 5;
+export const WIKI_SCHEMA_VERSION = 6;
 
 /**
  * Add a column an older database does not have yet.
@@ -270,6 +270,34 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
     // whole-paper pass writes them in one go. Empty is the correct carried-over
     // state: a session from 2.4.3 staged nothing because staging did not exist.
     ["staged_concepts", "TEXT NOT NULL DEFAULT ''"],
+    // Schema 6. How this session is reading the paper.
+    //
+    // 'fulltext' is a wiki_build_from_paper read: it holds the library's one
+    // reading slot and is the only mode that can ever reach paper_reviewed.
+    // 'qa' is the incremental reading a question produces - a handful of
+    // chunks that actually answered something, folded into the same note.
+    // Several 'qa' sessions may be open at once because one question routinely
+    // touches several papers, which is exactly why the exclusive index below
+    // had to be narrowed to the full-text mode.
+    //
+    // 'fulltext' is the correct carried-over value: every session written
+    // before this column existed came from wiki_build_from_paper.
+    ["mode", "TEXT NOT NULL DEFAULT 'fulltext'"],
+    // Chunks folded into the reading note whose knowledge has NOT yet been
+    // written into the Wiki. This is the "MD first, Wiki second" rule made
+    // enforceable: a paper carrying a debt refuses the next question's read
+    // until the previous one has been committed.
+    ["pending_wiki_chunks", "INTEGER NOT NULL DEFAULT 0"],
+    ["pending_wiki_since", "INTEGER"],
+    // The whole-Wiki review done after the final synthesis: when it was
+    // submitted, and what it said. NULL is right for a carried-over session -
+    // a 2.4.4 read owes the review like any other.
+    ["wiki_review_at", "INTEGER"],
+    ["wiki_review", "TEXT NOT NULL DEFAULT ''"],
+    // How many chunks this session had already read as a question-driven read
+    // when a full-text read took it over. Zero for a paper nobody asked about
+    // first, which is every session that predates 2.5.0.
+    ["question_chunks_carried_over", "INTEGER NOT NULL DEFAULT 0"],
   ] as const) {
     await addColumnIfMissing(db, "wiki_reading_sessions", column, definition);
   }
@@ -292,12 +320,31 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
       next_attempt_at INTEGER NOT NULL
     )
   `);
-  // At most one paper may be open per library. A partial unique index makes
-  // that the database's rule rather than a check the service could forget:
-  // the "start B while A is unfinished" case cannot be written at all.
+  // At most one paper may be READ IN FULL per library. A partial unique index
+  // makes that the database's rule rather than a check the service could
+  // forget: the "start B while A is unfinished" case cannot be written at all.
+  //
+  // Narrowed to mode 'fulltext' in schema 6. The rule it enforces was always
+  // about the full-text read - a batch run that opened paper after paper and
+  // wrote none of them - and never about answering a question, which normally
+  // has to look into three or four papers at once and would be made useless
+  // by an exclusive lock. Question-driven reading is unlimited in number and
+  // still cannot reach paper_reviewed; see WikiService.verifiedReadDepth.
   await db.queryAsync(
-    `CREATE UNIQUE INDEX IF NOT EXISTS idx_wiki_open_reading_session
+    "DROP INDEX IF EXISTS idx_wiki_open_reading_session",
+  );
+  await db.queryAsync(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_wiki_open_fulltext_session
        ON wiki_reading_sessions(library_id)
+       WHERE state IN ('reading','prepared') AND mode = 'fulltext'`,
+  );
+  // One session per paper, whichever mode it is in. This is what lets a
+  // full-text read CONTINUE the reading a question already started - the
+  // session is promoted in place, keeping its chunk ledger and its note -
+  // rather than opening a second ledger for the same document.
+  await db.queryAsync(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_wiki_open_reading_paper
+       ON wiki_reading_sessions(library_id, item_key)
        WHERE state IN ('reading','prepared')`,
   );
   await db.queryAsync(

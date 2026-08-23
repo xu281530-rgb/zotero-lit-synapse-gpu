@@ -84,6 +84,31 @@ export const WIKI_READING_STATES = [
 
 export type WikiReadingState = (typeof WIKI_READING_STATES)[number];
 
+export const WIKI_READING_MODES = ["fulltext", "qa"] as const;
+
+/**
+ * How a session is reading its paper.
+ *
+ * `fulltext` is a `wiki_build_from_paper` read: it holds the library's one
+ * reading slot, it is the only mode that can do the whole-paper synthesis, and
+ * therefore the only one that can ever reach `paper_reviewed`.
+ *
+ * `qa` is the reading a question produces. A user asks something, retrieval
+ * finds passages in three papers, the model actually reads a handful of them
+ * and answers. Those chunks are real reading and belong in the paper's note,
+ * so they get a session - but a question is not a review of a paper, and the
+ * two differ in exactly two ways: a `qa` session takes no exclusive lock
+ * (several are open at once, because one question routinely spans several
+ * papers), and its coverage never buys whole-paper depth no matter how many
+ * scattered chunks accumulate. Reading all 181 chunks of a paper three at a
+ * time across sixty questions is still not the act `paper_reviewed` names.
+ *
+ * The two are not separate ledgers. A `qa` session is PROMOTED to `fulltext`
+ * when `wiki_build_from_paper` opens that paper, keeping the chunks it has
+ * already read and the note it has already written; see `startOrContinue`.
+ */
+export type WikiReadingMode = (typeof WIKI_READING_MODES)[number];
+
 /** States in which a session still owns the library. */
 export const WIKI_OPEN_READING_STATES: readonly WikiReadingState[] = [
   "reading",
@@ -162,6 +187,96 @@ export interface WikiReadingSessionRecord {
    * a term already written would have to be corrected.
    */
   stagedConcepts: unknown[];
+
+  /** Full-text read, or the incremental reading a question produced. */
+  mode: WikiReadingMode;
+
+  /**
+   * Chunks folded into the reading note whose knowledge has not yet reached
+   * the Wiki.
+   *
+   * This is "update the note, THEN update the Wiki" made enforceable. The
+   * server cannot make a model call `wiki_commit`, but it can refuse to let
+   * the same paper be read again while the last thing learned about it is
+   * still sitting only in the note - which is the failure this counter exists
+   * to catch: a reader that answers ten questions from one paper, improves the
+   * note ten times, and writes not one Claim.
+   *
+   * Cleared by a commit that cites this paper. See
+   * WikiService.settleReadingSession.
+   */
+  pendingWikiChunks: number;
+  /** When the debt above was incurred. null when there is none. */
+  pendingWikiSince: number | null;
+
+  /**
+   * When the whole-Wiki review was submitted, and what it said.
+   *
+   * The final synthesis rewrites the NOTE as one account of the paper, and
+   * `conceptsRecordedAt` covers the terminology. Neither of them looks at the
+   * Wiki that was built incrementally while the paper was being read: whether
+   * a Page needs adjusting, whether two Claims written six questions apart are
+   * really one Claim, whether Evidence gathered at `chunk_local` can now carry
+   * full-paper depth, whether the relations drawn early still hold. That pass
+   * is the last gate before the write-up, and it is recorded here so a retry
+   * does not have to submit it twice.
+   */
+  wikiReviewAt: number | null;
+  wikiReview: WikiWholeWikiReview | null;
+
+  /**
+   * Chunks this session had read as a question-driven read before a full-text
+   * read took it over.
+   *
+   * Kept because the promotion erases the evidence of itself: afterwards the
+   * session is a full-text one and the reading it inherited looks like its
+   * own. A reader coming back to the paper - after a restart, after a
+   * compaction - needs to know it is continuing an existing note rather than
+   * opening a fresh paper, and this is the only thing that still says so.
+   */
+  questionChunksCarriedOver: number;
+}
+
+/**
+ * The five axes of the post-synthesis Wiki review.
+ *
+ * Every axis must be answered. "Nothing to change here, because ..." is a
+ * perfectly good answer and is the commonest one; what is not allowed is
+ * silence, because silence is indistinguishable from not having looked.
+ */
+export interface WikiWholeWikiReview {
+  pages: string;
+  claims: string;
+  evidence: string;
+  concepts: string;
+  relations: string;
+}
+
+export const WIKI_REVIEW_AXES = [
+  "pages",
+  "claims",
+  "evidence",
+  "concepts",
+  "relations",
+] as const;
+
+/** Minimum characters per axis. Long enough to exclude "ok" and "n/a". */
+export const WIKI_REVIEW_MIN_AXIS_CHARS = 20;
+
+function parseWikiReview(raw: unknown): WikiWholeWikiReview | null {
+  const text = String(raw ?? "").trim();
+  if (!text) return null;
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object") return null;
+    const review: Record<string, string> = {};
+    for (const axis of WIKI_REVIEW_AXES) {
+      review[axis] = String((parsed as Record<string, unknown>)[axis] ?? "");
+    }
+    return review as unknown as WikiWholeWikiReview;
+  } catch {
+    return null;
+  }
 }
 
 /** The staging buffer, tolerant of a row written before it existed. */
@@ -219,6 +334,12 @@ function mapSession(row: any): WikiReadingSessionRecord {
     "concepts_recorded_at",
     "conceptsRecordedAt",
   );
+  const pendingWikiSince = rowColumn(
+    row,
+    "pending_wiki_since",
+    "pendingWikiSince",
+  );
+  const wikiReviewAt = rowColumn(row, "wiki_review_at", "wikiReviewAt");
   return {
     sessionId: Number(rowColumn(row, "session_id", "sessionId")),
     libraryID: Number(rowColumn(row, "library_id", "libraryID")),
@@ -256,7 +377,28 @@ function mapSession(row: any): WikiReadingSessionRecord {
     stagedConcepts: parseStagedConcepts(
       rowColumn(row, "staged_concepts", "stagedConcepts"),
     ),
+    mode: normalizeMode(rowColumn(row, "mode", "mode")),
+    pendingWikiChunks: Number(
+      rowColumn(row, "pending_wiki_chunks", "pendingWikiChunks") ?? 0,
+    ),
+    pendingWikiSince:
+      pendingWikiSince == null ? null : Number(pendingWikiSince),
+    wikiReviewAt: wikiReviewAt == null ? null : Number(wikiReviewAt),
+    wikiReview: parseWikiReview(rowColumn(row, "wiki_review", "wikiReview")),
+    questionChunksCarriedOver: Number(
+      rowColumn(
+        row,
+        "question_chunks_carried_over",
+        "questionChunksCarriedOver",
+      ) ?? 0,
+    ),
   };
+}
+
+/** A row written before the column existed reads as a full-text read. */
+function normalizeMode(raw: unknown): WikiReadingMode {
+  const text = String(raw ?? "").trim();
+  return text === "qa" ? "qa" : "fulltext";
 }
 
 const OPEN_STATE_SQL = `state IN ('reading','prepared')`;
@@ -268,15 +410,68 @@ export class WikiReadingSessions {
     this.db = db;
   }
 
-  /** The session that currently owns this library, if any. */
+  /**
+   * The FULL-TEXT session that currently owns this library, if any.
+   *
+   * Deliberately blind to question-driven sessions. Everything that asks "what
+   * is open" is really asking "which paper holds the reading slot", and a `qa`
+   * session holds nothing: a question that read three papers must not make any
+   * of them look like the paper someone is in the middle of reviewing, or the
+   * next `wiki_build_from_paper` would be refused for a paper nobody opened.
+   * Use `openForItem` to find a specific paper's session in either mode.
+   */
   async getOpen(libraryID: number): Promise<WikiReadingSessionRecord | null> {
     const rows = await this.db.queryAsync(
       `SELECT * FROM wiki_reading_sessions
-       WHERE library_id = ? AND ${OPEN_STATE_SQL}
+       WHERE library_id = ? AND ${OPEN_STATE_SQL} AND mode = 'fulltext'
        ORDER BY session_id DESC LIMIT 1`,
       [libraryID],
     );
     return rows[0] ? mapSession(rows[0]) : null;
+  }
+
+  /** The open session for one paper, in whichever mode it is reading. */
+  async openForItem(
+    libraryID: number,
+    itemKey: string,
+  ): Promise<WikiReadingSessionRecord | null> {
+    const rows = await this.db.queryAsync(
+      `SELECT * FROM wiki_reading_sessions
+       WHERE library_id = ? AND item_key = ? AND ${OPEN_STATE_SQL}
+       ORDER BY session_id DESC LIMIT 1`,
+      [libraryID, itemKey],
+    );
+    return rows[0] ? mapSession(rows[0]) : null;
+  }
+
+  /** Every open session in the library, both modes. Newest first. */
+  async listOpen(libraryID: number): Promise<WikiReadingSessionRecord[]> {
+    const rows = await this.db.queryAsync(
+      `SELECT * FROM wiki_reading_sessions
+       WHERE library_id = ? AND ${OPEN_STATE_SQL}
+       ORDER BY session_id DESC`,
+      [libraryID],
+    );
+    return rows.map(mapSession);
+  }
+
+  /**
+   * Open sessions whose reading has not been written into the Wiki yet.
+   *
+   * What the "MD first, Wiki second" rule reports on: after a round of
+   * questions these are the papers whose notes have moved ahead of the Wiki,
+   * and the next commit is expected to cite them.
+   */
+  async listPendingWiki(
+    libraryID: number,
+  ): Promise<WikiReadingSessionRecord[]> {
+    const rows = await this.db.queryAsync(
+      `SELECT * FROM wiki_reading_sessions
+       WHERE library_id = ? AND ${OPEN_STATE_SQL} AND pending_wiki_chunks > 0
+       ORDER BY pending_wiki_since`,
+      [libraryID],
+    );
+    return rows.map(mapSession);
   }
 
   async get(sessionId: number): Promise<WikiReadingSessionRecord | null> {
@@ -288,75 +483,60 @@ export class WikiReadingSessions {
   }
 
   /**
-   * Open a session for `itemKey`, or return the one already open for it.
+   * Open a session for `itemKey`, or return - promoting if necessary - the one
+   * already open for it.
    *
-   * Refuses when a DIFFERENT paper is open. The message carries the open
-   * paper's key and both ways out, because the caller is a model that has to
-   * pick a recovery without asking anyone.
+   * Three cases, and the middle one is the point of the whole mode split:
+   *
+   *   - Nothing open for this paper: a session is created in the asked-for
+   *     mode.
+   *   - A session already open for this paper: it is CONTINUED. If questions
+   *     had already read part of the paper and a full-text read now starts,
+   *     that same session is promoted from `qa` to `fulltext` - chunk ledger,
+   *     note and expert all carry over, so `wiki_build_from_paper` picks up
+   *     where the questions left off instead of re-reading what was read.
+   *   - A DIFFERENT paper holds the full-text slot and this call wants that
+   *     slot: refused, with the open paper's key and both ways out, because
+   *     the caller is a model that has to pick a recovery without asking
+   *     anyone. A `qa` request is never refused: it takes no slot.
    */
   async startOrContinue(options: {
     libraryID: number;
     itemKey: string;
     title: string;
     totalChunks: number;
+    /** Defaults to `fulltext`, which is what every pre-2.5.0 caller meant. */
+    mode?: WikiReadingMode;
   }): Promise<WikiReadingSessionRecord> {
-    const open = await this.getOpen(options.libraryID);
-    if (open && open.itemKey !== options.itemKey) {
-      const coverage = await this.coverage(open.sessionId);
-      throw new WikiReadingSessionConflict(
-        `Paper ${open.itemKey} is still open in this library (state: ${open.state}, ` +
-          `${coverage.deliveredChunks} of ${coverage.totalChunks} chunks read). ` +
-          `Finish it before starting ${options.itemKey}. Two ways: read it to the end with ` +
-          `wiki_build_from_paper` +
-          (coverage.firstMissingIndex === null
-            ? ""
-            : ` (resume at chunk index ${coverage.firstMissingIndex})`) +
-          ` and then commit it — a commit only closes a paper once every chunk has been ` +
-          `delivered, so committing partway through keeps it open — or close it deliberately ` +
-          `with wiki_finish_reading, itemKey "${open.itemKey}", outcome "skipped".`,
-        open,
-      );
-    }
-    if (open) {
-      // Same paper: re-reading is normal. Refresh the chunk total in case the
-      // index was rebuilt underneath the reader.
-      if (open.totalChunks !== options.totalChunks) {
-        // A re-chunked document invalidates what "delivered" meant, and with
-        // it every count derived from delivery: the batch ledger, how much of
-        // the paper the note covers, and the whole-paper synthesis, which was
-        // made from text that no longer maps onto these chunks. The note's
-        // BODY is kept - the reading it records is still a reading of this
-        // paper - but its coverage claim restarts from zero.
+    const mode: WikiReadingMode = options.mode ?? "fulltext";
+    const existing = await this.openForItem(options.libraryID, options.itemKey);
+    if (existing) {
+      // Promotion is one-way. A full-text read subsumes whatever a question
+      // read, so `qa` -> `fulltext` carries everything over; the reverse would
+      // silently downgrade a paper under review and is never done.
+      if (mode === "fulltext" && existing.mode === "qa") {
+        const blocking = await this.getOpen(options.libraryID);
+        if (blocking && blocking.itemKey !== options.itemKey) {
+          throw await this.conflict(blocking, options.itemKey);
+        }
         await this.db.queryAsync(
-          `UPDATE wiki_reading_sessions
-           SET total_chunks = ?, updated_at = ?, delivered_batches = 0,
-               integrated_batches = 0, integrated_chunks = 0,
-               last_integration_unchanged = 0, final_synthesis_at = NULL,
-               concepts_recorded_at = NULL, staged_concepts = ''
+          `UPDATE wiki_reading_sessions SET mode = 'fulltext', updated_at = ?
            WHERE session_id = ?`,
-          [options.totalChunks, Date.now(), open.sessionId],
+          [Date.now(), existing.sessionId],
         );
-        await this.db.queryAsync(
-          "DELETE FROM wiki_reading_chunks WHERE session_id = ?",
-          [open.sessionId],
-        );
-        return {
-          ...open,
-          totalChunks: options.totalChunks,
-          deliveredBatches: 0,
-          integratedBatches: 0,
-          integratedChunks: 0,
-          lastIntegrationUnchanged: false,
-          finalSynthesisAt: null,
-        };
+        existing.mode = "fulltext";
       }
-      return open;
+      return this.continueExisting(existing, options.totalChunks);
+    }
+    if (mode === "fulltext") {
+      const open = await this.getOpen(options.libraryID);
+      if (open) throw await this.conflict(open, options.itemKey);
     }
     const now = Date.now();
     await this.db.queryAsync(
       `INSERT INTO wiki_reading_sessions
-       (library_id, item_key, title, total_chunks, state, started_at, updated_at)
-       VALUES (?, ?, ?, ?, 'reading', ?, ?)`,
+       (library_id, item_key, title, total_chunks, state, started_at, updated_at, mode)
+       VALUES (?, ?, ?, ?, 'reading', ?, ?, ?)`,
       [
         options.libraryID,
         options.itemKey,
@@ -364,11 +544,82 @@ export class WikiReadingSessions {
         options.totalChunks,
         now,
         now,
+        mode,
       ],
     );
-    const opened = await this.getOpen(options.libraryID);
+    const opened = await this.openForItem(options.libraryID, options.itemKey);
     if (!opened) throw new Error("Failed to open a Wiki reading session");
     return opened;
+  }
+
+  /** The refusal raised when another paper holds the full-text slot. */
+  private async conflict(
+    open: WikiReadingSessionRecord,
+    wantedKey: string,
+  ): Promise<WikiReadingSessionConflict> {
+    const coverage = await this.coverage(open.sessionId);
+    return new WikiReadingSessionConflict(
+      `Paper ${open.itemKey} is still open in this library (state: ${open.state}, ` +
+        `${coverage.deliveredChunks} of ${coverage.totalChunks} chunks read). ` +
+        `Finish it before starting ${wantedKey}. Two ways: read it to the end with ` +
+        `wiki_build_from_paper` +
+        (coverage.firstMissingIndex === null
+          ? ""
+          : ` (resume at chunk index ${coverage.firstMissingIndex})`) +
+        ` and then commit it — a commit only closes a paper once every chunk has been ` +
+        `delivered, so committing partway through keeps it open — or close it deliberately ` +
+        `with wiki_finish_reading, itemKey "${open.itemKey}", outcome "skipped". ` +
+        `Answering a QUESTION about ${wantedKey} is not blocked by this: retrieval followed by ` +
+        `wiki_update_reading_note with readChunkIds reads it incrementally and takes no slot.`,
+      open,
+    );
+  }
+
+  /**
+   * Continue a session already open for this paper.
+   *
+   * Split out of `startOrContinue` when promotion arrived: "the chunk total
+   * changed underneath the reader" has to be handled identically whether the
+   * session was found, promoted, or continued in the mode it was already in.
+   */
+  private async continueExisting(
+    open: WikiReadingSessionRecord,
+    totalChunks: number,
+  ): Promise<WikiReadingSessionRecord> {
+    if (open.totalChunks === totalChunks) return open;
+    // A re-chunked document invalidates what "delivered" meant, and with it
+    // every count derived from delivery: the batch ledger, how much of the
+    // paper the note covers, the whole-paper synthesis - made from text that
+    // no longer maps onto these chunks - and the Wiki review done over it. The
+    // note's BODY is kept, because the reading it records is still a reading
+    // of this paper, but its coverage claim restarts from zero.
+    await this.db.queryAsync(
+      `UPDATE wiki_reading_sessions
+       SET total_chunks = ?, updated_at = ?, delivered_batches = 0,
+           integrated_batches = 0, integrated_chunks = 0,
+           last_integration_unchanged = 0, final_synthesis_at = NULL,
+           concepts_recorded_at = NULL, staged_concepts = '',
+           wiki_review_at = NULL, wiki_review = ''
+       WHERE session_id = ?`,
+      [totalChunks, Date.now(), open.sessionId],
+    );
+    await this.db.queryAsync(
+      "DELETE FROM wiki_reading_chunks WHERE session_id = ?",
+      [open.sessionId],
+    );
+    return {
+      ...open,
+      totalChunks,
+      deliveredBatches: 0,
+      integratedBatches: 0,
+      integratedChunks: 0,
+      lastIntegrationUnchanged: false,
+      finalSynthesisAt: null,
+      conceptsRecordedAt: null,
+      stagedConcepts: [],
+      wikiReviewAt: null,
+      wikiReview: null,
+    };
   }
 
   /**
@@ -413,6 +664,157 @@ export class WikiReadingSessions {
       [now, deliveredBatches, sessionId],
     );
     return { newChunks, deliveredBatches };
+  }
+
+  /**
+   * Record chunks a question actually READ, by chunk id rather than position.
+   *
+   * The difference from `recordDelivery` is what the caller knows. Paging hands
+   * over a contiguous run and knows every index in it; a question hands over
+   * whichever passages retrieval surfaced and the model then genuinely used,
+   * and knows them only by the `chunkId` that `search_fulltext` printed. The
+   * ids are resolved against the document's real chunk list here, so an id that
+   * belongs to another paper - or to no paper - is reported rather than
+   * silently counted as reading.
+   *
+   * No batch is charged. A question integrates its reading into the note in the
+   * same turn, so there is never a delivery waiting to be folded in, and
+   * charging one would make the very next question fail the integration gate.
+   *
+   * @returns which ids were new, which were already read, and which were not
+   *   chunks of this document at all.
+   */
+  async recordReadChunkIds(
+    sessionId: number,
+    chunkIds: readonly number[],
+    documentChunks: ReadonlyArray<{ chunkId: number }>,
+  ): Promise<{
+    newIndexes: number[];
+    alreadyRead: number[];
+    unknownChunkIds: number[];
+  }> {
+    const indexByChunkId = new Map<number, number>();
+    documentChunks.forEach((chunk, index) => {
+      indexByChunkId.set(Number(chunk.chunkId), index);
+    });
+    const known = new Set(await this.deliveredIndexes(sessionId));
+    const newIndexes: number[] = [];
+    const alreadyRead: number[] = [];
+    const unknownChunkIds: number[] = [];
+    const seen = new Set<number>();
+    for (const raw of chunkIds) {
+      const chunkId = Number(raw);
+      const index = indexByChunkId.get(chunkId);
+      if (index === undefined) {
+        unknownChunkIds.push(chunkId);
+        continue;
+      }
+      // A repeat inside ONE call is as much a duplicate as a repeat across
+      // calls, and neither may inflate coverage.
+      if (seen.has(index)) continue;
+      seen.add(index);
+      if (known.has(index)) {
+        alreadyRead.push(index);
+        continue;
+      }
+      newIndexes.push(index);
+    }
+    if (newIndexes.length || alreadyRead.length) {
+      const now = Date.now();
+      for (const index of [...newIndexes, ...alreadyRead]) {
+        const chunk = documentChunks[index];
+        await this.db.queryAsync(
+          `INSERT INTO wiki_reading_chunks (session_id, chunk_index, chunk_id, delivered_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(session_id, chunk_index) DO UPDATE SET
+             chunk_id = excluded.chunk_id,
+             delivered_at = excluded.delivered_at`,
+          [sessionId, index, Number(chunk.chunkId), now],
+        );
+      }
+      await this.db.queryAsync(
+        "UPDATE wiki_reading_sessions SET updated_at = ? WHERE session_id = ?",
+        [now, sessionId],
+      );
+    }
+    return {
+      newIndexes: newIndexes.sort((a, b) => a - b),
+      alreadyRead: alreadyRead.sort((a, b) => a - b),
+      unknownChunkIds,
+    };
+  }
+
+  /** Has this chunk id been read for this paper, in either mode? */
+  async hasReadChunkId(
+    libraryID: number,
+    itemKey: string,
+    chunkId: number,
+  ): Promise<boolean> {
+    const found = await this.db.valueQueryAsync(
+      `SELECT 1 FROM wiki_reading_chunks c
+       JOIN wiki_reading_sessions s ON s.session_id = c.session_id
+       WHERE s.library_id = ? AND s.item_key = ? AND c.chunk_id = ?
+       LIMIT 1`,
+      [libraryID, itemKey, chunkId],
+    );
+    return found != null;
+  }
+
+  /**
+   * Note that the reading note has moved ahead of the Wiki by `chunks` chunks.
+   *
+   * Additive: two questions answered from the same paper before either is
+   * written up owe the sum, and the debt is discharged in one go by the commit
+   * that cites the paper.
+   */
+  async addPendingWiki(sessionId: number, chunks: number): Promise<void> {
+    if (chunks <= 0) return;
+    const now = Date.now();
+    await this.db.queryAsync(
+      `UPDATE wiki_reading_sessions
+       SET pending_wiki_chunks = pending_wiki_chunks + ?,
+           pending_wiki_since = COALESCE(pending_wiki_since, ?),
+           updated_at = ?
+       WHERE session_id = ?`,
+      [Math.floor(chunks), now, now, sessionId],
+    );
+  }
+
+  /** The Wiki has caught up with the note. */
+  async clearPendingWiki(sessionId: number): Promise<void> {
+    await this.db.queryAsync(
+      `UPDATE wiki_reading_sessions
+       SET pending_wiki_chunks = 0, pending_wiki_since = NULL, updated_at = ?
+       WHERE session_id = ?`,
+      [Date.now(), sessionId],
+    );
+  }
+
+  /** Remember what a full-text read inherited from question-driven reading. */
+  async recordQuestionCarryOver(
+    sessionId: number,
+    chunks: number,
+  ): Promise<void> {
+    await this.db.queryAsync(
+      `UPDATE wiki_reading_sessions
+       SET question_chunks_carried_over = ?, updated_at = ?
+       WHERE session_id = ?`,
+      [Math.max(0, Math.floor(chunks)), Date.now(), sessionId],
+    );
+  }
+
+  /** Record the whole-Wiki review that precedes the write-up. */
+  async recordWikiReview(
+    sessionId: number,
+    review: WikiWholeWikiReview,
+  ): Promise<void> {
+    const now = Date.now();
+    await this.db.queryAsync(
+      `UPDATE wiki_reading_sessions
+       SET wiki_review = ?, wiki_review_at = ?, updated_at = ?
+       WHERE session_id = ?`,
+      [JSON.stringify(review), now, now, sessionId],
+    );
   }
 
   /** Every chunk index delivered so far, ascending. */
@@ -614,6 +1016,7 @@ export class WikiReadingSessions {
       sessionId: number | null;
       finalSynthesisAt: number | null;
       integratedChunks: number;
+      mode: WikiReadingMode | null;
     }
   > {
     const session = await this.latestForItem(libraryID, itemKey);
@@ -627,12 +1030,14 @@ export class WikiReadingSessions {
         firstMissingIndex: null,
         finalSynthesisAt: null,
         integratedChunks: 0,
+        mode: null,
       };
     }
     return {
       sessionId: session.sessionId,
       finalSynthesisAt: session.finalSynthesisAt,
       integratedChunks: session.integratedChunks,
+      mode: session.mode,
       ...(await this.coverage(session.sessionId)),
     };
   }

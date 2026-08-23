@@ -157,13 +157,13 @@ const NOTE = [
   "# Directional solidification of columnar arrays",
   "",
   "## Research question",
-  "Whether an imposed thermal gradient fixes the width of the columnar band, and under what conditions the band collapses to equiaxed grains.",
+  "Whether an imposed thermal gradient fixes the width of the columnar band, and under what conditions the band collapses to equiaxed grains (chunk 0).",
   "",
   "## Method and conditions",
-  "Solidification runs at a series of imposed gradients, with the band width measured at fixed stations along the rig.",
+  "Solidification runs at a series of imposed gradients, with the band width measured at fixed stations along the rig (chunk 1).",
   "",
   "## Results and mechanism",
-  "Band width narrows monotonically with increasing gradient over the range studied, consistent with a growth-front stability argument.",
+  "Band width narrows monotonically with increasing gradient over the range studied, consistent with a growth-front stability argument (chunk 2).",
   "",
   "## Scope and limits",
   "One alloy, one rig geometry; the transition threshold is reported but not independently verified here.",
@@ -236,11 +236,28 @@ async function readToEnd(itemKey, limit = 20) {
   return pages;
 }
 
+/**
+ * The whole-Wiki review a completed full-text read owes before the write-up.
+ *
+ * Sent on every prepare in these fixtures because it is ignored unless a paper
+ * is actually finished, and the blocks below are about paging, sessions and
+ * commits rather than about the review itself - which is tested in
+ * test-wiki-qa-reading.js.
+ */
+const WIKI_REVIEW = {
+  pages: "The existing Page covers this subject; no new Page and no retitling needed.",
+  claims: "One Claim to add; nothing already stored is contradicted or superseded by it.",
+  evidence: "Evidence for the new Claim is quoted from a chunk delivered in this read.",
+  concepts: "No terminology beyond what the concept library already holds; nothing to merge.",
+  relations: "No relation to draw or withdraw: this paper links no two concepts already stored.",
+};
+
 async function commitClaim(options) {
   const prepared = await service.prepareUpdate({
     libraryID: 1,
     query: options.title,
     proposedPageTitles: [options.title],
+    wikiReview: WIKI_REVIEW,
   });
   return service.commit({
     libraryID: 1,

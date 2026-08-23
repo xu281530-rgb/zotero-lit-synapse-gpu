@@ -211,10 +211,10 @@ function noteBody(sections) {
     "# Two-stage forming of columnar grain arrays",
     "",
     "## Research question",
-    "Whether an imposed thermal gradient during directional solidification, followed by rapid hot pressing, can fix a columnar grain array without losing its alignment.",
+    "Whether an imposed thermal gradient during directional solidification, followed by rapid hot pressing, can fix a columnar grain array without losing its alignment (chunk 0).",
     "",
     "## Materials and apparatus",
-    "A nickel-base superalloy processed on a directional solidification rig instrumented with embedded thermocouples and a pyrometer.",
+    "A nickel-base superalloy processed on a directional solidification rig instrumented with embedded thermocouples and a pyrometer (chunk 1).",
     "",
     ...sections,
     "",
@@ -722,12 +722,70 @@ block("the write-up waits for the whole-paper pass", async () => {
     "the pass is recorded against the open paper, not merely stored as terms",
   );
 
+  // 2.5.0: the synthesis and the concept pass both look at the PAPER. Neither
+  // looks at the Wiki, which has been growing incrementally the whole time and
+  // has therefore drifted - a Claim written from an early chunk that a late one
+  // bounds, two Concepts written turns apart that are one, a relation that no
+  // longer holds. The last gate is one pass over all five axes of what is
+  // already stored, with the finished paper in hand.
+  await assert.rejects(
+    () =>
+      service.prepareUpdate({
+        libraryID: 1,
+        query: "Columnar array forming",
+        proposedPageTitles: ["Columnar array forming"],
+      }),
+    /review the WHOLE Wiki against the finished paper/iu,
+    "a read and named paper still owes one pass over the Wiki it has been building",
+  );
+
+  // Silence on an axis is not an answer: it cannot be told from not looking.
+  await assert.rejects(
+    () =>
+      service.prepareUpdate({
+        libraryID: 1,
+        query: "Columnar array forming",
+        proposedPageTitles: ["Columnar array forming"],
+        wikiReview: {
+          pages: "The existing Page covers this; nothing to add or retitle.",
+          claims: "The corrected 8 K/mm threshold supersedes the claim written from section 2.1.",
+          evidence: "",
+          concepts: "CET and equiaxed grain are already held; nothing to merge.",
+          relations: "No relation to draw or withdraw from this paper.",
+        },
+      }),
+    /missing a real answer for: evidence/iu,
+    "every axis has to be answered, and an empty one is named",
+  );
+
+  const REVIEW = {
+    pages: "The existing Page covers this subject; nothing to add or retitle.",
+    claims: "The corrected 8 K/mm threshold supersedes the claim written from section 2.1.",
+    evidence: "The superseded claim is thin and gets the corrected excerpt attached at paper depth.",
+    concepts: "CET and equiaxed grain are already held; no duplicates and nothing to correct.",
+    relations: "No relation between stored concepts is drawn or withdrawn by this paper.",
+  };
+
   const prepared = await service.prepareUpdate({
     libraryID: 1,
     query: "Columnar array forming",
     proposedPageTitles: ["Columnar array forming"],
+    wikiReview: REVIEW,
   });
-  assert.ok(prepared.prepareToken, "with both passes done, the write-up may start");
+  assert.ok(prepared.prepareToken, "with all three passes done, the write-up may start");
+  assert.equal(
+    prepared.readingSession.wikiReviewRecorded,
+    true,
+    "and the review is recorded against the paper, not merely validated",
+  );
+
+  // Recorded, so a retry after a validation error does not have to re-answer.
+  const again = await service.prepareUpdate({
+    libraryID: 1,
+    query: "Columnar array forming",
+    proposedPageTitles: ["Columnar array forming"],
+  });
+  assert.ok(again.prepareToken, "the review is asked for once per paper, not once per call");
 });
 
 block("finalSynthesis is refused before the paper has been delivered", async () => {

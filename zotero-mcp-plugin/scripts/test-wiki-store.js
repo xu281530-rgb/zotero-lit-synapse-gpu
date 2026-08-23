@@ -1173,7 +1173,7 @@ await bodyAwareService.updateReadingNote({
     "# Confirmed body evidence",
     "",
     "## What the paper establishes",
-    "The results section reports a cooling behaviour under stated conditions, and the paper is short enough that the single indexed passage carries all of it.",
+    "The results section reports a cooling behaviour under stated conditions (chunk 0), and the paper is short enough that the single indexed passage carries all of it.",
     "",
     "## Scope and limits",
     "Nothing outside the reported condition range is demonstrated, and no independent replication is offered.",

@@ -154,6 +154,8 @@ export function buildToolCatalog(): ToolDefinition[] {
       'PAGING: topK is the size of ONE page, not the depth of the search. The response carries a pagination block: appliedKeywordMinScore and appliedSemanticMinScore (the two floors these results were gated by), totalRelevant (how many documents at least one branch admitted — often more than one page), returned, hasMore and nextCursor. Gating happens BEFORE paging, so a later page can never contain a document both branches rejected, and a short last page is never padded out. To read further, call hybrid_search again with cursor set to nextCursor and everything else unchanged; that returns the next window of the SAME ranking rather than a fresh search. Page on when the bottom of a page is still relevant, or when the user asked for a comprehensive sweep or a literature review — not by reflex. Never lower either floor to make more results appear.',
       '',
       'THEN: having read one paper\'s abstract, redo the expert analysis for THAT paper — re-fit domain and expertRole to what it actually studies, write a query and keywords out of its own subject matter, in the language that paper is written in — and call search_fulltext with its single itemKey. Answer from the stage-1 rows alone when the user only asks which literature is relevant.',
+      '',
+      'AFTER YOU ANSWER, RECORD WHAT YOU READ. For every paper whose passages you genuinely read and used, call wiki_update_reading_note with that itemKey, the chunkIds you used, the domain and expertRole you searched it with, and the paper\'s whole reading note rewritten to include what you just learned. Then update the Wiki from those notes with wiki_prepare_update and wiki_commit. That is how a conversation leaves anything behind: the note is the library\'s memory of the paper, and the Wiki is what the next question can retrieve. Skip both only when the turn genuinely read nothing new.',
     ].join('\n'),
     inputSchema: {
       type: 'object',
@@ -1098,7 +1100,15 @@ export function buildToolCatalog(): ToolDefinition[] {
   {
     name: 'wiki_prepare_update',
     category: 'wiki',
-    description: 'Search existing Wiki Page, Concept/Alias, Claim keyword and Claim embedding candidates before proposing a controlled Wiki update. This tool never writes. CREATE_PAGE requires the short-lived prepareToken returned here.',
+    description: [
+      'Search existing Wiki Page, Concept/Alias, Claim keyword and Claim embedding candidates before proposing a controlled Wiki update. This tool never writes. CREATE_PAGE requires the short-lived prepareToken returned here.',
+      '',
+      'PREFER WHAT ALREADY EXISTS. The candidates come back so that a second question about the same subject EXTENDS the Page, Claim and Concept it already produced instead of creating a near-duplicate beside it. Look for the match before you propose anything new; a Wiki that grows a parallel Page every few turns is worth less than one Page that got better.',
+      '',
+      'pendingWikiWriteUp lists papers whose reading notes have moved ahead of the Wiki. Those are what this update owes: each stays closed to further question-driven reading until a commit cites it.',
+      '',
+      'AFTER A FULL-TEXT READ, this call asks for one more thing before it will start the write-up: wikiReview, a pass over the WHOLE Wiki with the finished paper in hand. It is refused once and asked for by name, so you will be told when it is needed rather than having to guess.'
+    ].join('\n'),
     inputSchema: {
       type: 'object',
       properties: {
@@ -1110,6 +1120,33 @@ export function buildToolCatalog(): ToolDefinition[] {
           maxItems: 2,
           items: { type: 'string' },
           description: 'Exact canonical Page titles being considered. The returned prepareToken authorizes only these titles; defaults to query.'
+        },
+        wikiReview: {
+          type: 'object',
+          description: 'The whole-Wiki review, required once a paper has been read in full and synthesised — and only then. With the complete paper in hand, say what it means for what the Wiki ALREADY holds, on all five axes. This is not a summary of what you are about to add: it is a correction pass over a Wiki that has been growing incrementally, page by page and question by question, and has therefore drifted. "Nothing to change here, because ..." is a real answer to any axis and is the commonest one. Answered once and remembered; a retry does not re-ask.',
+          properties: {
+            pages: {
+              type: 'string',
+              description: 'Does an existing Page need adjusting, splitting or retitling in light of the complete paper, or does a new one need creating? Name the Pages.'
+            },
+            claims: {
+              type: 'string',
+              description: 'Which existing Claims does the complete reading confirm, qualify, merge, correct or contradict? A Claim written from chunk 20 that chunk 140 turns out to bound is the case this exists for.'
+            },
+            evidence: {
+              type: 'string',
+              description: 'Which Claims are thin on Evidence, and which Evidence gathered mid-read can now be re-cited at full-paper depth? Name what you will attach.'
+            },
+            concepts: {
+              type: 'string',
+              description: 'Which terms need adding, correcting, completing or de-duplicating — including two Concepts written turns apart that turn out to be one?'
+            },
+            relations: {
+              type: 'string',
+              description: 'Which links between Concepts and Claims should now be drawn, and which drawn earlier no longer hold?'
+            }
+          },
+          required: ['pages', 'claims', 'evidence', 'concepts', 'relations']
         }
       },
       required: ['query']
@@ -1190,7 +1227,7 @@ export function buildToolCatalog(): ToolDefinition[] {
               evidence: {
                 type: 'array',
                 minItems: 1,
-                description: 'The exact chunks actually used for this Claim in this turn. Do not claim paper_reviewed unless every ordered document chunk was actually read.',
+                description: 'The exact chunks actually used for this Claim in this turn, quoted from the paper itself. Every chunk cited here must already be recorded as READ — delivered by wiki_build_from_paper, or named in a wiki_update_reading_note readChunkIds call — because a Claim may only rest on something the paper\'s reading note already accounts for. An excerpt from an unread chunk is refused by name. Never quote a reading note as Evidence: the note is your memory of the paper, the chunk is the paper. Do not claim paper_reviewed unless every ordered document chunk was actually read in a full-text pass.',
                 items: {
                   type: 'object',
                   properties: {
@@ -1442,13 +1479,17 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'TWO PHASES. The first call names the paper (itemKey, DOI, URL or title) and returns NO body text: it returns the metadata and abstract and asks you to generate this paper\'s expert reader with wiki_set_reading_expert. Chunks start only after that. This order is deliberate — a persona written after reading half the paper just describes what you already found.',
       '',
-      'PAGING. Once the expert exists, each call returns one page of chunks and the reading note as it currently stands. Pass cursor set to pagination.nextCursor from the previous response and change nothing else. pagination reports totalChunks, the range just returned, deliveredChunks / remainingChunks, and coverageComplete once every chunk has been delivered.',
+      'PAGING. Once the expert exists, each call returns one page of chunks and the reading note as it currently stands. Pass cursor set to pagination.nextCursor from the previous response and change nothing else. pagination reports totalChunks, the range just returned, deliveredChunks / remainingChunks, readChunkRanges and unreadChunkRanges, a coverageMap drawn as filled and hollow squares, and coverageComplete once every chunk has been delivered.',
+      '',
+      'IT CONTINUES WHATEVER QUESTIONS ALREADY READ. If the user has been asking about this paper, part of it is already read and it already has a reading note. This does not start over: the same session, the same chunk ledger and the same note carry forward, paging resumes at the first chunk nobody has read, and runs of already-read text are skipped rather than re-delivered. carriedOverFromQuestionAnswering says how much was inherited. Extend the existing note — never replace it with a fresh summary, and keep the chunk citations already in it. The one thing still asked for is a deliberate expert profile: the reader a question assembled on the fly is provisional, and reading a paper end to end deserves a considered one.',
       '',
       'INTEGRATION GATE. After each page, rewrite the WHOLE reading note with wiki_update_reading_note — merging the new text into one continuous account of the paper and correcting whatever the new text overtakes. Do not write per-page notes: "new in chunks 8-15" headings are refused. At most one delivered batch may be outstanding; asking for another page while two are is refused. A batch that genuinely adds nothing can be answered with unchanged: true and unchangedReason, but not twice in a row. Re-reading a chunk you were already given (to quote Evidence) is free and never counts against the gate.',
       '',
       'ONE PAPER AT A TIME. Starting a different paper while this one is unfinished is refused. Finish the open one first: read it out, do the final synthesis, then wiki_prepare_update and wiki_commit — or wiki_finish_reading with outcome "skipped" to close it without writing.',
       '',
-      'READ DEPTH. Evidence submitted with read_depth paper_reviewed or cross_paper is stored at section_read unless BOTH pagination.coverageComplete is true for that paper AND the whole-paper final synthesis has been recorded. Delivery is not understanding.',
+      'READ DEPTH. Evidence submitted with read_depth paper_reviewed or cross_paper is stored at section_read unless BOTH pagination.coverageComplete is true for that paper AND the whole-paper final synthesis has been recorded. Delivery is not understanding. Coverage accumulated by answering questions never qualifies on its own, however complete it becomes: only a full-text read can do the synthesis, and only the synthesis unlocks whole-paper depth.',
+      '',
+      'THIS IS NOT THE TOOL FOR ANSWERING A QUESTION. It reads one paper end to end, on explicit user request, and takes the library\'s single reading slot while it does. To answer a question, use hybrid_search then search_fulltext, and record what you actually read with wiki_update_reading_note and readChunkIds — that path takes no slot, works across several papers at once, and feeds this same note.',
       '',
       'RESUMING. The reading note lives as a Markdown attachment on the Zotero item, so a restart, a dropped connection or a context compaction loses nothing. Call this tool without a cursor (or wiki_get_reading_note) and it hands back the note, the expert and the chunk to resume at.',
       '',
@@ -1520,7 +1561,15 @@ export function buildToolCatalog(): ToolDefinition[] {
     name: 'wiki_update_reading_note',
     category: 'wiki',
     description: [
-      'Replace the open paper\'s reading note with your current understanding of the whole paper. This is how each batch of chunks is actually read, and it is what the integration gate in wiki_build_from_paper waits for.',
+      'Replace a paper\'s reading note with your current understanding of the whole paper. This is how reading is actually recorded, in BOTH ways a paper gets read: batch by batch during a wiki_build_from_paper pass, and passage by passage while answering the user\'s questions.',
+      '',
+      'AFTER ANSWERING A QUESTION FROM A PAPER, CALL THIS. Retrieval gave you passages; you read some of them and used them to answer. Send itemKey, readChunkIds (the chunkId of every passage you ACTUALLY read and used — never the ones you skimmed past or that turned out irrelevant), the domain and expertRole you gave search_fulltext, and the whole rewritten note. Those chunks are then recorded as read for that paper, and the note becomes the long-term memory of everything the library has ever learned from it. Do this for EVERY paper the turn genuinely read: three papers read means three calls. Then update the Wiki from what you wrote. Retrieval is not reading, so a chunk you did not use must not be listed — the count it feeds is what the server will and will not stand behind.',
+      '',
+      'ORDER IS FIXED: note first, Wiki second. A paper whose last reading is still only in its note refuses to be read again until a wiki_commit cites it. The note is where understanding accumulates; the Wiki is where it becomes usable by anything other than this conversation.',
+      '',
+      'CITE THE CHUNKS IN THE TEXT. Every fact, parameter, result, mechanism and figure in the note names the chunk it came from, written in the prose — "melt-pool depth reaches 1.2 mm (chunk 42)". Without the number the trail back to the source is lost, and a Claim built on this note still has to quote the paper\'s own chunk. Citations go in sentences, never in headings: a heading naming chunks is a page log and is refused separately.',
+      '',
+      'IT ONLY GROWS. This note is a progressive reading, not a summary that gets re-summarised. Restructure it, merge duplicated passages, correct what later text overtakes — but a confirmed fact, with its chunk citation, stays until the paper itself contradicts it. A rewrite that loses more than a tenth of the note is refused, because the failure this catches is invisible one turn at a time: compress a little every turn and by the twentieth question everything read on page 3 is gone.',
       '',
       'SEND THE WHOLE NOTE, every time. Not a diff, not only the new part. Rewriting is the point: add, delete, merge, move, correct. When a later section overturns something an earlier one implied, rewrite that passage rather than leaving both standing. The note must always read as one continuous, self-consistent account of the paper.',
       '',
@@ -1530,9 +1579,9 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'unchanged: true (with unchangedReason) records that a batch — references, acknowledgements, a repeated caption — leaves the account intact. It cannot be used twice in a row and cannot be used for the final synthesis.',
       '',
-      'finalSynthesis: true is the whole-paper pass, available only once every chunk has been delivered. It is required before wiki_prepare_update will start the write-up, and before Evidence can be stored at paper_reviewed or cross_paper depth.',
+      'finalSynthesis: true is the whole-paper pass, available only once every chunk has been delivered THROUGH A FULL-TEXT READ. It is required before wiki_prepare_update will start the write-up, and before Evidence can be stored at paper_reviewed or cross_paper depth. It is refused on a paper read only by questions, however much of it they have accumulated: whole-paper depth names an act — reading it through, then reconciling it as one thing — that scattered passages never perform. Open it with wiki_build_from_paper, which continues this same note and asks only for what questions never reached.',
       '',
-      'The note is your reading memory, never Evidence. Claims still need excerpts quoted from the paper\'s own chunks.'
+      'The note is your reading memory, never Evidence. Claims still need excerpts quoted from the paper\'s own chunks — and wiki_commit refuses an excerpt from a chunk that was never recorded as read here, which is the other half of "note first, Wiki second".'
     ].join('\n'),
     inputSchema: {
       type: 'object',
@@ -1556,7 +1605,20 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         finalSynthesis: {
           type: 'boolean',
-          description: 'The whole-paper pass, once every chunk has been delivered.'
+          description: 'The whole-paper pass, once every chunk has been delivered by a full-text read. Not available on a paper read only through questions.'
+        },
+        readChunkIds: {
+          type: 'array',
+          items: { type: 'integer', minimum: 0 },
+          description: 'The chunkId of every passage you ACTUALLY read and used to answer this turn, from search_fulltext or get_document_chunks on this same paper. Sending them is what records reading; retrieval alone records nothing. List only what you used — a passage that came back and was skimmed past is not reading, and this count is what the server will stand behind. Repeats are free and never double-counted, so re-reading a chunk to check a quotation costs nothing. Omit entirely while paging through wiki_build_from_paper: those chunks were booked when they were handed over.'
+        },
+        domain: {
+          type: 'string',
+          description: 'The discipline and sub-field you read this paper as, the same one you passed to search_fulltext. Used to give a question-driven reading a reader, so you are not asked to compose a persona per question. Ignored once the paper has a deliberate expert profile.'
+        },
+        expertRole: {
+          type: 'string',
+          description: 'The specialist perspective you read it from, the same one you passed to search_fulltext.'
         }
       },
       required: []

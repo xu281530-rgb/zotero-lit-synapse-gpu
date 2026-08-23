@@ -15,17 +15,23 @@ import {
 import { WikiEvidenceRelinker } from "./wikiEvidenceRelinker";
 import {
   WIKI_MAX_OUTSTANDING_BATCHES,
+  WIKI_REVIEW_AXES,
+  WIKI_REVIEW_MIN_AXIS_CHARS,
   WikiReadingIntegrationRequired,
   integrationDebt,
   type WikiReadingAbandonOutcome,
   type WikiReadingSessionRecord,
+  type WikiWholeWikiReview,
 } from "./wikiReadingSession";
 import {
   WIKI_EXPERT_OPEN_SCOPE_MANDATE,
   WIKI_READING_NOTE_SCHEMA,
   WikiReadingNoteStore,
+  assertChunkCitations,
   assertHolisticBody,
+  assertNoNoteRegression,
   formatChunkRanges,
+  formatCoverageMap,
   parseReadingNote,
   renderReadingNote,
   stripMachineBlock,
@@ -164,8 +170,14 @@ export class WikiService {
     query: string;
     limit?: number;
     proposedPageTitles?: string[];
+    /**
+     * The whole-Wiki review, required once a paper has been read in full.
+     * See {@link assertReadyToWriteUp}.
+     */
+    wikiReview?: Partial<WikiWholeWikiReview>;
   }): Promise<any> {
     this.prunePrepareTokens();
+    await this.recordWikiReviewIfOffered(options.libraryID, options.wikiReview);
     await this.assertReadyToWriteUp(options.libraryID);
     const exactCandidates = await this.store.prepareUpdate(options);
     const semanticCandidates = await this.search({
@@ -223,6 +235,11 @@ export class WikiService {
     const sessions = await this.store.readingSessions();
     const openSession = await sessions.getOpen(options.libraryID);
     if (openSession) await sessions.markPrepared(openSession.sessionId);
+    // Every paper whose note has run ahead of the Wiki, so the write-up can be
+    // planned over all of them at once. A round of questions typically leaves
+    // three, and writing up one and forgetting the others is the failure this
+    // list exists to make impossible to overlook.
+    const pendingWiki = await sessions.listPendingWiki(options.libraryID);
 
     const prepareToken = `${Date.now().toString(36)}-${Math.random()
       .toString(36)
@@ -247,7 +264,23 @@ export class WikiService {
               sessionId: openSession.sessionId,
               itemKey: openSession.itemKey,
               state: "prepared",
+              mode: openSession.mode,
+              wikiReviewRecorded: openSession.wikiReviewAt !== null,
             },
+          }
+        : {}),
+      ...(pendingWiki.length
+        ? {
+            pendingWikiWriteUp: pendingWiki.map((session) => ({
+              itemKey: session.itemKey,
+              pendingChunks: session.pendingWikiChunks,
+              mode: session.mode,
+            })),
+            pendingWikiWriteUpNote:
+              "These papers have reading in their notes that has not reached the Wiki. This update should " +
+              "carry it: add or correct the Claims that reading established, attach its Evidence quoted " +
+              "from those papers' own chunks, and update the Concepts and relations it touched. Each stays " +
+              "closed to further question-driven reading until a commit cites it.",
           }
         : {}),
     };
@@ -297,6 +330,84 @@ export class WikiService {
           "new. Then come back to wiki_prepare_update.",
       );
     }
+    // The last gate, and the widest. The two above look at the NOTE and at the
+    // terminology; neither looks at the Wiki, which by this point has usually
+    // been growing for a while - a Page created after the third question, a
+    // Claim written from chunk 20 that chunk 140 turns out to qualify, Evidence
+    // gathered at chunk_local that the completed read can now carry deeper, two
+    // Concepts that six questions apart became duplicates, a relation drawn
+    // early that no longer holds. Incremental building is what makes the Wiki
+    // useful during a read and what makes it drift by the end of one, and the
+    // only moment the drift is visible is now, with the whole paper in hand.
+    //
+    // Answered once, in five sentences, and remembered - a retry after a
+    // validation error does not re-ask. "Nothing to change here, because ..."
+    // is a proper answer to any axis and is the commonest one; what is not
+    // accepted is silence, which cannot be told from not having looked.
+    if (open.wikiReviewAt === null) {
+      throw new Error(
+        `${open.itemKey} is read, synthesised and its concepts are recorded. One pass left before the ` +
+          "write-up: review the WHOLE Wiki against the finished paper, not just the part you are about " +
+          "to add. Call wiki_prepare_update again with wikiReview, an object answering all five of " +
+          "pages, claims, evidence, concepts and relations — for each, what this paper means you should " +
+          "ADD, CORRECT, MERGE or LEAVE ALONE in what the Wiki already holds, and why. Concretely: " +
+          "pages — does an existing Page need adjusting, or a new one creating; claims — which existing " +
+          "Claims does the complete reading confirm, qualify, merge or contradict; evidence — which " +
+          "Claims are thin, and which Evidence gathered mid-read can now be re-cited at full-paper " +
+          "depth; concepts — which terms need adding, correcting or de-duplicating; relations — which " +
+          "links between concepts and claims should be drawn or withdrawn. " +
+          `Each answer needs at least ${WIKI_REVIEW_MIN_AXIS_CHARS} characters, and "nothing to change, ` +
+          'because ..." is a real answer. The candidates this call returns are what you review against.',
+      );
+    }
+  }
+
+  /**
+   * Store the whole-Wiki review when a caller supplies one.
+   *
+   * Validated here rather than in the gate so a malformed review is reported as
+   * a malformed review, instead of silently leaving the gate shut and sending
+   * the caller round the same loop wondering why its answer was ignored.
+   */
+  private async recordWikiReviewIfOffered(
+    libraryID: number,
+    review: Partial<WikiWholeWikiReview> | undefined,
+  ): Promise<void> {
+    if (!review || typeof review !== "object") return;
+    const sessions = await this.store.readingSessions();
+    const open = await sessions.getOpen(libraryID);
+    // Nowhere to record it, so nothing to record. The review belongs to a
+    // full-text read; a question-driven update has no such pass and is not
+    // gated on one. Ignoring the argument rather than refusing the call keeps
+    // an over-eager caller from turning a harmless extra field into a failed
+    // write-up - the gate that actually needs the review asks for it by name.
+    if (!open) return;
+    const missing: string[] = [];
+    const complete: Record<string, string> = {};
+    for (const axis of WIKI_REVIEW_AXES) {
+      const text = String(
+        (review as Record<string, unknown>)[axis] ?? "",
+      ).trim();
+      if (text.length < WIKI_REVIEW_MIN_AXIS_CHARS) {
+        missing.push(axis);
+        continue;
+      }
+      complete[axis] = text;
+    }
+    if (missing.length) {
+      throw new Error(
+        `The Wiki review is missing a real answer for: ${missing.join(", ")}. All five of ` +
+          `${WIKI_REVIEW_AXES.join(", ")} must be answered with at least ` +
+          `${WIKI_REVIEW_MIN_AXIS_CHARS} characters saying what this paper means for what the Wiki ` +
+          'already holds. "Nothing to change here, because the paper only confirms what page X already ' +
+          'states" is a valid answer; an empty string is not, because it cannot be told apart from not ' +
+          "having looked.",
+      );
+    }
+    await sessions.recordWikiReview(
+      open.sessionId,
+      complete as unknown as WikiWholeWikiReview,
+    );
   }
 
   async getPage(pageId: number): Promise<any> {
@@ -375,6 +486,7 @@ export class WikiService {
     }
     const status = await vectorStore.getIndexStatus(itemKey, libraryID);
     const bodyState = bodyIndexStateFromSourceKind(status?.sourceKind);
+    await this.assertChunkWasRead(libraryID, itemKey, chunk.chunkId, bodyState);
     const resetGeneration = await vectorStore.getCommittedResetGeneration();
     return {
       libraryID,
@@ -395,6 +507,50 @@ export class WikiService {
       ),
       readDepthCeiling: bodyState === "body" ? undefined : "chunk_local",
     };
+  }
+
+  /**
+   * Refuse Evidence quoted from a passage that was never read.
+   *
+   * The excerpt check above proves the words are really in the paper. This
+   * proves someone looked at them. They are different claims and both are
+   * needed: retrieval hands back passages by the dozen, and a model can lift a
+   * sentence out of a snippet it never engaged with, cite it as Evidence, and
+   * produce a Wiki entry that is textually accurate and epistemically empty.
+   * The reading ledger knows which chunks were declared read - by paging in a
+   * full-text pass, or by being named in `readChunkIds` after a question - so
+   * the rule is simply that Evidence comes from those.
+   *
+   * It is also what makes "note first, Wiki second" more than advice. Chunks
+   * become read by being folded into the reading note, so a Claim can only
+   * ever rest on something the note already accounts for.
+   *
+   * Body-less documents are exempt: their "chunks" are the title and abstract,
+   * there is nothing to page through, and evidence from them is already capped
+   * at `chunk_local` by `readDepthCeiling`.
+   */
+  private async assertChunkWasRead(
+    libraryID: number,
+    itemKey: string,
+    chunkId: number,
+    bodyState: string,
+  ): Promise<void> {
+    if (bodyState !== "body") return;
+    const sessions = await this.store.readingSessions();
+    if (await sessions.hasReadChunkId(libraryID, itemKey, chunkId)) return;
+    const coverage = await sessions.coverageForItem(libraryID, itemKey);
+    throw new Error(
+      `Evidence for ${itemKey} quotes chunk ${chunkId}, which is not recorded as read. The excerpt is ` +
+        "genuinely in the paper — what is missing is a reading of it. Retrieval returning a passage is " +
+        "not reading it, so passages have to be declared: after answering from them, call " +
+        `wiki_update_reading_note with itemKey "${itemKey}", readChunkIds including ${chunkId}, and the ` +
+        "whole reading note rewritten to account for what they say. Then commit this Claim. " +
+        (coverage.sessionId === null
+          ? "Nothing has been read from this paper yet."
+          : `So far ${coverage.deliveredChunks} of ${coverage.totalChunks} chunks are recorded as read.`) +
+        " For a full-text read, page through wiki_build_from_paper instead — it books each page as it " +
+        "hands it over, so anything it delivered can be quoted immediately.",
+    );
   }
 
   /**
@@ -433,15 +589,29 @@ export class WikiService {
     }
     const sessions = await this.store.readingSessions();
     const coverage = await sessions.coverageForItem(libraryID, itemKey);
-    if (coverage.complete && coverage.finalSynthesisAt !== null) {
+    if (
+      coverage.mode !== "qa" &&
+      coverage.complete &&
+      coverage.finalSynthesisAt !== null
+    ) {
       return requested;
     }
+    // A question-driven session is refused whole-paper depth on the MODE, not
+    // on the count, and the two are different rules. Sixty questions can, in
+    // principle, touch every chunk of a paper; the count would then say the
+    // paper was covered, and it would be wrong. `paper_reviewed` names an act
+    // - reading the paper through and then reconciling it as a whole - that
+    // scattered passages never perform, however many of them there are. Only
+    // a promotion to a full-text read can change that, and it keeps every
+    // chunk already read.
     const read =
       coverage.sessionId === null
         ? "no reading session recorded"
-        : coverage.complete
-          ? "every chunk delivered but no whole-paper synthesis of the reading note"
-          : `only ${coverage.deliveredChunks} of ${coverage.totalChunks} chunks delivered`;
+        : coverage.mode === "qa"
+          ? `${coverage.deliveredChunks} of ${coverage.totalChunks} chunks read by answering questions, which is not a full-text reading of the paper`
+          : coverage.complete
+            ? "every chunk delivered but no whole-paper synthesis of the reading note"
+            : `only ${coverage.deliveredChunks} of ${coverage.totalChunks} chunks delivered`;
     warnings.push(
       `Evidence from ${itemKey} asked for read_depth "${requested}", but the server has ${read}. ` +
         `It was stored as "section_read". Whole-paper depth needs both: read every chunk through ` +
@@ -581,7 +751,21 @@ export class WikiService {
     // Durable. The token can never be spent again.
     if (consumedToken) this.prepareTokens.delete(consumedToken);
 
-    const readingSession = await this.settleReadingSession(input, actions);
+    const citedKeys = new Set<string>();
+    for (const action of actions) {
+      for (const entry of (action as any).evidence ?? []) {
+        if (entry?.itemKey) citedKeys.add(String(entry.itemKey));
+      }
+    }
+    const questionReading = await this.settleQuestionReading(
+      input.libraryID,
+      citedKeys,
+    );
+    const readingSession = await this.settleReadingSession(
+      input,
+      actions,
+      citedKeys,
+    );
 
     const queue = await this.store.embeddingQueue();
     const embeddingPending = await queue.pendingCount();
@@ -599,6 +783,67 @@ export class WikiService {
           ? `The Wiki write is committed and permanent. ${embeddingPending} claim embedding(s) are queued and will be built in the background; Wiki keyword retrieval already sees these claims, and semantic retrieval will once the queue drains. Nothing needs to be re-submitted.`
           : undefined,
       ...(readingSession ? { readingSession } : {}),
+      ...(questionReading ? { questionReading } : {}),
+    };
+  }
+
+  /**
+   * Let every paper this commit cited off its "the note is ahead of the Wiki"
+   * debt, and report the papers still carrying one.
+   *
+   * Separate from `settleReadingSession` because they answer different
+   * questions. That one is about the library's single full-text slot - who
+   * holds it, may they let go of it. This one is about a round of questions,
+   * which routinely reads three papers and writes them up in ONE commit; each
+   * of those papers has its own debt and its own session, and none of them is
+   * the paper holding the slot.
+   *
+   * Papers left owing are named rather than merely counted, because the model
+   * is about to be asked another question and needs to know which papers it
+   * may not read again yet.
+   */
+  private async settleQuestionReading(
+    libraryID: number,
+    citedKeys: Set<string>,
+  ): Promise<
+    | {
+        clearedPapers: string[];
+        stillPending: Array<{ itemKey: string; pendingChunks: number }>;
+        note?: string;
+      }
+    | undefined
+  > {
+    const sessions = await this.store.readingSessions();
+    const pending = await sessions.listPendingWiki(libraryID);
+    if (!pending.length) return undefined;
+    const cleared: string[] = [];
+    for (const session of pending) {
+      if (!citedKeys.has(session.itemKey)) continue;
+      await sessions.clearPendingWiki(session.sessionId);
+      cleared.push(session.itemKey);
+    }
+    const stillPending = pending
+      .filter((session) => !citedKeys.has(session.itemKey))
+      .map((session) => ({
+        itemKey: session.itemKey,
+        pendingChunks: session.pendingWikiChunks,
+      }));
+    return {
+      clearedPapers: cleared,
+      stillPending,
+      ...(stillPending.length
+        ? {
+            note:
+              `This commit wrote up ${cleared.length ? cleared.join(", ") : "none"} of the papers whose ` +
+              `reading notes were ahead of the Wiki. Still owing: ` +
+              stillPending
+                .map((row) => `${row.itemKey} (${row.pendingChunks} chunk(s))`)
+                .join(", ") +
+              ". Those papers refuse another question's reading until what has already been read from " +
+              "them reaches the Wiki, so commit their Claims too — or close them with " +
+              'wiki_finish_reading and outcome "skipped" if their reading is not worth writing up.',
+          }
+        : {}),
     };
   }
 
@@ -621,6 +866,7 @@ export class WikiService {
   private async settleReadingSession(
     input: WikiCommitInput,
     actions: WikiCommitAction[],
+    citedKeys: Set<string>,
   ): Promise<
     | {
         sessionId: number;
@@ -638,12 +884,6 @@ export class WikiService {
     const open = await sessions.getOpen(input.libraryID);
     if (!open) return undefined;
 
-    const citedKeys = new Set<string>();
-    for (const action of actions) {
-      for (const entry of (action as any).evidence ?? []) {
-        if (entry?.itemKey) citedKeys.add(String(entry.itemKey));
-      }
-    }
     const concernsOpenPaper =
       input.readingSessionId === open.sessionId || citedKeys.has(open.itemKey);
 
@@ -711,17 +951,36 @@ export class WikiService {
       );
     }
     const sessions = await this.store.readingSessions();
-    const open = await sessions.getOpen(options.libraryID);
+    // With a key, close THAT paper, whichever mode it is being read in: a
+    // round of questions can leave three papers open, none of which holds the
+    // full-text slot, and "I read a bit of that one and it is not worth
+    // writing up" has to be sayable about each of them. Without a key it means
+    // what it always meant - close the paper being read in full.
+    const requestedKey = String(options.itemKey ?? "").trim();
+    const open = requestedKey
+      ? await sessions.openForItem(options.libraryID, requestedKey)
+      : await sessions.getOpen(options.libraryID);
     if (!open) {
+      // Naming a paper that is not open stays an ERROR rather than a quiet
+      // "nothing to do". The itemKey is a guard, and the whole value of a
+      // guard is that being wrong about which paper you are closing is loud:
+      // silently succeeding would let a caller believe it closed one paper
+      // while a different one still held the slot.
+      const stillOpen = await sessions.getOpen(options.libraryID);
+      if (requestedKey && stillOpen) {
+        throw new Error(
+          `The open paper is ${stillOpen.itemKey}, not ${requestedKey}. Pass that itemKey, or omit ` +
+            "itemKey to close whatever is open. (Papers being read by questions are closed by naming " +
+            "them too, but nothing is open for " +
+            `${requestedKey}.)`,
+        );
+      }
       return {
         closed: false,
-        message: "No paper is currently open for this library.",
+        message: requestedKey
+          ? `No reading session is open for ${requestedKey} in this library.`
+          : "No paper is currently open for full-text reading in this library.",
       };
-    }
-    if (options.itemKey && options.itemKey.trim() !== open.itemKey) {
-      throw new Error(
-        `The open paper is ${open.itemKey}, not ${options.itemKey.trim()}. Pass that itemKey, or omit itemKey to close whatever is open.`,
-      );
     }
     const coverage = await sessions.coverage(open.sessionId);
     await sessions.close(open.sessionId, options.outcome, options.note ?? "");
@@ -739,7 +998,20 @@ export class WikiService {
       chunksRead: coverage.deliveredChunks,
       totalChunks: coverage.totalChunks,
       ...(noteResult ? { readingNote: noteResult } : {}),
-      message: `Paper ${open.itemKey} closed as ${options.outcome}. The library is free for the next paper.`,
+      mode: open.mode,
+      // Closing discharges whatever the note owed the Wiki: the reading has
+      // been deliberately abandoned, so there is nothing left to write up and
+      // nothing left to block the next question.
+      pendingWikiChunksDischarged: open.pendingWikiChunks,
+      message:
+        `Paper ${open.itemKey} closed as ${options.outcome}.` +
+        (open.mode === "fulltext"
+          ? " The library is free for the next paper."
+          : " It was being read by questions, so it held no reading slot; what it does free is the " +
+            "block on reading it again — its note keeps everything already understood.") +
+        (open.pendingWikiChunks > 0
+          ? ` ${open.pendingWikiChunks} chunk(s) of reading in its note were never written into the Wiki, and now never will be.`
+          : ""),
     };
   }
 
@@ -772,7 +1044,11 @@ export class WikiService {
   }): Promise<any> {
     const sessions = await this.store.readingSessions();
     const session = await this.requireOpenSession(options.libraryID, options.itemKey);
-    if (session.expert) {
+    // A provisional profile is the placeholder a question-driven read assembles
+    // from the retrieval call's own domain and expertRole. It is replaceable
+    // precisely because it was never composed: the full-text read of a paper
+    // that questions had been probing still gets its one deliberate reader.
+    if (session.expert && !session.expert.provisional) {
       throw new Error(
         `Paper ${session.itemKey} already has its expert profile ("${session.expert.persona}"), ` +
           "and it is generated once per paper on purpose so the rest of the reading is done by " +
@@ -836,6 +1112,24 @@ export class WikiService {
    * it may not be used twice running, so "nothing new" cannot quietly become
    * the way the whole paper gets read.
    */
+  /**
+   * Fold what has just been read into the paper's one Markdown note.
+   *
+   * Two callers, one document. A `wiki_build_from_paper` page arrives with no
+   * `readChunkIds`: the chunks were already booked when they were handed over,
+   * and this call only says the note now accounts for them. A QUESTION arrives
+   * with `readChunkIds` - the passages retrieval surfaced and the model
+   * actually used to answer - and those are booked here, because that is the
+   * only moment the server can tell reading from retrieval. A chunk that came
+   * back from `search_fulltext` and was skimmed past is not reading, and the
+   * model is the only party that knows which is which, so it declares them.
+   *
+   * The note is the same file either way. That is the whole design: the
+   * understanding a hundred questions built up and the understanding a
+   * full-text pass builds are the same understanding of the same paper, and
+   * splitting them into two documents would mean the full-text read starts
+   * from nothing and the questions are forgotten.
+   */
   async updateReadingNote(options: {
     libraryID: number;
     itemKey?: string;
@@ -843,7 +1137,19 @@ export class WikiService {
     unchanged?: boolean;
     unchangedReason?: string;
     finalSynthesis?: boolean;
+    /**
+     * The chunk ids this turn actually READ and used, from `search_fulltext`
+     * or `get_document_chunks`. Present only on the question-driven path.
+     */
+    readChunkIds?: number[];
+    /** The sub-field this paper was read as, from the retrieval call. */
+    domain?: string;
+    /** The specialist perspective it was read from, from the same call. */
+    expertRole?: string;
   }): Promise<any> {
+    if (Array.isArray(options.readChunkIds) && options.readChunkIds.length) {
+      return this.integrateQuestionReading(options as any);
+    }
     const sessions = await this.store.readingSessions();
     const session = await this.requireOpenSession(options.libraryID, options.itemKey);
     if (!session.expert) {
@@ -861,6 +1167,16 @@ export class WikiService {
       throw new Error(
         "The final synthesis is a rewrite of the whole paper's account in one pass, so it cannot be " +
           'submitted as "unchanged". Send the full markdown.',
+      );
+    }
+    if (finalSynthesis && session.mode === "qa") {
+      throw new Error(
+        `${session.itemKey} has been read by answering questions, not by a full-text pass, so the ` +
+          "whole-paper synthesis is not available on it. The synthesis is what makes paper_reviewed " +
+          "mean something, and a paper assembled from scattered passages has never been read end to " +
+          "end even when the passages happen to add up to all of it. Open it properly with " +
+          "wiki_build_from_paper — it continues this same note and this same chunk ledger, and only " +
+          "asks for the parts questions never reached — then do the synthesis at the end of that.",
       );
     }
     if (finalSynthesis && !coverage.complete) {
@@ -916,6 +1232,8 @@ export class WikiService {
         );
       }
       assertHolisticBody(submitted);
+      assertChunkCitations(submitted);
+      assertNoNoteRegression(previousBody, submitted, { finalSynthesis });
       body = submitted;
     }
 
@@ -962,6 +1280,257 @@ export class WikiService {
   }
 
   /**
+   * The question-driven read: book the chunks this turn used, then rewrite the
+   * note around them.
+   *
+   * This is the whole of the incremental path, and it is deliberately ONE call
+   * rather than a read tool plus a write tool. A separate "record what I read"
+   * step would be a step a model can forget, and a chunk recorded as read
+   * before the note is rewritten is a chunk that can end up counted but never
+   * understood - which is precisely the coverage inflation the reading ledger
+   * exists to prevent. Booking and integrating in the same call makes "the
+   * note accounts for everything marked read" true by construction.
+   *
+   * The order inside is the rule the user asked for, made structural: the note
+   * is validated and written FIRST, and only then does the Wiki debt go up.
+   * The Wiki is updated from the note, so a turn that could not write a decent
+   * note has nothing to put in the Wiki either, and fails before it has
+   * changed anything.
+   */
+  private async integrateQuestionReading(options: {
+    libraryID: number;
+    itemKey?: string;
+    markdown?: string;
+    readChunkIds: number[];
+    domain?: string;
+    expertRole?: string;
+    finalSynthesis?: boolean;
+    unchanged?: boolean;
+  }): Promise<any> {
+    const itemKey = String(options.itemKey ?? "").trim();
+    if (!itemKey) {
+      throw new Error(
+        "itemKey is required with readChunkIds: the chunk ids say WHICH passages were read, and only " +
+          "the item key says which paper they belong to. Pass the same itemKey you gave search_fulltext.",
+      );
+    }
+    if (options.finalSynthesis === true) {
+      throw new Error(
+        "finalSynthesis is the whole-paper pass and belongs to a full-text read, never to a question. " +
+          "Answer the question, record what you read here, and leave the synthesis to " +
+          "wiki_build_from_paper — which continues this same note.",
+      );
+    }
+    if (options.unchanged === true) {
+      throw new Error(
+        'unchanged cannot be combined with readChunkIds: chunks you actually read and used to answer a ' +
+          "question, by definition, changed what the note should say. Send the rewritten note. If the " +
+          "passages turned out to say nothing you did not already have, pass no readChunkIds at all — " +
+          "reading is what you USE, not what retrieval returned.",
+      );
+    }
+
+    const item = await this.requirePaperItem(options.libraryID, itemKey);
+    const vectorStore = getVectorStore();
+    await vectorStore.initialize();
+    const [documentChunks, indexStatus] = await Promise.all([
+      vectorStore.getChunksForItem(itemKey, options.libraryID),
+      vectorStore.getIndexStatus(itemKey, options.libraryID),
+    ]);
+    if (!documentChunks.length) {
+      throw new Error(
+        `${itemKey} has no indexed chunks, so nothing about it can be recorded as read. Build its search index first.`,
+      );
+    }
+    const bodyState = bodyIndexStateFromSourceKind(indexStatus?.sourceKind);
+    if (bodyState !== "body") {
+      throw new Error(
+        `${itemKey} holds only metadata/abstract chunks (index state: ${bodyState}). Reading it means ` +
+          "reading its body, so build the body-text index before recording a reading of it.",
+      );
+    }
+
+    const sessions = await this.store.readingSessions();
+    const session = await sessions.startOrContinue({
+      libraryID: options.libraryID,
+      itemKey,
+      title: String(item.getField?.("title") || ""),
+      totalChunks: documentChunks.length,
+      mode: "qa",
+    });
+
+    // The "note before Wiki" gate, one turn later. A paper whose last reading
+    // never reached the Wiki does not get to be read again: otherwise a reader
+    // answers question after question from the same paper, improves the note
+    // every time, and the Wiki - which is the part that survives the
+    // conversation - never learns anything at all.
+    if (session.pendingWikiChunks > 0) {
+      throw new Error(
+        `The last ${session.pendingWikiChunks} chunk(s) read from ${itemKey} are in its reading note but ` +
+          "not yet in the Wiki, and the note must never run ahead of the Wiki by more than one turn. " +
+          "Write that reading up first: wiki_prepare_update, then wiki_commit with the Claims it " +
+          `established and their Evidence quoted from ${itemKey}'s own chunks. The commit clears this ` +
+          "and the next question can read further. (If the reading genuinely established nothing worth " +
+          "a Claim, commit the Evidence you do have against an existing Claim, or close the paper with " +
+          'wiki_finish_reading and outcome "skipped".)',
+      );
+    }
+
+    // An expert profile from what the retrieval call already decided. A
+    // question-driven read has a reader too - search_fulltext refuses to be
+    // recorded as domain-expert retrieval without `domain` and `expertRole`,
+    // re-fitted to THIS paper - so asking for the persona a second time would
+    // be asking the same question twice and slowing every question down to do
+    // it. The profile is only ever filled in, never overwritten: a persona
+    // written for a full-text read is the considered one and outranks this.
+    if (!session.expert) {
+      const expert = this.questionReadingExpert(
+        options.domain,
+        options.expertRole,
+        itemKey,
+      );
+      await sessions.setExpert(session.sessionId, expert);
+      session.expert = expert;
+    }
+
+    // Ids are checked as ARGUMENTS, before anything is judged about the note.
+    // A chunkId from the wrong paper is a mistake in the call, and answering it
+    // with "your note is too short" sends the caller to fix the wrong thing.
+    // Nothing is booked here - that happens once the note has passed.
+    const knownChunkIds = new Set(
+      documentChunks.map((chunk) => Number(chunk.chunkId)),
+    );
+    const unknownChunkIds = options.readChunkIds
+      .map((raw) => Number(raw))
+      .filter((id) => !knownChunkIds.has(id));
+    if (unknownChunkIds.length) {
+      throw new Error(
+        `These chunk ids are not passages of ${itemKey}: ${unknownChunkIds.join(", ")}. ` +
+          "chunkId comes from a search_fulltext or get_document_chunks call on THIS paper; ids from " +
+          "another document, and chunkIndex values passed as ids, both land here. Nothing was recorded.",
+      );
+    }
+
+    const previousBody = (await this.readNoteBody(item)) ?? "";
+    const submitted = stripMachineBlock(String(options.markdown ?? ""));
+    if (!submitted.trim()) {
+      throw new Error(
+        "markdown is required: send the ENTIRE reading note for this paper as it now stands, with what " +
+          "you just read merged into it — not a diff, not only the new part, and not only what answered " +
+          "this question. Call wiki_get_reading_note first if you do not have the current note.",
+      );
+    }
+    if (submitted.length < MIN_READING_NOTE_BODY_CHARS) {
+      throw new Error(
+        `The reading note is ${submitted.length} characters. It is this paper's long-term memory across ` +
+          "every question ever asked of it — question, materials, method chain, models and parameters, " +
+          "conditions, results, mechanisms, key figures and what they show, the terms it defines, each " +
+          `with the chunk it came from — so anything under ${MIN_READING_NOTE_BODY_CHARS} characters is ` +
+          "a placeholder rather than a reading.",
+      );
+    }
+    assertHolisticBody(submitted);
+    assertChunkCitations(submitted);
+    assertNoNoteRegression(previousBody, submitted, { finalSynthesis: false });
+
+    const booked = await sessions.recordReadChunkIds(
+      session.sessionId,
+      options.readChunkIds,
+      documentChunks,
+    );
+    const coverage = await sessions.coverage(session.sessionId);
+    await sessions.recordIntegration(session.sessionId, {
+      unchanged: false,
+      integratedChunks: coverage.deliveredChunks,
+      finalSynthesis: false,
+    });
+    const refreshed = (await sessions.get(session.sessionId)) ?? session;
+    const written = await this.writeNote(item, refreshed, submitted, "reading");
+
+    // Only now, with the note durable, does the Wiki fall behind. A turn that
+    // failed any check above never incurred a debt it could not discharge.
+    const newlyRead = booked.newIndexes.length;
+    if (newlyRead > 0) {
+      await sessions.addPendingWiki(session.sessionId, newlyRead);
+    }
+
+    const delivered = await sessions.deliveredIndexes(session.sessionId);
+    return {
+      itemKey,
+      integrated: true,
+      mode: refreshed.mode,
+      readingNote: written,
+      reading: {
+        newChunks: booked.newIndexes,
+        newChunkCount: newlyRead,
+        alreadyReadChunks: booked.alreadyRead,
+        // Re-reading a passage to check a quotation is normal and must not
+        // inflate anything, so the two numbers are reported apart.
+        alreadyReadCount: booked.alreadyRead.length,
+        readChunkRanges: formatChunkRanges(delivered),
+        coverageMap: formatCoverageMap(delivered, coverage.totalChunks),
+        deliveredChunks: coverage.deliveredChunks,
+        totalChunks: coverage.totalChunks,
+        coverageComplete: coverage.complete,
+        coveragePercent:
+          coverage.totalChunks === 0
+            ? 0
+            : Math.round(
+                (coverage.deliveredChunks / coverage.totalChunks) * 1000,
+              ) / 10,
+      },
+      readDepthCeiling: "section_read",
+      readDepthNote:
+        "Evidence from this reading is stored at chunk_local or section_read. Question-driven reading " +
+          "never reaches paper_reviewed however much of the paper it accumulates: that depth means the " +
+          "paper was read end to end and then synthesised as a whole, which is what wiki_build_from_paper " +
+          "does — and it will continue this same note and skip what you have already read.",
+      nextStep:
+        newlyRead > 0
+          ? `The note now accounts for ${coverage.deliveredChunks} of ${coverage.totalChunks} chunks. Update ` +
+            "the Wiki from it now, before the next question: call wiki_prepare_update with what this " +
+            "reading established, then wiki_commit. Update the Page, Claims, Concepts and relations that " +
+            "already exist rather than creating parallel ones, and quote every Evidence excerpt from " +
+            `${itemKey}'s own chunks — the note is your memory, never the source. Reading this paper ` +
+            "again is refused until that commit lands."
+          : "Every chunk you named had already been read, so the note improved but the Wiki owes nothing " +
+            "new. Carry on; write the Wiki when a turn actually adds something.",
+    };
+  }
+
+  /**
+   * The reader a question read this paper as.
+   *
+   * Built from the `domain` and `expertRole` the retrieval call declared, not
+   * invented here: those two are re-fitted to the specific paper before
+   * `search_fulltext` will record the call as domain-expert retrieval, so by
+   * the time a passage has been read the decision has already been made and
+   * paid for. Falling back to a generic reader is allowed rather than fatal -
+   * refusing here would lose a real reading over a missing label.
+   */
+  private questionReadingExpert(
+    domain: unknown,
+    expertRole: unknown,
+    itemKey: string,
+  ): WikiReadingExpert {
+    const field = String(domain ?? "").trim();
+    const role = String(expertRole ?? "").trim();
+    const persona = role
+      ? `${role}${field ? ` in ${field}` : ""}, reading ${itemKey} to answer specific questions about it.`
+      : `A reader of ${itemKey}${field ? ` working in ${field}` : ""}, reached through questions rather than a full-text pass. Re-state this properly when the paper is read in full.`;
+    return {
+      persona,
+      focus: [
+        field || "what this paper actually establishes",
+        "the questions this paper has been asked so far",
+      ],
+      openScopeMandate: WIKI_EXPERT_OPEN_SCOPE_MANDATE,
+      createdAt: Date.now(),
+      provisional: true,
+    };
+  }
+
+  /**
    * Hand back the reading note and where the reading got to.
    *
    * The recovery entry point. After a restart or a compaction the model has
@@ -994,6 +1563,7 @@ export class WikiService {
     const raw = attachment ? await this.notes.read(attachment) : null;
     const parsed = raw ? parseReadingNote(raw) : { metadata: null, body: "" };
     const coverage = await sessions.coverage(session.sessionId);
+    const delivered = await sessions.deliveredIndexes(session.sessionId);
     return {
       found: true,
       itemKey: session.itemKey,
@@ -1006,7 +1576,7 @@ export class WikiService {
         updatedAt: session.updatedAt,
       },
       expert: session.expert,
-      progress: this.noteProgress(session, coverage),
+      progress: this.noteProgress(session, coverage, delivered),
       readingNote: {
         exists: Boolean(attachment),
         attachmentKey: attachment?.key ?? session.noteKey ?? "",
@@ -1018,13 +1588,29 @@ export class WikiService {
     };
   }
 
-  /** The open session, checked against an optional itemKey guard. */
+  /**
+   * The session a call is about, checked against an optional itemKey guard.
+   *
+   * With a key, look that paper up in EITHER mode. Without one, it means the
+   * paper holding the full-text slot, which is what it has always meant.
+   *
+   * The distinction matters for the refusals more than for the successes: a
+   * call naming a paper that questions have been reading has to reach that
+   * paper's session in order to be told what is actually wrong with it -
+   * "the whole-paper synthesis is not available on a paper read by questions"
+   * - rather than bouncing off "no paper is open", which is both unhelpful and
+   * untrue.
+   */
   private async requireOpenSession(
     libraryID: number,
     itemKey?: string,
   ): Promise<WikiReadingSessionRecord> {
     const sessions = await this.store.readingSessions();
-    const open = await sessions.getOpen(libraryID);
+    const requestedKey = String(itemKey ?? "").trim();
+    const open = requestedKey
+      ? ((await sessions.openForItem(libraryID, requestedKey)) ??
+        (await sessions.getOpen(libraryID)))
+      : await sessions.getOpen(libraryID);
     if (!open) {
       throw new Error(
         "No paper is open for Wiki reading in this library. Start one with wiki_build_from_paper, " +
@@ -1092,6 +1678,8 @@ export class WikiService {
       abstract: String(item.getField?.("abstractNote") || ""),
       expert: session.expert,
       readChunks: formatChunkRanges(delivered),
+      coverageMap: formatCoverageMap(delivered, coverage.totalChunks),
+      mode: session.mode,
       totalChunks: coverage.totalChunks,
       nextChunk: coverage.complete
         ? null
@@ -1158,8 +1746,18 @@ export class WikiService {
       remainingChunks: number;
       firstMissingIndex: number | null;
     },
+    delivered?: readonly number[],
   ): Record<string, unknown> {
     return {
+      mode: session.mode,
+      ...(delivered
+        ? {
+            readChunkRanges: formatChunkRanges(delivered),
+            coverageMap: formatCoverageMap(delivered, coverage.totalChunks),
+          }
+        : {}),
+      pendingWikiChunks: session.pendingWikiChunks,
+      wikiReviewRecorded: session.wikiReviewAt !== null,
       deliveredChunks: coverage.deliveredChunks,
       totalChunks: coverage.totalChunks,
       remainingChunks: coverage.remainingChunks,
@@ -1837,12 +2435,30 @@ export class WikiService {
     // Opening the session is what enforces one paper at a time. It throws
     // WikiReadingSessionConflict when a different paper is still unfinished.
     const sessions = await this.store.readingSessions();
+    // Whether this paper has been read by questions before matters here and
+    // nowhere else, so it is read BEFORE the session is opened - opening it
+    // promotes a question session to a full-text one, which is exactly what
+    // makes this the last moment the difference is visible.
+    const priorSession = await sessions.openForItem(libraryID, itemKey);
+    if (priorSession?.mode === "qa") {
+      // Recorded on the session rather than computed here, because after this
+      // call the session IS a full-text one and the question-driven reading it
+      // inherited is no longer distinguishable from its own. It is worth
+      // keeping: a reader resuming after a restart needs to know it is
+      // continuing somebody's notes rather than starting a paper.
+      await sessions.recordQuestionCarryOver(
+        priorSession.sessionId,
+        (await sessions.coverage(priorSession.sessionId)).deliveredChunks,
+      );
+    }
     const session = await sessions.startOrContinue({
       libraryID,
       itemKey,
       title,
       totalChunks: chunks.length,
+      mode: "fulltext",
     });
+    const carriedOverFromQuestions = session.questionChunksCarriedOver;
 
     const target = {
       libraryID,
@@ -1852,10 +2468,18 @@ export class WikiService {
       url: String(item.getField("url") || ""),
     };
 
-    // Phase one: no expert, no body text. The metadata and the abstract are
-    // everything needed to decide who should be reading this paper, and they
-    // are all that is handed over until that decision is made.
-    if (!session.expert) {
+    // Phase one: no considered expert, no body text. The metadata and the
+    // abstract are everything needed to decide who should be reading this
+    // paper, and they are all that is handed over until that decision is made.
+    // A paper questions have already been probing arrives here too, carrying a
+    // provisional reader assembled from a retrieval call; the deliberate one
+    // is still asked for, because who reads a paper end to end is a decision
+    // worth making once and making properly.
+    if (!session.expert || session.expert.provisional) {
+      const briefingCoverage = await sessions.coverage(session.sessionId);
+      const briefingDelivered = await sessions.deliveredIndexes(
+        session.sessionId,
+      );
       if (servedFromCursor) {
         throw new Error(
           `Paper ${itemKey} has no expert reader yet, so no body text has been delivered and this ` +
@@ -1884,15 +2508,29 @@ export class WikiService {
           pageSize,
           hasMore: chunks.length > 0,
           servedFromCursor: false,
-          deliveredChunks: 0,
-          remainingChunks: chunks.length,
-          coverageComplete: false,
+          deliveredChunks: briefingCoverage.deliveredChunks,
+          remainingChunks: briefingCoverage.remainingChunks,
+          coverageComplete: briefingCoverage.complete,
+          readChunkRanges: formatChunkRanges(briefingDelivered),
+          coverageMap: formatCoverageMap(briefingDelivered, chunks.length),
           blocked: "expert_required",
         },
         readingNote: {
           status: "awaiting_expert" as WikiReadingNoteStatus,
-          exists: false,
+          exists: briefingCoverage.deliveredChunks > 0,
         },
+        ...(carriedOverFromQuestions > 0
+          ? {
+              carriedOverFromQuestionAnswering: {
+                chunksAlreadyRead: carriedOverFromQuestions,
+                note:
+                  `${carriedOverFromQuestions} chunk(s) of this paper have already been read while ` +
+                  "answering questions, and there is a reading note for it. This read continues both — " +
+                  "call wiki_get_reading_note to see what is already understood before you write the " +
+                  "expert profile, then read only what questions never reached.",
+              },
+            }
+          : {}),
         expertInstruction:
           "Before any body text is delivered, decide who is reading this paper. From the title, " +
           "metadata and abstract above, write the persona of a domain expert who is the right reader " +
@@ -1908,12 +2546,50 @@ export class WikiService {
       };
     }
 
+    const deliveredBefore = new Set(
+      await sessions.deliveredIndexes(session.sessionId),
+    );
+
+    // An explicit offset is an instruction, not a starting guess: it is how a
+    // chunk gets re-read to check an excerpt against the source before that
+    // excerpt becomes Evidence. It is honoured exactly, and the gap-skip below
+    // is switched off for it - skipping ahead would silently hand back some
+    // other part of the paper than the one that was asked for.
+    let explicitOffset = false;
     if (!servedFromCursor) {
       const requested = Number(options.offset);
-      offset =
-        Number.isFinite(requested) && requested > 0 ? Math.floor(requested) : 0;
+      // `offset: 0` is an instruction like any other - it is how the opening
+      // of a paper gets re-read to quote from it - so what counts is whether
+      // an offset was GIVEN, not whether it was above zero. Testing `> 0` made
+      // the two indistinguishable, which was harmless only while the implicit
+      // case also started at zero.
+      if (options.offset !== undefined && Number.isFinite(requested) && requested >= 0) {
+        offset = Math.floor(requested);
+        explicitOffset = true;
+      } else {
+        // Resume where the reading actually stopped, not at zero. On a paper
+        // questions had already been asking about, zero would spend the first
+        // pages re-delivering text the note already accounts for; on a fresh
+        // paper there is no first missing index below zero, so this is the old
+        // behaviour exactly.
+        offset =
+          (await sessions.coverage(session.sessionId)).firstMissingIndex ?? 0;
+      }
     }
     offset = Math.min(offset, chunks.length);
+    // Skip forward over a run of already-read text at the head of this page.
+    // Question-driven reading leaves holes rather than a clean frontier - {7,
+    // 8, 42} means the gaps are 0-6, 9-41, 43-onwards - so a cursor that walks
+    // straight through would spend whole pages on text the note already
+    // accounts for. Only the run AT THE START is skipped: an already-read
+    // chunk in the middle of a page comes back with it, which costs one chunk
+    // and keeps the page a contiguous stretch of the paper rather than a
+    // discontinuous splice that reads as nonsense.
+    if (!explicitOffset) {
+      while (offset < chunks.length && deliveredBefore.has(offset)) {
+        offset += 1;
+      }
+    }
 
     const page = chunks.slice(offset, offset + pageSize);
     const rows = page.map((chunk, index) => ({
@@ -1927,11 +2603,8 @@ export class WikiService {
     // The integration gate. Only NEW text is gated: re-reading a chunk already
     // delivered is how an excerpt gets checked against the source before it
     // becomes Evidence, and that must stay free.
-    const deliveredAlready = new Set(
-      await sessions.deliveredIndexes(session.sessionId),
-    );
     const carriesNewText = rows.some(
-      (row) => !deliveredAlready.has(row.chunkIndex),
+      (row) => !deliveredBefore.has(row.chunkIndex),
     );
     const debt = integrationDebt(session);
     if (carriesNewText && debt > WIKI_MAX_OUTSTANDING_BATCHES) {
@@ -1942,7 +2615,7 @@ export class WikiService {
           "the WHOLE note rewritten to account for everything delivered so far - adding, merging, " +
           "moving, and correcting earlier passages that the newer text has overtaken - and reading " +
           "resumes at chunk index " +
-          `${(await sessions.coverage(session.sessionId)).firstMissingIndex ?? deliveredAlready.size}. ` +
+          `${(await sessions.coverage(session.sessionId)).firstMissingIndex ?? deliveredBefore.size}. ` +
           "If a batch genuinely changed nothing, send unchanged: true with unchangedReason instead; " +
           "that cannot be used twice in a row.",
         {
@@ -1957,11 +2630,13 @@ export class WikiService {
       session.sessionId,
       rows.map((row) => ({ chunkIndex: row.chunkIndex, chunkId: row.chunkId })),
     );
-    const [coverage, afterDelivery] = await Promise.all([
+    const [coverage, afterDelivery, deliveredAfter] = await Promise.all([
       sessions.coverage(session.sessionId),
       sessions.get(session.sessionId),
+      sessions.deliveredIndexes(session.sessionId),
     ]);
     const current = afterDelivery ?? session;
+    const deliveredAfterSet = new Set(deliveredAfter);
 
     const end = offset + rows.length;
     const hasMore = end < chunks.length;
@@ -1992,6 +2667,22 @@ export class WikiService {
       },
       expert: current.expert,
       chunkCount: chunks.length,
+      ...(carriedOverFromQuestions > 0
+        ? {
+            carriedOverFromQuestionAnswering: {
+              chunksAlreadyRead: carriedOverFromQuestions,
+              note:
+                `${carriedOverFromQuestions} chunk(s) of this paper were already read while answering ` +
+                "questions, and this read continues that same session, that same reading note and that " +
+                "same chunk ledger — it does not start over. Paging skips runs of text the note already " +
+                "accounts for and asks only for what questions never reached. Carry the existing note " +
+                "forward: reorganise and extend it, never replace it with a fresh summary, and keep the " +
+                "chunk citations already in it. When every chunk has been delivered, the whole-paper " +
+                "synthesis becomes available for the first time — questions could not do it — and only " +
+                "then can this paper's Evidence be stored at paper_reviewed depth.",
+            },
+          }
+        : {}),
       pagination: {
         totalChunks: chunks.length,
         returned: rows.length,
@@ -2017,13 +2708,23 @@ export class WikiService {
         ...(coverage.firstMissingIndex === null
           ? {}
           : { firstMissingChunkIndex: coverage.firstMissingIndex }),
+        // What has been read and what is left, as ranges rather than counts.
+        // On a paper questions had already been asked of, the holes are
+        // scattered and a single "resume at" index does not describe them.
+        readChunkRanges: formatChunkRanges(deliveredAfter),
+        unreadChunkRanges: formatChunkRanges(
+          Array.from({ length: chunks.length }, (_, i) => i).filter(
+            (i) => !deliveredAfterSet.has(i),
+          ),
+        ),
+        coverageMap: formatCoverageMap(deliveredAfter, chunks.length),
       },
       chunks: rows,
       readingNote: {
         exists: Boolean(noteAttachment),
         attachmentKey: noteAttachment?.key ?? current.noteKey ?? "",
         bodyChars: noteBody.length,
-        ...this.noteProgress(current, coverage),
+        ...this.noteProgress(current, coverage, deliveredAfter),
         ...(includeNote ? { markdown: noteBody } : {}),
       },
       integrationInstruction:
