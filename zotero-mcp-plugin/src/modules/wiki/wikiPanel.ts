@@ -9,7 +9,20 @@ import {
   type GraphNodeInput,
   type Graph3DController,
 } from "./graph3D";
+import {
+  button,
+  clickable,
+  commandBlock,
+  describeError,
+  element,
+  jumpToItem,
+  labelFor,
+  section,
+  shorten,
+} from "./wikiDom";
 import { rowColumn } from "./wikiRow";
+import { createWikiTermsView } from "./wikiTermsView";
+import type { WikiTermRecord } from "./wikiConceptTerms";
 import { getWikiService } from "./wikiService";
 import {
   closeWikiTab,
@@ -43,6 +56,9 @@ const TAB_TITLE = "LLM 知识库";
  * to for tab types it does not know.
  */
 const TAB_ICON = "zotero-mcp-wiki";
+
+/** The three panes the header switches between. */
+type WikiView = "entries" | "graph" | "terms";
 
 const CLAIM_TYPE_LABELS: Record<WikiClaimType, string> = {
   definition: "定义",
@@ -238,117 +254,6 @@ async function confirmPageDeletion(
 const GRAPH_HINT =
   "拖动旋转、滚轮缩放、Shift 拖动平移；点击文献查看它的全部知识点，点击连线查看两篇文献的共同结论。";
 
-function labelFor<T extends string>(
-  labels: Readonly<Record<T, string>>,
-  value: unknown,
-): string {
-  return labels[value as T] ?? String(value);
-}
-
-function element<K extends keyof HTMLElementTagNameMap>(
-  doc: Document,
-  tag: K,
-  className?: string,
-  text?: string,
-): HTMLElementTagNameMap[K] {
-  const node = doc.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-function button(
-  doc: Document,
-  text: string,
-  title: string,
-  variant?: string,
-): HTMLButtonElement {
-  const node = element(
-    doc,
-    "button",
-    variant ? `zmp-wiki-command ${variant}` : "zmp-wiki-command",
-    text,
-  );
-  node.type = "button";
-  node.title = title;
-  return node;
-}
-
-/**
- * A clickable block that is deliberately not a `<button>`.
- *
- * Gecko lays a button's children out in an anonymous XUL box that does not
- * grow to fit them: a two-row button renders one row tall and spills its
- * second row over whatever comes next. Wrapping the rows in an inner element
- * does not help, because the wrapper is inside that same box. So every
- * control in this panel that holds more than one line of text is a div with
- * button semantics instead - a normal block box, which grows.
- *
- * The rule that keeps this from coming back: anything built as a `<button>`
- * here stays on one line (`white-space: nowrap`); anything that wraps is
- * built with this helper.
- */
-function clickable(
-  doc: Document,
-  className: string,
-  title?: string,
-): HTMLElement {
-  const node = element(doc, "div", className);
-  node.setAttribute("role", "button");
-  node.setAttribute("tabindex", "0");
-  if (title !== undefined) node.title = title;
-  node.addEventListener("keydown", (event: Event) => {
-    const key = (event as KeyboardEvent).key;
-    if (key !== "Enter" && key !== " ") return;
-    event.preventDefault();
-    node.click();
-  });
-  return node;
-}
-
-/** A wrapping, full-width command: the same look, without the button box. */
-function commandBlock(doc: Document, text: string, title: string): HTMLElement {
-  const node = clickable(doc, "zmp-wiki-command is-block", title);
-  node.textContent = text;
-  return node;
-}
-
-/**
- * A section of the reading column: a labelled heading plus its body.
- *
- * The middle column used to be one undivided stack, which is why the summary,
- * the terms and the claims ran into each other. Every block now announces what
- * it is before its content starts.
- */
-function section(
-  doc: Document,
-  title: string,
-  count?: string,
-): { root: HTMLElement; heading: HTMLElement } {
-  const root = element(doc, "section", "zmp-wiki-section");
-  const heading = element(doc, "h3", "zmp-wiki-section-title", title);
-  if (count !== undefined) {
-    heading.append(element(doc, "span", "zmp-wiki-section-count", count));
-  }
-  root.append(heading);
-  return { root, heading };
-}
-
-/** One trimmed line for a graph label or tooltip. */
-function shorten(text: string, limit: number): string {
-  const flat = String(text).replace(/\s+/gu, " ").trim();
-  return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat;
-}
-
-async function jumpToItem(
-  win: any,
-  libraryID: number,
-  itemKey: string,
-): Promise<void> {
-  const item = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, itemKey);
-  if (!item) throw new Error(`Zotero 条目 ${libraryID}:${itemKey} 已不存在`);
-  await win.ZoteroPane.selectItem(item.id);
-}
 
 /**
  * Zotero's file picker.
@@ -387,10 +292,18 @@ function createFilePicker(): any {
  * Never throws: it is called from a click handler, where a rejection would be
  * swallowed as an unhandled promise and the user would see nothing at all.
  */
-async function exportMarkdown(win: any, libraryID: number): Promise<void> {
+async function saveMarkdown(
+  win: any,
+  options: {
+    render: () => Promise<string>;
+    dialogTitle: string;
+    defaultName: string;
+    clipboardMessage: string;
+  },
+): Promise<void> {
   let markdown: string;
   try {
-    markdown = await getWikiService().exportMarkdown(libraryID);
+    markdown = await options.render();
   } catch (error) {
     ztoolkit.log("[wiki] could not render the Wiki Markdown", error);
     Zotero.logError?.(error);
@@ -401,17 +314,17 @@ async function exportMarkdown(win: any, libraryID: number): Promise<void> {
   let picker: any;
   try {
     picker = createFilePicker();
-    picker.init(win, "导出 Zotero LLM 知识库", picker.modeSave);
+    picker.init(win, options.dialogTitle, picker.modeSave);
     picker.appendFilter("Markdown 文档", "*.md");
     // `defaultExtension` is what appends ".md" when the user types a bare
     // name; `defaultString` only seeds the field.
-    picker.defaultString = "zotero-llm-wiki.md";
+    picker.defaultString = options.defaultName;
     picker.defaultExtension = "md";
   } catch (error) {
     ztoolkit.log("[wiki] the Zotero file picker is unavailable", error);
     Zotero.logError?.(error);
     Zotero.Utilities.Internal.copyTextToClipboard(markdown);
-    win.alert("保存对话框不可用，Wiki Markdown 已复制到剪贴板。");
+    win.alert(options.clipboardMessage);
     return;
   }
 
@@ -437,6 +350,35 @@ async function exportMarkdown(win: any, libraryID: number): Promise<void> {
       `导出失败，文件未写入：${describeError(error).message}\n目标路径：${target}`,
     );
   }
+}
+
+/** The whole Wiki: pages, claims, evidence, and the concept library appendix. */
+async function exportMarkdown(win: any, libraryID: number): Promise<void> {
+  await saveMarkdown(win, {
+    render: () => getWikiService().exportMarkdown(libraryID),
+    dialogTitle: "导出 Zotero LLM 知识库",
+    defaultName: "zotero-llm-wiki.md",
+    clipboardMessage: "保存对话框不可用，Wiki Markdown 已复制到剪贴板。",
+  });
+}
+
+/**
+ * The concept library on its own.
+ *
+ * Same save path as the Wiki export, down to the Zotero 9 FilePicker
+ * construction and the `returnReplace` handling - there is one implementation
+ * of "save this Markdown where the user chooses", and both buttons use it.
+ */
+async function exportConceptLibrary(
+  win: any,
+  libraryID: number,
+): Promise<void> {
+  await saveMarkdown(win, {
+    render: () => getWikiService().exportConceptsMarkdown(libraryID),
+    dialogTitle: "导出 Zotero LLM 术语库",
+    defaultName: "zotero-llm-concepts.md",
+    clipboardMessage: "保存对话框不可用，术语库 Markdown 已复制到剪贴板。",
+  });
 }
 
 function claimStatus(claim: any): string {
@@ -496,15 +438,6 @@ export async function openWikiPanel(
  * Wiki load failure is almost always a storage-layer fault whose call chain is
  * the only thing that identifies it.
  */
-function describeError(error: unknown): { message: string; detail: string } {
-  if (error instanceof Error) {
-    return {
-      message: error.message || String(error),
-      detail: error.stack || `${error.name}: ${error.message}`,
-    };
-  }
-  return { message: String(error), detail: String(error) };
-}
 
 /**
  * Replace the tab's contents with a legible failure card.
@@ -586,11 +519,15 @@ async function renderWikiPanelContent(
     Zotero.Libraries.userLibraryID;
   const service = getWikiService();
   const store = service.getStore();
-  const [pages, status, snapshot] = await Promise.all([
+  const [pages, status, snapshot, conceptList] = await Promise.all([
     store.listPages(libraryID),
     store.getStatus(libraryID),
     store.getRetrievalSnapshot(libraryID),
+    service.listConcepts(libraryID),
   ]);
+  const conceptEntities = new Map(
+    conceptList.map((concept) => [concept.conceptId, concept]),
+  );
   if (!isCurrentWikiTabRender(render)) return;
 
   const panel = element(doc, "section", "zmp-wiki-panel");
@@ -612,12 +549,19 @@ async function renderWikiPanelContent(
   const refresh = button(doc, "刷新", "重新加载 Wiki 数据");
   refresh.addEventListener("click", () => void openWikiPanel(win));
   const exportButton = button(doc, "导出", "导出 Markdown 文档");
-  exportButton.addEventListener(
-    "click",
-    () => void exportMarkdown(win, libraryID),
-  );
+  // Three views, one bar, in reading order: what the library knows, how it is
+  // connected, and what it calls things. The two action buttons come after,
+  // because they act on whichever view is open rather than switching to one.
+  const entriesButton = button(doc, "知识条目", "查看知识条目与论断", "is-on");
   const graphButton = button(doc, "知识图谱", "在三维知识空间中查看文献关系");
-  headerActions.append(refresh, exportButton, graphButton);
+  const termsButton = button(doc, "术语库", "查看独立的专业概念与术语");
+  headerActions.append(
+    entriesButton,
+    graphButton,
+    termsButton,
+    exportButton,
+    refresh,
+  );
   header.append(headerActions);
   panel.append(header);
 
@@ -655,16 +599,22 @@ async function renderWikiPanelContent(
   const graphDetails = element(doc, "div", "zmp-wiki-graph-details");
   graphPane.append(graphStage, graphDetails);
   panel.append(graphPane);
+
+  // ---- Terminology -------------------------------------------------------
+  const termsView = createWikiTermsView({
+    win,
+    doc,
+    libraryID,
+    store,
+    reload: () => openWikiPanel(win),
+  });
+  panel.append(termsView.root);
+  /** Which of the three panes is showing. Read by the export button. */
+  let activeView: WikiView = "entries";
+
   container.querySelector(`#${PANEL_ID}`)?.remove();
   container.append(panel);
 
-  const aliasesByConcept = new Map<number, any[]>();
-  for (const alias of snapshot.aliases) {
-    const conceptId = Number(rowColumn(alias, "concept_id", "conceptId"));
-    const list = aliasesByConcept.get(conceptId) ?? [];
-    list.push(alias);
-    aliasesByConcept.set(conceptId, list);
-  }
   const concepts = new Map(
     snapshot.concepts.map((concept) => [
       Number(rowColumn(concept, "concept_id", "conceptId")),
@@ -775,35 +725,19 @@ async function renderWikiPanelContent(
     const tools = element(doc, "div", "zmp-wiki-page-tools");
     const concept = concepts.get(page.primaryConceptId);
     if (concept) {
-      const editTerm = button(doc, "编辑术语", "修改规范概念名称", "quiet");
-      editTerm.addEventListener("click", async () => {
-        const next = win.prompt("规范概念名称", concept.canonical_name);
-        if (!next) return;
-        await store.updateConcept({
-          libraryID,
-          conceptId: page.primaryConceptId,
-          canonicalName: next,
-        });
-        await openWikiPanel(win);
-      });
-      const addAlias = button(
+      // Editing terminology lives in ONE place now - the terminology view -
+      // rather than in two dialogs here that could only reach the flat name.
+      // This button takes the reader there with this page's concept open.
+      const openTerms = button(
         doc,
-        "添加别名",
-        "添加中文、英文或缩写别名",
+        "在术语库中编辑",
+        "在术语库中查看并编辑这个概念的全部术语",
         "quiet",
       );
-      addAlias.addEventListener("click", async () => {
-        const alias = win.prompt("别名", "");
-        if (!alias) return;
-        const language = win.prompt("语言代码", "und") || "und";
-        await store.updateConcept({
-          libraryID,
-          conceptId: page.primaryConceptId,
-          addAliases: [{ alias, language, source: "user", confidence: 1 }],
-        });
-        await openWikiPanel(win);
+      openTerms.addEventListener("click", () => {
+        openConceptInTerms(Number(page.primaryConceptId));
       });
-      tools.append(editTerm, addAlias);
+      tools.append(openTerms);
     }
     titleRow.append(tools);
     article.append(titleRow);
@@ -817,44 +751,67 @@ async function renderWikiPanelContent(
     }
 
     if (concept) {
+      // The same table the terminology view shows, read-only. Rendering the
+      // structured terms here rather than a row of alias chips means the page
+      // and the concept library can never describe a concept differently.
       const terms = section(doc, "术语与别名");
-      const grid = element(doc, "div", "zmp-wiki-terms");
-      const canonicalRow = element(doc, "div", "zmp-wiki-term-row");
-      canonicalRow.append(
-        element(doc, "span", "zmp-wiki-term-label", "规范术语"),
-        element(doc, "span", "zmp-wiki-term-value", concept.canonical_name),
-      );
-      grid.append(canonicalRow);
-      const aliasRow = element(doc, "div", "zmp-wiki-term-row");
-      aliasRow.append(element(doc, "span", "zmp-wiki-term-label", "别名"));
-      const aliases = aliasesByConcept.get(page.primaryConceptId) ?? [];
-      if (!aliases.length) {
-        aliasRow.append(
-          element(doc, "span", "zmp-wiki-alias-empty", "尚未登记别名"),
+      const entity = conceptEntities.get(Number(page.primaryConceptId));
+      const rows: WikiTermRecord[] = entity
+        ? ([entity.primaryTerm, ...entity.aliasTerms].filter(
+            Boolean,
+          ) as WikiTermRecord[])
+        : [];
+      if (!rows.length) {
+        terms.root.append(
+          element(
+            doc,
+            "p",
+            "zmp-wiki-alias-empty",
+            `${String(concept.canonical_name)}（尚未登记结构化术语）`,
+          ),
         );
-      }
-      for (const alias of aliases) {
-        const aliasButton = element(
-          doc,
-          "button",
-          "zmp-wiki-alias-chip",
-          String(alias.alias),
-        );
-        aliasButton.type = "button";
-        aliasButton.title = "删除此别名";
-        aliasButton.addEventListener("click", async () => {
-          if (!win.confirm(`确定删除别名“${alias.alias}”吗？`)) return;
-          await store.updateConcept({
-            libraryID,
-            conceptId: page.primaryConceptId,
-            removeAliasIds: [Number(alias.alias_id)],
-          });
-          await openWikiPanel(win);
+      } else {
+        const table = element(doc, "table", "zmp-wiki-term-table");
+        const header = element(doc, "tr", "zmp-wiki-term-table-head");
+        for (const column of ["序号", "中文术语", "英文术语", "简称"]) {
+          header.append(element(doc, "th", "", column));
+        }
+        table.append(header);
+        rows.forEach((term, index) => {
+          const row = element(
+            doc,
+            "tr",
+            `zmp-wiki-term-row-cells${term.role === "primary" ? " is-primary" : ""}`,
+          );
+          const number = element(
+            doc,
+            "td",
+            "zmp-wiki-term-index",
+            String(index + 1),
+          );
+          if (term.role === "primary") {
+            number.append(element(doc, "span", "zmp-wiki-term-badge", "主"));
+          }
+          // Same per-field tints as the terminology view. A reader looking at
+          // an entry should not have to switch views to find out which of its
+          // names the papers themselves vouch for.
+          const cell = (value: string, origin: string) =>
+            element(
+              doc,
+              "td",
+              `zmp-wiki-term-cell${value && origin ? ` origin-${origin}` : ""}`,
+              value || "—",
+            );
+          row.append(
+            number,
+            cell(term.zh, term.origins.zh),
+            cell(term.en, term.origins.en),
+            cell(term.abbr, term.origins.abbr),
+          );
+          table.append(row);
         });
-        aliasRow.append(aliasButton);
+        terms.root.append(table);
       }
-      grid.append(aliasRow);
-      terms.root.append(grid);
       article.append(terms.root);
     }
 
@@ -1322,8 +1279,20 @@ async function renderWikiPanelContent(
 
   /** Reveal the reading columns again, focused on whatever the reader picked. */
   const returnToReading = () => {
-    graphPane.hidden = true;
-    body.hidden = false;
+    showView("entries");
+  };
+
+  /** Open one concept in the terminology view, from anywhere in the panel. */
+  const openConceptInTerms = (conceptId: number): void => {
+    showView("terms");
+    void termsView
+      .refresh()
+      .then(() => termsView.select(conceptId))
+      .catch((error: unknown) => {
+        ztoolkit.log("[wiki] could not open the concept library", error);
+        Zotero.logError?.(error);
+        win.alert(`术语库加载失败：${describeError(error).message}`);
+      });
   };
 
   /** Open a claim in the Wiki reading view, evidence rail and all. */
@@ -1587,15 +1556,33 @@ async function renderWikiPanelContent(
     graphHint(GRAPH_HINT);
   };
 
-  graphButton.addEventListener("click", () => {
-    const showing = !graphPane.hidden;
-    graphPane.hidden = showing;
-    body.hidden = !showing;
-    if (showing) {
+  // ---- One view at a time ------------------------------------------------
+  //
+  // The three views are mutually exclusive panes over one panel rather than
+  // three tabs, so switching keeps everything each view had loaded: the graph
+  // is not rebuilt, the open concept is still open, and the claim whose
+  // evidence is showing is still showing.
+  const showView = (next: WikiView): void => {
+    body.hidden = next !== "entries";
+    graphPane.hidden = next !== "graph";
+    termsView.root.hidden = next !== "terms";
+    activeView = next;
+    for (const [view, control] of [
+      ["entries", entriesButton],
+      ["graph", graphButton],
+      ["terms", termsButton],
+    ] as Array<[WikiView, HTMLButtonElement]>) {
+      control.className = `zmp-wiki-command ${view === next ? "is-on" : ""}`.trim();
+    }
+    if (next !== "graph") {
       graph?.setAutoRotate(false);
       rotateButton.className = "zmp-wiki-command is-off";
-      return;
     }
+  };
+
+  entriesButton.addEventListener("click", () => showView("entries"));
+  graphButton.addEventListener("click", () => {
+    showView("graph");
     void drawGraph().catch((error: unknown) => {
       ztoolkit.log("[wiki] failed to draw the document graph", error);
       Zotero.logError?.(error);
@@ -1609,5 +1596,30 @@ async function renderWikiPanelContent(
         ),
       );
     });
+  });
+  termsButton.addEventListener("click", () => {
+    showView("terms");
+    void termsView.refresh().catch((error: unknown) => {
+      ztoolkit.log("[wiki] failed to load the concept library", error);
+      Zotero.logError?.(error);
+      termsView.root.replaceChildren(
+        element(doc, "h2", "", "术语库加载失败"),
+        element(
+          doc,
+          "p",
+          "zmp-wiki-error-message",
+          describeError(error).message,
+        ),
+      );
+    });
+  });
+
+  // The export button acts on whatever is open: the concept library in the
+  // terminology view, the whole Wiki document anywhere else. One button, and
+  // it always exports the thing the user is looking at.
+  exportButton.addEventListener("click", () => {
+    void (activeView === "terms"
+      ? exportConceptLibrary(win, libraryID)
+      : exportMarkdown(win, libraryID));
   });
 }

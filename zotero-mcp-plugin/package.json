@@ -1,7 +1,7 @@
 {
   "name": "zotero-mcp-plugin",
   "type": "module",
-  "version": "2.4.2",
+  "version": "2.4.4",
   "description": "Zotero MCP Plugin for Zotero 9.0.x with question-driven LLM Wiki memory, independent evidence-linked knowledge storage, hybrid keyword/semantic/Wiki retrieval, cursor pagination, and MCP 2025-06-18 Streamable HTTP",
   "config": {
     "addonName": "Zotero MCP Plugin",
@@ -9,7 +9,7 @@
     "addonRef": "zotero-mcp-plugin",
     "addonInstance": "ZoteroMCP",
     "prefsPrefix": "extensions.zotero.zotero-mcp-plugin",
-    "addonVersion": "2.4.2"
+    "addonVersion": "2.4.4"
   },
   "repository": {
     "type": "git",
@@ -64,6 +64,7 @@
     "test:reset-crash-consistency": "node --experimental-strip-types --experimental-sqlite scripts/test-reset-crash-consistency.js",
     "test:index-statistics": "node --experimental-strip-types --experimental-sqlite scripts/test-index-statistics.js",
     "test:wiki-store": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-store.js",
+    "test:wiki-concepts": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-concepts.js",
     "test:wiki-retrieval": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-retrieval.js",
     "test:wiki-ui": "node scripts/test-wiki-ui.js",
     "test:wiki-page-delete": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-page-delete.js",

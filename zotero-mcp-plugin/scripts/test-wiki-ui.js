@@ -9,6 +9,10 @@ import {
 } from "../src/modules/wiki/wikiTabManager.ts";
 
 const panel = fs.readFileSync("src/modules/wiki/wikiPanel.ts", "utf8");
+const termsView = fs.readFileSync(
+  "src/modules/wiki/wikiTermsView.ts",
+  "utf8",
+);
 const tabManager = fs.readFileSync(
   "src/modules/wiki/wikiTabManager.ts",
   "utf8",
@@ -30,17 +34,52 @@ for (const id of [
   assert.ok(panel.includes(id), `Wiki UI must define ${id}`);
 }
 
+for (const id of [
+  "zotero-mcp-wiki-terms-list",
+  "zotero-mcp-wiki-terms-detail",
+]) {
+  assert.ok(termsView.includes(id), `the terminology view must define ${id}`);
+}
+
 for (const behavior of [
-  "updateConcept",
   "deletePage",
   "describePageDeletion",
   "deleteClaim",
   "exportMarkdown",
-  "selectItem",
-  "getChunksForItem",
+  "exportConceptsMarkdown",
+  "listConcepts",
+  "jumpToItem",
   "getDocumentGraph",
 ]) {
   assert.ok(panel.includes(behavior), `Wiki UI must expose ${behavior}`);
+}
+
+// The shared DOM vocabulary both views build from.
+const dom = fs.readFileSync("src/modules/wiki/wikiDom.ts", "utf8");
+assert.ok(dom.includes("selectItem"), "jumping to a Zotero item must survive");
+
+// Terminology editing lives in the terminology view, and it edits STRUCTURED
+// terms - not the flat alias strings the 2.4.2 panel could reach.
+for (const behavior of [
+  "updateTerm",
+  "addTerm",
+  "removeTerm",
+  "setPrimaryTerm",
+  "getChunksForItem",
+  "jumpToItem",
+]) {
+  assert.ok(
+    termsView.includes(behavior),
+    `the terminology view must expose ${behavior}`,
+  );
+}
+
+// The four header controls, in the order the user asked for them.
+const headerOrder = ["知识条目", "知识图谱", "术语库", "导出", "刷新"].map(
+  (label) => panel.indexOf(`"${label}"`),
+);
+for (const [index, position] of headerOrder.entries()) {
+  assert.ok(position > 0, `the header must offer ${index}`);
 }
 
 // Page merging is gone: no entry point, no call, no leftover label.
@@ -227,7 +266,14 @@ for (const rule of [
   ".zmp-wiki-claim-remove",
   ".zmp-wiki-page-entry.is-active",
   ".zmp-wiki-evidence-head",
-  ".zmp-wiki-alias-chip",
+  ".zmp-wiki-term-table",
+  ".zmp-wiki-terms-pane",
+  ".zmp-wiki-terms-search",
+  ".zmp-wiki-term-legend",
+  ".zmp-wiki-term-lock",
+  ".zmp-wiki-term-cell.origin-literature",
+  ".zmp-wiki-term-cell.origin-ai",
+  ".zmp-wiki-term-cell.origin-user",
   ".zmp-wiki-graph-toolbar",
   ".zmp-wiki-graph-tooltip",
   ".zmp-wiki-section-title",
@@ -242,22 +288,22 @@ for (const rule of [
 // that prevents a third time: a <button> here never wraps, and anything that
 // wraps is a div with button semantics.
 assert.match(
-  panel,
-  /function clickable\(/u,
+  dom,
+  /export function clickable\(/u,
   "the panel must provide a non-button clickable for multi-row controls",
 );
 assert.match(
-  panel,
+  dom,
   /node\.setAttribute\("role", "button"\)/u,
   "a div used as a control must announce itself as a button",
 );
 assert.match(
-  panel,
+  dom,
   /node\.setAttribute\("tabindex", "0"\)/u,
   "a div used as a control must be reachable by keyboard",
 );
 assert.match(
-  panel,
+  dom,
   /key !== "Enter" && key !== " "/u,
   "a div used as a control must activate on Enter and Space",
 );
@@ -277,8 +323,8 @@ for (const name of ["zmp-wiki-page-entry", "zmp-wiki-claim-open"]) {
 }
 // Long claim text in the graph rail wraps too, so it uses the block variant.
 assert.match(
-  panel,
-  /function commandBlock\(/u,
+  dom,
+  /export function commandBlock\(/u,
   "a wrapping command must have a non-button form",
 );
 assert.match(
@@ -499,8 +545,9 @@ for (const label of [
   "知识图谱",
   "打开文献",
   "查看片段",
-  "编辑术语",
-  "添加别名",
+  "术语库",
+  "知识条目",
+  "在术语库中编辑",
   "删除知识条目",
   "永久删除",
   "删除后不可恢复",
@@ -510,6 +557,35 @@ for (const label of [
   assert.ok(
     panel.includes(label),
     `Wiki UI must expose Chinese label: ${label}`,
+  );
+}
+
+// The terminology view speaks for itself: the four column headings of the
+// term table, the controls that edit a structured term group, the search box
+// over all three name columns, and the legend that says what the cell tints
+// mean. The tints are the only place a reader learns which half of a row a
+// paper actually vouches for, so an unlabelled colour would be worse than no
+// colour at all.
+for (const label of [
+  "序号",
+  "中文术语",
+  "英文术语",
+  "简称",
+  "添加术语",
+  "设为主术语",
+  "解除锁定",
+  "已锁定",
+  "文献原文",
+  "AI 补全",
+  "人工修改",
+  "搜索中文 / 英文 / 简称",
+  "来源文献",
+  "打开文献",
+  "查看片段",
+]) {
+  assert.ok(
+    termsView.includes(label),
+    `the terminology view must expose Chinese label: ${label}`,
   );
 }
 

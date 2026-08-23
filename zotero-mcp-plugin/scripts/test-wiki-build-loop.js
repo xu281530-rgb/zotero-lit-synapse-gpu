@@ -223,6 +223,16 @@ async function readToEnd(itemKey, limit = 20) {
     finalSynthesis: true,
     markdown: NOTE,
   });
+  // 2.4.3: a fully delivered paper also owes one deliberate pass over the
+  // terminology it established before its claims may be written up. Most
+  // papers introduce nothing new, which is what this answer says.
+  await service.recordConcepts({
+    libraryID: 1,
+    itemKey,
+    final: true,
+    concepts: [],
+    noConceptsReason: "fixture paper: no terminology beyond what is already held",
+  });
   return pages;
 }
 

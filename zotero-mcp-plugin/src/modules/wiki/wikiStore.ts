@@ -7,6 +7,8 @@ import { ensureWikiSchema } from "./wikiSchema";
 import { mapWikiEvidenceRow } from "./wikiDto";
 import { rowColumn as rowValue } from "./wikiRow";
 import { WikiEmbeddingQueue } from "./wikiEmbeddingQueue";
+import { WikiConceptLibrary } from "./wikiConceptLibrary";
+import { classifyLegacyName } from "./wikiConceptTerms";
 import { WikiReadingSessions } from "./wikiReadingSession";
 import {
   WIKI_READ_DEPTHS,
@@ -45,6 +47,8 @@ const WIKI_PERSISTENT_STATUS_KEYS = [
   "claims",
   "concepts",
   "aliases",
+  "conceptTerms",
+  "conceptTermSources",
   "relations",
   "evidence",
   "claimEmbeddings",
@@ -71,16 +75,24 @@ export class WikiStore {
    */
   private readonly sessions: WikiReadingSessions;
   private readonly embeddingQueueStore: WikiEmbeddingQueue;
+  private readonly conceptLibrary: WikiConceptLibrary;
 
   constructor(db: WikiDatabase) {
     this.db = db;
     this.sessions = new WikiReadingSessions(db);
     this.embeddingQueueStore = new WikiEmbeddingQueue(db);
+    this.conceptLibrary = new WikiConceptLibrary(db);
   }
 
   async readingSessions(): Promise<WikiReadingSessions> {
     await this.initialize();
     return this.sessions;
+  }
+
+  /** The structured term store. Schema-initialised, like the other two. */
+  async concepts(): Promise<WikiConceptLibrary> {
+    await this.initialize();
+    return this.conceptLibrary;
   }
 
   async embeddingQueue(): Promise<WikiEmbeddingQueue> {
@@ -258,6 +270,21 @@ export class WikiStore {
         ],
       );
     }
+    // The same names, recorded as structured terms, so a concept created by
+    // CREATE_PAGE shows up in the terminology library exactly like one
+    // recorded while reading. `ingestFlatNames` rewrites the flat projection
+    // from the terms afterwards, so the rows just written above are the input
+    // to that pass rather than a second source of truth.
+    await this.conceptLibrary.ingestFlatNames(conceptId, [
+      { name: canonicalName, source: "ai" },
+      ...(input.aliases ?? [])
+        .map((alias: any) => ({
+          name: normalizeWikiText(alias.alias),
+          language: alias.language,
+          source: alias.source || "ai",
+        }))
+        .filter((entry: { name: string }) => entry.name),
+    ]);
     return conceptId;
   }
 
@@ -635,38 +662,48 @@ export class WikiStore {
           );
           if (exists)
             throw new Error(`Wiki page already exists: ${canonicalTitle}`);
-          const knowledgeDuplicate = Number(
+          const claimDuplicate = Number(
             await this.db.valueQueryAsync(
-              `SELECT COUNT(*) FROM (
-                 SELECT concept_id AS id FROM wiki_concepts
-                 WHERE library_id = ? AND normalized_name = ?
-                 UNION ALL
-                 SELECT a.alias_id AS id FROM wiki_aliases a
-                 JOIN wiki_concepts c ON c.concept_id = a.concept_id
-                 WHERE c.library_id = ? AND a.normalized_alias = ?
-                 UNION ALL
-                 SELECT cl.claim_id AS id FROM wiki_claims cl
+              `SELECT COUNT(*) FROM wiki_claims cl
                  JOIN wiki_pages p ON p.page_id = cl.page_id
-                 WHERE p.library_id = ? AND cl.normalized_claim_text = ?
-               )`,
-              [
-                input.libraryID,
-                normalizedTitle,
-                input.libraryID,
-                normalizedTitle,
-                input.libraryID,
-                normalizedTitle,
-              ],
+                WHERE p.library_id = ? AND cl.normalized_claim_text = ?`,
+              [input.libraryID, normalizedTitle],
             ),
           );
-          if (knowledgeDuplicate) {
+          if (claimDuplicate) {
             throw new Error(
-              `Wiki page title matches existing Concept, Alias, or Claim: ${canonicalTitle}`,
+              `Wiki page title matches an existing Claim: ${canonicalTitle}`,
             );
           }
+          // A title that names a concept the library already knows is no
+          // longer a collision. Concepts became independent records in 2.4.3,
+          // so most of them will never have a page, and refusing every page
+          // whose title happens to be a known term would have made the
+          // terminology store fight the page store. The page ADOPTS that
+          // concept instead - which is what a page about a known term is. The
+          // one-page-per-concept rule below still stops fragmentation, and now
+          // says so in the message.
+          const titledConcept = await this.db.valueQueryAsync(
+            `SELECT concept_id FROM (
+               SELECT concept_id FROM wiki_concepts
+               WHERE library_id = ? AND normalized_name = ?
+               UNION
+               SELECT a.concept_id FROM wiki_aliases a
+               JOIN wiki_concepts c ON c.concept_id = a.concept_id
+               WHERE c.library_id = ? AND a.normalized_alias = ?
+             ) LIMIT 1`,
+            [
+              input.libraryID,
+              normalizedTitle,
+              input.libraryID,
+              normalizedTitle,
+            ],
+          );
           const primaryConceptId = action.primaryConcept
             ? await this.createConcept(input.libraryID, action.primaryConcept)
-            : null;
+            : titledConcept
+              ? Number(titledConcept)
+              : null;
           if (primaryConceptId != null) {
             const existingConceptPage = await this.db.valueQueryAsync(
               `SELECT page_id FROM wiki_pages
@@ -676,7 +713,9 @@ export class WikiStore {
             );
             if (existingConceptPage) {
               throw new Error(
-                `Concept already has active Wiki Page ${Number(existingConceptPage)}`,
+                `Concept already has active Wiki Page ${Number(existingConceptPage)}. ` +
+                  `The title "${canonicalTitle}" names a concept that already has a knowledge entry; ` +
+                  "add to that entry instead of starting a second one.",
               );
             }
           }
@@ -1360,6 +1399,26 @@ export class WikiStore {
           pageParams,
         ),
       ),
+      conceptTerms: Number(
+        await this.db.valueQueryAsync(
+          libraryID === undefined
+            ? "SELECT COUNT(*) FROM wiki_concept_terms"
+            : `SELECT COUNT(*) FROM wiki_concept_terms t JOIN wiki_concepts c ON c.concept_id = t.concept_id
+               WHERE c.library_id = ?`,
+          pageParams,
+        ),
+      ),
+      conceptTermSources: Number(
+        await this.db.valueQueryAsync(
+          libraryID === undefined
+            ? "SELECT COUNT(*) FROM wiki_concept_term_sources"
+            : `SELECT COUNT(*) FROM wiki_concept_term_sources s
+               JOIN wiki_concept_terms t ON t.term_id = s.term_id
+               JOIN wiki_concepts c ON c.concept_id = t.concept_id
+               WHERE c.library_id = ?`,
+          pageParams,
+        ),
+      ),
       relations: Number(
         await this.db.valueQueryAsync(
           libraryID === undefined
@@ -1430,6 +1489,8 @@ export class WikiStore {
         "wiki_claim_embeddings",
         "wiki_evidence",
         "wiki_relations",
+        "wiki_concept_term_sources",
+        "wiki_concept_terms",
         "wiki_aliases",
         "wiki_claims",
         "wiki_pages",
@@ -1495,10 +1556,17 @@ export class WikiStore {
           "UPDATE wiki_concepts SET canonical_name = ?, normalized_name = ? WHERE concept_id = ?",
           [name, normalizeWikiName(name), options.conceptId],
         );
+        // The flat column and the structured terms must not disagree: the
+        // term store is the authority and rewrites this column from the
+        // primary term, so a rename that only touched the column would be
+        // undone by the next projection sync.
+        await this.conceptLibrary.renamePrimaryFlat(options.conceptId, name);
       }
+      const addedNames: Array<{ name: string; language?: string }> = [];
       for (const alias of options.addAliases ?? []) {
         const value = normalizeWikiText(alias.alias);
         if (!value) continue;
+        addedNames.push({ name: value, language: alias.language });
         await this.assertConceptNameAvailable(
           options.libraryID,
           options.conceptId,
@@ -1518,11 +1586,27 @@ export class WikiStore {
           ],
         );
       }
+      if (addedNames.length) {
+        await this.conceptLibrary.ingestFlatNames(
+          options.conceptId,
+          addedNames.map((entry) => ({ ...entry, source: "user" })),
+        );
+      }
       for (const aliasId of options.removeAliasIds ?? []) {
+        const removed = await this.db.valueQueryAsync(
+          "SELECT alias FROM wiki_aliases WHERE alias_id = ? AND concept_id = ?",
+          [aliasId, options.conceptId],
+        );
         await this.db.queryAsync(
           "DELETE FROM wiki_aliases WHERE alias_id = ? AND concept_id = ?",
           [aliasId, options.conceptId],
         );
+        if (removed != null) {
+          await this.conceptLibrary.removeFlatName(
+            options.conceptId,
+            String(removed),
+          );
+        }
       }
       if (options.canonicalName !== undefined) {
         const pages = await this.db.queryAsync(

@@ -65,6 +65,9 @@ export const WIKI_TOOL_NAMES: ReadonlySet<string> = new Set([
   "wiki_get_claim",
   "wiki_status",
   "wiki_export",
+  "wiki_record_concepts",
+  "wiki_list_concepts",
+  "wiki_export_concepts",
   "wiki_reverify",
   "wiki_build_from_paper",
   "wiki_set_reading_expert",
@@ -1279,6 +1282,144 @@ export function buildToolCatalog(): ToolDefinition[] {
     name: 'wiki_export',
     category: 'wiki',
     description: 'Export the authoritative Wiki state as derived Markdown. Markdown is not used as the data source.',
+    inputSchema: {
+      type: 'object',
+      properties: { libraryID: { type: 'number' } }
+    }
+  },
+  {
+    name: 'wiki_record_concepts',
+    category: 'wiki',
+    description: [
+      'Record the professional concepts you recognised while ACTUALLY READING a paper - DRX, CET, columnar grain, dislocation density - into the independent concept library. This is not keyword extraction: a concept goes in only when the text you read establishes what it means in this field.',
+      '',
+      'WHEN TO CALL, and this changed in 2.4.4. Calls WITHOUT final are STAGED on the open reading session: they are checked and held, nothing is written, and the user is not asked to confirm anything. Use them to note candidates as you read. Then call ONCE with final true after the whole paper has been delivered and synthesised; that call writes everything you staged plus everything you pass to it, in a single database write and a single confirmation. Read the paper, understand it, decide which terms are genuinely concepts of the field, then write. wiki_prepare_update refuses to start the write-up until the final pass has happened. A paper that introduced nothing new is answered with an empty concepts list and noConceptsReason.',
+      '',
+      'ONE CONCEPT, MANY TERMS. A concept entity has one primary term and any number of alias terms, and EVERY term has the same three fields: zh (Chinese full name), en (English full name), abbr (abbreviation). Put every name for the same thing in ONE entity - the server decides which is primary and files the rest as aliases. Do not submit "动态再结晶" and "Dynamic Recrystallization" as two concepts.',
+      '',
+      'THE ONE HARD RULE: abbr may never be the only field. A term needs zh or en. If you cannot confirm which full name an abbreviation expands to, leave abbr out - the term is stored incomplete and can be completed by a later paper. Guessing is worse than missing.',
+      '',
+      'YOU MAY COMPLETE A TERM FROM YOUR OWN KNOWLEDGE, and you must say so. If a paper writes only "Dynamic Recrystallization" and you are confident of the standard Chinese term and abbreviation, submit zh 动态再结晶, en Dynamic Recrystallization, abbr DRX - and mark origins accordingly: literature for what the paper itself states, ai for what you supplied. The default for an unmarked field is ai, never literature. Only mark a field literature when the text you read actually contains it. If you are not confident, leave the field empty; a later paper can fill it. A field you marked ai is later upgraded to literature when a paper confirms it, and REPLACED when a paper contradicts it - so an honest ai mark costs nothing and a false literature mark is permanent.',
+      '',
+      'NAMES ARE NEVER OVERWRITTEN AWAY. If the library holds 动态再结晶 / Dynamic Recrystallization and this paper writes Dynamic Recrystallisation, both spellings are kept as two term rows of the same concept. Submit what the paper actually says; do not normalise it to what the library already has.',
+      '',
+      'DEDUPLICATION happens on the server, on FULL names only. A term whose Chinese or English full name the library already knows joins that concept instead of founding a second one, and its sources are added rather than replacing anything. A shared abbreviation alone never merges two concepts, because the same letters mean different things in different subfields.',
+      '',
+      'TO SAY TWO EXISTING CONCEPTS ARE ONE, put both names in the SAME term - zh 晶粒长大 and en grain growth in one term group. That is a claim about one term and it fuses them. Listing them as two separate terms of one entity does NOT: aliases of a concept differ from one another all the time, so that grouping is too weak to act on, and both concepts are left standing with a warning. A fusion is also refused when the two contradict each other anywhere, or when both already own a knowledge page.',
+      '',
+      'SOURCES. itemKey is required and must be a real Zotero document; it defaults to the paper currently open for reading. excerpt and chunkIdSnapshot are optional, and are verified against the live index when given - an excerpt that cannot be found is dropped with a warning while the document link is kept. Recording a concept from a second paper ADDS a source to the existing concept; it never duplicates it.'
+    ].join('\n'),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        libraryID: { type: 'number' },
+        itemKey: {
+          type: 'string',
+          description: 'Optional guard and source default: fails if a different paper is the open one.'
+        },
+        final: {
+          type: 'boolean',
+          description: 'The whole-paper pass. Writes everything staged plus this call, once. Required before wiki_prepare_update.'
+        },
+        noConceptsReason: {
+          type: 'string',
+          description: 'Required with final true when nothing at all is left to write.'
+        },
+        concepts: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              conceptType: { type: 'string' },
+              description: {
+                type: 'string',
+                description: 'One sentence on what this concept means, from the paper. Optional.'
+              },
+              primaryTerm: {
+                type: 'object',
+                properties: {
+                  zh: { type: 'string', description: 'Chinese full name, e.g. 动态再结晶' },
+                  en: { type: 'string', description: 'English full name, e.g. Dynamic Recrystallization' },
+                  abbr: { type: 'string', description: 'Abbreviation, e.g. DRX. Never on its own.' },
+                  origins: {
+                    type: 'object',
+                    description: 'Per-field provenance. Unmarked fields count as ai.',
+                    properties: {
+                      zh: { type: 'string', enum: ['literature', 'ai'] },
+                      en: { type: 'string', enum: ['literature', 'ai'] },
+                      abbr: { type: 'string', enum: ['literature', 'ai'] }
+                    }
+                  },
+                  origin: {
+                    type: 'string',
+                    enum: ['literature', 'ai'],
+                    description: 'Shorthand when every field of this term has the same provenance.'
+                  },
+                  sources: { type: 'array', items: { type: 'object' } }
+                }
+              },
+              terms: {
+                type: 'array',
+                description: 'Alias terms, each with the same zh / en / abbr / origins shape.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    zh: { type: 'string' },
+                    en: { type: 'string' },
+                    abbr: { type: 'string' },
+                    origins: {
+                      type: 'object',
+                      properties: {
+                        zh: { type: 'string', enum: ['literature', 'ai'] },
+                        en: { type: 'string', enum: ['literature', 'ai'] },
+                        abbr: { type: 'string', enum: ['literature', 'ai'] }
+                      }
+                    },
+                    origin: { type: 'string', enum: ['literature', 'ai'] },
+                    sources: { type: 'array', items: { type: 'object' } }
+                  }
+                }
+              },
+              sources: {
+                type: 'array',
+                description: 'Sources for every term of this concept that names none of its own.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    itemKey: { type: 'string' },
+                    chunkIdSnapshot: { type: 'integer', minimum: 0 },
+                    excerpt: { type: 'string' }
+                  },
+                  required: ['itemKey']
+                }
+              }
+            }
+          }
+        }
+      },
+      required: ['concepts']
+    }
+  },
+  {
+    name: 'wiki_list_concepts',
+    category: 'wiki',
+    description: 'List the independent concept library: every concept entity with its primary term, its alias terms (each as Chinese name / English name / abbreviation) and the documents each term was recognised in. Read this before recording concepts to see what the library already knows.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        libraryID: { type: 'number' },
+        query: {
+          type: 'string',
+          description: 'Optional filter matched against every term of every concept.'
+        },
+        limit: { type: 'integer', minimum: 1, maximum: 500 }
+      }
+    }
+  },
+  {
+    name: 'wiki_export_concepts',
+    category: 'wiki',
+    description: 'Export the whole concept library as Markdown: one section per concept, a 序号 / 中文术语 / 英文术语 / 简称 table of its primary and alias terms, and the source documents behind each numbered term. The same content is appended to wiki_export.',
     inputSchema: {
       type: 'object',
       properties: { libraryID: { type: 'number' } }

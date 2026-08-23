@@ -432,6 +432,44 @@ async function assertWikiCommitConfirmed(args: any): Promise<void> {
   if (!approved) throw new Error('The user declined the Wiki database update.');
 }
 
+function assertWikiEnabled(): void {
+  if (!getWikiSettings().enabled)
+    throw new Error('LLM Wiki is disabled in plugin preferences.');
+}
+
+/**
+ * The same consent gate as a Wiki commit, for a concept-library write.
+ *
+ * Recording concepts writes to the same independent Wiki database, so it
+ * honours the same preference rather than quietly bypassing it. The dialog
+ * says what is being written - terminology, not claims - because a user who
+ * sees a prompt every few minutes deserves to know which kind of write it is.
+ *
+ * Passed to the service as a callback rather than run before it, because only
+ * the service knows whether this call actually writes. A mid-reading call is
+ * staged on the reading session and asks nothing; the one whole-paper pass
+ * that commits the lot raises exactly one dialog. That is the difference
+ * between a prompt per batch and a prompt per paper.
+ */
+async function assertWikiConceptWriteConfirmed(count: number): Promise<void> {
+  const settings = getWikiSettings();
+  if (!settings.enabled)
+    throw new Error('LLM Wiki is disabled in plugin preferences.');
+  if (settings.autoWrite && settings.writeMode === 'auto') return;
+  const win = Zotero.getMainWindow?.();
+  if (!win) {
+    throw new Error(
+      'Wiki confirmation is required, but no Zotero window is available.',
+    );
+  }
+  const approved = Services.prompt.confirm(
+    win as any,
+    'Zotero MCP LLM Wiki',
+    `An MCP client has finished reading a paper and wants to record ${count} concept(s) in the independent Wiki terminology library.\n\nThis stores terms and their source documents. It does not modify Zotero items.\n\nAllow this terminology update?`,
+  );
+  if (!approved) throw new Error('The user declined the Wiki terminology update.');
+}
+
 /**
  * Streamable HTTP-based MCP Server integrated into Zotero Plugin
  *
@@ -1150,6 +1188,34 @@ Nothing in this server returns a whole document in one response. Every reading t
           break;
         case 'wiki_export':
           result = await getWikiService().exportMarkdown(
+            args?.libraryID ?? Zotero.Libraries.userLibraryID,
+          );
+          break;
+        case 'wiki_record_concepts': {
+          assertWikiEnabled();
+          const libraryID = args?.libraryID ?? Zotero.Libraries.userLibraryID;
+          result = await getWikiService().recordConcepts({
+            libraryID,
+            itemKey: args?.itemKey,
+            final: args?.final === true,
+            noConceptsReason: args?.noConceptsReason,
+            concepts: Array.isArray(args?.concepts) ? args.concepts : [],
+            confirmWrite: (count: number) =>
+              assertWikiConceptWriteConfirmed(count),
+          });
+          break;
+        }
+        case 'wiki_list_concepts': {
+          const libraryID = args?.libraryID ?? Zotero.Libraries.userLibraryID;
+          result = await getWikiService().searchConcepts({
+            libraryID,
+            query: args?.query,
+            limit: args?.limit,
+          });
+          break;
+        }
+        case 'wiki_export_concepts':
+          result = await getWikiService().exportConceptsMarkdown(
             args?.libraryID ?? Zotero.Libraries.userLibraryID,
           );
           break;

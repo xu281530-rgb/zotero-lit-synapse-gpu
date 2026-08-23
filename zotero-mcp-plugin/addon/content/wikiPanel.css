@@ -1160,6 +1160,217 @@
     monospace;
 }
 
+/* ============================ Terminology library ======================= */
+
+/* Two columns, deliberately the same proportions as the entry view next to
+   it: the index on the left keeps its width when a reader switches views, so
+   the panel does not reflow under them. */
+.zmp-wiki-terms-pane {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  grid-template-columns: clamp(240px, 24%, 320px) minmax(0, 1fr);
+  overflow: hidden;
+}
+.zmp-wiki-terms-pane[hidden] {
+  display: none;
+}
+.zmp-wiki-terms-list,
+.zmp-wiki-terms-detail {
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius);
+  box-shadow: var(--wiki-shadow);
+  scrollbar-width: thin;
+}
+.zmp-wiki-terms-list {
+  padding: 12px 10px;
+  background: var(--wiki-paper-alt);
+}
+.zmp-wiki-terms-detail {
+  padding: 22px 26px 40px;
+  background: var(--wiki-paper);
+}
+.zmp-wiki-terms-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.zmp-wiki-terms-head h2 {
+  margin: 0;
+  font-family: var(--wiki-font-song);
+  font-size: 22px;
+  letter-spacing: 0.02em;
+}
+
+/* The term table. One row per structured term group, primary first. */
+.zmp-wiki-term-table {
+  width: 100%;
+  margin: 12px 0 20px;
+  border-collapse: collapse;
+  font-family: var(--wiki-font-hei);
+  font-size: 13px;
+}
+.zmp-wiki-term-table th {
+  padding: 6px 8px;
+  color: var(--wiki-faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-align: left;
+  border-bottom: 1px solid var(--wiki-border-strong);
+  white-space: nowrap;
+}
+.zmp-wiki-term-table td {
+  padding: 8px;
+  vertical-align: top;
+  border-bottom: 1px solid var(--wiki-border);
+  word-break: break-word;
+}
+.zmp-wiki-term-row-cells.is-primary td {
+  font-weight: 600;
+}
+.zmp-wiki-term-index {
+  width: 3.5em;
+  color: var(--wiki-faint);
+  white-space: nowrap;
+}
+.zmp-wiki-term-badge {
+  margin-left: 5px;
+  padding: 0 5px;
+  color: var(--wiki-accent);
+  background: var(--wiki-accent-soft);
+  border-radius: var(--wiki-radius-pill);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
+/* A migrated 2.4.2 alias that is an abbreviation with no full name. Flagged
+   rather than hidden: it is the one shape the write rules forbid, and only a
+   person can supply what is missing. */
+.zmp-wiki-term-warning {
+  margin-left: 6px;
+  padding: 0 5px;
+  color: var(--wiki-danger);
+  background: var(--wiki-danger-soft);
+  border-radius: var(--wiki-radius-pill);
+  font-size: 10px;
+}
+/* Field provenance, per cell.
+   Three tints from the same low-saturation family the rest of the panel uses:
+   the paper's own words in the sheet green, an inferred value in a warm ochre,
+   a hand-edited one in a cool slate. They sit at the same lightness so no one
+   of them reads as an error state, and each cell also carries its provenance
+   as a tooltip - colour is the fast channel, not the only one. The inset bar
+   on the left edge keeps the distinction visible when the tint itself is too
+   faint, which on a low-contrast display it will be. */
+.zmp-wiki-term-cell.origin-literature {
+  background: rgba(83, 111, 98, 0.11);
+  box-shadow: inset 2px 0 0 rgba(83, 111, 98, 0.45);
+}
+.zmp-wiki-term-cell.origin-ai {
+  background: rgba(176, 133, 61, 0.13);
+  box-shadow: inset 2px 0 0 rgba(176, 133, 61, 0.5);
+}
+.zmp-wiki-term-cell.origin-user {
+  background: rgba(74, 101, 138, 0.12);
+  box-shadow: inset 2px 0 0 rgba(74, 101, 138, 0.5);
+}
+
+/* The key that makes the tints readable. Sits directly above the table so it
+   is read before the colours are, not hunted for afterwards. */
+.zmp-wiki-term-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 0;
+}
+.zmp-wiki-term-legend-key {
+  padding: 1px 8px;
+  border-radius: var(--wiki-radius-pill);
+  color: var(--wiki-muted);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+}
+.zmp-wiki-term-legend-key.origin-literature {
+  background: rgba(83, 111, 98, 0.16);
+}
+.zmp-wiki-term-legend-key.origin-ai {
+  background: rgba(176, 133, 61, 0.18);
+}
+.zmp-wiki-term-legend-key.origin-user {
+  background: rgba(74, 101, 138, 0.17);
+}
+
+/* A primary term a person pinned. Stated rather than implied, because the
+   difference between "this is the title today" and "this is the title until
+   somebody overrules it" is the whole reason the lock exists. */
+.zmp-wiki-term-lock {
+  margin-left: 5px;
+  padding: 0 5px;
+  color: var(--wiki-muted);
+  background: var(--wiki-paper-sunk);
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius-pill);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
+
+/* The terminology search box. */
+.zmp-wiki-terms-search {
+  width: 100%;
+  margin: 8px 0 10px;
+  padding: 6px 9px;
+  box-sizing: border-box;
+  color: var(--wiki-text);
+  background: var(--wiki-paper);
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius-sm);
+  font: 12.5px/1.5 var(--wiki-font-hei);
+}
+.zmp-wiki-terms-search:focus {
+  outline: none;
+  border-color: var(--wiki-accent-line);
+  box-shadow: 0 0 0 2px var(--wiki-accent-soft);
+}
+.zmp-wiki-terms-search::placeholder {
+  color: var(--wiki-faint);
+}
+
+.zmp-wiki-term-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.zmp-wiki-term-sources {
+  margin-top: 18px;
+}
+.zmp-wiki-term-source-group {
+  margin-bottom: 14px;
+}
+.zmp-wiki-term-source-heading {
+  margin: 0 0 6px;
+  color: var(--wiki-muted);
+  font-family: var(--wiki-font-hei);
+  font-size: 12px;
+  font-weight: 600;
+}
+.zmp-wiki-term-source-title {
+  display: block;
+  margin: 4px 0;
+  font-family: var(--wiki-font-hei);
+  font-size: 12.5px;
+}
+
 /* ============================ Narrow windows ============================ */
 
 @media (max-width: 1180px) {
@@ -1187,6 +1398,12 @@
   .zmp-wiki-graph-pane {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) minmax(120px, 34%);
+  }
+  .zmp-wiki-terms-pane {
+    grid-template-columns: clamp(150px, 30%, 220px) minmax(0, 1fr);
+  }
+  .zmp-wiki-terms-detail {
+    padding: 18px 16px 32px;
   }
 }
 

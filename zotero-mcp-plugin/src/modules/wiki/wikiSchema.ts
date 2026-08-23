@@ -1,6 +1,14 @@
 import type { WikiDatabase } from "./wikiTypes";
+import { normalizeWikiName } from "./wikiCanonicalizer";
+import {
+  classifyLegacyName,
+  mergeTermFields,
+  sameTerm,
+  type WikiTermFields,
+} from "./wikiConceptTerms";
+import { rowColumn } from "./wikiRow";
 
-export const WIKI_SCHEMA_VERSION = 3;
+export const WIKI_SCHEMA_VERSION = 5;
 
 /**
  * Add a column an older database does not have yet.
@@ -42,6 +50,7 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
       normalized_name TEXT NOT NULL,
       concept_type TEXT NOT NULL DEFAULT 'concept',
       description TEXT NOT NULL DEFAULT '',
+      primary_term_locked INTEGER NOT NULL DEFAULT 0,
       UNIQUE(library_id, normalized_name)
     )
   `);
@@ -57,6 +66,95 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
       UNIQUE(concept_id, normalized_alias)
     )
   `);
+  // The structured term store, schema 4. A concept's names stop being flat
+  // strings here: every term - the primary one and every alias - carries a
+  // Chinese full name, an English full name and an abbreviation in their own
+  // columns, so "DRX" is recorded as the short form of a named concept rather
+  // than as a third unrelated string.
+  //
+  // `source = 'legacy'` is the one exemption from the abbreviation rule, and
+  // it exists only for migration: a pre-2.4.3 database may already hold a bare
+  // "DRX" alias whose full name was never recorded, and dropping the user's
+  // data to satisfy a rule about what the AI may WRITE would be the wrong
+  // trade. Those rows are labelled in the UI so they can be completed by hand.
+  await db.queryAsync(`
+    CREATE TABLE IF NOT EXISTS wiki_concept_terms (
+      term_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      concept_id INTEGER NOT NULL REFERENCES wiki_concepts(concept_id) ON DELETE CASCADE,
+      role TEXT NOT NULL CHECK(role IN ('primary','alias')),
+      name_zh TEXT NOT NULL DEFAULT '',
+      name_en TEXT NOT NULL DEFAULT '',
+      abbreviation TEXT NOT NULL DEFAULT '',
+      normalized_zh TEXT NOT NULL DEFAULT '',
+      normalized_en TEXT NOT NULL DEFAULT '',
+      normalized_abbr TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT 'ai',
+      origin_zh TEXT NOT NULL DEFAULT '',
+      origin_en TEXT NOT NULL DEFAULT '',
+      origin_abbr TEXT NOT NULL DEFAULT '',
+      confidence REAL NOT NULL DEFAULT 1 CHECK(confidence >= 0 AND confidence <= 1),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      CHECK (name_zh <> '' OR name_en <> '' OR source = 'legacy'),
+      UNIQUE(concept_id, normalized_zh, normalized_en, normalized_abbr)
+    )
+  `);
+  // Schema 5. Field-level provenance, added to a table schema 4 already
+  // created, so the columns arrive by ALTER for anyone upgrading. They default
+  // to the empty string - "unknown" - because a 2.4.3 row genuinely does not
+  // record whether its English name was quoted or inferred, and stamping every
+  // one of them "literature" would invent exactly the assurance these columns
+  // exist to make honest. Unknown fields render untinted and are treated as
+  // unoverwritable, so the upgrade cannot cost anyone a name.
+  for (const column of ["origin_zh", "origin_en", "origin_abbr"]) {
+    await addColumnIfMissing(
+      db,
+      "wiki_concept_terms",
+      column,
+      "TEXT NOT NULL DEFAULT ''",
+    );
+  }
+  // Schema 5. A primary term a person pinned by hand. 0 is the pre-lock state:
+  // every migrated concept keeps electing its primary by completeness until
+  // someone overrules it.
+  await addColumnIfMissing(
+    db,
+    "wiki_concepts",
+    "primary_term_locked",
+    "INTEGER NOT NULL DEFAULT 0",
+  );
+  await db.queryAsync(`
+    CREATE TABLE IF NOT EXISTS wiki_concept_term_sources (
+      source_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      term_id INTEGER NOT NULL REFERENCES wiki_concept_terms(term_id) ON DELETE CASCADE,
+      library_id INTEGER NOT NULL,
+      item_key TEXT NOT NULL,
+      chunk_id_snapshot INTEGER,
+      excerpt TEXT NOT NULL DEFAULT '',
+      excerpt_hash TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL,
+      UNIQUE(term_id, library_id, item_key, excerpt_hash)
+    )
+  `);
+  // Exactly one primary term per concept, enforced by the database rather than
+  // by whichever write path happens to remember. A concept with two primaries
+  // would render two different titles for one entry depending on which query
+  // reached it first.
+  await db.queryAsync(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_wiki_concept_primary_term
+       ON wiki_concept_terms(concept_id)
+       WHERE role = 'primary'`,
+  );
+  await db.queryAsync(
+    `CREATE INDEX IF NOT EXISTS idx_wiki_concept_terms_zh ON wiki_concept_terms(normalized_zh)`,
+  );
+  await db.queryAsync(
+    `CREATE INDEX IF NOT EXISTS idx_wiki_concept_terms_en ON wiki_concept_terms(normalized_en)`,
+  );
+  await db.queryAsync(
+    `CREATE INDEX IF NOT EXISTS idx_wiki_concept_term_sources_item
+       ON wiki_concept_term_sources(library_id, item_key)`,
+  );
   await db.queryAsync(`
     CREATE TABLE IF NOT EXISTS wiki_pages (
       page_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -165,6 +263,13 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
     ["integrated_chunks", "INTEGER NOT NULL DEFAULT 0"],
     ["last_integration_unchanged", "INTEGER NOT NULL DEFAULT 0"],
     ["final_synthesis_at", "INTEGER"],
+    // Schema 4. NULL is the pre-concept-library state exactly: a session
+    // carried over from 2.4.2 owes its whole-paper concept pass like any other.
+    ["concepts_recorded_at", "INTEGER"],
+    // Schema 5. Candidate concepts noticed while reading, held here until the
+    // whole-paper pass writes them in one go. Empty is the correct carried-over
+    // state: a session from 2.4.3 staged nothing because staging did not exist.
+    ["staged_concepts", "TEXT NOT NULL DEFAULT ''"],
   ] as const) {
     await addColumnIfMissing(db, "wiki_reading_sessions", column, definition);
   }
@@ -221,5 +326,111 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
   await db.queryAsync(
     `CREATE INDEX IF NOT EXISTS idx_wiki_relations_target ON wiki_relations(target_concept_id)`,
   );
+  await backfillConceptTerms(db);
   await db.queryAsync(`PRAGMA user_version = ${WIKI_SCHEMA_VERSION}`);
+}
+
+/**
+ * Give every pre-2.4.3 concept the structured terms it never had.
+ *
+ * Before schema 4 a concept was one `canonical_name` plus a bag of flat alias
+ * strings. Those strings still exist and still mean something, so the upgrade
+ * reads them rather than discarding them: `canonical_name` becomes the primary
+ * term, each alias becomes an alias term, and {@link classifyLegacyName}
+ * decides which of the three fields each string belongs in.
+ *
+ * Two behaviours are worth stating, because both are choices:
+ *
+ *   - A legacy alias that classifies as a bare abbreviation is folded into the
+ *     primary term's empty abbreviation slot when there is one. That is not a
+ *     guess: the database already asserts this string is a name for THIS
+ *     concept, so attaching it to the concept's own full name adds no claim
+ *     that was not already recorded. Only when the slot is already taken by a
+ *     different abbreviation is the row kept as its own `source = 'legacy'`
+ *     term, which the UI marks as needing a full name.
+ *   - It runs on every open and skips any concept that already has terms, so
+ *     it is idempotent and costs one query on an up-to-date database.
+ */
+async function backfillConceptTerms(db: WikiDatabase): Promise<void> {
+  const pending = await db.queryAsync(
+    `SELECT c.concept_id, c.canonical_name
+       FROM wiki_concepts c
+       LEFT JOIN wiki_concept_terms t ON t.concept_id = c.concept_id
+      WHERE t.term_id IS NULL`,
+  );
+  if (!pending.length) return;
+  const now = Date.now();
+  for (const row of pending) {
+    const conceptId = Number(rowColumn(row, "concept_id", "conceptId"));
+    const canonicalName = String(
+      rowColumn(row, "canonical_name", "canonicalName") ?? "",
+    );
+    const primary = classifyLegacyName(canonicalName);
+    if (!primary.zh && !primary.en && !primary.abbr) continue;
+    const aliasRows = await db.queryAsync(
+      "SELECT alias, language FROM wiki_aliases WHERE concept_id = ? ORDER BY alias_id",
+      [conceptId],
+    );
+    const aliasTerms: WikiTermFields[] = [];
+    for (const aliasRow of aliasRows) {
+      const fields = classifyLegacyName(
+        String(rowColumn(aliasRow, "alias", "alias") ?? ""),
+        String(rowColumn(aliasRow, "language", "language") ?? ""),
+      );
+      if (!fields.zh && !fields.en && !fields.abbr) continue;
+      // A bare abbreviation completes the primary term when that term has no
+      // abbreviation yet, rather than becoming a term of its own.
+      if (!fields.zh && !fields.en && fields.abbr) {
+        if (!primary.abbr) {
+          primary.abbr = fields.abbr;
+          continue;
+        }
+        if (normalizeWikiName(primary.abbr) === normalizeWikiName(fields.abbr)) {
+          continue;
+        }
+      }
+      const twin = aliasTerms.find((existing) => sameTerm(existing, fields));
+      if (twin) {
+        Object.assign(twin, mergeTermFields(twin, fields));
+        continue;
+      }
+      if (sameTerm(primary, fields)) {
+        Object.assign(primary, mergeTermFields(primary, fields));
+        continue;
+      }
+      aliasTerms.push(fields);
+    }
+    await insertLegacyTerm(db, conceptId, "primary", primary, now);
+    for (const fields of aliasTerms) {
+      await insertLegacyTerm(db, conceptId, "alias", fields, now);
+    }
+  }
+}
+
+async function insertLegacyTerm(
+  db: WikiDatabase,
+  conceptId: number,
+  role: "primary" | "alias",
+  fields: WikiTermFields,
+  now: number,
+): Promise<void> {
+  await db.queryAsync(
+    `INSERT OR IGNORE INTO wiki_concept_terms
+       (concept_id, role, name_zh, name_en, abbreviation,
+        normalized_zh, normalized_en, normalized_abbr,
+        source, confidence, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'legacy', 1, ?, ?)`,
+    [
+      conceptId,
+      role,
+      fields.zh,
+      fields.en,
+      fields.abbr,
+      fields.zh ? normalizeWikiName(fields.zh) : "",
+      fields.en ? normalizeWikiName(fields.en) : "",
+      fields.abbr ? normalizeWikiName(fields.abbr) : "",
+      now,
+      now,
+    ],
+  );
 }

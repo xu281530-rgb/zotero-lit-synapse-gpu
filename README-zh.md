@@ -5,7 +5,7 @@ _This README is also available in: [:gb: English](./README.md) | :cn: 简体中�
 [![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-2.4.2-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-2.4.4-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -720,7 +720,7 @@ targeted build 生命周期：正文只提取、切块一次，然后同时更�
 > 正文——那是全服务器唯一一条绕开检索漏斗的旁路。数据库维护能力保留在插件设置
 > 界面内部，不再对外暴露。
 
-### 四、LLM Wiki（12 个，可独立禁用）
+### 四、LLM Wiki（16 个，可独立禁用）
 
 Wiki 使用独立长期知识数据库，保存可复用的 Page、Claim、Concept、Relation 和可回溯
 Evidence，而不是再建一份论文摘要索引。普通研究采用“先检索、后受控提交”的流程；
@@ -741,8 +741,14 @@ Evidence，而不是再建一份论文摘要索引。普通研究采用“先检
 它是条目下的真实文件，Zotero 重启、MCP 断线、对话中断与 context compaction 都不会
 造成损失：`wiki_get_reading_note` 会交回总结、专家角色和应当续读的 chunk 序号。
 
-全部 chunk 交付完成后，还必须再做一次覆盖全文的整体重构（`finalSynthesis`），
-`wiki_prepare_update` 才会开始写入阶段；Evidence 只有在**全部 chunk 已交付**且
+全部 chunk 交付完成后，还必须再做两次覆盖全文的复盘，`wiki_prepare_update` 才会开始
+写入阶段：一次是整体重构阅读总结（`finalSynthesis`），一次是复盘该文献确立的术语
+（`wiki_record_concepts` 且 `final` 为真）。后者构建独立术语库：一个概念一个实体，
+含一个主术语与任意别名术语，每组术语都由中文全称、英文全称、简称构成，且硬性规则是
+简称禁止独立存在；确实没有新术语时，用空清单加理由作答。有效名称不会被静默吞掉：
+两篇文献对同一术语给出不同拼写时，两个名称都作为该概念的两条术语保留；只有 AI 推断
+出来、又被文献否定的字段才会按文献修正。用户手动修改过的字段与手动锁定的主术语，
+AI 之后都不再改动。此外，Evidence 只有在**全部 chunk 已交付**且
 **该次整体重构已记录**时，才能达到 `paper_reviewed` / `cross_paper` 深度——交付不等于
 读懂。总结本身永远不是 Evidence：Claim 仍必须引用能在该文献真实 chunk 中校验通过的
 原文摘录。该附件也被排除在检索索引之外，避免一篇论文的总结被当作论文原文检索出来。
@@ -753,7 +759,10 @@ Evidence，而不是再建一份论文摘要索引。普通研究采用“先检
 - `wiki_get_page` —— 查看 Page、Claim 与 Evidence
 - `wiki_get_claim` —— 查看一个原子 Claim 及其来源
 - `wiki_status` —— 查看 Wiki 与 Evidence 链接状态
-- `wiki_export` —— 导出派生 Markdown，不改变权威数据库
+- `wiki_export` —— 导出派生 Markdown，不改变权威数据库；末尾追加术语库章节
+- `wiki_record_concepts` —— 记录在真正阅读文献时识别出的专业概念：每个概念一个实体，含一个主术语与任意别名术语，每组术语都由中文全称、英文全称、简称三个字段构成，并记录来源文献。未带 `final` 的调用只暂存在当前阅读会话中、不写库也不弹确认；带 `final` 的那一次把全部内容一次写入，因此一篇文献只有一次写入、一次确认。每个字段单独记录来源类型（文献原文 / AI 补全 / 人工修改），AI 可以依据可靠专业知识补全中文、英文或简称，但必须如实标注
+- `wiki_list_concepts` —— 列出独立术语库，含全部术语与来源
+- `wiki_export_concepts` —— 单独导出术语库 Markdown
 - `wiki_reverify` —— 索引重建后重新定位 Evidence
 - `wiki_build_from_paper` —— 阅读用户明确指定的单篇文献：先给元数据与摘要，再分页下发正文；用 `pagination.nextCursor` 逐页翻到 `pagination.coverageComplete` 为真，且必须先结束当前这篇才能开始下一篇
 - `wiki_set_reading_expert` —— 依据元数据与摘要生成该文献专属的领域专家角色，并在条目下创建持久化 Markdown 阅读总结

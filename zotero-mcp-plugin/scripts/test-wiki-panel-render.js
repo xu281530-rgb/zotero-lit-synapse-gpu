@@ -599,9 +599,47 @@ async function seedCrowded(sqlite) {
   for (const heading of ["知识摘要", "术语与别名", "核心知识", "知识条目"]) {
     assert.ok(rendered.includes(heading), `the document must announce ${heading}`);
   }
+  // 2.4.3: the page renders the STRUCTURED terms, not a row of alias chips.
+  // The seeded concept is 定向凝固 with a bare "DS" and an English full name,
+  // which the migration reads as one primary term carrying the Chinese name
+  // and the abbreviation, plus one alias term carrying the English name.
+  const termRows = findByClass(panel, "zmp-wiki-term-row-cells");
+  assert.equal(termRows.length, 2, "every term group must get its own row");
   assert.ok(
-    findByClass(panel, "zmp-wiki-alias-chip").length >= 2,
-    "aliases must render as chips",
+    termRows[0].className.includes("is-primary"),
+    "the primary term must be the first row",
+  );
+  const primaryText = textOf(termRows[0]);
+  assert.match(primaryText, /定向凝固/u);
+  assert.match(primaryText, /DS/u, "a bare abbreviation completes the primary term");
+  assert.match(
+    textOf(termRows[1]),
+    /Directional Solidification/u,
+    "the English full name must survive as its own alias term",
+  );
+  for (const heading of ["序号", "中文术语", "英文术语", "简称"]) {
+    assert.ok(
+      textOf(panel).includes(heading),
+      `the term table must announce ${heading}`,
+    );
+  }
+  // 2.4.4: the entry view uses the same tintable cells as the terminology
+  // view, so a reader does not have to switch views to see which of a term's
+  // names a paper actually vouches for. These names were typed into
+  // CREATE_PAGE by the model rather than quoted from a paper, so they are
+  // marked as the model's - the one thing that must never happen is a name
+  // nobody read in a paper being painted as if a paper had stated it.
+  const termCells = findByClass(panel, "zmp-wiki-term-cell");
+  assert.equal(termCells.length, 6, "three name columns for each of two terms");
+  const filled = termCells.filter((cell) => textOf(cell).trim() !== "—");
+  assert.ok(filled.length >= 3, "the seeded terms fill several cells");
+  assert.ok(
+    filled.every((cell) => cell.className.includes("origin-ai")),
+    "a name the model supplied must not be tinted as the paper's own words",
+  );
+  assert.ok(
+    termCells.every((cell) => !cell.className.includes("origin-literature")),
+    "nothing here was quoted from a document",
   );
 
   // Clicking a claim opens its evidence and moves the active marker.

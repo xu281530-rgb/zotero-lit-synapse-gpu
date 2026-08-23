@@ -503,7 +503,12 @@ await assert.rejects(
         },
       ],
     }),
-  /matches existing Concept, Alias, or Claim/iu,
+  // 2.4.3: a title that names a known concept is no longer refused for being a
+  // known name - concepts are independent records now and most of them will
+  // never have a page. What still refuses it is the rule that matters: the
+  // concept this title names ALREADY has a knowledge entry, so a second one
+  // would fragment it.
+  /already has active Wiki Page/iu,
   "a known alias must not fragment into a second Wiki Page",
 );
 
@@ -1350,6 +1355,8 @@ assert.deepEqual(await store.getStatus(), {
   claims: 0,
   concepts: 0,
   aliases: 0,
+  conceptTerms: 0,
+  conceptTermSources: 0,
   relations: 0,
   evidence: 0,
   claimEmbeddings: 0,

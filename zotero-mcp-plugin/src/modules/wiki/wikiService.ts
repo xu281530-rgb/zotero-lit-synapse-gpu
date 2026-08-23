@@ -39,7 +39,17 @@ import {
   encodeChunkCursor,
   resolvePageSize,
 } from "../documentChunks";
-import { renderWikiMarkdown } from "./wikiRenderer";
+import {
+  renderConceptLibraryMarkdown,
+  renderWikiMarkdown,
+} from "./wikiRenderer";
+import type { WikiPreparedSource } from "./wikiConceptLibrary";
+import { normalizeTermFields } from "./wikiConceptTerms";
+import type {
+  WikiConceptEntity,
+  WikiConceptEntityInput,
+  WikiTermSourceInput,
+} from "./wikiConceptTerms";
 import { WikiRetriever } from "./wikiRetriever";
 import type {
   WikiClaimSearchResult,
@@ -262,14 +272,31 @@ export class WikiService {
     const open = await sessions.getOpen(libraryID);
     if (!open || !open.expert) return;
     const coverage = await sessions.coverage(open.sessionId);
-    if (!coverage.complete || open.finalSynthesisAt !== null) return;
-    throw new Error(
-      `Every chunk of ${open.itemKey} has been delivered, but its reading note has not been rewritten ` +
-        "as one account of the complete paper. Do that pass first: call wiki_update_reading_note with " +
-        "finalSynthesis true and the whole note, reconciling anything the later sections corrected, " +
-        "then come back to wiki_prepare_update. (Committing PART of a paper you are still reading is " +
-        "always allowed - this only applies once the whole paper has been delivered.)",
-    );
+    if (!coverage.complete) return;
+    if (open.finalSynthesisAt === null) {
+      throw new Error(
+        `Every chunk of ${open.itemKey} has been delivered, but its reading note has not been rewritten ` +
+          "as one account of the complete paper. Do that pass first: call wiki_update_reading_note with " +
+          "finalSynthesis true and the whole note, reconciling anything the later sections corrected, " +
+          "then come back to wiki_prepare_update. (Committing PART of a paper you are still reading is " +
+          "always allowed - this only applies once the whole paper has been delivered.)",
+      );
+    }
+    // The terminology pass, for the same reason as the synthesis pass, and
+    // after it: the concepts a paper established are read off the whole-paper
+    // account, not off the batch that happened to mention them. Asking for
+    // that once, deliberately, is what turns scattered per-batch notes into a
+    // concept library. An empty answer with a reason is accepted - most papers
+    // introduce nothing the library did not already hold.
+    if (open.conceptsRecordedAt === null) {
+      throw new Error(
+        `${open.itemKey} has been read and synthesised, but its concepts have not been reviewed as a whole. ` +
+          "Call wiki_record_concepts ONCE with final true - anything you staged while reading is written by that same call - and the terms this paper established, each with whatever " +
+          "of Chinese full name, English full name and abbreviation you can actually confirm, and never an " +
+          "abbreviation alone - or with an empty concepts list and noConceptsReason if it introduced nothing " +
+          "new. Then come back to wiki_prepare_update.",
+      );
+    }
   }
 
   async getPage(pageId: number): Promise<any> {
@@ -1306,11 +1333,387 @@ export class WikiService {
   }
 
   async exportMarkdown(libraryID: number): Promise<string> {
-    const [pages, snapshot] = await Promise.all([
+    const [pages, snapshot, concepts] = await Promise.all([
       this.store.listPages(libraryID),
       this.store.getRetrievalSnapshot(libraryID),
+      this.listConcepts(libraryID),
     ]);
-    return renderWikiMarkdown(pages, snapshot);
+    return renderWikiMarkdown(
+      pages,
+      snapshot,
+      concepts,
+      await this.nameConceptSources(concepts),
+    );
+  }
+
+  /** `libraryID:itemKey` to a readable citation, for either export. */
+  private async nameConceptSources(
+    concepts: WikiConceptEntity[],
+  ): Promise<Map<string, string>> {
+    const names = new Map<string, string>();
+    for (const concept of concepts) {
+      for (const term of [concept.primaryTerm, ...concept.aliasTerms]) {
+        for (const source of term?.sources ?? []) {
+          const key = `${source.libraryID}:${source.itemKey}`;
+          if (names.has(key)) continue;
+          names.set(
+            key,
+            await this.describeSourceItem(source.libraryID, source.itemKey),
+          );
+        }
+      }
+    }
+    return names;
+  }
+
+  /** Every concept entity in the library, with its terms and their sources. */
+  async listConcepts(libraryID: number): Promise<WikiConceptEntity[]> {
+    const library = await this.store.concepts();
+    return library.list(libraryID);
+  }
+
+  /**
+   * The concept library, optionally filtered.
+   *
+   * The filter is matched against every field of every term, abbreviations
+   * included, so looking up "DRX" finds the concept whose primary term is
+   * 动态再结晶 - which is the whole point of storing the short form in its own
+   * column rather than as another loose string.
+   */
+  async searchConcepts(options: {
+    libraryID: number;
+    query?: string;
+    limit?: number;
+  }): Promise<{ total: number; concepts: WikiConceptEntity[] }> {
+    const all = await this.listConcepts(options.libraryID);
+    const query = normalizeWikiName(String(options.query ?? ""));
+    const matched = !query
+      ? all
+      : all.filter((concept) =>
+          [concept.primaryTerm, ...concept.aliasTerms].some((term) =>
+            term
+              ? [term.zh, term.en, term.abbr].some(
+                  (name) => name && normalizeWikiName(name).includes(query),
+                )
+              : false,
+          ),
+        );
+    const limit = Math.max(1, Math.min(500, Math.floor(options.limit ?? 100)));
+    return { total: matched.length, concepts: matched.slice(0, limit) };
+  }
+
+  /** The concept library alone, as its own Markdown document. */
+  async exportConceptsMarkdown(libraryID: number): Promise<string> {
+    const concepts = await this.listConcepts(libraryID);
+    return renderConceptLibraryMarkdown(
+      concepts,
+      await this.nameConceptSources(concepts),
+    );
+  }
+
+  /** A readable name for one source document, for exports and the panel. */
+  private async describeSourceItem(
+    libraryID: number,
+    itemKey: string,
+  ): Promise<string> {
+    try {
+      const item = await Zotero.Items.getByLibraryAndKeyAsync(
+        libraryID,
+        itemKey,
+      );
+      if (!item) return itemKey;
+      const title = item.getDisplayTitle?.() || item.getField?.("title") || "";
+      const creator = String(item.getField?.("firstCreator") ?? "");
+      const year = String(item.getField?.("date") ?? "").slice(0, 4);
+      const detail = [creator, year].filter(Boolean).join(" ");
+      return [String(title || itemKey), detail && `(${detail})`]
+        .filter(Boolean)
+        .join(" ");
+    } catch {
+      return itemKey;
+    }
+  }
+
+  /**
+   * Record the concepts one reading pass recognised.
+   *
+   * This is the extraction entry point, and it is deliberately NOT part of
+   * `CREATE_PAGE`. Concepts accumulate while a paper is actually being read
+   * and analysed - which is when a reader can tell that DRX in this paper
+   * means dynamic recrystallization and not something else - rather than at
+   * the moment somebody decides a topic deserves a page.
+   *
+   * TWO MODES, and the difference is the whole point of 2.4.4:
+   *
+   *   - Without `final`, while a paper is open, the entities are STAGED. They
+   *     are checked for shape and held on the reading session; nothing reaches
+   *     the concept tables and no confirmation dialog is raised. A model may
+   *     therefore note candidates as it goes without costing the user a prompt
+   *     per batch, and may drop a candidate it later decides it misread simply
+   *     by leaving it out of the final list.
+   *   - With `final`, everything staged is combined with what this call
+   *     carries and written ONCE. One write, one confirmation, one paper.
+   *
+   * Sources are verified as far as they were offered. The document is
+   * mandatory and must exist in Zotero. An excerpt and chunk index are
+   * optional; when they are supplied they are checked against the live index
+   * exactly as Evidence is, and a quotation that cannot be found is dropped -
+   * with a warning - rather than stored as if it had been verified. The term
+   * keeps its link to the document either way, because "this paper uses this
+   * term" is true whether or not a quotable line came with it.
+   */
+  async recordConcepts(options: {
+    libraryID: number;
+    concepts: WikiConceptEntityInput[];
+    /** The whole-paper pass. Writes, and discharges the write-up gate. */
+    final?: boolean;
+    /** Required when `final` is set with nothing to write, for the reading log. */
+    noConceptsReason?: string;
+    itemKey?: string;
+    /**
+     * Raised immediately before anything is written, never for a staging call.
+     * The server passes the user consent gate here so that consent is asked
+     * once per paper rather than once per batch.
+     */
+    confirmWrite?: (conceptCount: number) => Promise<void>;
+  }): Promise<any> {
+    const sessions = await this.store.readingSessions();
+    const open = await sessions.getOpen(options.libraryID);
+    if (options.itemKey && open && options.itemKey.trim() !== open.itemKey) {
+      throw new Error(
+        `The open paper is ${open.itemKey}, not ${options.itemKey.trim()}.`,
+      );
+    }
+    const defaultItemKey = options.itemKey?.trim() || open?.itemKey || "";
+    const entities = Array.isArray(options.concepts) ? options.concepts : [];
+
+    // ---- Staging: no write, no prompt ------------------------------------
+    if (options.final !== true && open) {
+      const warnings = this.inspectConceptShapes(entities);
+      const totalStaged = await sessions.stageConcepts(
+        open.sessionId,
+        entities.map((entity) => ({ ...entity, itemKey: defaultItemKey })),
+      );
+      return {
+        staged: entities.length,
+        totalStaged,
+        written: false,
+        warnings,
+        readingSession: {
+          sessionId: open.sessionId,
+          itemKey: open.itemKey,
+          conceptPassRecorded: false,
+        },
+        note:
+          "Held for the whole-paper pass. Call wiki_record_concepts with final true " +
+          "after the paper has been read to write these, plus anything else you found, in one go.",
+      };
+    }
+
+    // ---- The write -------------------------------------------------------
+    const staged = open
+      ? ((await sessions.drainStagedConcepts(open.sessionId)) as Array<
+          WikiConceptEntityInput & { itemKey?: string }
+        >)
+      : [];
+    const combined = [...staged, ...entities];
+    if (options.final && !combined.length && !options.noConceptsReason?.trim()) {
+      throw new Error(
+        "A final concept submission with no concepts must say why in noConceptsReason. " +
+          "That this paper introduced no term the library did not already hold is a real answer; " +
+          "an empty one is not.",
+      );
+    }
+    const warnings: string[] = [];
+    const prepared: Array<
+      WikiConceptEntityInput & { sources?: WikiPreparedSource[] }
+    > = [];
+    for (const entity of combined) {
+      // A staged entity remembers which paper it was staged for, so a stretch
+      // read before the reader moved on still cites the right document.
+      const itemKey =
+        String((entity as { itemKey?: string }).itemKey ?? "").trim() ||
+        defaultItemKey;
+      prepared.push({
+        ...entity,
+        sources: await this.prepareTermSources(
+          options.libraryID,
+          entity.sources,
+          itemKey,
+          warnings,
+        ),
+        primaryTerm: entity.primaryTerm
+          ? {
+              ...entity.primaryTerm,
+              sources: await this.prepareTermSources(
+                options.libraryID,
+                entity.primaryTerm.sources,
+                "",
+                warnings,
+              ),
+            }
+          : undefined,
+        terms: await Promise.all(
+          (entity.terms ?? []).map(async (term) => ({
+            ...term,
+            sources: await this.prepareTermSources(
+              options.libraryID,
+              term.sources,
+              "",
+              warnings,
+            ),
+          })),
+        ),
+      });
+    }
+    if (prepared.length) await options.confirmWrite?.(prepared.length);
+    const library = await this.store.concepts();
+    const result = await library.record({
+      libraryID: options.libraryID,
+      entities: prepared,
+    });
+    if (open) {
+      await sessions.recordConceptSubmission(open.sessionId, {
+        final: options.final === true,
+      });
+    }
+    return {
+      ...result,
+      written: true,
+      fromStaging: staged.length,
+      warnings: [...result.warnings, ...warnings],
+      final: options.final === true,
+      ...(open
+        ? {
+            readingSession: {
+              sessionId: open.sessionId,
+              itemKey: open.itemKey,
+              conceptPassRecorded: options.final === true,
+            },
+          }
+        : {}),
+    };
+  }
+
+  /**
+   * Check staged entities for the one shape the store will refuse.
+   *
+   * Staging must not silently accept a term the final pass will drop, or the
+   * model learns about the abbreviation rule at the end of the paper instead
+   * of at the point it wrote the offending term. Nothing is stored or
+   * rejected here - the warnings just travel back with the staging reply.
+   */
+  private inspectConceptShapes(entities: WikiConceptEntityInput[]): string[] {
+    const warnings: string[] = [];
+    for (const entity of entities) {
+      for (const term of [entity.primaryTerm, ...(entity.terms ?? [])]) {
+        if (!term) continue;
+        try {
+          normalizeTermFields(term);
+        } catch (error) {
+          warnings.push(String((error as Error)?.message ?? error));
+        }
+      }
+    }
+    return warnings;
+  }
+
+  /**
+   * Verify a term's sources as far as the caller chose to specify them.
+   *
+   * A source with no `itemKey` is dropped; a source naming a document Zotero
+   * does not have is dropped and reported. An excerpt that cannot be found in
+   * that document's indexed chunks loses the excerpt and the chunk index, not
+   * the source - the link to the paper still holds.
+   */
+  private async prepareTermSources(
+    libraryID: number,
+    sources: WikiTermSourceInput[] | undefined,
+    defaultItemKey: string,
+    warnings: string[],
+  ): Promise<WikiPreparedSource[]> {
+    const requested = (sources ?? []).slice();
+    if (!requested.length && defaultItemKey) {
+      requested.push({ itemKey: defaultItemKey });
+    }
+    const prepared: WikiPreparedSource[] = [];
+    for (const source of requested) {
+      const itemKey = String(source.itemKey ?? "").trim();
+      if (!itemKey) continue;
+      const item = await Zotero.Items.getByLibraryAndKeyAsync(
+        libraryID,
+        itemKey,
+      );
+      if (!item || item.deleted || !item.isRegularItem?.()) {
+        warnings.push(
+          `Concept source ${libraryID}:${itemKey} is not a Zotero document in this library and was not recorded.`,
+        );
+        continue;
+      }
+      const excerpt = normalizeWikiText(String(source.excerpt ?? ""));
+      if (!excerpt) {
+        prepared.push({
+          libraryID,
+          itemKey,
+          chunkIdSnapshot: null,
+          excerpt: "",
+        });
+        continue;
+      }
+      const located = await this.locateTermExcerpt(
+        libraryID,
+        itemKey,
+        excerpt,
+        source.chunkIdSnapshot,
+      );
+      if (!located) {
+        warnings.push(
+          `The quotation offered for ${itemKey} could not be found in its indexed chunks, so the source was kept without it. ` +
+            "Quote the text of the paper itself if you want the excerpt stored.",
+        );
+        prepared.push({
+          libraryID,
+          itemKey,
+          chunkIdSnapshot: null,
+          excerpt: "",
+        });
+        continue;
+      }
+      prepared.push({
+        libraryID,
+        itemKey,
+        chunkIdSnapshot: located.chunkId,
+        excerpt,
+      });
+    }
+    return prepared;
+  }
+
+  private async locateTermExcerpt(
+    libraryID: number,
+    itemKey: string,
+    excerpt: string,
+    chunkIdSnapshot: number | null | undefined,
+  ): Promise<{ chunkId: number } | null> {
+    try {
+      const vectorStore = getVectorStore();
+      await vectorStore.initialize();
+      const chunks = await vectorStore.getChunksForItem(itemKey, libraryID);
+      if (!chunks.length) return null;
+      const named = chunks.find(
+        (candidate) => candidate.chunkId === Number(chunkIdSnapshot),
+      );
+      if (named && normalizeWikiText(named.text).includes(excerpt)) {
+        return { chunkId: named.chunkId };
+      }
+      const found = chunks.find((candidate) =>
+        normalizeWikiText(candidate.text).includes(excerpt),
+      );
+      return found ? { chunkId: found.chunkId } : null;
+    } catch (error) {
+      ztoolkit.log("[wiki] could not verify a concept excerpt", error);
+      return null;
+    }
   }
 
   /**

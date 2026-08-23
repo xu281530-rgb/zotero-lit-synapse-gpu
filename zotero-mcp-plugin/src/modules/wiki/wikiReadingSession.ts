@@ -140,6 +140,40 @@ export interface WikiReadingSessionRecord {
   lastIntegrationUnchanged: boolean;
   /** When the whole-paper rewrite was done. null until the paper is read. */
   finalSynthesisAt: number | null;
+  /**
+   * When the paper's whole-paper concept list was submitted. null until it is.
+   *
+   * The write-up gate reads this: a paper that has been delivered in full and
+   * synthesised still owes one deliberate pass over the terminology it
+   * established before its claims may be written. Recorded on the session
+   * rather than derived from the term rows because "this paper contributed no
+   * new concepts" is a real, and common, answer that leaves no rows behind.
+   */
+  conceptsRecordedAt: number | null;
+
+  /**
+   * Concept candidates noticed part-way through, waiting for the whole-paper
+   * pass to write them.
+   *
+   * Held here rather than written on arrival so that reading one paper costs
+   * ONE database write and one confirmation instead of one per batch. It also
+   * makes the mid-reading calls cheap enough to be honest: a term the model
+   * later decides it misread can simply be left out of the final list, whereas
+   * a term already written would have to be corrected.
+   */
+  stagedConcepts: unknown[];
+}
+
+/** The staging buffer, tolerant of a row written before it existed. */
+function parseStagedConcepts(raw: unknown): unknown[] {
+  const text = String(raw ?? "").trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 /** Delivered batches not yet folded into the note. */
@@ -180,6 +214,11 @@ function mapSession(row: any): WikiReadingSessionRecord {
     "final_synthesis_at",
     "finalSynthesisAt",
   );
+  const conceptsRecordedAt = rowColumn(
+    row,
+    "concepts_recorded_at",
+    "conceptsRecordedAt",
+  );
   return {
     sessionId: Number(rowColumn(row, "session_id", "sessionId")),
     libraryID: Number(rowColumn(row, "library_id", "libraryID")),
@@ -212,6 +251,11 @@ function mapSession(row: any): WikiReadingSessionRecord {
       ) === 1,
     finalSynthesisAt:
       finalSynthesisAt == null ? null : Number(finalSynthesisAt),
+    conceptsRecordedAt:
+      conceptsRecordedAt == null ? null : Number(conceptsRecordedAt),
+    stagedConcepts: parseStagedConcepts(
+      rowColumn(row, "staged_concepts", "stagedConcepts"),
+    ),
   };
 }
 
@@ -287,7 +331,8 @@ export class WikiReadingSessions {
           `UPDATE wiki_reading_sessions
            SET total_chunks = ?, updated_at = ?, delivered_batches = 0,
                integrated_batches = 0, integrated_chunks = 0,
-               last_integration_unchanged = 0, final_synthesis_at = NULL
+               last_integration_unchanged = 0, final_synthesis_at = NULL,
+               concepts_recorded_at = NULL, staged_concepts = ''
            WHERE session_id = ?`,
           [options.totalChunks, Date.now(), open.sessionId],
         );
@@ -434,6 +479,66 @@ export class WikiReadingSessions {
         options.finalSynthesis ? now : (session?.finalSynthesisAt ?? null),
         sessionId,
       ],
+    );
+  }
+
+  /**
+   * Record that this paper's whole-paper concept list has been submitted.
+   *
+   * `final` is what the write-up gate looks for. A submission made partway
+   * through a paper is still recorded as terms and sources - it just does not
+   * discharge the obligation to review the terminology once the whole paper
+   * has been read.
+   */
+  /**
+   * Hold candidate concepts until the whole-paper pass.
+   *
+   * Appends rather than replaces: each mid-reading call adds what that stretch
+   * of text established, and the final pass sees everything at once, which is
+   * the only vantage point from which "is this actually a concept of the field
+   * or just a phrase this section used" can be answered.
+   */
+  async stageConcepts(sessionId: number, entities: unknown[]): Promise<number> {
+    if (!entities.length) {
+      const session = await this.get(sessionId);
+      return session ? session.stagedConcepts.length : 0;
+    }
+    const session = await this.get(sessionId);
+    const staged = [...(session?.stagedConcepts ?? []), ...entities];
+    await this.db.queryAsync(
+      `UPDATE wiki_reading_sessions
+       SET staged_concepts = ?, updated_at = ?
+       WHERE session_id = ?`,
+      [JSON.stringify(staged), Date.now(), sessionId],
+    );
+    return staged.length;
+  }
+
+  /** Take everything staged and empty the buffer, in one step. */
+  async drainStagedConcepts(sessionId: number): Promise<unknown[]> {
+    const session = await this.get(sessionId);
+    const staged = session?.stagedConcepts ?? [];
+    if (staged.length) {
+      await this.db.queryAsync(
+        `UPDATE wiki_reading_sessions
+         SET staged_concepts = '', updated_at = ?
+         WHERE session_id = ?`,
+        [Date.now(), sessionId],
+      );
+    }
+    return staged;
+  }
+
+  async recordConceptSubmission(
+    sessionId: number,
+    options: { final: boolean },
+  ): Promise<void> {
+    if (!options.final) return;
+    await this.db.queryAsync(
+      `UPDATE wiki_reading_sessions
+       SET concepts_recorded_at = ?, updated_at = ?
+       WHERE session_id = ?`,
+      [Date.now(), Date.now(), sessionId],
     );
   }
 

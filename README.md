@@ -5,7 +5,7 @@ _This README is also available in: [:cn: 简体中文](./README-zh.md) | :gb: En
 [![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-2.4.2-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-2.4.4-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -650,7 +650,7 @@ being answered with its title and abstract dressed up as body text.
 > bypass around the retrieval funnel every other tool enforces. Index
 > maintenance now lives only in the plugin's preferences UI.
 
-### 4. LLM Wiki (12 tools, can be disabled independently)
+### 4. LLM Wiki (16 tools, can be disabled independently)
 
 The Wiki is an independent long-term knowledge database. It stores reusable
 Pages, Claims, Concepts, Relations and traceable Evidence rather than another
@@ -679,8 +679,18 @@ real file on the item, a Zotero restart, an MCP disconnect or a context
 compaction costs nothing: `wiki_get_reading_note` hands back the note, the
 expert and the chunk index to resume at.
 
-Once every chunk has been delivered, one more pass over the whole paper is
-required (`finalSynthesis`) before `wiki_prepare_update` will start the write-up,
+Once every chunk has been delivered, two more passes are required before
+`wiki_prepare_update` will start the write-up: one over the whole paper
+(`finalSynthesis`), and one over the terminology it established
+(`wiki_record_concepts` with `final`). The second builds the independent concept
+library: one entity per concept, one primary term and any number of alias terms,
+every term carrying a Chinese full name, an English full name and an
+abbreviation — with the hard rule that an abbreviation may never stand alone. A
+paper that introduced nothing new answers with an empty list and a reason. Names
+are never overwritten away: two papers that spell the same term differently keep
+both spellings as two term rows of one concept, and only a value the model had
+merely inferred is replaced when a paper contradicts it. The
+first pass
 and Evidence reaches `paper_reviewed` or `cross_paper` depth only when both are
 true: every chunk delivered **and** that final pass recorded. Delivery is not
 understanding. The note itself is never Evidence — Claims still cite excerpts
@@ -694,7 +704,10 @@ the paper.
 - `wiki_get_page` — read a Page with its Claims and Evidence
 - `wiki_get_claim` — read one atomic Claim and its provenance
 - `wiki_status` — report Wiki and Evidence-link status
-- `wiki_export` — render derived Markdown without changing the authoritative database
+- `wiki_export` — render derived Markdown without changing the authoritative database; the concept library is appended as a final section
+- `wiki_record_concepts` — record the professional concepts recognised while actually reading a paper, each as one entity with one primary term and any number of alias terms (Chinese full name / English full name / abbreviation), with the source documents they were recognised in. Calls without `final` are staged on the open reading session and write nothing; the one call with `final` writes everything at once, so a paper costs one database write and one confirmation instead of one per batch. Every field carries its own provenance — quoted from the paper, completed by the model, or edited by a person — and the model may complete a term from its own knowledge as long as it says so
+- `wiki_list_concepts` — list the independent concept library, with every term and its sources
+- `wiki_export_concepts` — export the concept library on its own as Markdown
 - `wiki_reverify` — relink Evidence after index rebuilds
 - `wiki_build_from_paper` — read one explicitly requested paper: metadata and abstract first, then one page of chunks at a time; follow `pagination.nextCursor` until `pagination.coverageComplete` is true, and finish the open paper before starting another
 - `wiki_set_reading_expert` — generate this paper's one domain expert from its metadata and abstract, and create its persistent Markdown reading note on the Zotero item

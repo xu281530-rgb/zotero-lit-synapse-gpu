@@ -646,12 +646,88 @@ block("the write-up waits for the whole-paper pass", async () => {
   assert.equal(parsed.metadata.coverage.finalSynthesis, true);
   assert.equal(parsed.metadata.nextChunk, null);
 
+  // 2.4.3: the synthesis pass is no longer the last gate. A paper that has
+  // been read whole also owes one deliberate review of the terminology it
+  // established, so the concept library is built from reading rather than
+  // from whatever CREATE_PAGE happened to name.
+  await assert.rejects(
+    () =>
+      service.prepareUpdate({
+        libraryID: 1,
+        query: "Columnar array forming",
+        proposedPageTitles: ["Columnar array forming"],
+      }),
+    /concepts have not been reviewed as a whole/iu,
+    "a synthesised paper still owes its whole-paper concept pass",
+  );
+
+  // 2.4.4: a call without `final` while a paper is open is STAGED. Nothing is
+  // written and nothing is confirmed, which is what makes noting a candidate
+  // mid-read cost the user nothing. The whole-paper pass writes the lot once.
+  let confirmations = 0;
+  const staged = await service.recordConcepts({
+    libraryID: 1,
+    concepts: [
+      {
+        primaryTerm: { zh: "等轴晶", en: "equiaxed grain" },
+      },
+    ],
+    confirmWrite: async () => {
+      confirmations += 1;
+    },
+  });
+  assert.equal(staged.written, false, "a mid-reading call must not write");
+  assert.equal(staged.totalStaged, 1);
+  assert.equal(confirmations, 0, "and must not ask the user anything");
+  assert.equal(
+    (await service.listConcepts(1)).some(
+      (concept) => concept.displayName === "等轴晶",
+    ),
+    false,
+    "nothing staged has reached the concept library yet",
+  );
+
+  const conceptPass = await service.recordConcepts({
+    libraryID: 1,
+    final: true,
+    concepts: [
+      {
+        primaryTerm: {
+          zh: "柱状晶到等轴晶转变",
+          en: "columnar-to-equiaxed transition",
+          abbr: "CET",
+        },
+      },
+    ],
+    confirmWrite: async () => {
+      confirmations += 1;
+    },
+  });
+  assert.equal(
+    confirmations,
+    1,
+    "one paper, one confirmation - not one per batch",
+  );
+  assert.equal(conceptPass.fromStaging, 1, "the staged candidate is written too");
+  assert.equal(conceptPass.createdConcepts, 2);
+  assert.ok(
+    (await service.listConcepts(1)).some(
+      (concept) => concept.displayName === "等轴晶",
+    ),
+    "what was staged while reading is in the library after the final pass",
+  );
+  assert.equal(
+    conceptPass.readingSession.conceptPassRecorded,
+    true,
+    "the pass is recorded against the open paper, not merely stored as terms",
+  );
+
   const prepared = await service.prepareUpdate({
     libraryID: 1,
     query: "Columnar array forming",
     proposedPageTitles: ["Columnar array forming"],
   });
-  assert.ok(prepared.prepareToken, "with the pass done, the write-up may start");
+  assert.ok(prepared.prepareToken, "with both passes done, the write-up may start");
 });
 
 block("finalSynthesis is refused before the paper has been delivered", async () => {
