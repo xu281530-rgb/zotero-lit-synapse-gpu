@@ -252,13 +252,38 @@ const WIKI_REVIEW = {
   relations: "No relation to draw or withdraw: this paper links no two concepts already stored.",
 };
 
+/**
+ * Prepare, sending the whole-Wiki review only when the paper is ready for it.
+ *
+ * Mirrors what a caller actually has to do: the review is refused outright on
+ * an unfinished paper - reviewing the Wiki against half a paper would then
+ * count as the final pass and never be asked for again - so a mid-read
+ * checkpoint commit sends no review, and the gate at the end asks for one by
+ * name. Driving it off the refusal rather than off a flag means these blocks
+ * also prove the two messages are distinguishable.
+ */
+async function prepareFor(title) {
+  try {
+    return await service.prepareUpdate({
+      libraryID: 1,
+      query: title,
+      proposedPageTitles: [title],
+    });
+  } catch (error) {
+    if (!/review the WHOLE Wiki against the finished paper/iu.test(error.message)) {
+      throw error;
+    }
+    return service.prepareUpdate({
+      libraryID: 1,
+      query: title,
+      proposedPageTitles: [title],
+      wikiReview: WIKI_REVIEW,
+    });
+  }
+}
+
 async function commitClaim(options) {
-  const prepared = await service.prepareUpdate({
-    libraryID: 1,
-    query: options.title,
-    proposedPageTitles: [options.title],
-    wikiReview: WIKI_REVIEW,
-  });
+  const prepared = await prepareFor(options.title);
   return service.commit({
     libraryID: 1,
     userInitiated: true,

@@ -194,7 +194,42 @@ function readByQuestion(key, indexes, facts, extra = {}) {
   });
 }
 
-/** The write-up that discharges the debt those turns incurred. */
+/**
+ * A write-off reason with enough substance to pass the argue-don't-assert
+ * check, for chunks these blocks are not really about.
+ */
+function writeOffReason(what) {
+  return (
+    `Those passages restate ${what} at the same stated values, and the Page already carries it as a ` +
+    "Claim with its own excerpt; they add no condition, parameter or mechanism beyond what is stored."
+  );
+}
+
+/** Every chunk of `key` still owing the Wiki, as a SKIP that writes them off. */
+async function settleRest(key, what = "the depth-versus-station series") {
+  const sessions = await store.readingSessions();
+  const open = await sessions.openForItem(1, key);
+  if (!open) return [];
+  const owed = await sessions.pendingWikiChunks(open.sessionId);
+  if (!owed.length) return [];
+  return [
+    {
+      action: "SKIP",
+      itemKey: key,
+      chunkIds: owed.map((chunk) => chunk.chunkId),
+      reason: writeOffReason(what),
+    },
+  ];
+}
+
+/**
+ * The write-up that discharges the debt those turns incurred.
+ *
+ * `settle` names the papers whose remaining chunks should be written off, which
+ * is what a real caller does once it has decided the rest of what it read adds
+ * nothing: the Claim carries the chunk that mattered, and a SKIP accounts for
+ * the others. Blocks that are ABOUT the settlement pass their own actions.
+ */
 async function writeUp(options) {
   const prepared = await service.prepareUpdate({
     libraryID: 1,
@@ -202,6 +237,20 @@ async function writeUp(options) {
     proposedPageTitles: [options.title],
     ...(options.wikiReview ? { wikiReview: options.wikiReview } : {}),
   });
+  // By default, write off whatever the cited papers still owe. That is what a
+  // caller does in practice - the Claim carries the chunk that mattered and a
+  // SKIP accounts for the rest - and it keeps the blocks below about their own
+  // subject. `settle: false` opts out, for the blocks that ARE about a debt
+  // being left standing.
+  const settle =
+    options.settle === false
+      ? []
+      : (options.settle ??
+        [...new Set((options.evidence ?? []).map((row) => row.itemKey))]);
+  const skips = [];
+  for (const key of settle) {
+    skips.push(...(await settleRest(key)));
+  }
   const result = await service.commit({
     libraryID: 1,
     userInitiated: true,
@@ -219,6 +268,8 @@ async function writeUp(options) {
         confidence: 0.7,
         evidence: options.evidence,
       },
+      ...skips,
+      ...(options.extraActions ?? []),
     ],
   });
   return { prepared, result };
@@ -404,11 +455,17 @@ block("a commit that ignores a paper leaves that paper's debt standing", async (
     claimText: "The imposed gradient cycles across the reported range.",
     evidence: [evidenceFrom("PAPERONE", 15)],
   });
+  // PAPERONE owed nothing going in - its own reading was settled in full - so
+  // there is nothing of it to clear, and citing it buys PAPERTWO nothing.
   assert.deepEqual(result.questionReading.clearedPapers, []);
   assert.deepEqual(result.questionReading.stillPending, [
-    { itemKey: "PAPERTWO", pendingChunks: 1 },
+    {
+      itemKey: "PAPERTWO",
+      pendingChunkIds: [chunkId("PAPERTWO", 9)],
+      pendingChunks: 1,
+    },
   ]);
-  assert.match(result.questionReading.note, /PAPERTWO \(1 chunk\(s\)\)/u);
+  assert.match(result.questionReading.note, /PAPERTWO chunk\(s\) 2009/u);
 
   await writeUp({
     title: "Station nine",
@@ -847,6 +904,464 @@ block("a body-less paper cannot be read, and chunk ids are checked", async () =>
     /are not passages of PAPERTWO: 1003, 4/u,
     "an id from the wrong paper is reported rather than counted as reading",
   );
+});
+
+// =========================================================================
+// 9. The debt is settled chunk by chunk, not paper by paper
+// =========================================================================
+
+block("one Claim settles the chunk it quotes, and only that chunk", async () => {
+  // The exact shape of the bug this block exists for: five chunks read, one
+  // Claim written, and every one of the five recorded as written up.
+  const read = await readByQuestion(
+    "PAPERTWO",
+    [10, 11, 35, 48, 60],
+    [
+      "The early stations behave as PAPERONE's do (chunk 3, chunk 4).",
+      "Station 9 continues the trend (chunk 9).",
+      "Station 50 shows the same plateau PAPERONE reaches, and 51 with it (chunk 50, chunk 51).",
+      "Depth at stations 10 and 11 is equal to within the stated uncertainty (chunk 10, chunk 11).",
+      "Station 35 is where the series first departs from linear (chunk 35).",
+      "Stations 48 and 60 are both on the plateau (chunk 48, chunk 60).",
+    ],
+  );
+  assert.deepEqual(read.wikiDebt.chunkIndexes, [10, 11, 35, 48, 60]);
+
+  const { result } = await writeUp({
+    title: "Departure from linearity",
+    claimText: "The depth series first departs from linear near station 35.",
+    evidence: [evidenceFrom("PAPERTWO", 35)],
+    settle: false,
+  });
+  assert.deepEqual(result.questionReading.settledByEvidence, [
+    { itemKey: "PAPERTWO", chunkIds: [chunkId("PAPERTWO", 35)] },
+  ]);
+  assert.deepEqual(result.questionReading.clearedPapers, []);
+  assert.deepEqual(result.questionReading.stillPending, [
+    {
+      itemKey: "PAPERTWO",
+      pendingChunkIds: [10, 11, 48, 60].map((i) => chunkId("PAPERTWO", i)),
+      pendingChunks: 4,
+    },
+  ]);
+
+  // And the paper is still closed to further reading, naming what it owes.
+  await assert.rejects(
+    () =>
+      readByQuestion("PAPERTWO", [61], [
+        "Station 61 is on the plateau too (chunk 61).",
+      ]),
+    (error) =>
+      /are in its reading note but not yet in the Wiki/u.test(error.message) &&
+      /2010, 2011, 2048, 2060/u.test(error.message),
+    "the refusal names the outstanding chunks rather than a count",
+  );
+});
+
+block("a write-off settles the rest, but only if it argues", async () => {
+  const owed = [10, 11, 48, 60].map((i) => chunkId("PAPERTWO", i));
+
+  const prepared = await service.prepareUpdate({
+    libraryID: 1,
+    query: "Plateau extent",
+    proposedPageTitles: ["Plateau extent"],
+  });
+  assert.deepEqual(
+    prepared.pendingWikiWriteUp,
+    [{ itemKey: "PAPERTWO", mode: "qa", pendingChunkIds: owed, pendingChunks: 4 }],
+    "prepare names the chunk ids the write-up has to account for",
+  );
+
+  const commitWith = (skip) =>
+    service.commit({
+      libraryID: 1,
+      userInitiated: true,
+      prepareToken: prepared.prepareToken,
+      actions: [
+        { action: "CREATE_PAGE", ref: "p", canonicalTitle: "Plateau extent" },
+        {
+          action: "ADD_CLAIM",
+          ref: "c",
+          pageId: "p",
+          claimText: "The plateau covers stations 48 through 60.",
+          claimType: "mechanism",
+          epistemicStatus: "provisional",
+          coverageLevel: "chunk_local",
+          confidence: 0.7,
+          evidence: [evidenceFrom("PAPERTWO", 48)],
+        },
+        skip,
+      ],
+    });
+
+  // "Nothing new" is exactly what a reader who read nothing would write.
+  await assert.rejects(
+    () =>
+      commitWith({
+        action: "SKIP",
+        itemKey: "PAPERTWO",
+        chunkIds: [chunkId("PAPERTWO", 10)],
+        reason: "no new knowledge",
+      }),
+    /asserts rather than argues/u,
+    "a reason that only asserts is refused",
+  );
+
+  // Not the reflex answer, but still too short to be an argument.
+  await assert.rejects(
+    () =>
+      commitWith({
+        action: "SKIP",
+        itemKey: "PAPERTWO",
+        chunkIds: [chunkId("PAPERTWO", 10)],
+        reason: "Covered by the plateau claim.",
+      }),
+    /needs a reason of at least 40 characters/u,
+    "and so is one too short to contain an argument",
+  );
+
+  // A chunk that owes nothing cannot be written off.
+  await assert.rejects(
+    () =>
+      commitWith({
+        action: "SKIP",
+        itemKey: "PAPERTWO",
+        chunkIds: [chunkId("PAPERTWO", 35)],
+        reason: writeOffReason("the departure from linearity"),
+      }),
+    /do not owe the Wiki anything/u,
+    "chunk 35 was settled by its own Claim already",
+  );
+
+  // Nothing above was written: a refused write-off fails the whole commit.
+  const sessions = await store.readingSessions();
+  const stillOpen = await sessions.openForItem(1, "PAPERTWO");
+  assert.equal(
+    (await sessions.pendingWikiChunks(stillOpen.sessionId)).length,
+    4,
+    "a refused write-off leaves the debt exactly as it was",
+  );
+
+  const result = await commitWith({
+    action: "SKIP",
+    itemKey: "PAPERTWO",
+    chunkIds: [10, 11, 60].map((i) => chunkId("PAPERTWO", i)),
+    reason:
+      "Stations 10, 11 and 60 restate the depth-versus-station series at values the Plateau extent " +
+      "Page already carries, and add no condition, parameter or mechanism beyond the claim just written.",
+  });
+  assert.deepEqual(result.questionReading.clearedPapers, ["PAPERTWO"]);
+  assert.equal(result.questionReading.settledAsNoUpdate.length, 1);
+  assert.deepEqual(
+    result.questionReading.settledAsNoUpdate[0].chunkIds,
+    [10, 11, 60].map((i) => chunkId("PAPERTWO", i)),
+  );
+
+  // The judgement is kept, not merely honoured once.
+  const declarations = await sessions.noUpdateDeclarations(
+    stillOpen.sessionId,
+  );
+  const mine = declarations.find((entry) =>
+    /Plateau extent/u.test(entry.reason),
+  );
+  assert.ok(mine, "the reason is stored, not just accepted and dropped");
+  assert.deepEqual(mine.chunkIndexes, [10, 11, 60]);
+  assert.ok(
+    declarations.every((entry) => entry.reason.length >= 40),
+    "and every write-off ever accepted carries a real reason",
+  );
+
+  // Settled in full, so the paper opens to questions again.
+  const resumed = await readByQuestion("PAPERTWO", [61], [
+    "The early stations behave as PAPERONE's do (chunk 3, chunk 4).",
+    "Station 9 continues the trend (chunk 9).",
+    "Station 50 shows the same plateau PAPERONE reaches, and 51 with it (chunk 50, chunk 51).",
+    "Depth at stations 10 and 11 is equal to within the stated uncertainty (chunk 10, chunk 11).",
+    "Station 35 is where the series first departs from linear (chunk 35).",
+    "Stations 48, 60 and 61 are all on the plateau (chunk 48, chunk 60, chunk 61).",
+  ]);
+  assert.deepEqual(resumed.reading.newChunks, [61]);
+  await writeUp({
+    title: "Plateau at sixty-one",
+    claimText: "Station 61 is on the plateau.",
+    evidence: [evidenceFrom("PAPERTWO", 61)],
+  });
+});
+
+block("a whole turn may be written off, and re-reading is never charged", async () => {
+  await readByQuestion("PAPERTWO", [70, 71], [
+    "The early stations behave as PAPERONE's do (chunk 3, chunk 4).",
+    "Station 9 continues the trend (chunk 9).",
+    "Station 50 shows the same plateau PAPERONE reaches, and 51 with it (chunk 50, chunk 51).",
+    "Depth at stations 10 and 11 is equal to within the stated uncertainty (chunk 10, chunk 11).",
+    "Station 35 is where the series first departs from linear (chunk 35).",
+    "Stations 48, 60 and 61 are all on the plateau (chunk 48, chunk 60, chunk 61).",
+    "Stations 70 and 71 repeat the plateau reading at the same values (chunk 70, chunk 71).",
+  ]);
+
+  const prepared = await service.prepareUpdate({
+    libraryID: 1,
+    query: "Plateau at sixty-one",
+    proposedPageTitles: ["Plateau at sixty-one"],
+  });
+  // No Claim at all: the whole turn established nothing the Wiki lacked. That
+  // is allowed, and it is the reason - not the absence of a Claim - that has
+  // to carry the weight.
+  const result = await service.commit({
+    libraryID: 1,
+    userInitiated: true,
+    prepareToken: prepared.prepareToken,
+    actions: [
+      {
+        action: "SKIP",
+        itemKey: "PAPERTWO",
+        chunkIds: [70, 71].map((i) => chunkId("PAPERTWO", i)),
+        reason:
+          "Stations 70 and 71 repeat the plateau depth at the same values already stored for stations " +
+          "48 to 61, and introduce no new condition, parameter, mechanism or terminology.",
+      },
+    ],
+  });
+  assert.deepEqual(result.questionReading.clearedPapers, ["PAPERTWO"]);
+
+  // Re-reading a chunk to check a quotation owes nothing: it is not new
+  // knowledge, and charging it would mean no paper could be quoted twice
+  // without a Claim in between.
+  const reread = await readByQuestion("PAPERTWO", [70], [
+    "The early stations behave as PAPERONE's do (chunk 3, chunk 4).",
+    "Station 9 continues the trend (chunk 9).",
+    "Station 50 shows the same plateau PAPERONE reaches, and 51 with it (chunk 50, chunk 51).",
+    "Depth at stations 10 and 11 is equal to within the stated uncertainty (chunk 10, chunk 11).",
+    "Station 35 is where the series first departs from linear (chunk 35).",
+    "Stations 48, 60 and 61 are all on the plateau (chunk 48, chunk 60, chunk 61).",
+    "Stations 70 and 71 repeat the plateau reading at the same values, checked again (chunk 70, chunk 71).",
+  ]);
+  assert.deepEqual(reread.reading.newChunks, []);
+  assert.deepEqual(reread.reading.alreadyReadChunks, [70]);
+  assert.equal(reread.wikiDebt.count, 0, "a re-read incurs no debt");
+});
+
+// =========================================================================
+// 10. A full-text read never re-delivers what a question already read
+// =========================================================================
+
+block("paging over holes converges rather than stalling", async () => {
+  // PAPERONE was read scattershot by every block above. Page it to the end and
+  // check that the reading terminates with real full coverage rather than
+  // looping on an empty page or declaring itself done with holes left.
+  const sessions = await store.readingSessions();
+  const before = await sessions.coverageForItem(1, "PAPERONE");
+  assert.ok(before.deliveredChunks > 0 && !before.complete, "holes to close");
+
+  // PAPERONE is already open for full-text reading, with its expert, from the
+  // block above; this continues that read rather than starting a second one.
+  let page = await service.buildFromPaper({
+    libraryID: 1,
+    userRequested: true,
+    itemKey: "PAPERONE",
+    limit: 12,
+  });
+  const seen = [...page.chunks.map((row) => row.chunkIndex)];
+  let guard = 0;
+  while (page.pagination.hasMore) {
+    assert.ok((guard += 1) < 40, "paging must terminate");
+    await service.updateReadingNote({
+      libraryID: 1,
+      itemKey: "PAPERONE",
+      markdown: note([
+        "The imposed gradient cycles between 8 and 14 K/mm along the traverse (chunk 7, chunk 8).",
+        "The linear stretch persists at least to station 15 (chunk 15).",
+        "At station 42 the response has flattened noticeably (chunk 42).",
+        "By station 70 the depth is essentially constant, and 71 confirms it (chunk 70, chunk 71).",
+        "Stations 30, 31 and 50 sit on the plateau (chunk 30, chunk 31, chunk 50).",
+        `Reading the traverse through confirms one continuous series across all ${LONG} stations.`,
+      ]),
+    });
+    page = await service.buildFromPaper({
+      libraryID: 1,
+      userRequested: true,
+      cursor: page.pagination.nextCursor,
+    });
+    seen.push(...page.chunks.map((row) => row.chunkIndex));
+  }
+  assert.equal(
+    new Set(seen).size,
+    seen.length,
+    "no chunk is delivered twice across the whole pass",
+  );
+  const after = await sessions.coverageForItem(1, "PAPERONE");
+  assert.equal(after.complete, true, "and the paper really is fully covered");
+  assert.equal(after.deliveredChunks, LONG);
+  assert.equal(
+    seen.length,
+    LONG - before.deliveredChunks,
+    "exactly the chunks the questions had not reached, and no more",
+  );
+
+  // Release the full-text slot for the blocks below.
+  await service.finishReading({
+    libraryID: 1,
+    itemKey: "PAPERONE",
+    outcome: "skipped",
+  });
+});
+
+block("paging walks the unread chunks, wherever the holes are", async () => {
+  // Scattered reading, deliberately not a prefix: {1, 3} of a six-chunk paper.
+  await readByQuestion("PAPRTHRE", [1, 3], [
+    "Every station of this short paper reports the same depth to within the stated uncertainty (chunk 0, chunk 1, chunk 2, chunk 3, chunk 4, chunk 5).",
+    "Read as a whole the paper is a single-condition confirmation, and its uniformity claim is bounded by the one gradient range it covers.",
+    "Stations 1 and 3 agree to within the stated uncertainty, re-checked for this question (chunk 1, chunk 3).",
+  ]);
+  await writeUp({
+    title: "Short paper agreement",
+    claimText: "Stations 1 and 3 agree in the short communication.",
+    evidence: [evidenceFrom("PAPRTHRE", 1)],
+  });
+
+  await service.buildFromPaper({
+    libraryID: 1,
+    userRequested: true,
+    itemKey: "PAPRTHRE",
+  });
+  await service.setReadingExpert({
+    libraryID: 1,
+    itemKey: "PAPRTHRE",
+    persona:
+      "A solidification metallurgist reading this short communication end to end for its uncertainty budget.",
+    focus: ["the uncertainty budget", "the gradient range covered"],
+  });
+
+  const page = await service.buildFromPaper({
+    libraryID: 1,
+    userRequested: true,
+    itemKey: "PAPRTHRE",
+    limit: 6,
+  });
+  assert.deepEqual(
+    page.chunks.map((row) => row.chunkIndex),
+    [0, 2, 4, 5],
+    "1 and 3 are already read, so the page is the four that are not",
+  );
+  assert.deepEqual(page.pagination.skippedAlreadyReadChunkIndexes, [1, 3]);
+  assert.match(page.pagination.skippedNote, /already been read/u);
+  assert.equal(
+    page.pagination.coverageComplete,
+    true,
+    "and that one page completes the paper",
+  );
+  assert.equal(page.pagination.hasMore, false);
+
+  // Asking for a skipped chunk by offset still delivers it: this is how an
+  // excerpt gets checked against its source before it becomes Evidence.
+  const reread = await service.buildFromPaper({
+    libraryID: 1,
+    userRequested: true,
+    itemKey: "PAPRTHRE",
+    offset: 3,
+    limit: 1,
+  });
+  assert.deepEqual(reread.chunks.map((row) => row.chunkIndex), [3]);
+  assert.equal(
+    reread.pagination.skippedAlreadyReadChunkIndexes,
+    undefined,
+    "an explicit offset takes the plain slice it asked for",
+  );
+
+  // Release the slot for the block below.
+  await service.finishReading({
+    libraryID: 1,
+    itemKey: "PAPRTHRE",
+    outcome: "skipped",
+  });
+});
+
+// =========================================================================
+// 11. The whole-Wiki review cannot be banked before there is a paper to review
+// =========================================================================
+
+block("the final review is refused, and not stored, on an unfinished paper", async () => {
+  const REVIEW = {
+    pages: "Nothing to change; the existing Page already covers this subject.",
+    claims: "Nothing to merge or correct among the claims already stored here.",
+    evidence: "Evidence already attached is sufficient for every stored claim.",
+    concepts: "No terminology beyond what the concept library already holds.",
+    relations: "No relation between stored concepts is added or withdrawn.",
+  };
+
+  await service.buildFromPaper({
+    libraryID: 1,
+    userRequested: true,
+    itemKey: "PAPERTWO",
+  });
+  await service.setReadingExpert({
+    libraryID: 1,
+    itemKey: "PAPERTWO",
+    persona:
+      "A solidification metallurgist reading this paper end to end to establish where the plateau begins.",
+    focus: ["the plateau onset", "the uncertainty budget"],
+  });
+  const page = await service.buildFromPaper({
+    libraryID: 1,
+    userRequested: true,
+    itemKey: "PAPERTWO",
+    limit: 5,
+  });
+  assert.equal(page.pagination.coverageComplete, false);
+
+  await assert.rejects(
+    () =>
+      service.prepareUpdate({
+        libraryID: 1,
+        query: "Premature review",
+        proposedPageTitles: ["Premature review"],
+        wikiReview: REVIEW,
+      }),
+    (error) =>
+      /LAST pass over a finished paper/u.test(error.message) &&
+      /Nothing was recorded/u.test(error.message),
+    "reviewing the Wiki against half a paper is not the final pass",
+  );
+
+  const sessions = await store.readingSessions();
+  const open = await sessions.openForItem(1, "PAPERTWO");
+  assert.equal(
+    open.wikiReviewAt,
+    null,
+    "and the refusal really did store nothing - otherwise the gate is bypassed forever",
+  );
+
+  // A checkpoint commit partway through is still allowed; it just carries no
+  // review. This is the ability the refusal must not have cost.
+  await service.updateReadingNote({
+    libraryID: 1,
+    itemKey: "PAPERTWO",
+    markdown: note([
+      "The early stations behave as PAPERONE's do (chunk 3, chunk 4).",
+      "Station 9 continues the trend (chunk 9).",
+      "Station 50 shows the same plateau PAPERONE reaches, and 51 with it (chunk 50, chunk 51).",
+      "Depth at stations 10 and 11 is equal to within the stated uncertainty (chunk 10, chunk 11).",
+      "Station 35 is where the series first departs from linear (chunk 35).",
+      "Stations 48, 60 and 61 are all on the plateau (chunk 48, chunk 60, chunk 61).",
+      "Stations 70 and 71 repeat the plateau reading at the same values (chunk 70, chunk 71).",
+      "The opening pages set out the rig geometry and the traverse stations (chunk 0, chunk 2).",
+    ]),
+  });
+  const checkpoint = await service.prepareUpdate({
+    libraryID: 1,
+    query: "Rig geometry",
+    proposedPageTitles: ["Rig geometry"],
+  });
+  assert.ok(
+    checkpoint.prepareToken,
+    "committing what has been read so far must survive the new refusal",
+  );
+
+  await service.finishReading({
+    libraryID: 1,
+    itemKey: "PAPERTWO",
+    outcome: "skipped",
+  });
 });
 
 // --- Runner ---------------------------------------------------------------

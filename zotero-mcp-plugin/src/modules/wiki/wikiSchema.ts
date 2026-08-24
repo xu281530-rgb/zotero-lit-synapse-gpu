@@ -8,7 +8,7 @@ import {
 } from "./wikiConceptTerms";
 import { rowColumn } from "./wikiRow";
 
-export const WIKI_SCHEMA_VERSION = 6;
+export const WIKI_SCHEMA_VERSION = 7;
 
 /**
  * Add a column an older database does not have yet.
@@ -283,10 +283,13 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
     // 'fulltext' is the correct carried-over value: every session written
     // before this column existed came from wiki_build_from_paper.
     ["mode", "TEXT NOT NULL DEFAULT 'fulltext'"],
-    // Chunks folded into the reading note whose knowledge has NOT yet been
-    // written into the Wiki. This is the "MD first, Wiki second" rule made
-    // enforceable: a paper carrying a debt refuses the next question's read
-    // until the previous one has been committed.
+    // Schema 6 kept the "not yet in the Wiki" debt as a COUNT on the session.
+    // Schema 7 moves it onto the individual chunks (see wiki_reading_chunks
+    // below), because a count cannot answer the question that matters: a
+    // commit citing one chunk of the five a question read used to clear all
+    // five, and no counter could have noticed. These two columns are no longer
+    // read or written; they stay because dropping a column in SQLite means
+    // rebuilding the table, and an unused column is cheaper than that.
     ["pending_wiki_chunks", "INTEGER NOT NULL DEFAULT 0"],
     ["pending_wiki_since", "INTEGER"],
     // The whole-Wiki review done after the final synthesis: when it was
@@ -310,6 +313,29 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
       PRIMARY KEY (session_id, chunk_index)
     )
   `);
+  // Schema 7. Which chunks owe the Wiki something, and how each one was
+  // settled.
+  //
+  // `owes_wiki` is set only on chunks a QUESTION read: those are the ones the
+  // "note first, Wiki second" rule is about. Chunks delivered by a full-text
+  // read are 0, because that path has its own gates - a note rewrite per page,
+  // then synthesis, terminology and the whole-Wiki review at the end - and
+  // making it settle page by page would destroy both the mid-read checkpoint
+  // and the ability to read a long paper at all.
+  //
+  // `settled_kind` records WHICH of the two honest outcomes happened. A chunk
+  // that produced Evidence is settled by that Evidence. A chunk that genuinely
+  // established nothing the Wiki did not already hold is settled by saying so,
+  // with a reason - and the reason is kept forever, because the whole value of
+  // allowing that answer is that it can be read back and judged later.
+  for (const [column, definition] of [
+    ["owes_wiki", "INTEGER NOT NULL DEFAULT 0"],
+    ["settled_at", "INTEGER"],
+    ["settled_kind", "TEXT"],
+    ["settled_reason", "TEXT NOT NULL DEFAULT ''"],
+  ] as const) {
+    await addColumnIfMissing(db, "wiki_reading_chunks", column, definition);
+  }
   await db.queryAsync(`
     CREATE TABLE IF NOT EXISTS wiki_embedding_queue (
       claim_id INTEGER PRIMARY KEY REFERENCES wiki_claims(claim_id) ON DELETE CASCADE,
@@ -350,6 +376,12 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
   await db.queryAsync(
     `CREATE INDEX IF NOT EXISTS idx_wiki_reading_sessions_item
        ON wiki_reading_sessions(library_id, item_key, state)`,
+  );
+  // The debt lookup runs on every question-driven read and every commit, so it
+  // gets an index rather than a scan of every chunk ever read.
+  await db.queryAsync(
+    `CREATE INDEX IF NOT EXISTS idx_wiki_reading_chunks_owed
+       ON wiki_reading_chunks(session_id, owes_wiki, settled_at)`,
   );
   await db.queryAsync(
     `CREATE INDEX IF NOT EXISTS idx_wiki_embedding_queue_due

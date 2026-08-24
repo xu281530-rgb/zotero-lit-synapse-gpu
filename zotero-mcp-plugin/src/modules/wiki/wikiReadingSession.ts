@@ -192,24 +192,6 @@ export interface WikiReadingSessionRecord {
   mode: WikiReadingMode;
 
   /**
-   * Chunks folded into the reading note whose knowledge has not yet reached
-   * the Wiki.
-   *
-   * This is "update the note, THEN update the Wiki" made enforceable. The
-   * server cannot make a model call `wiki_commit`, but it can refuse to let
-   * the same paper be read again while the last thing learned about it is
-   * still sitting only in the note - which is the failure this counter exists
-   * to catch: a reader that answers ten questions from one paper, improves the
-   * note ten times, and writes not one Claim.
-   *
-   * Cleared by a commit that cites this paper. See
-   * WikiService.settleReadingSession.
-   */
-  pendingWikiChunks: number;
-  /** When the debt above was incurred. null when there is none. */
-  pendingWikiSince: number | null;
-
-  /**
    * When the whole-Wiki review was submitted, and what it said.
    *
    * The final synthesis rewrites the NOTE as one account of the paper, and
@@ -334,11 +316,6 @@ function mapSession(row: any): WikiReadingSessionRecord {
     "concepts_recorded_at",
     "conceptsRecordedAt",
   );
-  const pendingWikiSince = rowColumn(
-    row,
-    "pending_wiki_since",
-    "pendingWikiSince",
-  );
   const wikiReviewAt = rowColumn(row, "wiki_review_at", "wikiReviewAt");
   return {
     sessionId: Number(rowColumn(row, "session_id", "sessionId")),
@@ -378,11 +355,6 @@ function mapSession(row: any): WikiReadingSessionRecord {
       rowColumn(row, "staged_concepts", "stagedConcepts"),
     ),
     mode: normalizeMode(rowColumn(row, "mode", "mode")),
-    pendingWikiChunks: Number(
-      rowColumn(row, "pending_wiki_chunks", "pendingWikiChunks") ?? 0,
-    ),
-    pendingWikiSince:
-      pendingWikiSince == null ? null : Number(pendingWikiSince),
     wikiReviewAt: wikiReviewAt == null ? null : Number(wikiReviewAt),
     wikiReview: parseWikiReview(rowColumn(row, "wiki_review", "wikiReview")),
     questionChunksCarriedOver: Number(
@@ -464,14 +436,31 @@ export class WikiReadingSessions {
    */
   async listPendingWiki(
     libraryID: number,
-  ): Promise<WikiReadingSessionRecord[]> {
+  ): Promise<
+    Array<{ session: WikiReadingSessionRecord; pendingChunkIds: number[] }>
+  > {
     const rows = await this.db.queryAsync(
-      `SELECT * FROM wiki_reading_sessions
-       WHERE library_id = ? AND ${OPEN_STATE_SQL} AND pending_wiki_chunks > 0
-       ORDER BY pending_wiki_since`,
+      `SELECT s.* FROM wiki_reading_sessions s
+       WHERE s.library_id = ? AND s.${OPEN_STATE_SQL}
+         AND EXISTS (
+           SELECT 1 FROM wiki_reading_chunks c
+           WHERE c.session_id = s.session_id
+             AND c.owes_wiki = 1 AND c.settled_at IS NULL
+         )
+       ORDER BY s.session_id`,
       [libraryID],
     );
-    return rows.map(mapSession);
+    const pending = [];
+    for (const row of rows) {
+      const session = mapSession(row);
+      pending.push({
+        session,
+        pendingChunkIds: (await this.pendingWikiChunks(session.sessionId)).map(
+          (chunk) => chunk.chunkId,
+        ),
+      });
+    }
+    return pending;
   }
 
   async get(sessionId: number): Promise<WikiReadingSessionRecord | null> {
@@ -721,15 +710,28 @@ export class WikiReadingSessions {
     }
     if (newIndexes.length || alreadyRead.length) {
       const now = Date.now();
-      for (const index of [...newIndexes, ...alreadyRead]) {
+      for (const index of newIndexes) {
         const chunk = documentChunks[index];
+        // A NEW chunk owes the Wiki. Re-reading one already read does not:
+        // checking a passage against the source before quoting it is not new
+        // knowledge, and charging it would mean a paper could never be quoted
+        // from twice without a Claim in between.
         await this.db.queryAsync(
-          `INSERT INTO wiki_reading_chunks (session_id, chunk_index, chunk_id, delivered_at)
-           VALUES (?, ?, ?, ?)
+          `INSERT INTO wiki_reading_chunks
+             (session_id, chunk_index, chunk_id, delivered_at, owes_wiki)
+           VALUES (?, ?, ?, ?, 1)
            ON CONFLICT(session_id, chunk_index) DO UPDATE SET
              chunk_id = excluded.chunk_id,
-             delivered_at = excluded.delivered_at`,
+             delivered_at = excluded.delivered_at,
+             owes_wiki = 1`,
           [sessionId, index, Number(chunk.chunkId), now],
+        );
+      }
+      for (const index of alreadyRead) {
+        await this.db.queryAsync(
+          `UPDATE wiki_reading_chunks SET delivered_at = ?
+           WHERE session_id = ? AND chunk_index = ?`,
+          [now, sessionId, index],
         );
       }
       await this.db.queryAsync(
@@ -761,33 +763,108 @@ export class WikiReadingSessions {
   }
 
   /**
-   * Note that the reading note has moved ahead of the Wiki by `chunks` chunks.
+   * The chunks of this session that still owe the Wiki something.
    *
-   * Additive: two questions answered from the same paper before either is
-   * written up owe the sum, and the debt is discharged in one go by the commit
-   * that cites the paper.
+   * Ascending by index, each with the chunk id the model would quote. This is
+   * the debt: not a number, but a named list, because "which of the five
+   * things I read has been written up" is the only version of the question
+   * that can be answered honestly. A count could be discharged by one Claim;
+   * a list has to be gone through.
    */
-  async addPendingWiki(sessionId: number, chunks: number): Promise<void> {
-    if (chunks <= 0) return;
-    const now = Date.now();
-    await this.db.queryAsync(
-      `UPDATE wiki_reading_sessions
-       SET pending_wiki_chunks = pending_wiki_chunks + ?,
-           pending_wiki_since = COALESCE(pending_wiki_since, ?),
-           updated_at = ?
-       WHERE session_id = ?`,
-      [Math.floor(chunks), now, now, sessionId],
+  async pendingWikiChunks(
+    sessionId: number,
+  ): Promise<Array<{ chunkIndex: number; chunkId: number }>> {
+    const rows = await this.db.queryAsync(
+      `SELECT chunk_index, chunk_id FROM wiki_reading_chunks
+       WHERE session_id = ? AND owes_wiki = 1 AND settled_at IS NULL
+       ORDER BY chunk_index`,
+      [sessionId],
     );
+    return rows.map((row) => ({
+      chunkIndex: Number(rowColumn(row, "chunk_index", "chunkIndex")),
+      chunkId: Number(rowColumn(row, "chunk_id", "chunkId")),
+    }));
   }
 
-  /** The Wiki has caught up with the note. */
-  async clearPendingWiki(sessionId: number): Promise<void> {
-    await this.db.queryAsync(
-      `UPDATE wiki_reading_sessions
-       SET pending_wiki_chunks = 0, pending_wiki_since = NULL, updated_at = ?
-       WHERE session_id = ?`,
-      [Date.now(), sessionId],
+  /**
+   * Mark chunks as having had their turn at the Wiki.
+   *
+   * `kind` says how, and both are legitimate. `evidence` means the chunk was
+   * quoted into a Claim. `no_update` means the reader looked at what it read,
+   * compared it with what the Wiki already holds, and concluded there was
+   * nothing to add, correct or merge - which is a real and common conclusion,
+   * and is accepted on the condition that it is argued rather than asserted.
+   *
+   * Only chunks that actually owe something are touched, so settling a chunk
+   * twice, or settling one a full-text read delivered, is a no-op rather than
+   * an error.
+   */
+  async settleWikiChunks(
+    sessionId: number,
+    chunkIds: readonly number[],
+    kind: "evidence" | "no_update",
+    reason = "",
+  ): Promise<number[]> {
+    if (!chunkIds.length) return [];
+    const now = Date.now();
+    const settled: number[] = [];
+    for (const raw of chunkIds) {
+      const chunkId = Number(raw);
+      const owed = await this.db.valueQueryAsync(
+        `SELECT chunk_index FROM wiki_reading_chunks
+         WHERE session_id = ? AND chunk_id = ? AND owes_wiki = 1
+           AND settled_at IS NULL`,
+        [sessionId, chunkId],
+      );
+      if (owed == null) continue;
+      await this.db.queryAsync(
+        `UPDATE wiki_reading_chunks
+         SET settled_at = ?, settled_kind = ?, settled_reason = ?
+         WHERE session_id = ? AND chunk_id = ?`,
+        [now, kind, reason, sessionId, chunkId],
+      );
+      settled.push(chunkId);
+    }
+    if (settled.length) {
+      await this.db.queryAsync(
+        "UPDATE wiki_reading_sessions SET updated_at = ? WHERE session_id = ?",
+        [now, sessionId],
+      );
+    }
+    return settled;
+  }
+
+  /**
+   * Why chunks of this paper were recorded as needing no Wiki entry.
+   *
+   * Kept readable rather than write-only: the point of accepting "this added
+   * nothing" is defeated if nobody can ever go back and see what was waved
+   * through.
+   */
+  async noUpdateDeclarations(
+    sessionId: number,
+  ): Promise<Array<{ chunkIndexes: number[]; reason: string; at: number }>> {
+    const rows = await this.db.queryAsync(
+      `SELECT chunk_index, settled_reason, settled_at FROM wiki_reading_chunks
+       WHERE session_id = ? AND settled_kind = 'no_update'
+       ORDER BY settled_at, chunk_index`,
+      [sessionId],
     );
+    const byReason = new Map<
+      string,
+      { chunkIndexes: number[]; reason: string; at: number }
+    >();
+    for (const row of rows) {
+      const reason = String(rowColumn(row, "settled_reason", "settledReason") ?? "");
+      const at = Number(rowColumn(row, "settled_at", "settledAt") ?? 0);
+      const key = `${at}:${reason}`;
+      const entry = byReason.get(key) ?? { chunkIndexes: [], reason, at };
+      entry.chunkIndexes.push(
+        Number(rowColumn(row, "chunk_index", "chunkIndex")),
+      );
+      byReason.set(key, entry);
+    }
+    return [...byReason.values()];
   }
 
   /** Remember what a full-text read inherited from question-driven reading. */

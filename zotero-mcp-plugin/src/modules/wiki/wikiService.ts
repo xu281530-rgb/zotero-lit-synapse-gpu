@@ -77,6 +77,36 @@ import {
 declare let Zotero: any;
 declare let ztoolkit: ZToolkit;
 
+/** One SKIP action, validated: these chunks need no Wiki entry, and why. */
+interface WikiWikiWriteOff {
+  itemKey: string;
+  chunkIds: number[];
+  reason: string;
+}
+
+/**
+ * Shortest write-off reason that can carry an argument.
+ *
+ * The point of allowing "this reading added nothing" is that it is often TRUE,
+ * and forcing a Claim for every chunk read would fill the Wiki with restated
+ * definitions to satisfy a counter. The point of bounding it is that the same
+ * answer is also the easiest thing to say when nothing was checked at all, and
+ * those two are indistinguishable unless the reason names what the text
+ * actually said and what the Wiki already holds instead.
+ */
+export const WIKI_WRITE_OFF_MIN_REASON_CHARS = 40;
+
+/**
+ * Reasons that assert rather than argue.
+ *
+ * Matched against the WHOLE reason, so a sentence that happens to contain
+ * "nothing new" while going on to say what was already recorded passes; a
+ * reason that is only this does not. The list is short on purpose - it catches
+ * the reflex answer, and the length floor above catches the rest.
+ */
+const VACUOUS_WRITE_OFF_REASON =
+  /^(?:no(?:thing)?\s+new(?:\s+knowledge)?|nothing\s+to\s+add|not\s+relevant|irrelevant|n\/?a|none|already\s+known|duplicate)[\s.。!！]*$|^(?:\u65e0|\u6ca1\u6709)?(?:\u65b0\u77e5\u8bc6|\u65b0\u5185\u5bb9|\u65b0\u4fe1\u606f|\u53ef\u8865\u5145\u5185\u5bb9)[\s.。!！]*$|^\u5df2\u77e5(?:\u5185\u5bb9)?[\s.。!！]*$|^\u91cd\u590d\u5185\u5bb9[\s.。!！]*$|^\u4e0d\u76f8\u5173[\s.。!！]*$/iu;
+
 /**
  * What `wiki_search` returns, and what `wiki_prepare_update` embeds as
  * `semanticClaims`. Every field is a plain DTO: {@link WikiRetriever.search}
@@ -271,16 +301,23 @@ export class WikiService {
         : {}),
       ...(pendingWiki.length
         ? {
-            pendingWikiWriteUp: pendingWiki.map((session) => ({
-              itemKey: session.itemKey,
-              pendingChunks: session.pendingWikiChunks,
-              mode: session.mode,
+            pendingWikiWriteUp: pendingWiki.map((entry) => ({
+              itemKey: entry.session.itemKey,
+              mode: entry.session.mode,
+              // The chunk ids themselves, because settling is now per chunk:
+              // a Claim citing one of them settles that one, and every other
+              // one has to be either cited too or explicitly written off.
+              pendingChunkIds: entry.pendingChunkIds,
+              pendingChunks: entry.pendingChunkIds.length,
             })),
             pendingWikiWriteUpNote:
-              "These papers have reading in their notes that has not reached the Wiki. This update should " +
-              "carry it: add or correct the Claims that reading established, attach its Evidence quoted " +
-              "from those papers' own chunks, and update the Concepts and relations it touched. Each stays " +
-              "closed to further question-driven reading until a commit cites it.",
+              "These papers have reading in their notes that has not reached the Wiki, listed chunk by " +
+              "chunk. This update should carry all of it: add or correct the Claims that reading " +
+              "established, attach its Evidence quoted from those papers' own chunks, and update the " +
+              "Concepts and relations it touched. A chunk is settled by being cited as Evidence, or - " +
+              "when it genuinely established nothing the Wiki did not already hold - by a SKIP action " +
+              "naming it with a reason. Anything left unsettled keeps its paper closed to further " +
+              "question-driven reading.",
           }
         : {}),
     };
@@ -382,6 +419,37 @@ export class WikiService {
     // an over-eager caller from turning a harmless extra field into a failed
     // write-up - the gate that actually needs the review asks for it by name.
     if (!open) return;
+
+    // The review is a review OF A FINISHED PAPER, and until now it was only a
+    // review of an open one. A caller could answer all five axes on page two
+    // of a 181-chunk paper, have it stamped, and never be asked again - the
+    // gate at the end only checked that SOMETHING had been recorded, so the
+    // pass it exists to force was skippable by doing it before there was
+    // anything to review. Both conditions are required, and they are the same
+    // two the depth rule uses: every chunk delivered, and the note rewritten
+    // as one account of the whole paper. Refused rather than ignored, because
+    // a caller that sent a review and got silence would reasonably believe the
+    // pass was done.
+    const coverage = await sessions.coverage(open.sessionId);
+    if (!coverage.complete || open.finalSynthesisAt === null) {
+      throw new Error(
+        `The whole-Wiki review is the LAST pass over a finished paper, and ${open.itemKey} is not ` +
+          "finished: " +
+          (coverage.complete
+            ? "every chunk has been delivered, but the reading note has not been rewritten as one account " +
+              "of the complete paper"
+            : `${coverage.deliveredChunks} of ${coverage.totalChunks} chunks have been delivered` +
+              (coverage.firstMissingIndex === null
+                ? ""
+                : `, resume at chunk index ${coverage.firstMissingIndex}`)) +
+          ". Reviewing now would be reviewing the Wiki against half a paper, and it would then count as " +
+          "the final pass and never be asked for again. Nothing was recorded. Finish the paper with " +
+          "wiki_build_from_paper, do the whole-paper synthesis with wiki_update_reading_note and " +
+          "finalSynthesis true, then send wikiReview. Committing what you have read so far is still " +
+          "allowed in the meantime - just leave wikiReview out of those calls.",
+      );
+    }
+
     const missing: string[] = [];
     const complete: Record<string, string> = {};
     for (const axis of WIKI_REVIEW_AXES) {
@@ -621,6 +689,92 @@ export class WikiService {
     return "section_read";
   }
 
+  /**
+   * Read the SKIP actions as write-offs, refusing the ones that assert instead
+   * of arguing.
+   *
+   * Validated BEFORE the transaction, so a write-off that would not have
+   * settled anything fails the whole commit rather than leaving Claims written
+   * and a debt silently outstanding. A SKIP without an itemKey is the old
+   * no-op form and is left alone: it has always meant "I considered this and
+   * chose to do nothing", and nothing depended on it.
+   */
+  private async readWriteOffs(
+    actions: WikiCommitAction[],
+    libraryID: number,
+  ): Promise<WikiWikiWriteOff[]> {
+    const sessions = await this.store.readingSessions();
+    const writeOffs: WikiWikiWriteOff[] = [];
+    for (const action of actions) {
+      if (action.action !== "SKIP") continue;
+      const raw = action as unknown as {
+        itemKey?: unknown;
+        chunkIds?: unknown;
+        reason?: unknown;
+      };
+      const itemKey = String(raw.itemKey ?? "").trim();
+      const chunkIds = Array.isArray(raw.chunkIds)
+        ? raw.chunkIds.map((id) => Number(id)).filter(Number.isFinite)
+        : [];
+      const reason = String(raw.reason ?? "").trim();
+      if (!itemKey && !chunkIds.length) continue;
+      if (!itemKey || !chunkIds.length) {
+        throw new Error(
+          "A SKIP that writes off reading needs BOTH itemKey and chunkIds: which paper, and which of " +
+            "its chunks established nothing the Wiki did not already hold. Omit both to use SKIP as the " +
+            "plain no-op it has always been.",
+        );
+      }
+      // Shape before size. Both refuse the same answer, but "your reason is
+      // too short" invites padding, whereas naming the reflex tells the caller
+      // what is actually wanted - so the specific diagnosis has to win when
+      // both apply, which for the commonest answer of all they always do.
+      if (VACUOUS_WRITE_OFF_REASON.test(reason)) {
+        throw new Error(
+          `The SKIP reason for ${itemKey} asserts rather than argues: "${reason}". "Nothing new" is ` +
+            "exactly what a reader who checked nothing would also say, so it cannot settle anything. " +
+            "Name what those chunks say and what already covers it - for example \"restates the CET " +
+            "criterion already stored as Claim #12 with the same threshold, and adds no condition or " +
+            "parameter beyond it\".",
+        );
+      }
+      if (reason.length < WIKI_WRITE_OFF_MIN_REASON_CHARS) {
+        throw new Error(
+          `The SKIP for ${itemKey} chunk(s) ${chunkIds.join(", ")} needs a reason of at least ` +
+            `${WIKI_WRITE_OFF_MIN_REASON_CHARS} characters. Say what those passages actually establish ` +
+            "and where the Wiki already holds it - which Page, Claim, Concept or relation makes them " +
+            "redundant - so the judgement can be read back and checked later. One reason may cover the " +
+            "whole group; you are not asked to explain each chunk separately.",
+        );
+      }
+      const open = await sessions.openForItem(libraryID, itemKey);
+      if (!open) {
+        throw new Error(
+          `SKIP names ${itemKey}, which has no open reading session in this library, so it owes the ` +
+            "Wiki nothing and there is nothing to write off.",
+        );
+      }
+      const owed = new Set(
+        (await sessions.pendingWikiChunks(open.sessionId)).map(
+          (chunk) => chunk.chunkId,
+        ),
+      );
+      const notOwed = chunkIds.filter((id) => !owed.has(id));
+      if (notOwed.length) {
+        throw new Error(
+          `SKIP writes off ${itemKey} chunk(s) ${notOwed.join(", ")}, which do not owe the Wiki ` +
+            "anything: they were either never read by a question, already settled, or delivered by a " +
+            "full-text read, which settles nothing chunk by chunk. " +
+            (owed.size
+              ? `Outstanding for this paper: ${[...owed].join(", ")}.`
+              : "This paper owes nothing at all."),
+        );
+      }
+      writeOffs.push({ itemKey, chunkIds, reason });
+    }
+    return writeOffs;
+  }
+
   private async hydrateActions(
     actions: WikiCommitAction[],
     libraryID: number,
@@ -725,7 +879,12 @@ export class WikiService {
     }
 
     let result: WikiCommitResult;
+    let writeOffs: WikiWikiWriteOff[];
     try {
+      // Both before the transaction: a write-off whose reason does not argue,
+      // or whose chunks owe nothing, must fail the commit rather than let the
+      // Claims land while the debt it was meant to settle quietly survives.
+      writeOffs = await this.readWriteOffs(input.actions, input.libraryID);
       const hydrated = await this.hydrateActions(
         input.actions,
         input.libraryID,
@@ -751,15 +910,27 @@ export class WikiService {
     // Durable. The token can never be spent again.
     if (consumedToken) this.prepareTokens.delete(consumedToken);
 
+    // Which chunks of which papers this commit actually quoted. The keys alone
+    // used to be enough because the debt was per paper; now that it is per
+    // chunk, the chunk ids ARE the settlement.
     const citedKeys = new Set<string>();
+    const citedChunkIdsByItem = new Map<string, Set<number>>();
     for (const action of actions) {
       for (const entry of (action as any).evidence ?? []) {
-        if (entry?.itemKey) citedKeys.add(String(entry.itemKey));
+        if (!entry?.itemKey) continue;
+        const itemKey = String(entry.itemKey);
+        citedKeys.add(itemKey);
+        const chunkId = Number(entry.chunkIdSnapshot);
+        if (!Number.isFinite(chunkId)) continue;
+        const set = citedChunkIdsByItem.get(itemKey) ?? new Set<number>();
+        set.add(chunkId);
+        citedChunkIdsByItem.set(itemKey, set);
       }
     }
     const questionReading = await this.settleQuestionReading(
       input.libraryID,
-      citedKeys,
+      citedChunkIdsByItem,
+      writeOffs,
     );
     const readingSession = await this.settleReadingSession(
       input,
@@ -788,8 +959,30 @@ export class WikiService {
   }
 
   /**
-   * Let every paper this commit cited off its "the note is ahead of the Wiki"
-   * debt, and report the papers still carrying one.
+   * Settle the "the note is ahead of the Wiki" debt CHUNK BY CHUNK, and report
+   * what is still owed.
+   *
+   * The version this replaced settled per PAPER: any Evidence citing a paper
+   * cleared everything that paper owed. Read {10, 11, 35, 48, 60} to answer a
+   * question, write one Claim quoting chunk 10, and the other four were
+   * recorded as written up although nothing had looked at them. The debt has
+   * to be as fine-grained as the reading was, or it measures the wrong thing.
+   *
+   * Two ways a chunk is settled, and both are honest:
+   *
+   *   - It was CITED as Evidence. Its content is now in the Wiki.
+   *   - It was WRITTEN OFF by a SKIP action naming it, with a reason. Plenty
+   *     of read text establishes nothing the Wiki did not already hold - a
+   *     restated definition, a figure caption confirming a known number, a
+   *     paragraph of related work - and demanding a Claim for it would fill
+   *     the Wiki with noise to satisfy a counter. So the answer is allowed;
+   *     what is not allowed is leaving it unsaid. The reason is validated when
+   *     the action is hydrated and kept in the ledger permanently.
+   *
+   * Anything neither cited nor written off stays owed, and its paper stays
+   * closed to further question-driven reading. That is deliberate: a partial
+   * write-up is still a real write-up and its Claims are kept, but it does not
+   * buy the right to read on.
    *
    * Separate from `settleReadingSession` because they answer different
    * questions. That one is about the library's single full-text slot - who
@@ -797,18 +990,25 @@ export class WikiService {
    * which routinely reads three papers and writes them up in ONE commit; each
    * of those papers has its own debt and its own session, and none of them is
    * the paper holding the slot.
-   *
-   * Papers left owing are named rather than merely counted, because the model
-   * is about to be asked another question and needs to know which papers it
-   * may not read again yet.
    */
   private async settleQuestionReading(
     libraryID: number,
-    citedKeys: Set<string>,
+    citedChunkIdsByItem: Map<string, Set<number>>,
+    writeOffs: WikiWikiWriteOff[],
   ): Promise<
     | {
+        settledByEvidence: Array<{ itemKey: string; chunkIds: number[] }>;
+        settledAsNoUpdate: Array<{
+          itemKey: string;
+          chunkIds: number[];
+          reason: string;
+        }>;
         clearedPapers: string[];
-        stillPending: Array<{ itemKey: string; pendingChunks: number }>;
+        stillPending: Array<{
+          itemKey: string;
+          pendingChunkIds: number[];
+          pendingChunks: number;
+        }>;
         note?: string;
       }
     | undefined
@@ -816,32 +1016,89 @@ export class WikiService {
     const sessions = await this.store.readingSessions();
     const pending = await sessions.listPendingWiki(libraryID);
     if (!pending.length) return undefined;
-    const cleared: string[] = [];
-    for (const session of pending) {
-      if (!citedKeys.has(session.itemKey)) continue;
-      await sessions.clearPendingWiki(session.sessionId);
-      cleared.push(session.itemKey);
+
+    const byItem = new Map(
+      pending.map((entry) => [entry.session.itemKey, entry]),
+    );
+    const settledByEvidence: Array<{ itemKey: string; chunkIds: number[] }> =
+      [];
+    const settledAsNoUpdate: Array<{
+      itemKey: string;
+      chunkIds: number[];
+      reason: string;
+    }> = [];
+
+    for (const [itemKey, chunkIds] of citedChunkIdsByItem) {
+      const entry = byItem.get(itemKey);
+      if (!entry) continue;
+      const settled = await sessions.settleWikiChunks(
+        entry.session.sessionId,
+        [...chunkIds],
+        "evidence",
+      );
+      if (settled.length) settledByEvidence.push({ itemKey, chunkIds: settled });
     }
-    const stillPending = pending
-      .filter((session) => !citedKeys.has(session.itemKey))
-      .map((session) => ({
-        itemKey: session.itemKey,
-        pendingChunks: session.pendingWikiChunks,
-      }));
+
+    for (const writeOff of writeOffs) {
+      const entry = byItem.get(writeOff.itemKey);
+      if (!entry) continue;
+      const settled = await sessions.settleWikiChunks(
+        entry.session.sessionId,
+        writeOff.chunkIds,
+        "no_update",
+        writeOff.reason,
+      );
+      if (settled.length) {
+        settledAsNoUpdate.push({
+          itemKey: writeOff.itemKey,
+          chunkIds: settled,
+          reason: writeOff.reason,
+        });
+      }
+    }
+
+    const clearedPapers: string[] = [];
+    const stillPending: Array<{
+      itemKey: string;
+      pendingChunkIds: number[];
+      pendingChunks: number;
+    }> = [];
+    for (const entry of pending) {
+      const remaining = await sessions.pendingWikiChunks(
+        entry.session.sessionId,
+      );
+      if (!remaining.length) {
+        clearedPapers.push(entry.session.itemKey);
+        continue;
+      }
+      stillPending.push({
+        itemKey: entry.session.itemKey,
+        pendingChunkIds: remaining.map((chunk) => chunk.chunkId),
+        pendingChunks: remaining.length,
+      });
+    }
+
     return {
-      clearedPapers: cleared,
+      settledByEvidence,
+      settledAsNoUpdate,
+      clearedPapers,
       stillPending,
       ...(stillPending.length
         ? {
             note:
-              `This commit wrote up ${cleared.length ? cleared.join(", ") : "none"} of the papers whose ` +
-              `reading notes were ahead of the Wiki. Still owing: ` +
+              `This commit settled ${clearedPapers.length ? clearedPapers.join(", ") : "no paper"} in full. ` +
+              "Reading that has still not reached the Wiki: " +
               stillPending
-                .map((row) => `${row.itemKey} (${row.pendingChunks} chunk(s))`)
-                .join(", ") +
-              ". Those papers refuse another question's reading until what has already been read from " +
-              "them reaches the Wiki, so commit their Claims too — or close them with " +
-              'wiki_finish_reading and outcome "skipped" if their reading is not worth writing up.',
+                .map(
+                  (row) =>
+                    `${row.itemKey} chunk(s) ${row.pendingChunkIds.join(", ")}`,
+                )
+                .join("; ") +
+              ". Each of those chunks needs either Evidence quoting it in a Claim, or a SKIP action " +
+              "naming it and saying what it established that the Wiki already holds - a real reason, " +
+              'not "nothing new". Until then those papers refuse another question\'s reading. If a ' +
+              "paper's reading is not worth writing up at all, close it with wiki_finish_reading and " +
+              'outcome "skipped".',
           }
         : {}),
     };
@@ -983,6 +1240,7 @@ export class WikiService {
       };
     }
     const coverage = await sessions.coverage(open.sessionId);
+    const owedAtClose = await sessions.pendingWikiChunks(open.sessionId);
     await sessions.close(open.sessionId, options.outcome, options.note ?? "");
     // The note stays on the item - it records a real reading even when the
     // paper was not written up - but its status has to stop saying "reading",
@@ -1002,15 +1260,16 @@ export class WikiService {
       // Closing discharges whatever the note owed the Wiki: the reading has
       // been deliberately abandoned, so there is nothing left to write up and
       // nothing left to block the next question.
-      pendingWikiChunksDischarged: open.pendingWikiChunks,
+      pendingWikiChunksDischarged: owedAtClose.length,
+      pendingWikiChunkIdsDischarged: owedAtClose.map((chunk) => chunk.chunkId),
       message:
         `Paper ${open.itemKey} closed as ${options.outcome}.` +
         (open.mode === "fulltext"
           ? " The library is free for the next paper."
           : " It was being read by questions, so it held no reading slot; what it does free is the " +
             "block on reading it again — its note keeps everything already understood.") +
-        (open.pendingWikiChunks > 0
-          ? ` ${open.pendingWikiChunks} chunk(s) of reading in its note were never written into the Wiki, and now never will be.`
+        (owedAtClose.length > 0
+          ? ` ${owedAtClose.length} chunk(s) of reading in its note were never written into the Wiki, and now never will be.`
           : ""),
     };
   }
@@ -1364,15 +1623,16 @@ export class WikiService {
     // answers question after question from the same paper, improves the note
     // every time, and the Wiki - which is the part that survives the
     // conversation - never learns anything at all.
-    if (session.pendingWikiChunks > 0) {
+    const owed = await sessions.pendingWikiChunks(session.sessionId);
+    if (owed.length > 0) {
       throw new Error(
-        `The last ${session.pendingWikiChunks} chunk(s) read from ${itemKey} are in its reading note but ` +
-          "not yet in the Wiki, and the note must never run ahead of the Wiki by more than one turn. " +
-          "Write that reading up first: wiki_prepare_update, then wiki_commit with the Claims it " +
-          `established and their Evidence quoted from ${itemKey}'s own chunks. The commit clears this ` +
-          "and the next question can read further. (If the reading genuinely established nothing worth " +
-          "a Claim, commit the Evidence you do have against an existing Claim, or close the paper with " +
-          'wiki_finish_reading and outcome "skipped".)',
+        `Chunk(s) ${owed.map((chunk) => chunk.chunkId).join(", ")} of ${itemKey} are in its reading note ` +
+          "but not yet in the Wiki, and the note must never run ahead of the Wiki by more than one turn. " +
+          "Write that reading up first: wiki_prepare_update, then wiki_commit. Every one of those chunks " +
+          "has to be settled - either an Evidence excerpt quoting it in a Claim, or a SKIP action naming " +
+          "it with a reason saying what it establishes that the Wiki already holds. Citing just one of " +
+          "them no longer settles the rest, because it never did settle the rest. (If the whole reading " +
+          'is not worth writing up, close the paper with wiki_finish_reading and outcome "skipped".)',
       );
     }
 
@@ -1447,13 +1707,11 @@ export class WikiService {
     const refreshed = (await sessions.get(session.sessionId)) ?? session;
     const written = await this.writeNote(item, refreshed, submitted, "reading");
 
-    // Only now, with the note durable, does the Wiki fall behind. A turn that
-    // failed any check above never incurred a debt it could not discharge.
+    // The debt is booked by `recordReadChunkIds` itself now - every newly read
+    // chunk is written with owes_wiki set - so there is no separate counter to
+    // keep in step, and no way for the two to disagree.
     const newlyRead = booked.newIndexes.length;
-    if (newlyRead > 0) {
-      await sessions.addPendingWiki(session.sessionId, newlyRead);
-    }
-
+    const owedNow = await sessions.pendingWikiChunks(session.sessionId);
     const delivered = await sessions.deliveredIndexes(session.sessionId);
     return {
       itemKey,
@@ -1479,6 +1737,11 @@ export class WikiService {
                 (coverage.deliveredChunks / coverage.totalChunks) * 1000,
               ) / 10,
       },
+      wikiDebt: {
+        chunkIds: owedNow.map((chunk) => chunk.chunkId),
+        chunkIndexes: owedNow.map((chunk) => chunk.chunkIndex),
+        count: owedNow.length,
+      },
       readDepthCeiling: "section_read",
       readDepthNote:
         "Evidence from this reading is stored at chunk_local or section_read. Question-driven reading " +
@@ -1491,8 +1754,11 @@ export class WikiService {
             "the Wiki from it now, before the next question: call wiki_prepare_update with what this " +
             "reading established, then wiki_commit. Update the Page, Claims, Concepts and relations that " +
             "already exist rather than creating parallel ones, and quote every Evidence excerpt from " +
-            `${itemKey}'s own chunks — the note is your memory, never the source. Reading this paper ` +
-            "again is refused until that commit lands."
+            `${itemKey}'s own chunks — the note is your memory, never the source. EVERY one of chunk(s) ` +
+            `${owedNow.map((chunk) => chunk.chunkId).join(", ")} has to be accounted for: either an ` +
+            "Evidence excerpt quoting it, or a SKIP action naming it with a reason saying what it " +
+            "establishes that the Wiki already holds. Writing up one of them does not settle the others. " +
+            "Reading this paper again is refused until they are all settled."
           : "Every chunk you named had already been read, so the note improved but the Wiki owes nothing " +
             "new. Carry on; write the Wiki when a turn actually adds something.",
     };
@@ -1756,7 +2022,6 @@ export class WikiService {
             coverageMap: formatCoverageMap(delivered, coverage.totalChunks),
           }
         : {}),
-      pendingWikiChunks: session.pendingWikiChunks,
       wikiReviewRecorded: session.wikiReviewAt !== null,
       deliveredChunks: coverage.deliveredChunks,
       totalChunks: coverage.totalChunks,
@@ -2577,28 +2842,59 @@ export class WikiService {
       }
     }
     offset = Math.min(offset, chunks.length);
-    // Skip forward over a run of already-read text at the head of this page.
-    // Question-driven reading leaves holes rather than a clean frontier - {7,
-    // 8, 42} means the gaps are 0-6, 9-41, 43-onwards - so a cursor that walks
-    // straight through would spend whole pages on text the note already
-    // accounts for. Only the run AT THE START is skipped: an already-read
-    // chunk in the middle of a page comes back with it, which costs one chunk
-    // and keeps the page a contiguous stretch of the paper rather than a
-    // discontinuous splice that reads as nonsense.
-    if (!explicitOffset) {
-      while (offset < chunks.length && deliveredBefore.has(offset)) {
-        offset += 1;
+
+    // Which indexes this page carries.
+    //
+    // An explicit offset takes a plain contiguous slice, unchanged: it is the
+    // re-read path, used to check an excerpt against its source before that
+    // excerpt becomes Evidence, and it has to hand back exactly the stretch it
+    // was asked for even when every chunk in it has been read before.
+    //
+    // Everything else pages over the chunks NOT YET READ. Question-driven
+    // reading leaves holes rather than a clean frontier - {7, 8, 42} means the
+    // gaps are 0-6, 9-41, 43-onwards - and the previous version only skipped a
+    // run at the head of a page, so a lone already-read chunk in the middle of
+    // the paper came back on every pass over it. Filtering the candidate list
+    // instead means a page can be discontinuous, and that is the right trade:
+    // the skipped text is already in the reading note WITH its chunk citations,
+    // so nothing is lost, whereas re-delivering it costs a slot that could have
+    // carried text nobody has seen. On a paper nobody has read this reduces to
+    // exactly the old contiguous slice.
+    let pageIndexes: number[];
+    if (explicitOffset) {
+      pageIndexes = [];
+      for (
+        let index = offset;
+        index < chunks.length && pageIndexes.length < pageSize;
+        index += 1
+      ) {
+        pageIndexes.push(index);
       }
+    } else {
+      const unread: number[] = [];
+      for (let index = 0; index < chunks.length; index += 1) {
+        if (!deliveredBefore.has(index)) unread.push(index);
+      }
+      // A cursor points at a position, and the holes it has yet to cover may
+      // all lie BEHIND it - a question read the end of the paper, so paging
+      // forward from the last page finds nothing while chunk 3 is still
+      // unread. Wrapping to the earliest unread chunk keeps paging converging
+      // on full coverage instead of stalling on an empty page.
+      const ahead = unread.filter((index) => index >= offset);
+      pageIndexes = (ahead.length ? ahead : unread).slice(0, pageSize);
     }
 
-    const page = chunks.slice(offset, offset + pageSize);
-    const rows = page.map((chunk, index) => ({
-      chunkIndex: offset + index,
-      chunkId: chunk.chunkId,
-      chars: chunk.text.length,
-      ...(chunk.language ? { language: chunk.language } : {}),
-      text: chunk.text,
-    }));
+    const rows = pageIndexes.map((index) => {
+      const chunk = chunks[index];
+      return {
+        chunkIndex: index,
+        chunkId: chunk.chunkId,
+        chars: chunk.text.length,
+        ...(chunk.language ? { language: chunk.language } : {}),
+        text: chunk.text,
+      };
+    });
+    if (rows.length) offset = rows[0].chunkIndex;
 
     // The integration gate. Only NEW text is gated: re-reading a chunk already
     // delivered is how an excerpt gets checked against the source before it
@@ -2638,9 +2934,37 @@ export class WikiService {
     const current = afterDelivery ?? session;
     const deliveredAfterSet = new Set(deliveredAfter);
 
-    const end = offset + rows.length;
-    const hasMore = end < chunks.length;
+    // Where the next page starts, and whether there is one.
+    //
+    // A discontinuous page breaks the old arithmetic: `offset + rows.length`
+    // assumed the page was a contiguous slice, so a page that skipped two
+    // already-read chunks would hand back a cursor pointing two chunks short
+    // and re-deliver them next time - which is the bug this whole change is
+    // about, reintroduced one line later.
+    //
+    // `hasMore` also stops being "did we reach the end of the array". What
+    // decides whether there is more to read is whether any chunk is still
+    // unread, wherever it sits; a page that ends at the last chunk while
+    // chunk 3 is still unread is not the end of the reading. On the explicit
+    // re-read path both keep their old meaning, because that path deliberately
+    // walks the paper rather than the unread set.
+    const end = rows.length ? rows[rows.length - 1].chunkIndex + 1 : offset;
+    const hasMore = explicitOffset
+      ? end < chunks.length
+      : coverage.remainingChunks > 0;
     const range = rows.length === 0 ? "none" : `${offset + 1}-${end}`;
+    // What was actually handed over, when it is not a plain run. A model told
+    // it received "41-60" that in fact received 41-44 and 46-60 would silently
+    // mis-attribute an excerpt to chunk 45.
+    const contiguous = rows.every(
+      (row, index) => index === 0 || row.chunkIndex === rows[index - 1].chunkIndex + 1,
+    );
+    const skippedWithinPage = contiguous
+      ? []
+      : Array.from(
+          { length: end - offset },
+          (_, step) => offset + step,
+        ).filter((index) => !rows.some((row) => row.chunkIndex === index));
 
     const existing = await this.store.prepareUpdate({
       libraryID,
@@ -2711,6 +3035,18 @@ export class WikiService {
         // What has been read and what is left, as ranges rather than counts.
         // On a paper questions had already been asked of, the holes are
         // scattered and a single "resume at" index does not describe them.
+        deliveredChunkIndexes: rows.map((row) => row.chunkIndex),
+        ...(skippedWithinPage.length
+          ? {
+              skippedAlreadyReadChunkIndexes: skippedWithinPage,
+              skippedNote:
+                `Chunk(s) ${skippedWithinPage.join(", ")} fall inside this page's range but were left ` +
+                "out because they have already been read and are accounted for in the reading note, " +
+                "with their chunk citations. This page is therefore not a continuous run — read " +
+                "deliveredChunkIndexes, not the range, when you attribute an excerpt to a chunk. To " +
+                "see a skipped chunk again, ask for it by offset; re-reading is free.",
+            }
+          : {}),
         readChunkRanges: formatChunkRanges(deliveredAfter),
         unreadChunkRanges: formatChunkRanges(
           Array.from({ length: chunks.length }, (_, i) => i).filter(

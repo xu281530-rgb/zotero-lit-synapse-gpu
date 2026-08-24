@@ -1107,7 +1107,9 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'pendingWikiWriteUp lists papers whose reading notes have moved ahead of the Wiki. Those are what this update owes: each stays closed to further question-driven reading until a commit cites it.',
       '',
-      'AFTER A FULL-TEXT READ, this call asks for one more thing before it will start the write-up: wikiReview, a pass over the WHOLE Wiki with the finished paper in hand. It is refused once and asked for by name, so you will be told when it is needed rather than having to guess.'
+      'AFTER A FULL-TEXT READ, this call asks for one more thing before it will start the write-up: wikiReview, a pass over the WHOLE Wiki with the finished paper in hand. It is refused once and asked for by name, so you will be told when it is needed rather than having to guess.',
+      '',
+      'wikiReview is accepted ONLY once every chunk has been delivered AND the whole-paper synthesis is recorded. Sent earlier it is refused and nothing is stored — reviewing the Wiki against half a paper is not the pass this gate exists to force. Committing what you have read so far is still allowed while a paper is unfinished; just leave wikiReview out of those calls.'
     ].join('\n'),
     inputSchema: {
       type: 'object',
@@ -1123,7 +1125,7 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         wikiReview: {
           type: 'object',
-          description: 'The whole-Wiki review, required once a paper has been read in full and synthesised — and only then. With the complete paper in hand, say what it means for what the Wiki ALREADY holds, on all five axes. This is not a summary of what you are about to add: it is a correction pass over a Wiki that has been growing incrementally, page by page and question by question, and has therefore drifted. "Nothing to change here, because ..." is a real answer to any axis and is the commonest one. Answered once and remembered; a retry does not re-ask.',
+          description: 'The whole-Wiki review, accepted only after every chunk has been delivered AND wiki_update_reading_note finalSynthesis has been recorded — sent before that it is refused and nothing is stored. With the complete paper in hand, say what it means for what the Wiki ALREADY holds, on all five axes. This is not a summary of what you are about to add: it is a correction pass over a Wiki that has been growing incrementally, page by page and question by question, and has therefore drifted. "Nothing to change here, because ..." is a real answer to any axis and is the commonest one. Answered once and remembered; a retry does not re-ask.',
           properties: {
             pages: {
               type: 'string',
@@ -1155,7 +1157,13 @@ export function buildToolCatalog(): ToolDefinition[] {
   {
     name: 'wiki_commit',
     category: 'wiki',
-    description: 'Apply only controlled Wiki actions. The plugin validates pages, claims, Zotero documents, actual indexed chunks, excerpts, duplicates, versions and the two-page creation ceiling. It never accepts SQL. When automatic Wiki writing is disabled, Zotero asks the user to confirm this Wiki-only database update.',
+    description: [
+      'Apply only controlled Wiki actions. The plugin validates pages, claims, Zotero documents, actual indexed chunks, excerpts, duplicates, versions and the two-page creation ceiling. It never accepts SQL. When automatic Wiki writing is disabled, Zotero asks the user to confirm this Wiki-only database update.',
+      '',
+      'SETTLING WHAT A QUESTION READ. Chunks read while answering a question owe the Wiki something until this call accounts for them, ONE BY ONE. A chunk is settled by an Evidence excerpt quoting it, or by a SKIP action naming it with a reason — and citing one chunk of the five a question read settles that one only. Whatever is left unsettled keeps its paper closed to further question-driven reading; the Claims you did write are still committed and permanent. wiki_prepare_update lists exactly which chunk ids are outstanding.',
+      '',
+      'A SKIP that carries itemKey, chunkIds and reason is how you record that read text established nothing the Wiki did not already hold — a restated definition, a caption confirming a known number, a paragraph of related work. That is a legitimate and common outcome, and a whole turn may be settled this way. What it is not is a formality: the reason must say what those passages actually establish and which Page, Claim, Concept or relation already covers it. "Nothing new" is refused, because it is exactly what a reader who checked nothing would also write. One reason may cover a group of chunks; you are never asked to explain each chunk separately. Every reason is kept in the reading ledger permanently.'
+    ].join('\n'),
     inputSchema: {
       type: 'object',
       properties: {
@@ -1183,6 +1191,16 @@ export function buildToolCatalog(): ToolDefinition[] {
                 ]
               },
               ref: { type: 'string' },
+              itemKey: { type: 'string' },
+              chunkIds: {
+                type: 'array',
+                items: { type: 'integer', minimum: 0 },
+                description: 'SKIP only: the chunk ids of this paper whose reading needs no Wiki entry. Every id must currently owe the Wiki — wiki_prepare_update lists them as pendingWikiWriteUp.'
+              },
+              reason: {
+                type: 'string',
+                description: 'SKIP only, required with chunkIds: what those passages establish, and which existing Page, Claim, Concept or relation already holds it. At least 40 characters and it must argue rather than assert — "nothing new", "already known" and their equivalents are refused. One reason covers the whole group.'
+              },
               pageId: {},
               claimId: {},
               expectedVersion: { type: 'integer' },
@@ -1481,7 +1499,7 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'PAGING. Once the expert exists, each call returns one page of chunks and the reading note as it currently stands. Pass cursor set to pagination.nextCursor from the previous response and change nothing else. pagination reports totalChunks, the range just returned, deliveredChunks / remainingChunks, readChunkRanges and unreadChunkRanges, a coverageMap drawn as filled and hollow squares, and coverageComplete once every chunk has been delivered.',
       '',
-      'IT CONTINUES WHATEVER QUESTIONS ALREADY READ. If the user has been asking about this paper, part of it is already read and it already has a reading note. This does not start over: the same session, the same chunk ledger and the same note carry forward, paging resumes at the first chunk nobody has read, and runs of already-read text are skipped rather than re-delivered. carriedOverFromQuestionAnswering says how much was inherited. Extend the existing note — never replace it with a fresh summary, and keep the chunk citations already in it. The one thing still asked for is a deliberate expert profile: the reader a question assembled on the fly is provisional, and reading a paper end to end deserves a considered one.',
+      'IT CONTINUES WHATEVER QUESTIONS ALREADY READ. If the user has been asking about this paper, part of it is already read and it already has a reading note. This does not start over: the same session, the same chunk ledger and the same note carry forward, and paging walks the chunks NOBODY HAS READ rather than the paper front to back. A page can therefore be discontinuous — 41-44 then 46-60, with 45 left out because a question already read it. Read pagination.deliveredChunkIndexes, not the range, when you attribute an excerpt to a chunk; pagination.skippedAlreadyReadChunkIndexes names what was left out, and its content is already in the reading note with its chunk citations. To see a skipped chunk again, ask for it by offset. carriedOverFromQuestionAnswering says how much was inherited. Extend the existing note — never replace it with a fresh summary, and keep the chunk citations already in it. The one thing still asked for is a deliberate expert profile: the reader a question assembled on the fly is provisional, and reading a paper end to end deserves a considered one.',
       '',
       'INTEGRATION GATE. After each page, rewrite the WHOLE reading note with wiki_update_reading_note — merging the new text into one continuous account of the paper and correcting whatever the new text overtakes. Do not write per-page notes: "new in chunks 8-15" headings are refused. At most one delivered batch may be outstanding; asking for another page while two are is refused. A batch that genuinely adds nothing can be answered with unchanged: true and unchangedReason, but not twice in a row. Re-reading a chunk you were already given (to quote Evidence) is free and never counts against the gate.',
       '',
