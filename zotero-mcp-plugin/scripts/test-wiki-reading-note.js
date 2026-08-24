@@ -205,6 +205,18 @@ const EXPERT = {
   ],
 };
 
+const REVIEW = {
+  pages: "The existing Page covers this subject; nothing to add or retitle.",
+  claims:
+    "The corrected 8 K/mm threshold supersedes the claim written from section 2.1.",
+  evidence:
+    "The superseded claim is thin and gets the corrected excerpt attached at paper depth.",
+  concepts:
+    "CET and equiaxed grain are already held; no duplicates and nothing to correct.",
+  relations:
+    "No relation between stored concepts is drawn or withdrawn by this paper.",
+};
+
 /** A note body long enough to be a reading and shaped like one. */
 function noteBody(sections) {
   return [
@@ -471,7 +483,7 @@ block("chunk ranges are compact and gap-aware", () => {
 // 4. The integration gate: one batch of slack, and re-reading is free
 // =========================================================================
 
-block("two outstanding batches stop the paging", async () => {
+block("one outstanding batch stops new paging but not re-reading", async () => {
   const second = await service.buildFromPaper({
     libraryID: 1,
     userRequested: true,
@@ -481,30 +493,18 @@ block("two outstanding batches stop the paging", async () => {
   });
   assert.equal(second.readingNote.integrationDebt, 1, "one batch behind is allowed");
 
-  const third = await service.buildFromPaper({
-    libraryID: 1,
-    userRequested: true,
-    cursor: second.pagination.nextCursor,
-  });
-  assert.equal(third.chunks[0].chunkIndex, 16);
-  assert.equal(third.readingNote.integrationDebt, 2);
-  assert.ok(
-    !("markdown" in third.readingNote),
-    "while paging the model already holds the note, so it is not resent",
-  );
-
   await assert.rejects(
     () =>
       service.buildFromPaper({
         libraryID: 1,
         userRequested: true,
-        cursor: third.pagination.nextCursor,
+        cursor: second.pagination.nextCursor,
       }),
     (error) =>
       error.name === "WikiReadingIntegrationRequired" &&
-      /2 batches of DEEPREAD/u.test(error.message) &&
-      error.details.integrationDebt === 2,
-    "a third outstanding batch is refused, naming the debt",
+      /1 batch of DEEPREAD has been delivered/u.test(error.message) &&
+      error.details.integrationDebt === 1,
+    "a second outstanding batch is refused, naming the existing debt",
   );
 
   // Re-reading text already delivered is how Evidence gets checked against the
@@ -519,12 +519,11 @@ block("two outstanding batches stop the paging", async () => {
   assert.equal(reread.chunks[0].chunkIndex, 0);
   assert.equal(
     reread.readingNote.integrationDebt,
-    2,
+    1,
     "a re-read adds no debt of its own",
   );
 
-  // One integration clears the whole backlog: the note was rewritten as a
-  // whole, so it accounts for everything delivered.
+  // Rewriting the whole note clears the one allowed outstanding batch.
   const caughtUp = await service.updateReadingNote({
     libraryID: 1,
     markdown: noteBody([
@@ -536,6 +535,28 @@ block("two outstanding batches stop the paging", async () => {
     ]),
   });
   assert.equal(caughtUp.readingSession.integrationDebt, 0);
+
+  const third = await service.buildFromPaper({
+    libraryID: 1,
+    userRequested: true,
+    cursor: second.pagination.nextCursor,
+  });
+  assert.equal(third.chunks[0].chunkIndex, 16);
+  assert.equal(third.readingNote.integrationDebt, 1);
+  assert.ok(
+    !("markdown" in third.readingNote),
+    "while paging the model already holds the note, so it is not resent",
+  );
+  await service.updateReadingNote({
+    libraryID: 1,
+    markdown: noteBody([
+      "## Process chain",
+      "Directional solidification at 4 mm/min under an imposed gradient, then rapid hot pressing at 1180 C and 45 MPa for 90 s.",
+      "",
+      "## Columnar-to-equiaxed transition",
+      "The paper places the transition at a thermal gradient of 12 K/mm for this alloy.",
+    ]),
+  });
 
   const fourth = await service.buildFromPaper({
     libraryID: 1,
@@ -625,6 +646,54 @@ block("the write-up waits for the whole-paper pass", async () => {
     "every chunk delivered is the moment the final pass is owed, not the moment claims start",
   );
 
+  // 2.4.4 staging remains cheap and reversible, but its final write belongs
+  // after the whole-paper synthesis. An early final must neither drain what
+  // was staged nor ask the user to confirm a permanent concept write.
+  let confirmations = 0;
+  const staged = await service.recordConcepts({
+    libraryID: 1,
+    concepts: [
+      {
+        primaryTerm: { zh: "等轴晶", en: "equiaxed grain" },
+      },
+    ],
+    confirmWrite: async () => {
+      confirmations += 1;
+    },
+  });
+  assert.equal(staged.written, false, "a mid-reading call must not write");
+  assert.equal(staged.totalStaged, 1);
+  assert.equal(confirmations, 0, "and must not ask the user anything");
+  await assert.rejects(
+    () =>
+      service.recordConcepts({
+        libraryID: 1,
+        final: true,
+        concepts: [
+          {
+            primaryTerm: {
+              zh: "柱状晶到等轴晶转变",
+              en: "columnar-to-equiaxed transition",
+              abbr: "CET",
+            },
+          },
+        ],
+        confirmWrite: async () => {
+          confirmations += 1;
+        },
+      }),
+    /whole-paper synthesis.*Nothing was written/iu,
+    "concepts final is refused before finalSynthesis",
+  );
+  assert.equal(confirmations, 0, "an invalid final asks for no confirmation");
+  assert.equal(
+    (await service.listConcepts(1)).some(
+      (concept) => concept.displayName === "等轴晶",
+    ),
+    false,
+    "neither the staged nor early-final term reached the concept library",
+  );
+
   const finalPass = await service.updateReadingNote({
     libraryID: 1,
     finalSynthesis: true,
@@ -646,6 +715,27 @@ block("the write-up waits for the whole-paper pass", async () => {
   assert.equal(parsed.metadata.coverage.finalSynthesis, true);
   assert.equal(parsed.metadata.nextChunk, null);
 
+  // The Wiki review is last: it is invalid until the independent terminology
+  // pass has also looked at the finished paper. A rejected early answer must
+  // not be kept and silently reused after that pass happens.
+  await assert.rejects(
+    () =>
+      service.prepareUpdate({
+        libraryID: 1,
+        query: "Columnar array forming",
+        proposedPageTitles: ["Columnar array forming"],
+        wikiReview: REVIEW,
+      }),
+    /concepts have not been reviewed as a whole/iu,
+    "a review submitted before concepts final is explicitly rejected",
+  );
+  const afterEarlyReview = await service.getReadingNote({ libraryID: 1 });
+  assert.equal(
+    afterEarlyReview.progress.wikiReviewRecorded,
+    false,
+    "the rejected review leaves wikiReviewAt empty rather than banking it",
+  );
+
   // 2.4.3: the synthesis pass is no longer the last gate. A paper that has
   // been read whole also owes one deliberate review of the terminology it
   // established, so the concept library is built from reading rather than
@@ -661,24 +751,7 @@ block("the write-up waits for the whole-paper pass", async () => {
     "a synthesised paper still owes its whole-paper concept pass",
   );
 
-  // 2.4.4: a call without `final` while a paper is open is STAGED. Nothing is
-  // written and nothing is confirmed, which is what makes noting a candidate
-  // mid-read cost the user nothing. The whole-paper pass writes the lot once.
-  let confirmations = 0;
-  const staged = await service.recordConcepts({
-    libraryID: 1,
-    concepts: [
-      {
-        primaryTerm: { zh: "等轴晶", en: "equiaxed grain" },
-      },
-    ],
-    confirmWrite: async () => {
-      confirmations += 1;
-    },
-  });
-  assert.equal(staged.written, false, "a mid-reading call must not write");
-  assert.equal(staged.totalStaged, 1);
-  assert.equal(confirmations, 0, "and must not ask the user anything");
+  // The valid final write now consumes what remained staged, once.
   assert.equal(
     (await service.listConcepts(1)).some(
       (concept) => concept.displayName === "等轴晶",
@@ -757,14 +830,6 @@ block("the write-up waits for the whole-paper pass", async () => {
     /missing a real answer for: evidence/iu,
     "every axis has to be answered, and an empty one is named",
   );
-
-  const REVIEW = {
-    pages: "The existing Page covers this subject; nothing to add or retitle.",
-    claims: "The corrected 8 K/mm threshold supersedes the claim written from section 2.1.",
-    evidence: "The superseded claim is thin and gets the corrected excerpt attached at paper depth.",
-    concepts: "CET and equiaxed grain are already held; no duplicates and nothing to correct.",
-    relations: "No relation between stored concepts is drawn or withdrawn by this paper.",
-  };
 
   const prepared = await service.prepareUpdate({
     libraryID: 1,

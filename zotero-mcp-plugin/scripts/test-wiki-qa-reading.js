@@ -871,6 +871,18 @@ block("the full-text slot still admits one paper, and says so usefully", async (
   );
   assert.equal(page.pagination.readChunkRanges, "0-4,7-8,15,30-31,42,50,70-71");
   assert.match(page.pagination.unreadChunkRanges, /^5-6,9-14,16-29/u);
+  await service.updateReadingNote({
+    libraryID: 1,
+    itemKey: "PAPERONE",
+    markdown: note([
+      "The imposed gradient cycles between 8 and 14 K/mm along the traverse (chunk 7, chunk 8).",
+      "The linear stretch persists at least to station 15 (chunk 15).",
+      "At station 42 the response has flattened noticeably (chunk 42).",
+      "By station 70 the depth is essentially constant, and 71 confirms it (chunk 70, chunk 71).",
+      "Stations 30, 31 and 50 sit on the plateau (chunk 30, chunk 31, chunk 50).",
+      "The opening full-text batch establishes the rig geometry and initial traverse response (chunk 0, chunk 1, chunk 2, chunk 3, chunk 4).",
+    ]),
+  });
 });
 
 // =========================================================================

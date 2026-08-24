@@ -1109,7 +1109,7 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'AFTER A FULL-TEXT READ, this call asks for one more thing before it will start the write-up: wikiReview, a pass over the WHOLE Wiki with the finished paper in hand. It is refused once and asked for by name, so you will be told when it is needed rather than having to guess.',
       '',
-      'wikiReview is accepted ONLY once every chunk has been delivered AND the whole-paper synthesis is recorded. Sent earlier it is refused and nothing is stored — reviewing the Wiki against half a paper is not the pass this gate exists to force. Committing what you have read so far is still allowed while a paper is unfinished; just leave wikiReview out of those calls.'
+      'wikiReview is accepted ONLY once every chunk has been delivered, the whole-paper synthesis is recorded, AND wiki_record_concepts final true has completed. Sent earlier it is refused and nothing is stored — the order is finalSynthesis, terminology final, then the five-axis Wiki review. Committing what you have read so far is still allowed while a paper is unfinished; just leave wikiReview out of those calls.'
     ].join('\n'),
     inputSchema: {
       type: 'object',
@@ -1125,7 +1125,7 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         wikiReview: {
           type: 'object',
-          description: 'The whole-Wiki review, accepted only after every chunk has been delivered AND wiki_update_reading_note finalSynthesis has been recorded — sent before that it is refused and nothing is stored. With the complete paper in hand, say what it means for what the Wiki ALREADY holds, on all five axes. This is not a summary of what you are about to add: it is a correction pass over a Wiki that has been growing incrementally, page by page and question by question, and has therefore drifted. "Nothing to change here, because ..." is a real answer to any axis and is the commonest one. Answered once and remembered; a retry does not re-ask.',
+          description: 'The whole-Wiki review, accepted only after every chunk has been delivered, wiki_update_reading_note finalSynthesis has been recorded, AND wiki_record_concepts final true has completed — sent before that it is refused and nothing is stored. With the complete paper in hand, say what it means for what the Wiki ALREADY holds, on all five axes. This is not a summary of what you are about to add: it is a correction pass over a Wiki that has been growing incrementally, page by page and question by question, and has therefore drifted. "Nothing to change here, because ..." is a real answer to any axis and is the commonest one. Answered once and remembered; a retry does not re-ask.',
           properties: {
             pages: {
               type: 'string',

@@ -426,27 +426,36 @@ export class WikiService {
     // gate at the end only checked that SOMETHING had been recorded, so the
     // pass it exists to force was skippable by doing it before there was
     // anything to review. Both conditions are required, and they are the same
-    // two the depth rule uses: every chunk delivered, and the note rewritten
-    // as one account of the whole paper. Refused rather than ignored, because
-    // a caller that sent a review and got silence would reasonably believe the
+    // depth rule uses, plus the independent whole-paper terminology pass:
+    // every chunk delivered, the note rewritten as one account of the paper,
+    // and its final concepts recorded. Refused rather than ignored, because a
+    // caller that sent a review and got silence would reasonably believe the
     // pass was done.
     const coverage = await sessions.coverage(open.sessionId);
-    if (!coverage.complete || open.finalSynthesisAt === null) {
+    if (
+      !coverage.complete ||
+      open.finalSynthesisAt === null ||
+      open.conceptsRecordedAt === null
+    ) {
       throw new Error(
         `The whole-Wiki review is the LAST pass over a finished paper, and ${open.itemKey} is not ` +
-          "finished: " +
+          "ready for it: " +
           (coverage.complete
-            ? "every chunk has been delivered, but the reading note has not been rewritten as one account " +
-              "of the complete paper"
+            ? open.finalSynthesisAt === null
+              ? "every chunk has been delivered, but the reading note has not been rewritten as one account " +
+                "of the complete paper"
+              : "the reading note has been rewritten as one account of the complete paper, but its " +
+                "concepts have not been reviewed as a whole with wiki_record_concepts final true"
             : `${coverage.deliveredChunks} of ${coverage.totalChunks} chunks have been delivered` +
               (coverage.firstMissingIndex === null
                 ? ""
                 : `, resume at chunk index ${coverage.firstMissingIndex}`)) +
-          ". Reviewing now would be reviewing the Wiki against half a paper, and it would then count as " +
-          "the final pass and never be asked for again. Nothing was recorded. Finish the paper with " +
+          ". Reviewing now would complete the final Wiki pass before all earlier whole-paper passes, " +
+          "and it would then count forever and never be asked for again. Nothing was recorded. Finish the paper with " +
           "wiki_build_from_paper, do the whole-paper synthesis with wiki_update_reading_note and " +
-          "finalSynthesis true, then send wikiReview. Committing what you have read so far is still " +
-          "allowed in the meantime - just leave wikiReview out of those calls.",
+          "finalSynthesis true, complete the terminology pass with wiki_record_concepts and final true, " +
+          "then send wikiReview. Committing what you have read so far is still allowed in the meantime " +
+          "- just leave wikiReview out of those calls.",
       );
     }
 
@@ -2513,6 +2522,23 @@ export class WikiService {
       };
     }
 
+    // A final submission is the paper's terminology pass, not merely a write
+    // mode. It must use the finished whole-paper account, and this check has
+    // to happen before staged concepts are drained or confirmation is raised.
+    if (options.final === true && open) {
+      const coverage = await sessions.coverage(open.sessionId);
+      if (!coverage.complete || open.finalSynthesisAt === null) {
+        throw new Error(
+          `The final terminology pass for ${open.itemKey} belongs after the complete paper has been ` +
+            "delivered and its whole-paper synthesis recorded. " +
+            (coverage.complete
+              ? "Every chunk is delivered, but finalSynthesis is still missing. "
+              : `${coverage.deliveredChunks} of ${coverage.totalChunks} chunks have been delivered. `) +
+            "Nothing was written, no confirmation was requested, and all staged concepts remain staged.",
+        );
+      }
+    }
+
     // ---- The write -------------------------------------------------------
     const staged = open
       ? ((await sessions.drainStagedConcepts(open.sessionId)) as Array<
@@ -3043,9 +3069,10 @@ export class WikiService {
       (row) => !deliveredBefore.has(row.chunkIndex),
     );
     const debt = integrationDebt(session);
-    if (carriesNewText && debt > WIKI_MAX_OUTSTANDING_BATCHES) {
+    if (carriesNewText && debt >= WIKI_MAX_OUTSTANDING_BATCHES) {
       throw new WikiReadingIntegrationRequired(
-        `${debt} batches of ${itemKey} have been delivered without being folded into its reading ` +
+        `${debt} batch${debt === 1 ? "" : "es"} of ${itemKey} ${debt === 1 ? "has" : "have"} been ` +
+          "delivered without being folded into its reading " +
           `note, and at most ${WIKI_MAX_OUTSTANDING_BATCHES} may be outstanding. Chunks are a way to ` +
           "transport the text, not a way to organise what it says: call wiki_update_reading_note with " +
           "the WHOLE note rewritten to account for everything delivered so far - adding, merging, " +
@@ -3210,7 +3237,7 @@ export class WikiService {
         "corrects or sharpens something written earlier, rewrite that passage rather than leaving " +
         "both versions standing. Then send it with wiki_update_reading_note." +
         (integrationDebt(current) >= WIKI_MAX_OUTSTANDING_BATCHES
-          ? ` ${integrationDebt(current)} batch(es) are outstanding; the next page is refused once more than ${WIKI_MAX_OUTSTANDING_BATCHES} is.`
+          ? ` ${integrationDebt(current)} batch(es) are outstanding; fold them into the note before requesting another page.`
           : ""),
       coverageInstruction: coverage.complete
         ? "Every chunk of this paper has been delivered. That is delivery, not understanding: " +

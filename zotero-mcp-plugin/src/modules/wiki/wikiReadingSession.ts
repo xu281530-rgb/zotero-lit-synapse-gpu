@@ -67,10 +67,10 @@ import type { WikiReadingExpert } from "./wikiReadingNote";
  * then write one summary from whatever survived in context - the thing this
  * whole mechanism exists to stop.
  *
- * One outstanding batch is the slack. A reader may be a batch behind when it
- * asks for more; asking again while two are outstanding is refused, and any
- * integration clears the whole backlog because the note is rewritten as a
- * whole and therefore covers everything delivered so far.
+ * One outstanding batch is the slack. Once a batch is waiting, the reader must
+ * fold it into the note before asking for more. Any integration clears the
+ * backlog because the note is rewritten as a whole and therefore covers
+ * everything delivered so far.
  */
 export const WIKI_MAX_OUTSTANDING_BATCHES = 1;
 
