@@ -256,8 +256,8 @@ export class WikiConceptLibrary {
     entities: Array<
       WikiConceptEntityInput & { sources?: WikiPreparedSource[] }
     >;
-    /** Runs after every concept write, inside the same database transaction. */
-    onRecorded?: () => Promise<void>;
+    /** Runs after every concept statement but before the transaction commits. */
+    beforeCommit?: () => Promise<void>;
   }): Promise<WikiConceptRecordResult> {
     const result: WikiConceptRecordResult = {
       createdConcepts: 0,
@@ -274,7 +274,7 @@ export class WikiConceptLibrary {
       for (const entity of options.entities ?? []) {
         await this.recordOne(options.libraryID, entity, result);
       }
-      await options.onRecorded?.();
+      await options.beforeCommit?.();
     });
     return result;
   }

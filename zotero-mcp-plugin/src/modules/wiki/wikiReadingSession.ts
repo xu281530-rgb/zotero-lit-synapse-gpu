@@ -1002,16 +1002,28 @@ export class WikiReadingSessions {
   /** Consume staged concepts and record the final pass in one database write. */
   async completeConceptSubmission(
     sessionId: number,
-    options: { final: boolean },
+    options: { final: boolean; stagedConcepts: unknown[] },
   ): Promise<void> {
     if (!options.final) return;
     const now = Date.now();
+    const expectedStaged = options.stagedConcepts.length
+      ? JSON.stringify(options.stagedConcepts)
+      : "";
     await this.db.queryAsync(
       `UPDATE wiki_reading_sessions
        SET staged_concepts = '', concepts_recorded_at = ?, updated_at = ?
-       WHERE session_id = ?`,
-      [now, now, sessionId],
+       WHERE session_id = ? AND COALESCE(staged_concepts, '') = ?`,
+      [now, now, sessionId, expectedStaged],
     );
+    const changed = Number(
+      (await this.db.valueQueryAsync("SELECT changes()")) ?? 0,
+    );
+    if (changed !== 1) {
+      throw new Error(
+        "Staged concepts changed while the final submission was being checked. " +
+          "Nothing was written or marked complete; retry to include the new staged concepts.",
+      );
+    }
   }
 
   /** How much of the document has actually been delivered. */

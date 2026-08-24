@@ -54,6 +54,7 @@ import { normalizeTermFields } from "./wikiConceptTerms";
 import type {
   WikiConceptEntity,
   WikiConceptEntityInput,
+  WikiTermInput,
   WikiTermSourceInput,
 } from "./wikiConceptTerms";
 import { WikiRetriever } from "./wikiRetriever";
@@ -2553,7 +2554,15 @@ export class WikiService {
           "an empty one is not.",
       );
     }
+    const shapeFailures = this.inspectConceptShapes(combined);
+    if (options.final === true && open && shapeFailures.length) {
+      throw new Error(
+        "The final concept submission contains an invalid concept: " +
+          `${shapeFailures.join(" ")} Nothing was written or marked complete, and all staged concepts remain staged.`,
+      );
+    }
     const warnings: string[] = [];
+    const sourceValidationFailures: string[] = [];
     const prepared: Array<
       WikiConceptEntityInput & { sources?: WikiPreparedSource[] }
     > = [];
@@ -2570,6 +2579,7 @@ export class WikiService {
           entity.sources,
           itemKey,
           warnings,
+          sourceValidationFailures,
         ),
         primaryTerm: entity.primaryTerm
           ? {
@@ -2579,6 +2589,7 @@ export class WikiService {
                 entity.primaryTerm.sources,
                 "",
                 warnings,
+                sourceValidationFailures,
               ),
             }
           : undefined,
@@ -2590,10 +2601,16 @@ export class WikiService {
               term.sources,
               "",
               warnings,
+              sourceValidationFailures,
             ),
           })),
         ),
       });
+    }
+    if (options.final === true && open && sourceValidationFailures.length) {
+      throw new Error(
+        `${sourceValidationFailures.join(" ")} Nothing was written or marked complete, and all staged concepts remain staged.`,
+      );
     }
     if (prepared.length) await options.confirmWrite?.(prepared.length);
     const library = await this.store.concepts();
@@ -2602,9 +2619,10 @@ export class WikiService {
       entities: prepared,
       ...(open
         ? {
-            onRecorded: () =>
+            beforeCommit: () =>
               sessions.completeConceptSubmission(open.sessionId, {
                 final: options.final === true,
+                stagedConcepts: staged,
               }),
           }
         : {}),
@@ -2638,8 +2656,15 @@ export class WikiService {
   private inspectConceptShapes(entities: WikiConceptEntityInput[]): string[] {
     const warnings: string[] = [];
     for (const entity of entities) {
-      for (const term of [entity.primaryTerm, ...(entity.terms ?? [])]) {
-        if (!term) continue;
+      const terms = [entity.primaryTerm, ...(entity.terms ?? [])].filter(
+        (term): term is WikiTermInput => Boolean(term),
+      );
+      if (!terms.length) {
+        warnings.push(
+          "A concept must include a primaryTerm or at least one term.",
+        );
+      }
+      for (const term of terms) {
         try {
           normalizeTermFields(term);
         } catch (error) {
@@ -2663,6 +2688,7 @@ export class WikiService {
     sources: WikiTermSourceInput[] | undefined,
     defaultItemKey: string,
     warnings: string[],
+    validationFailures: string[],
   ): Promise<WikiPreparedSource[]> {
     const requested = (sources ?? []).slice();
     if (!requested.length && defaultItemKey) {
@@ -2677,9 +2703,9 @@ export class WikiService {
         itemKey,
       );
       if (!item || item.deleted || !item.isRegularItem?.()) {
-        warnings.push(
-          `Concept source ${libraryID}:${itemKey} is not a Zotero document in this library and was not recorded.`,
-        );
+        const warning = `Concept source ${libraryID}:${itemKey} is not a Zotero document in this library and was not recorded.`;
+        warnings.push(warning);
+        validationFailures.push(warning);
         continue;
       }
       const excerpt = normalizeWikiText(String(source.excerpt ?? ""));

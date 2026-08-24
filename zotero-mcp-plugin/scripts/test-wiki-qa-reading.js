@@ -734,25 +734,35 @@ block("failed final concept writes preserve staged data until retry", async () =
   };
   await assertConceptRetryState();
 
-  const getByLibraryAndKeyAsync = fake.Zotero.Items.getByLibraryAndKeyAsync;
-  fake.Zotero.Items.getByLibraryAndKeyAsync = async () => {
-    throw new Error("concept source validation failed");
-  };
-  try {
-    await assert.rejects(
-      () =>
-        service.recordConcepts({
-          libraryID: 1,
-          itemKey: "PAPRTHRE",
-          final: true,
-          concepts: [],
-          confirmWrite: async () => {},
-        }),
-      /concept source validation failed/u,
-    );
-  } finally {
-    fake.Zotero.Items.getByLibraryAndKeyAsync = getByLibraryAndKeyAsync;
-  }
+  await assert.rejects(
+    () =>
+      service.recordConcepts({
+        libraryID: 1,
+        itemKey: "PAPRTHRE",
+        final: true,
+        concepts: [{ primaryTerm: { abbr: "MPD" } }],
+        confirmWrite: async () => {},
+      }),
+    /abbreviation on its own.*staged concepts remain staged/iu,
+  );
+  await assertConceptRetryState();
+
+  await assert.rejects(
+    () =>
+      service.recordConcepts({
+        libraryID: 1,
+        itemKey: "PAPRTHRE",
+        final: true,
+        concepts: [
+          {
+            primaryTerm: { en: "invalid-source concept" },
+            sources: [{ itemKey: "NOTFOUND" }],
+          },
+        ],
+        confirmWrite: async () => {},
+      }),
+    /NOTFOUND is not a Zotero document.*staged concepts remain staged/iu,
+  );
   await assertConceptRetryState();
 
   const queryAsync = database.queryAsync;
@@ -786,6 +796,41 @@ block("failed final concept writes preserve staged data until retry", async () =
     "the failed concept transaction must leave no partial concept row",
   );
 
+  await assert.rejects(
+    () =>
+      service.recordConcepts({
+        libraryID: 1,
+        itemKey: "PAPRTHRE",
+        final: true,
+        concepts: [],
+        confirmWrite: async () => {
+          await service.recordConcepts({
+            libraryID: 1,
+            itemKey: "PAPRTHRE",
+            concepts: [
+              {
+                primaryTerm: { en: "thermal gradient" },
+                sources: [{ itemKey: "PAPRTHRE" }],
+              },
+            ],
+          });
+        },
+      }),
+    /Staged concepts changed.*Nothing was written or marked complete/iu,
+  );
+  const afterConcurrentStage = await sessions.openForItem(1, "PAPRTHRE");
+  assert.equal(afterConcurrentStage.stagedConcepts.length, 2);
+  assert.equal(afterConcurrentStage.conceptsRecordedAt, null);
+  for (const name of ["melt-pool depth", "thermal gradient"]) {
+    assert.equal(
+      sqlite
+        .prepare("SELECT COUNT(*) AS count FROM wiki_concepts WHERE canonical_name = ?")
+        .get(name).count,
+      0,
+      `the stale final snapshot must roll back ${name}`,
+    );
+  }
+
   await service.recordConcepts({
     libraryID: 1,
     itemKey: "PAPRTHRE",
@@ -803,6 +848,13 @@ block("failed final concept writes preserve staged data until retry", async () =
       .get("melt-pool depth").count,
     1,
     "a successful retry writes the staged concept exactly once",
+  );
+  assert.equal(
+    sqlite
+      .prepare("SELECT COUNT(*) AS count FROM wiki_concepts WHERE canonical_name = ?")
+      .get("thermal gradient").count,
+    1,
+    "a successful retry also writes the concept staged during the failed final",
   );
 });
 
