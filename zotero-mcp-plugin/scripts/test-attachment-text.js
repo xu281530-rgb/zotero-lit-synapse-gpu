@@ -17,9 +17,14 @@
  */
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { register } from "node:module";
+import { fileURLToPath } from "node:url";
 
 register("./ts-ext-hooks.mjs", import.meta.url);
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const {
   DEFAULT_ATTACHMENT_TEXT_WINDOW,
@@ -32,6 +37,10 @@ const {
   selectAttachment,
   takeTextWindow,
 } = await import("../src/modules/attachmentText.ts");
+const {
+  STANDARD_AGGREGATE_CONTENT_LIMITS,
+  resolveAttachmentContentLimit,
+} = await import("../src/modules/contentExtractionDefaults.ts");
 
 const tests = [];
 function test(name, fn) {
@@ -81,6 +90,37 @@ test("windows tile the text exactly once, in order", () => {
 
   assert.equal(assembled, text, "reassembled text must equal the original");
   assert.ok(windows > 1, "the fixture must actually need several windows");
+});
+
+test("attachment extraction is complete before character-window paging", () => {
+  assert.deepEqual(STANDARD_AGGREGATE_CONTENT_LIMITS, {
+    maxContentLength: 3000,
+    maxAttachments: 10,
+    maxNotes: 15,
+    includeWebpage: true,
+  });
+  assert.equal(resolveAttachmentContentLimit(false), 3000);
+  assert.equal(resolveAttachmentContentLimit(true), -1);
+
+  const server = fs.readFileSync(
+    path.join(root, "src/modules/streamableMCPServer.ts"),
+    "utf8",
+  );
+  const extractor = fs.readFileSync(
+    path.join(root, "src/modules/unifiedContentExtractor.ts"),
+    "utf8",
+  );
+  assert.match(
+    server,
+    /getAttachmentContent\(\s*attachment\.key,\s*\{ preserveOriginal: true \},\s*attachment\.libraryID/s,
+  );
+  for (const removed of [
+    "MCPSettingsService",
+    "getModeConfiguration",
+    "IntelligentContentProcessor",
+  ]) {
+    assert.ok(!extractor.includes(removed), `extractor still uses ${removed}`);
+  }
 });
 
 test("a window ends on a boundary rather than mid-word", () => {

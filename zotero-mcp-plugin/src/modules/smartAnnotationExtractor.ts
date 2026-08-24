@@ -10,7 +10,6 @@
  */
 
 import { AnnotationService } from './annotationService';
-import { MCPSettingsService } from './mcpSettingsService';
 
 declare let Zotero: any;
 declare let ztoolkit: ZToolkit;
@@ -18,48 +17,10 @@ declare let ztoolkit: ZToolkit;
 /**
  * Maximum marks one page may return, whatever the caller asks for.
  *
- * A well-read PDF holds hundreds of highlights, and there used to be no cap at
- * all on the "give me everything" path: `outputMode: 'full'` skipped pagination
- * outright and returned every matching mark in one response.
+ * A well-read PDF holds hundreds of highlights, so full-text responses remain
+ * paged even though individual marks are no longer shortened.
  */
 export const MAX_ANNOTATIONS_PER_PAGE = 100;
-
-/**
- * The four detail levels, and the one vocabulary they are named in.
- *
- * There were two vocabularies before, and they did not overlap. The tool
- * schema advertised `mode` with the values `minimal | preview | standard |
- * complete`; the implementation read `outputMode` and compared it against
- * `'full'`. Both halves were self-consistent and neither could reach the
- * other: the `mode` a caller passed was dropped on the floor by the `{ q,
- * ...options }` spread, so every call silently fell back to the user's default,
- * and `complete` never once took effect because the only value the code looked
- * for was `full`, which the schema did not offer.
- *
- * One vocabulary now, with the old spellings accepted as inputs and normalised
- * here, so a caller written against either half keeps working and both mean the
- * same thing.
- */
-export type AnnotationDetail = 'minimal' | 'preview' | 'standard' | 'complete';
-
-const DETAIL_ALIASES: Record<string, AnnotationDetail> = {
-  minimal: 'minimal',
-  preview: 'preview',
-  standard: 'standard',
-  complete: 'complete',
-  // Legacy internal spellings.
-  smart: 'standard',
-  full: 'complete',
-};
-
-export function resolveAnnotationDetail(...candidates: unknown[]): AnnotationDetail {
-  for (const candidate of candidates) {
-    if (typeof candidate !== 'string') continue;
-    const resolved = DETAIL_ALIASES[candidate.trim().toLowerCase()];
-    if (resolved) return resolved;
-  }
-  return 'standard';
-}
 
 export function resolveAnnotationPageSize(
   requested: unknown,
@@ -91,8 +52,6 @@ export function resolveAnnotationItemKeys(params: {
 
 export interface SmartAnnotationOptions {
   libraryID?: number;
-  maxTokens?: number;
-  outputMode?: string; // 'smart', 'preview', 'full', 'minimal'
   types?: string[];
   colors?: string[];    // Filter by annotation colors (e.g., ['#ffd400', '#ff6666'])
   tags?: string[];      // Filter by tags
@@ -142,14 +101,9 @@ export interface AnnotationResult {
 }
 
 export interface SmartAnnotationResponse {
-  mode: string;
-  originalCount?: number;
   includedCount: number;
-  estimatedTokens: number;
-  compressionRatio?: string;
   metadata: {
     extractedAt: string;
-    userSettings: any;
     processingTime: string;
     /** Every document this page's marks were read from, in the order asked. */
     sourceItemKeys?: string[];
@@ -166,7 +120,6 @@ export interface SmartAnnotationResponse {
       foundCount: number;     // 找到的原始数量
       filteredCount: number; // 过滤后数量
       returnedCount: number; // 实际返回数量
-      skippedCount?: number;  // 跳过的数量（压缩时）
     };
   };
   data: AnnotationResult[];
@@ -248,10 +201,6 @@ export class SmartAnnotationExtractor {
     types?: string[];
     colors?: string[];      // Filter by colors (e.g., ['#ffd400', 'yellow'])
     tags?: string[];        // Filter by tags
-    maxTokens?: number;
-    detail?: string;
-    mode?: string;
-    outputMode?: string;
     limit?: number;
     offset?: number;
   }): Promise<SmartAnnotationResponse> {
@@ -260,31 +209,16 @@ export class SmartAnnotationExtractor {
     try {
       ztoolkit.log(`[SmartAnnotationExtractor] getAnnotations called with params: ${JSON.stringify(params)}`);
 
-      // Read user settings for defaults
-      const effectiveSettings = MCPSettingsService.getEffectiveSettings();
-      const detail = resolveAnnotationDetail(
-        params.detail,
-        params.mode,
-        params.outputMode,
-        MCPSettingsService.get('content.mode'),
-      );
       const itemKeys = resolveAnnotationItemKeys(params);
 
       const options: SmartAnnotationOptions = {
         libraryID: params.libraryID,
-        maxTokens: params.maxTokens || effectiveSettings.maxTokens,
-        outputMode: detail,
         types: params.types || ['note', 'highlight', 'annotation'],
         colors: params.colors,  // Color filter (hex codes or names)
         tags: params.tags,      // Tag filter
-        limit: resolveAnnotationPageSize(
-          params.limit,
-          detail === 'complete' ? effectiveSettings.maxAnnotationsPerRequest : 20,
-        ),
+        limit: resolveAnnotationPageSize(params.limit, 20),
         offset: params.offset || 0
       };
-
-      ztoolkit.log(`[SmartAnnotationExtractor] Using settings - maxTokens: ${options.maxTokens}, mode: ${options.outputMode}`);
 
       let annotations: any[] = [];
 
@@ -330,19 +264,15 @@ export class SmartAnnotationExtractor {
         });
       }
 
-      // Paginate before processing. Every detail level pages, including
-      // `complete`: it used to mean "return every matching mark in one
-      // response", which on a heavily annotated PDF is hundreds of them, and
-      // it was the only way to ask for that — so a caller wanting verbatim
-      // text had to also ask for all of it.
+      // Paginate before formatting so full-text marks stay bounded by count.
       const totalCount = annotations.length;
       const paginatedAnnotations = annotations.slice(
         options.offset!,
         options.offset! + options.limit!,
       );
 
-      // Process content with smart compression
-      const processed = await this.processAnnotations(paginatedAnnotations, options);
+      // Format every mark in full; pagination is the response-size guard.
+      const processed = this.processAnnotations(paginatedAnnotations);
 
       const processingTime = `${Date.now() - startTime}ms`;
       ztoolkit.log(`[SmartAnnotationExtractor] Completed in ${processingTime}, processed ${processed.includedCount} of ${totalCount} annotations (paginated: ${paginatedAnnotations.length})`);
@@ -355,11 +285,6 @@ export class SmartAnnotationExtractor {
         ...processed,
         metadata: {
           extractedAt: new Date().toISOString(),
-          userSettings: {
-            maxTokens: options.maxTokens,
-            detail: options.outputMode,
-            outputMode: options.outputMode
-          },
           sourceItemKeys: itemKeys,
           processingTime,
           pagination: {
@@ -372,8 +297,7 @@ export class SmartAnnotationExtractor {
           stats: {
             foundCount: totalCount,
             filteredCount: paginatedAnnotations.length,
-            returnedCount: processed.includedCount,
-            skippedCount: processed.originalCount ? processed.originalCount - processed.includedCount : undefined
+            returnedCount: processed.includedCount
           }
         }
       };
@@ -412,10 +336,6 @@ export class SmartAnnotationExtractor {
     types?: string[];
     colors?: string[];      // Filter by colors
     tags?: string[];        // Filter by tags
-    maxTokens?: number;
-    detail?: string;
-    mode?: string;
-    outputMode?: string;
     minRelevance?: number;
     limit?: number;
     offset?: number;
@@ -425,28 +345,16 @@ export class SmartAnnotationExtractor {
     try {
       ztoolkit.log(`[SmartAnnotationExtractor] searchAnnotations called: "${query || '(filter only)'}"`);
 
-      const effectiveSettings = MCPSettingsService.getEffectiveSettings();
       const hasQuery = Boolean(query && query.trim().length > 0);
-      const detail = resolveAnnotationDetail(
-        options.detail,
-        options.mode,
-        options.outputMode,
-        MCPSettingsService.get('content.mode'),
-      );
       const itemKeys = resolveAnnotationItemKeys(options);
 
       const searchOptions: SmartAnnotationOptions = {
         libraryID: options.libraryID,
-        maxTokens: options.maxTokens || effectiveSettings.maxTokens,
-        outputMode: detail,
         types: options.types || ['note', 'highlight', 'annotation'],
         colors: options.colors,  // Color filter
         tags: options.tags,      // Tag filter
         minRelevance: hasQuery ? (options.minRelevance ?? 0.1) : 0, // No relevance filter when no query
-        limit: resolveAnnotationPageSize(
-          options.limit,
-          detail === 'complete' ? effectiveSettings.maxAnnotationsPerRequest : 15,
-        ),
+        limit: resolveAnnotationPageSize(options.limit, 15),
         offset: options.offset || 0
       };
 
@@ -468,7 +376,6 @@ export class SmartAnnotationExtractor {
             ...(hasQuery ? { q: query } : {}),
             ...(scopeItemKey ? { itemKey: scopeItemKey } : {}),
             type: searchOptions.types,
-            detailed: false, // We handle detail level ourselves
             limit: String(batchSize),
             offset: String(currentOffset),
           });
@@ -550,8 +457,8 @@ export class SmartAnnotationExtractor {
         searchOptions.offset! + searchOptions.limit!,
       );
 
-      // Process with smart compression
-      const processed = await this.processAnnotations(paginatedAnnotations, searchOptions);
+      // Format every mark in full; pagination is the response-size guard.
+      const processed = this.processAnnotations(paginatedAnnotations);
 
       const processingTime = `${Date.now() - startTime}ms`;
       ztoolkit.log(`[SmartAnnotationExtractor] Search completed in ${processingTime}, found ${processed.includedCount} relevant results of ${totalCount} total (paginated: ${paginatedAnnotations.length})`);
@@ -564,12 +471,6 @@ export class SmartAnnotationExtractor {
         ...processed,
         metadata: {
           extractedAt: new Date().toISOString(),
-          userSettings: {
-            maxTokens: searchOptions.maxTokens,
-            detail: searchOptions.outputMode,
-            outputMode: searchOptions.outputMode,
-            minRelevance: searchOptions.minRelevance
-          },
           sourceItemKeys: itemKeys,
           ...(truncated
             ? {
@@ -588,8 +489,7 @@ export class SmartAnnotationExtractor {
           stats: {
             foundCount: annotations.length,
             filteredCount: totalCount, // 已过滤过相关性的数量
-            returnedCount: processed.includedCount,
-            skippedCount: processed.originalCount ? processed.originalCount - processed.includedCount : undefined
+            returnedCount: processed.includedCount
           }
         }
       };
@@ -647,137 +547,21 @@ export class SmartAnnotationExtractor {
     return annotations;
   }
 
-  /**
-   * Smart content processing and compression
-   */
-  private async processAnnotations(annotations: any[], options: SmartAnnotationOptions): Promise<SmartAnnotationResponse> {
-    if (annotations.length === 0) {
-      return {
-        mode: 'empty',
-        includedCount: 0,
-        estimatedTokens: 0,
-        data: [],
-        metadata: {
-          extractedAt: new Date().toISOString(),
-          userSettings: {
-            maxTokens: options.maxTokens,
-            outputMode: options.outputMode
-          },
-          processingTime: "0ms",
-          stats: {
-            foundCount: 0,
-            filteredCount: 0,
-            returnedCount: 0
-          }
-        }
-      };
-    }
+  /** Format one already-paged response without shortening any mark. */
+  private processAnnotations(
+    annotations: any[],
+  ): Pick<SmartAnnotationResponse, 'includedCount' | 'data'> {
+    const data = annotations.map((annotation) =>
+      this.formatAnnotation({
+        ...annotation,
+        importance:
+          annotation.importance ?? this.calculateImportance(annotation),
+      }),
+    );
 
-    // Calculate importance scores
-    const scoredAnnotations = annotations.map(ann => ({
-      ...ann,
-      importance: this.calculateImportance(ann)
-    }));
-
-    // Estimate tokens for all content
-    const fullTokens = this.estimateTokens(scoredAnnotations);
-
-    // Within budget, or the caller explicitly asked for verbatim text.
-    // `complete` is the public spelling; `full` was the internal one and is
-    // still accepted so a caller written against either keeps working.
-    const wantsVerbatim =
-      options.outputMode === 'complete' || options.outputMode === 'full';
-    if (fullTokens <= options.maxTokens! || wantsVerbatim) {
-      const processedAnnotations = scoredAnnotations.map(ann => this.formatAnnotation(ann, 'full'));
-      return {
-        mode: fullTokens <= options.maxTokens! ? 'full_within_budget' : 'full_forced',
-        includedCount: processedAnnotations.length,
-        estimatedTokens: fullTokens,
-        data: processedAnnotations,
-        metadata: {
-          extractedAt: new Date().toISOString(),
-          userSettings: {
-            maxTokens: options.maxTokens,
-            outputMode: options.outputMode
-          },
-          processingTime: "0ms",
-          stats: {
-            foundCount: annotations.length,
-            filteredCount: annotations.length,
-            returnedCount: processedAnnotations.length
-          }
-        }
-      };
-    }
-
-    // Smart compression needed
-    return this.smartCompress(scoredAnnotations, options.maxTokens!, options.outputMode!);
-  }
-
-  /**
-   * Smart compression algorithm
-   */
-  private smartCompress(annotations: any[], maxTokens: number, outputMode: string): SmartAnnotationResponse {
-    // Sort by importance (descending)
-    const sortedAnnotations = [...annotations].sort((a, b) => b.importance - a.importance);
-
-    const result: AnnotationResult[] = [];
-    let tokenBudget = maxTokens;
-    let skipped = 0;
-
-    for (const annotation of sortedAnnotations) {
-      // Determine processing mode based on remaining budget and annotation importance
-      const processMode = this.selectProcessingMode(tokenBudget, annotation.importance, outputMode);
-      
-      if (processMode === 'skip') {
-        skipped++;
-        continue;
-      }
-
-      const processed = this.formatAnnotation(annotation, processMode);
-      const estimatedTokens = this.estimateTokens([processed]);
-
-      if (estimatedTokens <= tokenBudget) {
-        result.push(processed);
-        tokenBudget -= estimatedTokens;
-      } else if (tokenBudget > 100) { // Try minimal if we have some budget left
-        const minimal = this.formatAnnotation(annotation, 'minimal');
-        const minimalTokens = this.estimateTokens([minimal]);
-        
-        if (minimalTokens <= tokenBudget) {
-          result.push(minimal);
-          tokenBudget -= minimalTokens;
-        } else {
-          skipped++;
-        }
-      } else {
-        skipped++;
-      }
-    }
-
-    const compressionRatio = `${Math.round(result.length / annotations.length * 100)}%`;
-    
     return {
-      mode: 'smart_compressed',
-      originalCount: annotations.length,
-      includedCount: result.length,
-      estimatedTokens: maxTokens - tokenBudget,
-      compressionRatio,
-      data: result,
-      metadata: {
-        extractedAt: new Date().toISOString(),
-        userSettings: {
-          maxTokens: maxTokens,
-          outputMode: outputMode
-        },
-        processingTime: "0ms",
-        stats: {
-          foundCount: annotations.length,
-          filteredCount: annotations.length,
-          returnedCount: result.length,
-          skippedCount: annotations.length - result.length
-        }
-      }
+      includedCount: data.length,
+      data,
     };
   }
 
@@ -846,32 +630,26 @@ export class SmartAnnotationExtractor {
     return Math.min(score, 1.0);
   }
 
-  /**
-   * Select processing mode based on budget and importance
-   */
-  private selectProcessingMode(availableTokens: number, importance: number, userMode: string): string {
-    if (userMode === 'minimal') return 'minimal';
-    if (userMode === 'complete' || userMode === 'full') return 'full';
-
-    // For standard and preview modes, adapt based on budget and importance
-    if (availableTokens > 500 && importance > 0.6) return 'full';
-    if (availableTokens > 200 && importance > 0.3) return 'preview';
-    if (availableTokens > 80) return 'minimal';
-    
-    return 'skip';
-  }
-
-  /**
-   * Format annotation according to processing mode
-   */
-  private formatAnnotation(annotation: any, mode: string): AnnotationResult {
+  /** Format one annotation without shortening its text. */
+  private formatAnnotation(annotation: any): AnnotationResult {
+    const originalContent =
+      annotation.type === 'note'
+        ? annotation.content || annotation.text || ''
+        : annotation.text || annotation.content || '';
+    const comment = annotation.comment || '';
+    const content =
+      comment && comment !== originalContent
+        ? `${originalContent}\n\nComment: ${comment}`
+        : originalContent;
     const base: AnnotationResult = {
       id: annotation.id,
       type: annotation.type,
-      content: '',
+      content,
       color: annotation.color,
       colorName: this.getColorName(annotation.color),
       tags: annotation.tags || [],
+      keywords: this.extractKeywords(content, 8),
+      importance: annotation.importance,
       itemKey: annotation.itemKey,
       annotationKey: annotation.annotationKey || annotation.itemKey,
       ...(annotation.attachmentKey
@@ -885,56 +663,7 @@ export class SmartAnnotationExtractor {
       dateModified: annotation.dateModified
     };
 
-    switch (mode) {
-      case 'minimal':
-        base.content = this.smartTruncate(annotation.content || annotation.text || '', 50);
-        base.keywords = this.extractKeywords(annotation.content || annotation.text || '', 2);
-        break;
-
-      case 'preview':
-        base.content = this.smartTruncate(annotation.content || annotation.text || '', 150);
-        base.keywords = this.extractKeywords(
-          (annotation.content || '') + ' ' + (annotation.comment || '') + ' ' + (annotation.text || ''), 
-          5
-        );
-        base.importance = annotation.importance;
-        break;
-
-      case 'full':
-        base.content = annotation.content || annotation.text || '';
-        if (annotation.comment && annotation.comment !== base.content) {
-          base.content += annotation.comment ? `\n\nComment: ${annotation.comment}` : '';
-        }
-        base.keywords = this.extractKeywords(base.content, 8);
-        base.importance = annotation.importance;
-        break;
-
-      default:
-        base.content = annotation.content || annotation.text || '';
-        break;
-    }
-
     return base;
-  }
-
-  /**
-   * Smart truncation that preserves sentence boundaries
-   */
-  private smartTruncate(text: string, maxLength: number): string {
-    if (!text || text.length <= maxLength) return text;
-    
-    const truncated = text.substring(0, maxLength);
-    const lastSentence = Math.max(
-      truncated.lastIndexOf('。'),
-      truncated.lastIndexOf('.'),
-      truncated.lastIndexOf('\n')
-    );
-    
-    if (lastSentence > maxLength * 0.6) {
-      return truncated.substring(0, lastSentence + 1) + '...';
-    }
-    
-    return truncated + '...';
   }
 
   /**
@@ -963,15 +692,6 @@ export class SmartAnnotationExtractor {
       .sort((a, b) => b[1] - a[1])
       .slice(0, maxCount)
       .map(([word]) => word);
-  }
-
-  /**
-   * Estimate token count for content
-   */
-  private estimateTokens(content: any): number {
-    const text = JSON.stringify(content);
-    // Rough estimation: 1 token ≈ 3.5 characters for mixed Chinese/English
-    return Math.ceil(text.length / 3.5);
   }
 
 }

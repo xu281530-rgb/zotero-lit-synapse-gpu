@@ -7,18 +7,6 @@ pref("write.enabled", false);
 pref("write.confirmBeforeMutation", true);
 pref("write.allowFileImport", false);
 pref("privacy.exposeFilePaths", false);
-pref("ai.maxTokens", 12000);
-pref("content.mode", "standard");
-pref("custom.maxContentLength", 12000);
-pref("custom.maxAttachments", 10);
-pref("custom.maxNotes", 20);
-pref("custom.keywordCount", 8);
-pref("custom.smartTruncateLength", 300);
-pref("custom.searchItemLimit", 100);
-pref("custom.maxAnnotationsPerRequest", 100);
-pref("custom.includeWebpage", false);
-pref("custom.enableCompression", true);
-pref("ui.includeMetadata", true);
 pref("hybrid.maxDocuments", 20);
 pref("hybrid.maxChunksPerItem", 5);
 // Two independent branch thresholds, replacing the single fused-score floor.

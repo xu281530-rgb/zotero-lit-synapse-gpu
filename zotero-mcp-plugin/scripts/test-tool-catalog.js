@@ -170,15 +170,12 @@ test("the new tools are present with the shapes their callers depend on", () => 
 test("get_item_details advertises no content-bearing parameter", () => {
   const tool = buildToolCatalog().find((t) => t.name === "get_item_details");
   const properties = Object.keys(tool.inputSchema.properties);
-  for (const forbidden of ["include", "contentControl", "format"]) {
+  for (const forbidden of ["include", "contentControl", "format", "mode"]) {
     assert.ok(
       !properties.includes(forbidden),
       `get_item_details still accepts ${forbidden}, which is a content knob`,
     );
   }
-  // The mode enum must not offer a level that implies "and the text too".
-  const modes = tool.inputSchema.properties.mode.enum;
-  assert.deepEqual(modes, ["minimal", "standard", "complete"]);
 });
 
 test("get_collection_items can start at the library root", () => {
@@ -194,22 +191,26 @@ test("get_collection_items can start at the library root", () => {
   }
 });
 
-test("annotation tools expose one detail vocabulary and real paging", () => {
+test("annotation tools expose full-text paging without content controls", () => {
   for (const name of ["get_annotations", "search_annotations"]) {
     const tool = buildToolCatalog().find((t) => t.name === name);
     const properties = tool.inputSchema.properties;
-    assert.ok("detail" in properties, `${name} lacks the detail parameter`);
-    assert.deepEqual(properties.detail.enum, [
-      "minimal",
-      "preview",
-      "standard",
-      "complete",
-    ]);
+    for (const removed of ["mode", "detail", "outputMode", "maxTokens"]) {
+      assert.ok(!(removed in properties), `${name} still exposes ${removed}`);
+    }
     assert.ok("limit" in properties && "offset" in properties);
     assert.ok(
       "itemKeys" in properties,
       `${name} must accept several documents, not one`,
     );
+  }
+});
+
+test("fixed-default tools no longer expose content modes", () => {
+  for (const name of ["search_library", "get_collections"]) {
+    const tool = buildToolCatalog().find((t) => t.name === name);
+    assert.ok(!("mode" in tool.inputSchema.properties), `${name} still exposes mode`);
+    assert.ok("limit" in tool.inputSchema.properties, `${name} lost paging`);
   }
 });
 

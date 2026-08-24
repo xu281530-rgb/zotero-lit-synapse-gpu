@@ -4,7 +4,7 @@ import { serverPreferences, SERVER_LISTENER_PREFS } from "./modules/serverPrefer
 import { getString, initLocale } from "./utils/locale";
 import { registerPrefsScripts } from "./modules/preferenceScript";
 import { createZToolkit } from "./utils/ztoolkit";
-import { MCPSettingsService } from "./modules/mcpSettingsService";
+import { clearDeprecatedContentSettings } from "./modules/deprecatedContentSettings";
 import { migrateFusedScoreThreshold } from "./modules/hybridSearchSettings";
 import { registerSemanticIndexColumn, unregisterSemanticIndexColumn, refreshSemanticColumn } from "./modules/semanticIndexColumn";
 import { getMinerUService } from "./modules/mineru";
@@ -1018,13 +1018,7 @@ async function onStartup() {
 
   initLocale();
 
-  // Initialize MCP settings with defaults
-  try {
-    MCPSettingsService.initializeDefaults();
-    ztoolkit.log(`[MCP Plugin] [STARTUP] MCP settings initialized`);
-  } catch (error) {
-    ztoolkit.log(`[MCP Plugin] [STARTUP] Error initializing MCP settings: ${error}`, 'error');
-  }
+  clearDeprecatedContentSettings();
 
   // The single fused-score threshold was split into a keyword floor and a
   // semantic floor. A user who had tuned the old one keeps that tuning, on the

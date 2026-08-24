@@ -5,7 +5,7 @@
  *
  * `handleGetCollections` answered with a bare JSON array and put the total in
  * an `X-Total-Count` header. `callGetCollections` then did
- * `result.metadata = { mode, appliedModeConfig }` on the parsed array -- and
+ * metadata on the parsed array -- and
  * `JSON.stringify` dropped it, because properties hung on an Array are not
  * serialised. MCP forwards only the body, so over MCP the metadata never
  * existed and the total never existed either: a page of 100 out of 300 was
@@ -55,18 +55,18 @@ test("metadata survives JSON.stringify", () => {
       rows(3),
       { total: 3, offset: 0, limit: 100 },
       {
-        mode: "standard",
+        scope: { level: "top" },
       },
     ),
   );
-  assert.equal(body.metadata.mode, "standard");
+  assert.deepEqual(body.metadata.scope, { level: "top" });
 });
 
 test("an array cannot carry metadata, which is what went wrong", () => {
   // Kept as an executable explanation of the original defect.
   const legacy = rows(3);
-  legacy.metadata = { mode: "standard" };
-  assert.equal(legacy.metadata.mode, "standard"); // fine in memory
+  legacy.metadata = { scope: { level: "top" } };
+  assert.deepEqual(legacy.metadata.scope, { level: "top" }); // fine in memory
   assert.equal(overTheWire(legacy).metadata, undefined); // gone on the wire
 });
 
@@ -82,9 +82,9 @@ test("the MCP layer can add its own metadata without losing the handler's", () =
       },
     ),
   );
-  body.metadata = { ...body.metadata, mode: "standard" };
+  body.metadata = { ...body.metadata, source: "handler" };
   const final = overTheWire(body);
-  assert.equal(final.metadata.mode, "standard");
+  assert.equal(final.metadata.source, "handler");
   assert.deepEqual(final.metadata.scope, { level: "top" });
   assert.ok(final.metadata.extractedAt);
 });

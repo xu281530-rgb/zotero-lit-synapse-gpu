@@ -22,7 +22,7 @@ _This README is also available in: [:gb: English](./README.md) | :cn: 简体中�
 Zotero MCP 服务器是一个基于 Model Context Protocol 的工具服务器，它为 Claude Desktop 等 AI 应用提供了与 Zotero 文献管理系统的无缝集成。通过此服务器，AI 助手可以：
 
 - 🔍 **智能搜索**：多维度搜索文献库（标题/作者/年份/标签/全文/语义），支持布尔运算和相关性评分
-- 📖 **内容提取**：获取 PDF 全文、笔记、摘要、网页快照等多种内容，支持精细的模式控制
+- 📖 **内容提取**：通过专用分页工具读取 PDF 全文、笔记、批注和摘要
 - 📝 **批注分析**：按颜色、标签、关键词检索和分析 PDF 高亮与注释
 - 📂 **分类浏览**：浏览和搜索分类层级结构，获取分类下的条目
 - 🧠 **语义搜索**：基于 AI 向量嵌入的概念匹配，发现跨语言的相关文献
@@ -158,7 +158,7 @@ AI 客户端 ↔ Streamable HTTP ↔ Zotero 插件（集成 MCP 服务器）
 
 - **集成 MCP 服务器**: 内置 MCP 服务器，使用 Streamable HTTP 协议，无需额外进程
 - **高级搜索引擎**: 支持全文搜索、布尔运算、相关性评分，按标题、作者、年份、标签、文献类型等多维度筛选
-- **统一内容提取**: 从 PDF、附件、笔记、摘要、网页快照中提取内容，支持四种模式（minimal/preview/standard/complete）
+- **按用途读取内容**: 摘要、完整批注、附件正文窗口和索引段落分别由专用分页工具返回，不再使用隐藏内容模式
 - **智能批注系统**: 按颜色、标签、关键词搜索和检索 PDF 高亮、注释和笔记，支持智能排序
 - **分类管理**: 浏览、搜索分类层级结构，获取分类详情、子分类和条目列表
 - **语义搜索**: 基于 AI 向量嵌入的语义搜索，支持 OpenAI/Ollama API，发现概念相关的文献
@@ -391,7 +391,7 @@ cursor 过期会明确报错，而不是悄悄重新搜一遍。
 
 #### `search_library`
 
-高级文献库搜索，支持多维度筛选、布尔运算、相关性评分和智能模式控制。
+高级文献库搜索，支持多维度筛选、布尔运算和相关性评分。
 
 | 参数                 | 类型    | 描述                                                                       |
 | -------------------- | ------- | -------------------------------------------------------------------------- |
@@ -401,10 +401,9 @@ cursor 过期会明确报错，而不是悄悄重新搜一遍。
 | `fulltext`           | string  | 全文搜索（附件/笔记内容），支持 `fulltextMode`: attachment/note/both       |
 | `itemType`           | string  | 文献类型筛选（journalArticle/book/attachment 等）                          |
 | `includeAttachments` | string  | 设为 "true" 可搜索独立 PDF 条目                                            |
-| `mode`               | string  | 处理模式：minimal(30)/preview(100)/standard(自适应)/complete(500+)         |
 | `relevanceScoring`   | boolean | 启用相关性评分                                                             |
 | `sort`               | string  | 排序：relevance/date/title/year                                            |
-| `limit` / `offset`   | number  | 分页控制                                                                   |
+| `limit` / `offset`   | number  | 分页控制，`limit` 默认 200                                                 |
 
 #### `search_annotations`
 
@@ -417,7 +416,9 @@ cursor 过期会明确报错，而不是悄悄重新搜一遍。
 | `types`    | string[] | 批注类型：note/highlight/annotation/ink/text/image                |
 | `colors`   | string[] | 按颜色过滤（支持色名或 hex：yellow/red/green/blue/purple/orange） |
 | `tags`     | string[] | 按标签过滤                                                        |
-| `mode`     | string   | 内容处理模式                                                      |
+
+当前页内的高亮、笔记正文和评论都按完整原文返回，不做令牌压缩；`limit` 默认
+15、最大 100。
 
 每条命中带三个互不相同的 key，其中只有一个是文献级 key：`sourceItemKey` 是
 **文献条目**，`attachmentKey` 是批注所在的 PDF/附件，`annotationKey` 是批注
@@ -493,17 +494,16 @@ Zotero 里手写的笔记。**笔记正文从这里读**——`get_item_details`
 命中行里的 `sourceItemKey`，而不是它的 `attachmentKey`；返回的每一行也都带着
 自己的 `sourceItemKey`，多篇混在一页时仍然各归各的来源。
 
-结果始终分页：一篇读透的 PDF 有几百条高亮，而 `complete` 以前的含义是「一次
-全部返回」。
+结果始终分页：一篇读透的 PDF 可能有几百条高亮。当前页内每条高亮、笔记正文和
+评论都完整返回，不做截断或令牌压缩。
 
 - `itemKeys`、`itemKey`、`annotationId`、`annotationIds`、`types`、`colors`、
-  `tags`、`detail`（minimal/preview/standard/complete）、`maxTokens`、`limit`、
-  `offset`、`libraryID`
+  `tags`、`limit`（默认 20、最大 100）、`offset`、`libraryID`
 
 #### `get_item_details`
 
 **文献元数据详情工具**，用于引用与著录。返回标题、作者、日期、类型、期刊、
-卷期页、DOI、URL、语言、标签、所属分类（含路径），以及每个附件一行的基本信息。
+卷期页、DOI、URL、语言、标签，以及每个附件一行的基本信息。
 
 **不返回任何正文内容**：没有摘要正文、没有 Notes 正文、没有批注正文、没有 PDF
 正文、没有 chunks——这四类各有专门的工具按需返回并正确分页。这里给出的是
@@ -516,7 +516,7 @@ Zotero 里手写的笔记。**笔记正文从这里读**——`get_item_details`
 「有全文」。按附件的判断仍在，改名为 `hasExtractableText`，含义是「这种文件类型
 可能能抽出文本」。
 
-参数：`itemKey`（必需）、`mode`（minimal/standard/complete）、`libraryID`。
+参数：`itemKey`（必需）、`libraryID`。
 
 #### `get_item_abstract`
 
@@ -566,7 +566,7 @@ JSON 数组、总数只放在 `X-Total-Count` 响应头里，而 MCP 只转发 b
 一页 100 条，和一共就 100 条的完整库，返回的东西一模一样。`search_collections`
 用同一个信封。
 
-参数：`parentCollection`、`mode`、`limit`、`offset`、`libraryID`。
+参数：`parentCollection`、`limit`（默认 100）、`offset`、`libraryID`。
 
 > `recursive` 已在 1.9.1 删除。它一次返回所有层级且不分页，和
 > `get_collection_items` 重复，等于把逐级浏览刚取代掉的整体倾倒又放了回来。

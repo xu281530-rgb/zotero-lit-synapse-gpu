@@ -33,6 +33,8 @@
     "test:attachment-text": "node --experimental-strip-types scripts/test-attachment-text.js",
     "test:collection-browser": "node --experimental-strip-types scripts/test-collection-browser.js",
     "test:annotation-params": "node --experimental-strip-types scripts/test-annotation-params.js",
+    "test:deprecated-content-settings": "node --experimental-strip-types scripts/test-deprecated-content-settings.js",
+    "test:content-tool-defaults": "node --experimental-strip-types scripts/test-content-tool-defaults.js",
     "test:annotation-keys": "node --experimental-strip-types scripts/test-annotation-keys.js",
     "test:item-key-kind": "node --experimental-strip-types scripts/test-item-key-kind.js",
     "test:collection-envelope": "node --experimental-strip-types scripts/test-collection-envelope.js",

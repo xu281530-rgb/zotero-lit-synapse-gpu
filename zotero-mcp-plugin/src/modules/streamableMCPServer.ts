@@ -43,7 +43,12 @@ import {
   type CollectionBrowserDeps,
   type CollectionNode,
 } from './collectionBrowser';
-import { MCPSettingsService } from './mcpSettingsService';
+import {
+  COLLECTIONS_DEFAULT_LIMIT,
+  prepareFixedContentToolArgs,
+  SEARCH_LIBRARY_DEFAULT_LIMIT,
+  STANDARD_ITEM_DETAIL_FIELDS,
+} from './contentToolDefaults';
 import {
   DEFAULT_EMBEDDING_TIMEOUT_MS,
   describeFullTextAvailability,
@@ -1531,23 +1536,15 @@ Nothing in this server returns a whole document in one response. Every reading t
   }
 
   private async callSearchLibrary(args: any): Promise<any> {
-    // Apply mode-based defaults before creating search params
-    const effectiveMode = args.mode || MCPSettingsService.get('content.mode');
-    const modeConfig = this.getSearchModeConfiguration(effectiveMode);
-
-    // Apply mode defaults if not explicitly provided
-    const processedArgs = {
-      ...args,
-      limit: args.limit || modeConfig.limit,
-    };
+    const processedArgs = prepareFixedContentToolArgs(
+      args,
+      SEARCH_LIBRARY_DEFAULT_LIMIT,
+    );
 
     const searchParams = new URLSearchParams();
     for (const [key, value] of Object.entries(processedArgs)) {
       if (value !== undefined && value !== null) {
-        if (key !== 'mode') {
-          // Don't pass mode to API
-          searchParams.append(key, String(value));
-        }
+        searchParams.append(key, String(value));
       }
     }
 
@@ -1573,14 +1570,7 @@ Nothing in this server returns a whole document in one response. Every reading t
       );
     }
 
-    // Add mode information to metadata
     if (result && typeof result === 'object') {
-      result.metadata = {
-        ...result.metadata,
-        mode: effectiveMode,
-        appliedModeConfig: modeConfig,
-      };
-
       // Remove any unwanted content array if it's empty
       if (Array.isArray(result.content) && result.content.length === 0) {
         delete result.content;
@@ -2609,14 +2599,11 @@ Nothing in this server returns a whole document in one response. Every reading t
     await this.assertDocumentKey(itemKey, libraryID, 'get_item_details');
     const { handleGetItem } = await import('./apiHandlers');
 
-    const effectiveMode = this.resolveItemDetailsMode(args.mode ?? args.detail);
-    const modeConfig = this.getItemDetailsModeConfiguration(effectiveMode);
-
     const queryParams = new URLSearchParams();
     if (libraryID !== undefined && libraryID !== null) {
       queryParams.append('libraryID', String(libraryID));
     }
-    queryParams.append('fields', modeConfig.fields.join(','));
+    queryParams.append('fields', STANDARD_ITEM_DETAIL_FIELDS.join(','));
 
     const response = await handleGetItem({ 1: itemKey }, queryParams);
     const result = response.body ? JSON.parse(response.body) : response;
@@ -2642,27 +2629,13 @@ Nothing in this server returns a whole document in one response. Every reading t
 
     result.metadata = {
       ...result.metadata,
-      mode: effectiveMode,
-      returnedFields: modeConfig.fields,
+      returnedFields: [...STANDARD_ITEM_DETAIL_FIELDS],
       contentPolicy:
         'Metadata only. Abstract text, note bodies, annotation text, attachment text and chunks are never returned here: use get_item_abstract, get_annotations, get_attachment_text and get_document_chunks respectively. hasAbstract/abstractChars say what get_item_abstract would return without returning it.',
       extractedAt: new Date().toISOString(),
     };
 
     return result;
-  }
-
-  /**
-   * Older callers wrote `preview`; it means the same thing as `standard` now
-   * that no mode returns content, so it is folded in rather than rejected.
-   */
-  private resolveItemDetailsMode(requested: unknown): string {
-    const raw =
-      typeof requested === 'string' && requested.trim()
-        ? requested.trim()
-        : String(MCPSettingsService.get('content.mode') || 'standard');
-    if (raw === 'preview') return 'standard';
-    return raw === 'minimal' || raw === 'complete' ? raw : 'standard';
   }
 
   private async callGetAnnotations(args: any): Promise<any> {
@@ -2884,7 +2857,6 @@ Nothing in this server returns a whole document in one response. Every reading t
     const extractor = new UnifiedContentExtractor();
     const processed = await extractor.getAttachmentContent(
       attachment.key,
-      'complete',
       { preserveOriginal: true },
       attachment.libraryID,
     );
@@ -2978,23 +2950,15 @@ Nothing in this server returns a whole document in one response. Every reading t
   }
 
   private async callGetCollections(args: any): Promise<any> {
-    // Apply mode-based defaults before creating search params
-    const effectiveMode = args.mode || MCPSettingsService.get('content.mode');
-    const modeConfig = this.getCollectionModeConfiguration(effectiveMode);
-
-    // Apply mode defaults if not explicitly provided
-    const processedArgs = {
-      ...args,
-      limit: args.limit || modeConfig.limit,
-    };
+    const processedArgs = prepareFixedContentToolArgs(
+      args,
+      COLLECTIONS_DEFAULT_LIMIT,
+    );
 
     const collectionParams = new URLSearchParams();
     for (const [key, value] of Object.entries(processedArgs)) {
       if (value !== undefined && value !== null) {
-        if (key !== 'mode') {
-          // Don't pass mode to API
-          collectionParams.append(key, String(value));
-        }
+        collectionParams.append(key, String(value));
       }
     }
 
@@ -3003,18 +2967,6 @@ Nothing in this server returns a whole document in one response. Every reading t
       response,
       response.body ? JSON.parse(response.body) : response,
     );
-
-    // The handler now answers with { results, pagination, metadata }. It used
-    // to answer with a bare array, and this same assignment silently vanished
-    // at JSON.stringify time, taking the total count and the paging state with
-    // it. An error body has no metadata block and must be passed through as is.
-    if (result && typeof result === 'object' && Array.isArray(result.results)) {
-      result.metadata = {
-        ...result.metadata,
-        mode: effectiveMode,
-        appliedModeConfig: modeConfig,
-      };
-    }
 
     return result;
   }
@@ -5454,107 +5406,4 @@ Nothing in this server returns a whole document in one response. Every reading t
     };
   }
 
-  /**
-   * Get search mode configuration
-   */
-  private getSearchModeConfiguration(mode: string): any {
-    const modeConfigs = {
-      minimal: {
-        limit: 30,
-      },
-      preview: {
-        limit: 100,
-      },
-      standard: {
-        limit: 200,
-      },
-      complete: {
-        limit: 500,
-      },
-    };
-
-    return (
-      modeConfigs[mode as keyof typeof modeConfigs] || modeConfigs['standard']
-    );
-  }
-
-  /**
-   * Get collection mode configuration
-   */
-  private getCollectionModeConfiguration(mode: string): any {
-    const modeConfigs = {
-      minimal: {
-        limit: 20,
-      },
-      preview: {
-        limit: 50,
-      },
-      standard: {
-        limit: 100,
-      },
-      complete: {
-        limit: 500,
-      },
-    };
-
-    return (
-      modeConfigs[mode as keyof typeof modeConfigs] || modeConfigs['standard']
-    );
-  }
-
-  /**
-   * Get item details mode configuration
-   */
-  /**
-   * Which METADATA fields each mode returns.
-   *
-   * Every list here is metadata. `standard` and `complete` used to be `fields:
-   * null`, meaning "whatever formatItem defaults to" — which included
-   * `abstractNote` and `notes`, so the two most-used modes returned the
-   * abstract and every note body from a tool documented as returning
-   * bibliographic details. Naming the fields explicitly is what stops that
-   * from happening again by default: adding a content field to formatItem can
-   * no longer leak into this tool without someone typing it here.
-   */
-  private getItemDetailsModeConfiguration(mode: string): { fields: string[] } {
-    const identity = ['key', 'title', 'creators', 'date', 'itemType'];
-    const citation = [
-      ...identity,
-      'publicationTitle',
-      'volume',
-      'issue',
-      'pages',
-      'DOI',
-      'url',
-      'language',
-      'tags',
-      'hasAbstract',
-      'noteCount',
-      'attachments',
-    ];
-    const modeConfigs: Record<string, { fields: string[] }> = {
-      minimal: { fields: identity },
-      standard: { fields: citation },
-      complete: {
-        fields: [
-          ...citation,
-          'collections',
-          'ISSN',
-          'ISBN',
-          'publisher',
-          'place',
-          'series',
-          'edition',
-          'archive',
-          'callNumber',
-          'rights',
-          'extra',
-          'dateAdded',
-          'dateModified',
-        ],
-      },
-    };
-
-    return modeConfigs[mode] ?? modeConfigs.standard;
-  }
 }

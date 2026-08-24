@@ -68,90 +68,9 @@ export interface AnnotationSearchParams {
   offset?: string;
   sort?: string; // dateAdded, dateModified, position
   direction?: string;
-  // 新增：内容详细程度控制
-  detailed?: boolean; // 是否返回完整内容，默认false
 }
 
 export class AnnotationService {
-  /**
-   * 智能截断文本，保留完整句子
-   */
-  private smartTruncate(text: string, maxLength: number = 200): string {
-    if (!text || text.length <= maxLength) return text;
-    
-    const truncated = text.substring(0, maxLength);
-    // 寻找最后一个句号或换行
-    const lastPeriod = Math.max(
-      truncated.lastIndexOf('。'),
-      truncated.lastIndexOf('.'),
-      truncated.lastIndexOf('\n')
-    );
-    
-    // 如果找到合适的句子边界且不会截断太多内容
-    if (lastPeriod > maxLength * 0.6) {
-      return truncated.substring(0, lastPeriod + 1) + "...";
-    }
-    
-    return truncated + "...";
-  }
-
-  /**
-   * 提取关键词
-   */
-  private extractKeywords(text: string, maxCount: number = 5): string[] {
-    if (!text) return [];
-    
-    // 简单的关键词提取：移除停用词，按词频排序
-    const stopWords = new Set(['的', '了', '在', '是', '和', '与', '或', '但', '然而', '因此', '所以', 
-                              'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with']);
-    
-    const words = text
-      .toLowerCase()
-      .replace(/[^\w\s\u4e00-\u9fa5]/g, ' ') // 保留中英文字符
-      .split(/\s+/)
-      .filter(word => word.length > 1 && !stopWords.has(word));
-    
-    // 统计词频
-    const wordCount = new Map<string, number>();
-    words.forEach(word => {
-      wordCount.set(word, (wordCount.get(word) || 0) + 1);
-    });
-    
-    // 按频率排序并返回前N个
-    return Array.from(wordCount.entries())
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, maxCount)
-      .map(([word]) => word);
-  }
-
-  /**
-   * 处理注释内容，根据需要返回简化或完整版本
-   */
-  private processAnnotationContent(annotation: AnnotationContent, detailed: boolean = false): AnnotationContent {
-    if (detailed) {
-      return annotation; // 返回完整内容
-    }
-    
-    // 创建简化版本
-    const processed: AnnotationContent = {
-      ...annotation,
-      content: this.smartTruncate(annotation.content),
-      text: annotation.text ? this.smartTruncate(annotation.text, 150) : annotation.text,
-      comment: annotation.comment ? this.smartTruncate(annotation.comment, 100) : annotation.comment,
-    };
-    
-    // 添加额外的元数据
-    (processed as any).contentMeta = {
-      isPreview: !detailed,
-      originalLength: annotation.content?.length || 0,
-      textLength: annotation.text?.length || 0,
-      commentLength: annotation.comment?.length || 0,
-      keywords: this.extractKeywords(annotation.content + " " + (annotation.text || "") + " " + (annotation.comment || ""))
-    };
-    
-    return processed;
-  }
-
   /**
    * 获取所有笔记内容
    * @param itemKey 可选，特定文献的笔记
@@ -309,7 +228,6 @@ export class AnnotationService {
     pagination: any;
     searchTime: string;
     totalCount: number;
-    contentMode: string;
     version: string;
     endpoint: string;
     results: AnnotationContent[];
@@ -400,30 +318,21 @@ export class AnnotationService {
         );
       }
 
-      // 处理内容（简化或完整）
-      const detailed = params.detailed === true || String(params.detailed) === "true";
-
       // 排序
       const sort = params.sort || "dateModified";
       const direction = params.direction || "desc";
       this.sortAnnotations(filteredAnnotations, sort, direction);
 
-      // 分页 - 为preview模式使用更小的默认值
-      const defaultLimit = detailed ? "50" : "20"; // preview模式默认20条，详细模式50条
-      const limit = Math.min(parseInt(params.limit || defaultLimit, 10), detailed ? 200 : 100);
+      const limit = Math.min(parseInt(params.limit || "20", 10), 100);
       const offset = parseInt(params.offset || "0", 10);
       const totalCount = filteredAnnotations.length;
       const paginatedResults = filteredAnnotations.slice(
         offset,
         offset + limit,
       );
-      const processedResults = paginatedResults.map(annotation => 
-        this.processAnnotationContent(annotation, detailed)
-      );
-
       const searchTime = `${Date.now() - startTime}ms`;
       ztoolkit.log(
-        `[AnnotationService] Search completed in ${searchTime}, found ${totalCount} results (detailed: ${detailed})`,
+        `[AnnotationService] Search completed in ${searchTime}, found ${totalCount} results`,
       );
 
       return {
@@ -436,11 +345,9 @@ export class AnnotationService {
         },
         searchTime,
         totalCount,
-        contentMode: detailed ? "full" : "preview",
         version: "2.0",
         endpoint: "annotations/search",
-        // 实际数据放在后面
-        results: processedResults,
+        results: paginatedResults,
       };
     } catch (error) {
       ztoolkit.log(
@@ -551,7 +458,7 @@ export class AnnotationService {
             : undefined,
         }),
         type,
-        content: annotationComment || annotationText,
+        content: annotationText,
         text: annotationText,
         comment: annotationComment,
         color: annotationColor,

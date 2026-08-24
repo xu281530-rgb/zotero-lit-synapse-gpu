@@ -239,21 +239,7 @@ function bindPrefEvents() {
       addon.data.prefs!.window.alert(`Failed to apply MCP remote-access setting: ${error}`);
     }
   });
-  bindHtmlCheckbox(doc, `#zotero-prefpane-${config.addonRef}-include-metadata`, "extensions.zotero.zotero-mcp-plugin.ui.includeMetadata");
   bindHtmlCheckbox(doc, `#zotero-prefpane-${config.addonRef}-semantic-auto-update`, "extensions.zotero.zotero-mcp-plugin.semantic.autoUpdate");
-  bindHtmlCheckbox(doc, `#zotero-prefpane-${config.addonRef}-custom-include-webpage`, "extensions.zotero.zotero-mcp-plugin.custom.includeWebpage");
-  bindHtmlCheckbox(doc, `#zotero-prefpane-${config.addonRef}-custom-enable-compression`, "extensions.zotero.zotero-mcp-plugin.custom.enableCompression");
-
-  // Bind HTML number/text inputs that need manual pref sync
-  bindHtmlInput(doc, `#zotero-prefpane-${config.addonRef}-max-tokens`, "extensions.zotero.zotero-mcp-plugin.ai.maxTokens", true);
-  bindHtmlSelect(doc, `#zotero-prefpane-${config.addonRef}-content-mode`, "extensions.zotero.zotero-mcp-plugin.content.mode");
-  bindHtmlInput(doc, `#zotero-prefpane-${config.addonRef}-custom-content-length`, "extensions.zotero.zotero-mcp-plugin.custom.maxContentLength", true);
-  bindHtmlInput(doc, `#zotero-prefpane-${config.addonRef}-custom-max-attachments`, "extensions.zotero.zotero-mcp-plugin.custom.maxAttachments", true);
-  bindHtmlInput(doc, `#zotero-prefpane-${config.addonRef}-custom-max-notes`, "extensions.zotero.zotero-mcp-plugin.custom.maxNotes", true);
-  bindHtmlInput(doc, `#zotero-prefpane-${config.addonRef}-custom-keyword-count`, "extensions.zotero.zotero-mcp-plugin.custom.keywordCount", true);
-  bindHtmlInput(doc, `#zotero-prefpane-${config.addonRef}-custom-truncate-length`, "extensions.zotero.zotero-mcp-plugin.custom.smartTruncateLength", true);
-  bindHtmlInput(doc, `#zotero-prefpane-${config.addonRef}-custom-search-limit`, "extensions.zotero.zotero-mcp-plugin.custom.searchItemLimit", true);
-  bindHtmlInput(doc, `#zotero-prefpane-${config.addonRef}-custom-max-annotations`, "extensions.zotero.zotero-mcp-plugin.custom.maxAnnotationsPerRequest", true);
 
   // Client config generation
   const clientSelect = doc?.querySelector("#client-type-select") as HTMLSelectElement;
@@ -358,9 +344,6 @@ function bindPrefEvents() {
 
   // ============ Collapsible Panels ============
   bindCollapsiblePanels(doc);
-
-  // ============ Content Mode → Custom Panel ============
-  bindContentModeToggle(doc);
 
   // ============ Semantic Search Toggle ============
   bindSemanticEnabledToggle(doc);
@@ -1290,7 +1273,6 @@ function updateServerDependentUI(doc: Document, enabled: boolean) {
  */
 function bindCollapsiblePanels(doc: Document) {
   const panels = [
-    { toggle: '#custom-settings-toggle', panel: '#custom-settings-panel' },
     { toggle: '#rate-limit-toggle', panel: '#rate-limit-panel' },
     { toggle: '#detail-stats-toggle', panel: '#detail-stats-panel' },
     { toggle: '#hybrid-advanced-toggle', panel: '#hybrid-advanced-panel' },
@@ -1308,27 +1290,6 @@ function bindCollapsiblePanels(doc: Document) {
         panelEl.classList.toggle('open');
       });
     }
-  }
-}
-
-/**
- * Auto-open custom settings panel when custom mode is selected
- */
-function bindContentModeToggle(doc: Document) {
-  const modeSelect = doc?.querySelector(`#zotero-prefpane-${config.addonRef}-content-mode`) as HTMLSelectElement;
-  const customPanel = doc?.querySelector('#custom-settings-panel') as HTMLElement;
-
-  if (modeSelect && customPanel) {
-    // Auto-open on custom mode
-    if (modeSelect.value === 'custom') {
-      customPanel.classList.add('open');
-    }
-
-    modeSelect.addEventListener('change', () => {
-      if (modeSelect.value === 'custom') {
-        customPanel.classList.add('open');
-      }
-    });
   }
 }
 

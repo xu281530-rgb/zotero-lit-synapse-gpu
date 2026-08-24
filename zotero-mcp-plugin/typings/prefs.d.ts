@@ -16,18 +16,6 @@ declare namespace _ZoteroTypes {
       "write.confirmBeforeMutation": boolean;
       "write.allowFileImport": boolean;
       "privacy.exposeFilePaths": boolean;
-      "ai.maxTokens": number;
-      "content.mode": string;
-      "custom.maxContentLength": number;
-      "custom.maxAttachments": number;
-      "custom.maxNotes": number;
-      "custom.keywordCount": number;
-      "custom.smartTruncateLength": number;
-      "custom.searchItemLimit": number;
-      "custom.maxAnnotationsPerRequest": number;
-      "custom.includeWebpage": boolean;
-      "custom.enableCompression": boolean;
-      "ui.includeMetadata": boolean;
       "hybrid.maxDocuments": number;
       "hybrid.maxChunksPerItem": number;
       "hybrid.keywordMinScore": string;

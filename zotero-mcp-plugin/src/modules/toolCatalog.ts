@@ -272,18 +272,13 @@ export function buildToolCatalog(): ToolDefinition[] {
           enum: ['true', 'false'],
           description: 'Include standalone attachment items (e.g., PDFs without parent item) in results. Must be "true" when itemType is "attachment". Default: false.'
         },
-        mode: {
-          type: 'string',
-          enum: ['minimal', 'preview', 'standard', 'complete'],
-          description: 'Processing mode: minimal (30 results), preview (100), standard (adaptive), complete (500+). Uses user default if not specified.'
-        },
         relevanceScoring: { type: 'boolean', description: 'Enable relevance scoring' },
         sort: {
           type: 'string',
           enum: ['relevance', 'date', 'title', 'year'],
           description: 'Sort order'
         },
-        limit: { type: 'number', description: 'Maximum results to return (overrides mode default)' },
+        limit: { type: 'number', description: 'Maximum results to return (default: 200)' },
         offset: { type: 'number', description: 'Pagination offset' },
       },
     },
@@ -349,15 +344,6 @@ export function buildToolCatalog(): ToolDefinition[] {
           items: { type: 'string' },
           description: 'Filter by tags attached to annotations'
         },
-        detail: {
-          type: 'string',
-          enum: ['minimal', 'preview', 'standard', 'complete'],
-          description: 'How much of each mark to return: minimal (identity and a few words), preview (a short excerpt), standard (the mark and its comment — the default), complete (verbatim text with no compression). Uses the user setting when omitted. "mode" is accepted as a synonym.'
-        },
-        maxTokens: {
-          type: 'number',
-          description: 'Token budget for the page (uses user setting default if not specified). Marks are compressed to fit it; raise detail to complete to stop that.'
-        },
         minRelevance: {
           type: 'number',
           minimum: 0,
@@ -377,7 +363,7 @@ export function buildToolCatalog(): ToolDefinition[] {
     description: [
       'BIBLIOGRAPHIC METADATA for one item. This is the citation tool: everything you need to cite a paper correctly and to see how it sits in the library.',
       '',
-      'RETURNS: title, creators (with roles), date and year, item type, publication title, volume, issue, pages, DOI, ISSN/ISBN, URL, language, publisher, tags, the collections the item belongs to (with their paths), and one row per attachment — key, filename, content type, size, and whether its text can be read.',
+      'RETURNS: title, creators (with roles), date and year, item type, publication title, volume, issue, pages, DOI, URL, language, tags, abstract/note availability, and one row per attachment — key, filename, content type, size, and whether its text can be read.',
       '',
       'DOES NOT RETURN CONTENT, by design. No abstract text, no note bodies, no annotation text, no PDF text, no chunks. Every one of those has a tool that returns it on purpose and pages it properly: get_item_abstract for the abstract, get_annotations for your notes and highlights, get_attachment_text for an attachment, get_document_chunks for the indexed body. Returning them here made a metadata lookup silently ship a whole paper, so it no longer does. What you get instead is availability: hasAbstract and abstractChars tell you what get_item_abstract would return without returning it.',
       '',
@@ -391,11 +377,6 @@ export function buildToolCatalog(): ToolDefinition[] {
           description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
         },
         itemKey: { type: 'string', description: 'Unique item key' },
-        mode: {
-          type: 'string',
-          enum: ['minimal', 'standard', 'complete'],
-          description: 'How much metadata to return: minimal (identity only: key, title, creators, year, item type), standard (the citation fields plus tags and attachment rows — the default), complete (standard plus collections, identifiers and every populated Zotero field). No mode returns content of any kind. Uses the user default when omitted; "preview" is accepted as a synonym for "standard" for older callers.'
-        },
       },
       required: ['itemKey'],
     },
@@ -451,15 +432,6 @@ export function buildToolCatalog(): ToolDefinition[] {
           type: 'array',
           items: { type: 'string' },
           description: 'Filter by tags attached to annotations'
-        },
-        detail: {
-          type: 'string',
-          enum: ['minimal', 'preview', 'standard', 'complete'],
-          description: 'How much of each mark to return: minimal (identity and a few words), preview (a short excerpt), standard (the mark and its comment — the default), complete (verbatim text with no compression). Uses the user setting when omitted. "mode" is accepted as a synonym.'
-        },
-        maxTokens: {
-          type: 'number',
-          description: 'Token budget for the page (uses user setting default if not specified). Marks are compressed to fit it; raise detail to complete to stop that.'
         },
         limit: { type: 'number', description: 'Marks per page (default 20, maximum 100).' },
         offset: { type: 'number', default: 0, description: 'Pagination offset. Pass the nextOffset from the previous response to continue.' }
@@ -523,12 +495,7 @@ export function buildToolCatalog(): ToolDefinition[] {
           type: 'number',
           description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
         },
-        mode: {
-          type: 'string',
-          enum: ['minimal', 'preview', 'standard', 'complete'],
-          description: 'Processing mode: minimal (20 collections), preview (50), standard (100), complete (500+). Uses user default if not specified.'
-        },
-        limit: { type: 'number', description: 'Maximum results to return (overrides mode default).' },
+        limit: { type: 'number', description: 'Maximum results to return (default: 100).' },
         offset: { type: 'number', description: 'Pagination offset. Continue from pagination.nextOffset.' },
         parentCollection: {
           type: 'string',

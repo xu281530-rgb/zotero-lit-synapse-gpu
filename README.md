@@ -22,7 +22,7 @@ _This README is also available in: [:cn: 简体中文](./README-zh.md) | :gb: En
 The Zotero MCP server is a tool server based on the Model Context Protocol that provides seamless integration with the Zotero reference management system for AI applications like Claude Desktop. Through this server, AI assistants can:
 
 - 🔍 **Smart Search**: Multi-dimensional library search (title/creator/year/tags/fulltext/semantic) with boolean operators and relevance scoring
-- 📖 **Content Extraction**: Extract PDF full-text, notes, abstracts, webpage snapshots with fine-grained mode control
+- 📖 **Content Extraction**: Read abstracts, annotations, attachment text, and indexed document chunks through purpose-specific paginated tools
 - 📝 **Annotation Analysis**: Search and analyze PDF highlights and annotations by color, tags, and keywords
 - 📂 **Collection Browsing**: Browse and search collection hierarchies, retrieve items within collections
 - 🧠 **Semantic Search**: AI-powered concept matching via embedding vectors, discover related literature across languages
@@ -164,7 +164,7 @@ Example configuration for Claude Desktop:
 
 - **Integrated MCP Server**: Built-in MCP server using Streamable HTTP protocol, no separate process needed
 - **Advanced Search Engine**: Full-text search with boolean operators, relevance scoring, filtering by title, creator, year, tags, item type, and more
-- **Unified Content Extraction**: Extract content from PDFs, attachments, notes, abstracts, webpage snapshots with four modes (minimal/preview/standard/complete)
+- **Purpose-specific Content Retrieval**: Read abstracts, complete annotation text, attachment text windows, and indexed document chunks without hidden content modes
 - **Smart Annotation System**: Search and retrieve PDF highlights, annotations, and notes by color, tags, and keywords with intelligent ranking
 - **Collection Management**: Browse, search collection hierarchies, get collection details, subcollections, and item lists
 - **Semantic Search**: AI-powered semantic search using embedding vectors
@@ -299,7 +299,7 @@ both set.
 Structured metadata search for explicit title, author, year, item type, or other
 field constraints. Use `hybrid_search` first for general literature discovery.
 
-- `q`, `title`, `titleOperator`, `yearRange`, `itemType`, `includeAttachments`, `mode` (minimal/preview/standard/complete), `relevanceScoring`, `sort`, `limit`, `offset`
+- `q`, `title`, `titleOperator`, `yearRange`, `itemType`, `includeAttachments`, `relevanceScoring`, `sort`, `limit` (default 200), `offset`
 
 #### `search_annotations`
 
@@ -328,8 +328,9 @@ what `get_annotations(itemKeys)`, `get_item_details`, `search_fulltext` and
 > the defect, so keeping it would keep the failure.
 
 - `q`, `itemKeys` (document keys; all of them are searched), `types`, `colors`,
-  `tags`, `detail` (minimal/preview/standard/complete), `maxTokens`,
-  `minRelevance`, `limit`, `offset`
+  `tags`, `minRelevance`, `limit` (default 15, maximum 100), `offset`
+- Every row on the current page contains the full highlight/note text and its
+  complete comment; there is no token compression or detail mode.
 - Returns `pagination` with `total`, `offset`, `limit`, `hasMore`, `nextOffset`
 - Each row returns `sourceItemKey`, `attachmentKey` (absent for notes) and
   `annotationKey`
@@ -397,18 +398,17 @@ keys — the `sourceItemKey` of a `search_annotations` hit, never its
 `attachmentKey`. Each row carries the `sourceItemKey` it came from, so marks
 stay attributable when several documents are read at once.
 
-Results always page: a well-read PDF holds hundreds of highlights, and `complete`
-used to mean "all of them in one response".
+Results always page because a well-read PDF can hold hundreds of highlights.
+Every mark on the current page contains its complete original text and comment.
 
 - `itemKeys`, `itemKey`, `annotationId`, `annotationIds`, `types`, `colors`,
-  `tags`, `detail` (minimal/preview/standard/complete), `maxTokens`, `limit`,
-  `offset`, `libraryID`
+  `tags`, `limit` (default 20, maximum 100), `offset`, `libraryID`
 
 #### `get_item_details`
 
 Bibliographic metadata for one item — the citation tool. Returns title, creators,
-date, item type, venue, volume/issue/pages, DOI, URL, language, tags, the
-collections the item belongs to (with paths), and one row per attachment.
+date, item type, venue, volume/issue/pages, DOI, URL, language, tags, and one
+row per attachment.
 
 **It returns no content, by design.** No abstract text, no note bodies, no
 annotation text, no PDF text, no chunks — each of those has a tool that returns
@@ -423,7 +423,7 @@ boolean, which only looked at the file extension and therefore claimed full text
 for PDFs that had never parsed; the per-attachment flag is still there as
 `hasExtractableText`, meaning "this file type could yield text".
 
-Params: `itemKey` (required), `mode` (minimal/standard/complete), `libraryID`.
+Params: `itemKey` (required), `libraryID`.
 
 #### `get_item_abstract`
 
@@ -476,7 +476,7 @@ were both silently dropped by `JSON.stringify`, and a page of 100 out of 300 was
 indistinguishable from a complete library of 100. `search_collections` returns
 the same envelope.
 
-Params: `parentCollection`, `mode`, `limit`, `offset`, `libraryID`.
+Params: `parentCollection`, `limit` (default 100), `offset`, `libraryID`.
 
 > `recursive` was removed in 1.9.1. It returned every level in one unpaginated
 > response, duplicating `get_collection_items` and reintroducing the bulk dump
