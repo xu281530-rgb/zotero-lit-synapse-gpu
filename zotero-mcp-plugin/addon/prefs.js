@@ -45,7 +45,6 @@ pref("wiki.shadowMode", true);
 pref("wiki.minScore", "0");
 pref("wiki.rrfWeight", "0");
 pref("wiki.searchTimeoutMs", 5000);
-pref("semantic.enabled", false);
 pref("semantic.autoUpdate", false);
 pref("embedding.apiBase", "");
 pref("embedding.apiKey", "");

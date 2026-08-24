@@ -211,12 +211,8 @@ service.indexItemWithProcessor = async () => {
   rebuildCalls += 1;
 };
 
-// Cleanup does not depend on the search/Embedding switch. A second injected
-// failure proves the persisted task backs off instead of spinning or vanishing.
-preferences.set(
-  "extensions.zotero.zotero-mcp-plugin.semantic.enabled",
-  false,
-);
+// A second injected failure proves the persisted cleanup task backs off
+// instead of spinning or vanishing.
 fault.failNextKeywordDelete = true;
 const retryFailure = await restartedRuntime.processIndexRefreshQueue({
   service,
@@ -292,10 +288,6 @@ preferences.set(
       reason: "legacy-refresh",
     },
   ]),
-);
-preferences.set(
-  "extensions.zotero.zotero-mcp-plugin.semantic.enabled",
-  true,
 );
 const legacyRefresh = await restartedRuntime.processIndexRefreshQueue({ service });
 assert.equal(legacyRefresh.processed, 1);

@@ -2867,17 +2867,25 @@ export class SemanticSearchService {
             }
             ztoolkit.log(`[SemanticSearch] extractItemContent() extracting PDF: ${filePath}`);
 
-            // MinerU 高精度解析优先：索引是批处理任务，允许阻塞等待解析。
-            // 未启用 / 解析失败时返回 null，自动落到下面的内置提取。
-            const minerUText = await getMinerUService().getIndexTextForAttachment(
-              attachment,
-              {
+            // Existing Doc2X/MinerU Markdown is the authoritative body source,
+            // even when new MinerU parsing is disabled. Only after that
+            // read-only reuse pass misses do we allow the enabled MinerU
+            // service to parse. PDFWorker is the final single-source fallback,
+            // never a second body beside Markdown.
+            const minerUService = getMinerUService();
+            const reusableMarkdownText =
+              await minerUService.getIndexTextForAttachment(attachment, {
+                allowParse: false,
+                ignoreEnabled: true,
+              });
+            const minerUText =
+              reusableMarkdownText ??
+              (await minerUService.getIndexTextForAttachment(attachment, {
                 allowParse: true,
                 // A forced re-index is the user asking us to try again,
                 // so don't sit on a cached parse failure.
                 ignoreFailureCache: this._forceRun,
-              },
-            );
+              }));
             if (minerUText) {
               // The complete body text is indexed. It used to be cut at
               // 50k characters, which silently made everything past
@@ -2890,7 +2898,8 @@ export class SemanticSearchService {
               continue;
             }
 
-            // 回退：Zotero 内置 pdfWorker 提取
+            // No reusable or newly parsed Markdown exists. In this case the
+            // Zotero PDF worker is the sole body source for this index build.
             // Use shared processor if provided (much faster for batch processing)
             const processor = sharedProcessor || new PDFProcessor(ztoolkit);
             const shouldTerminate = !sharedProcessor;  // Only terminate if we created it

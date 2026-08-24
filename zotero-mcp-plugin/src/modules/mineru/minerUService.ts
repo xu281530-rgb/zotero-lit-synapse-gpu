@@ -1198,44 +1198,6 @@ export class MinerUService {
     return files;
   }
 
-  async updateCachedMarkdown(
-    attachment: any,
-    markdown: string,
-  ): Promise<boolean> {
-    const value = String(markdown || "");
-    if (!value.trim()) throw new Error("Markdown cannot be empty");
-    if (new TextEncoder().encode(value).byteLength > 16 * 1024 * 1024) {
-      throw new Error("Markdown exceeds the 16 MB safety limit");
-    }
-    const dir = this.getAttachmentDir(attachment.key);
-    await IOUtils.makeDirectory(dir, {
-      ignoreExisting: true,
-      createAncestors: true,
-    });
-    await IOUtils.writeUTF8(PathUtils.join(dir, "full.md"), value);
-
-    const metaPath = PathUtils.join(dir, "meta.json");
-    try {
-      const meta = JSON.parse(await IOUtils.readUTF8(metaPath));
-      meta.markdownLength = value.length;
-      meta.editedAt = new Date().toISOString();
-      await IOUtils.writeUTF8(metaPath, JSON.stringify(meta, null, 2));
-    } catch {
-      /* ignore */
-    }
-
-    const config = this.getConfig();
-    if (config.attachMarkdown) {
-      await this.syncMarkdownAttachment(
-        attachment,
-        value,
-        attachment.attachmentFilename || `${attachment.key}.pdf`,
-        { replaceExisting: true },
-      );
-    }
-    return true;
-  }
-
   private async statFile(
     path: string,
   ): Promise<{ size: number; mtime: number } | null> {

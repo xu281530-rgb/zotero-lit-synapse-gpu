@@ -156,7 +156,7 @@ export class FulltextService {
 
       // Handle different attachment types
       if (this.isPDFAttachment(attachment, attachmentType)) {
-        // 与 get_content 共用同一个入口：先 Doc2X 原文、再 MinerU 缓存/已挂载 .md，
+        // 与附件正文读取共用同一个入口：先 Doc2X 原文、再 MinerU 缓存/已挂载 .md，
         // 都没有时才按「允许 MCP 接口即时解析」开关决定要不要现场解析。
         const minerU = await getPDFTextFromMarkdown(attachment);
         if (minerU.text) {

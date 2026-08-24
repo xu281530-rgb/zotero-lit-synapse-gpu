@@ -85,6 +85,25 @@ interface WikiWikiWriteOff {
   reason: string;
 }
 
+type WikiNoteStatusWriteResult =
+  | {
+      updated: true;
+      attachmentKey: string;
+      status: WikiReadingNoteStatus;
+    }
+  | {
+      updated: false;
+      reason:
+        | "item_not_found"
+        | "reading_note_not_found"
+        | "not_authorized"
+        | "write_failed";
+    };
+
+interface WikiNoteStatusWriteOptions {
+  authorizeNoteStatusWrite?: () => Promise<boolean | void>;
+}
+
 /**
  * Shortest write-off reason that can carry an argument.
  *
@@ -832,7 +851,10 @@ export class WikiService {
     return { actions: hydrated, warnings };
   }
 
-  async commit(input: WikiCommitInput): Promise<
+  async commit(
+    input: WikiCommitInput,
+    options: WikiNoteStatusWriteOptions = {},
+  ): Promise<
     WikiCommitResult & {
       warnings: string[];
       /** Always true on return: the database transaction is durable. */
@@ -954,6 +976,7 @@ export class WikiService {
       input,
       actions,
       citedKeys,
+      options.authorizeNoteStatusWrite,
     );
 
     const queue = await this.store.embeddingQueue();
@@ -1142,6 +1165,7 @@ export class WikiService {
     input: WikiCommitInput,
     actions: WikiCommitAction[],
     citedKeys: Set<string>,
+    authorizeNoteStatusWrite?: () => Promise<boolean | void>,
   ): Promise<
     | {
         sessionId: number;
@@ -1152,6 +1176,7 @@ export class WikiService {
         totalChunks: number;
         coverageComplete: boolean;
         note: string;
+        noteStatusWrite?: WikiNoteStatusWriteResult;
       }
     | undefined
   > {
@@ -1258,12 +1283,22 @@ export class WikiService {
       // The note is kept permanently, so it becomes this paper's long-term
       // reading memory rather than scaffolding: a later re-read continues it,
       // and a person can open it in Zotero. Only its status changes here.
-      await this.syncNoteStatus(open, "completed");
+      const noteStatusWrite = await this.syncNoteStatus(
+        open,
+        "completed",
+        authorizeNoteStatusWrite,
+      );
       return {
         ...base,
         state: "committed",
         released: true,
-        note: `Paper ${open.itemKey} was read in full, synthesised, its terminology and the Wiki reviewed, and every chunk it owed the Wiki settled. It is now closed. Its reading note stays on the Zotero item, marked completed. The library is free for the next paper.`,
+        noteStatusWrite,
+        note:
+          `Paper ${open.itemKey} was read in full, synthesised, its terminology and the Wiki reviewed, and every chunk it owed the Wiki settled. It is now closed. ` +
+          (noteStatusWrite.updated
+            ? "Its reading note stays on the Zotero item, marked completed. "
+            : `Its Wiki state is complete, but the Zotero reading-note status was not changed (${noteStatusWrite.reason}). `) +
+          "The library is free for the next paper.",
       };
     }
 
@@ -1287,12 +1322,15 @@ export class WikiService {
    * "I read it and it is not worth a Wiki page" is a normal outcome, not a
    * failure, and the one-paper-at-a-time rule needs a way to express it.
    */
-  async finishReading(options: {
-    libraryID: number;
-    itemKey?: string;
-    outcome: WikiReadingAbandonOutcome;
-    note?: string;
-  }): Promise<any> {
+  async finishReading(
+    options: {
+      libraryID: number;
+      itemKey?: string;
+      outcome: WikiReadingAbandonOutcome;
+      note?: string;
+    },
+    writeOptions: WikiNoteStatusWriteOptions = {},
+  ): Promise<any> {
     if (options.outcome !== "skipped" && options.outcome !== "failed") {
       throw new Error(
         'finishReading only accepts "skipped" or "failed". A paper becomes "committed" by being read in full and committed, never by being declared finished.',
@@ -1339,6 +1377,7 @@ export class WikiService {
     const noteResult = await this.syncNoteStatus(
       open,
       options.outcome === "skipped" ? "skipped" : "failed",
+      writeOptions.authorizeNoteStatusWrite,
     );
     return {
       closed: true,
@@ -1346,7 +1385,15 @@ export class WikiService {
       outcome: options.outcome,
       chunksRead: coverage.deliveredChunks,
       totalChunks: coverage.totalChunks,
-      ...(noteResult ? { readingNote: noteResult } : {}),
+      noteStatusWrite: noteResult,
+      ...(noteResult.updated
+        ? {
+            readingNote: {
+              attachmentKey: noteResult.attachmentKey,
+              status: noteResult.status,
+            },
+          }
+        : {}),
       mode: open.mode,
       // Closing discharges whatever the note owed the Wiki: the reading has
       // been deliberately abandoned, so there is nothing left to write up and
@@ -1361,7 +1408,10 @@ export class WikiService {
             "block on reading it again — its note keeps everything already understood.") +
         (owedAtClose.length > 0
           ? ` ${owedAtClose.length} chunk(s) of reading in its note were never written into the Wiki, and now never will be.`
-          : ""),
+          : "") +
+        (noteResult.updated
+          ? ` Its Zotero reading note is marked ${noteResult.status}.`
+          : ` Its Wiki state is closed, but the Zotero reading-note status was not changed (${noteResult.reason}).`),
     };
   }
 
@@ -1619,8 +1669,10 @@ export class WikiService {
         integrationDebt: integrationDebt(refreshed),
       },
       nextStep: finalSynthesis
-        ? "The whole-paper synthesis is recorded. Now build the Wiki from it: call wiki_prepare_update, " +
-          "then wiki_commit. Every Claim still needs Evidence quoted from the paper's own chunks - the " +
+        ? "The whole-paper synthesis is recorded. Now call wiki_record_concepts once with final true " +
+          "(use an empty concepts list plus noConceptsReason when appropriate). Then call " +
+          "wiki_prepare_update with a five-axis Wiki Review covering pages, claims, evidence, concepts " +
+          "and relations, followed by wiki_commit. Every Claim still needs Evidence quoted from the paper's own chunks - the " +
           "note is your understanding, not a source - so re-read the chunks a claim rests on with " +
           "wiki_build_from_paper (offset) and take the excerpt from there. Re-reading a chunk you have " +
           "already been given costs nothing against the integration gate."
@@ -2133,23 +2185,44 @@ export class WikiService {
   private async syncNoteStatus(
     session: WikiReadingSessionRecord,
     status: WikiReadingNoteStatus,
-  ): Promise<{ attachmentKey: string; status: WikiReadingNoteStatus } | null> {
+    authorizeWrite?: () => Promise<boolean | void>,
+  ): Promise<WikiNoteStatusWriteResult> {
     try {
       const item = await Zotero.Items.getByLibraryAndKeyAsync(
         session.libraryID,
         session.itemKey,
       );
-      if (!item) return null;
+      if (!item) return { updated: false, reason: "item_not_found" };
       const body = await this.readNoteBody(item);
-      if (body === null) return null;
+      if (body === null) {
+        return { updated: false, reason: "reading_note_not_found" };
+      }
+      if (authorizeWrite) {
+        try {
+          const authorized = await authorizeWrite();
+          if (authorized === false) {
+            return { updated: false, reason: "not_authorized" };
+          }
+        } catch (error) {
+          ztoolkit?.log?.(
+            `[WikiService] reading note status write was not authorized for ${session.itemKey}: ${error}`,
+            "warn",
+          );
+          return { updated: false, reason: "not_authorized" };
+        }
+      }
       const written = await this.writeNote(item, session, body, status);
-      return { attachmentKey: written.attachmentKey, status };
+      return {
+        updated: true,
+        attachmentKey: written.attachmentKey,
+        status,
+      };
     } catch (error) {
       ztoolkit?.log?.(
         `[WikiService] could not stamp reading note status for ${session.itemKey}: ${error}`,
         "warn",
       );
-      return null;
+      return { updated: false, reason: "write_failed" };
     }
   }
 
@@ -2216,11 +2289,23 @@ export class WikiService {
       return (
         "Every chunk has been delivered but the whole-paper synthesis has not been done. Call " +
         "wiki_update_reading_note with finalSynthesis true and the note rewritten as one coherent " +
-        "reading of the complete paper, then build the Wiki from it."
+        "reading of the complete paper. Then review its terminology with wiki_record_concepts final true."
+      );
+    }
+    if (session.conceptsRecordedAt === null) {
+      return (
+        "The paper has been read and synthesised. Call wiki_record_concepts once with final true " +
+        "(or an empty concepts list plus noConceptsReason). Then run the five-axis Wiki Review."
+      );
+    }
+    if (session.wikiReviewAt === null) {
+      return (
+        "The paper and its terminology have been reviewed. Call wiki_prepare_update with wikiReview " +
+        "covering pages, claims, evidence, concepts and relations, then call wiki_commit."
       );
     }
     return (
-      "The paper has been read and synthesised. Build the Wiki: wiki_prepare_update, then wiki_commit, " +
+      "The paper synthesis, terminology pass and five-axis Wiki Review are complete. Call wiki_commit, " +
       "with every Claim's Evidence quoted from the paper's own chunks rather than from this note."
     );
   }
@@ -2594,6 +2679,20 @@ export class WikiService {
       );
     }
     const { prepared, warnings } = preparation;
+    const sourceFree = prepared.filter((entity) => {
+      const sources = [
+        ...(entity.sources ?? []),
+        ...(entity.primaryTerm?.sources ?? []),
+        ...(entity.terms ?? []).flatMap((term) => term.sources ?? []),
+      ];
+      return sources.length === 0;
+    });
+    if (sourceFree.length) {
+      throw new Error(
+        `${sourceFree.length} concept(s) have no real Zotero document source. ` +
+          "Pass itemKey, use the paper currently open for reading, or provide a valid source itemKey on every concept. Nothing was written.",
+      );
+    }
     if (prepared.length) await options.confirmWrite?.(prepared.length);
     const library = await this.store.concepts();
     const result = await library.record({
@@ -3312,8 +3411,8 @@ export class WikiService {
           "finalSynthesis true once the note reads as one coherent account of the complete paper."
         : `${coverage.deliveredChunks} of ${coverage.totalChunks} chunks delivered. wiki_commit will store evidence from this paper as section_read at best until the whole paper has been delivered; keep paging with pagination.nextCursor, or submit chunk_local / section_read / partial / incomplete now.`,
       nextStep: hasMore
-        ? `You have read chunks ${range} of ${chunks.length}. Update the reading note, then continue with cursor set to pagination.nextCursor and nothing else changed. When you are done reading — whether or not you read it all — finish this paper before starting another: call wiki_prepare_update then wiki_commit to write it, or wiki_finish_reading with outcome "skipped" to close it without writing.`
-        : `That is the whole paper: ${chunks.length} chunk(s). Fold this last batch in, then call wiki_update_reading_note once more with finalSynthesis true. Only after that: wiki_prepare_update and wiki_commit, with every Claim's Evidence quoted from these chunks rather than from the note. If you decide not to write it up, close it with wiki_finish_reading and outcome "skipped".`,
+        ? `You have read chunks ${range} of ${chunks.length}. Update the reading note, then continue with cursor set to pagination.nextCursor and nothing else changed. Continue until the whole paper is delivered; if you abandon the read instead, close it with wiki_finish_reading and outcome "skipped".`
+        : `That is the whole paper: ${chunks.length} chunk(s). Fold this last batch in, then follow the fixed completion chain: wiki_update_reading_note with finalSynthesis true; wiki_record_concepts with final true (or an empty list plus noConceptsReason); wiki_prepare_update with the five-axis Wiki Review covering pages, claims, evidence, concepts and relations; then wiki_commit. Quote Claim Evidence from these chunks rather than from the note. If you decide not to write it up, close it with wiki_finish_reading and outcome "skipped".`,
       existingWikiCandidates: existing,
     };
   }

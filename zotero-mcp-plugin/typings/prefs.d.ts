@@ -38,7 +38,6 @@ declare namespace _ZoteroTypes {
       "wiki.minScore": string;
       "wiki.rrfWeight": string;
       "wiki.searchTimeoutMs": number;
-      "semantic.enabled": boolean;
       "semantic.autoUpdate": boolean;
       "embedding.apiBase": string;
       "embedding.apiKey": string;

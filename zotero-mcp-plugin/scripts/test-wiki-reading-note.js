@@ -710,6 +710,13 @@ block("the write-up waits for the whole-paper pass", async () => {
   });
   assert.equal(finalPass.finalSynthesis, true);
   assert.equal(finalPass.readingNote.status, "synthesized");
+  assert.match(finalPass.nextStep, /wiki_record_concepts/iu);
+  assert.ok(
+    finalPass.nextStep.indexOf("wiki_record_concepts") <
+      finalPass.nextStep.indexOf("wiki_prepare_update"),
+    "the final synthesis must lead to terminology before Wiki Review and prepare",
+  );
+  assert.match(finalPass.nextStep, /five|five-axis|pages.*claims.*evidence.*concepts.*relations/iu);
 
   const parsed = parseReadingNote((await readNoteFromDisk("DEEPREAD")).raw);
   assert.equal(parsed.metadata.coverage.finalSynthesis, true);
@@ -923,34 +930,37 @@ block("an excerpt quoted from the chunk is accepted at whole-paper depth", async
     query: "Columnar array forming",
     proposedPageTitles: ["Columnar array forming"],
   });
-  const committed = await service.commit({
-    libraryID: 1,
-    userInitiated: true,
-    prepareToken: prepared.prepareToken,
-    actions: [
-      { action: "CREATE_PAGE", ref: "p", canonicalTitle: "Columnar array forming" },
-      {
-        action: "ADD_CLAIM",
-        ref: "c",
-        pageId: "p",
-        claimText:
-          "The columnar-to-equiaxed transition occurs at 8 K/mm once thermocouple lag is corrected.",
-        claimType: "mechanism",
-        epistemicStatus: "supported",
-        coverageLevel: "paper_reviewed",
-        confidence: 0.8,
-        evidence: [
-          {
-            libraryID: 1,
-            itemKey: "DEEPREAD",
-            excerpt: "after correction the transition occurs at 8 K/mm",
-            evidenceRole: "SUPPORTS",
-            readDepth: "paper_reviewed",
-          },
-        ],
-      },
-    ],
-  });
+  const committed = await service.commit(
+    {
+      libraryID: 1,
+      userInitiated: true,
+      prepareToken: prepared.prepareToken,
+      actions: [
+        { action: "CREATE_PAGE", ref: "p", canonicalTitle: "Columnar array forming" },
+        {
+          action: "ADD_CLAIM",
+          ref: "c",
+          pageId: "p",
+          claimText:
+            "The columnar-to-equiaxed transition occurs at 8 K/mm once thermocouple lag is corrected.",
+          claimType: "mechanism",
+          epistemicStatus: "supported",
+          coverageLevel: "paper_reviewed",
+          confidence: 0.8,
+          evidence: [
+            {
+              libraryID: 1,
+              itemKey: "DEEPREAD",
+              excerpt: "after correction the transition occurs at 8 K/mm",
+              evidenceRole: "SUPPORTS",
+              readDepth: "paper_reviewed",
+            },
+          ],
+        },
+      ],
+    },
+    { authorizeNoteStatusWrite: async () => false },
+  );
   assert.equal(committed.committed, true);
   assert.deepEqual(
     committed.warnings,
@@ -971,12 +981,14 @@ block("an excerpt quoted from the chunk is accepted at whole-paper depth", async
     "Evidence points at the real chunk the sentence was read in, not at the note",
   );
 
-  // The commit closed the paper, and the note stays behind as its reading
-  // memory rather than being cleaned up.
+  // The Wiki commit and session close are independent of Zotero write
+  // permission. The note stays synthesised when its status write is denied.
   const parsed = parseReadingNote((await readNoteFromDisk("DEEPREAD")).raw);
-  assert.equal(parsed.metadata.status, "completed");
+  assert.equal(parsed.metadata.status, "synthesized");
   assert.equal(committed.readingSession.state, "committed");
   assert.equal(committed.readingSession.released, true);
+  assert.equal(committed.readingSession.noteStatusWrite.updated, false);
+  assert.equal(committed.readingSession.noteStatusWrite.reason, "not_authorized");
 });
 
 block("delivery without the whole-paper pass is still only section_read", async () => {
@@ -998,12 +1010,17 @@ block("delivery without the whole-paper pass is still only section_read", async 
     itemKey: "SHORTONE",
   });
   assert.equal(page.pagination.coverageComplete, true, "six chunks fit in one page");
-  await service.finishReading({
-    libraryID: 1,
-    itemKey: "SHORTONE",
-    outcome: "skipped",
-    note: "Read in full but too thin for a page of its own.",
-  });
+  const finished = await service.finishReading(
+    {
+      libraryID: 1,
+      itemKey: "SHORTONE",
+      outcome: "skipped",
+      note: "Read in full but too thin for a page of its own.",
+    },
+    { authorizeNoteStatusWrite: async () => false },
+  );
+  assert.equal(finished.closed, true, "the Wiki reading state still closes");
+  assert.equal(finished.noteStatusWrite.reason, "not_authorized");
 
   const prepared = await service.prepareUpdate({
     libraryID: 1,
@@ -1048,9 +1065,9 @@ block("delivery without the whole-paper pass is still only section_read", async 
     .get("SHORTONE").read_depth;
   assert.equal(depth, "section_read");
 
-  // The note records that this reading ended without a write-up.
+  // The Zotero note is unchanged because its status write was not authorized.
   const parsed = parseReadingNote((await readNoteFromDisk("SHORTONE")).raw);
-  assert.equal(parsed.metadata.status, "skipped");
+  assert.equal(parsed.metadata.status, "reading");
 });
 
 // =========================================================================

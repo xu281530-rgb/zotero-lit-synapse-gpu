@@ -77,18 +77,6 @@ class Addon {
             ignoreEnabled: true,
           });
         },
-        updateCachedMarkdown: async (
-          attachment: Zotero.Item,
-          markdown: string,
-        ) => {
-          return getMinerUService().updateCachedMarkdown(attachment, markdown);
-        },
-        syncMarkdownAttachment: async (
-          attachment: Zotero.Item,
-          markdown: string,
-        ) => {
-          return getMinerUService().updateCachedMarkdown(attachment, markdown);
-        },
         selectOriginalPDFAttachments: async (items: Zotero.Item[]) => {
           const selected: Zotero.Item[] = [];
           const seen = new Set<number>();

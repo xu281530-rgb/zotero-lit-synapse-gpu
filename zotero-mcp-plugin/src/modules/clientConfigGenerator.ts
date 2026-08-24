@@ -269,7 +269,7 @@ url = "http://127.0.0.1:${port}/mcp"
         "   - search_library: Search your Zotero library by exact/field relevance",
         "   - semantic_search: Search by embedding similarity only",
         "   - get_annotations: Get annotations and notes",
-        "   - get_content: Extract full content from PDFs",
+        "   - get_attachment_text: Read one attachment's extracted text",
         "   - get_collections: Browse your collections",
         "   - get_item_abstract: STAGE 2; one item's abstract, on demand. Call it only for a candidate you are seriously considering reading in depth - never across the whole result set",
         "   - search_fulltext: STAGE 3; hybrid keyword+semantic search over the passages of ONE document from hybrid_search. Re-derive query and keywords from that specific paper, in that paper's own language, then optionally expand neighbouring passages by chunkId",

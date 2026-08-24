@@ -4,7 +4,7 @@
  * Regression tests for `get_attachment_text` (src/modules/attachmentText.ts).
  *
  * Three properties are worth pinning, and each replaces a specific behaviour
- * of the `get_content` this tool succeeds:
+ * of the removed catch-all content tool this focused tool succeeds:
  *
  *  - Windows page and never end mid-word, because a model reading a seam
  *    cannot tell a truncation artefact from the source text.

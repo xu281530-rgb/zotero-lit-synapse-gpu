@@ -453,6 +453,35 @@ await block("a merge that would collide two pages is refused, loudly", async () 
 
 // --- 5. Sources are verified as far as they were offered ------------------
 
+await block("a concept without a real Zotero source is refused", async () => {
+  await assert.rejects(
+    () =>
+      service.recordConcepts({
+        libraryID: 1,
+        concepts: [{ primaryTerm: { en: "untraceable mechanism" } }],
+      }),
+    /real Zotero document source/iu,
+  );
+  assert.equal(
+    await byName("untraceable mechanism"),
+    undefined,
+    "a source-free concept must never reach the Wiki database",
+  );
+  await assert.rejects(
+    () =>
+      service.recordConcepts({
+        libraryID: 1,
+        concepts: [
+          {
+            primaryTerm: { en: "ghost source term" },
+            sources: [{ itemKey: "NOSUCHKEY" }],
+          },
+        ],
+      }),
+    /real Zotero document source/iu,
+  );
+});
+
 await block("a source is a document; an excerpt is only kept if it checks out", async () => {
   const recorded = await service.recordConcepts({
     libraryID: 1,
@@ -477,10 +506,6 @@ await block("a source is a document; an excerpt is only kept if it checks out", 
           },
         ],
       },
-      {
-        primaryTerm: { en: "ghost source term" },
-        sources: [{ itemKey: "NOSUCHKEY" }],
-      },
     ],
   });
 
@@ -504,15 +529,6 @@ await block("a source is a document; an excerpt is only kept if it checks out", 
     recorded.warnings.some((warning) => /could not be found in its indexed chunks/iu.test(warning)),
   );
 
-  const ghost = await byName("ghost source term");
-  assert.equal(
-    ghost.primaryTerm.sources.length,
-    0,
-    "a source naming no Zotero document is dropped",
-  );
-  assert.ok(
-    recorded.warnings.some((warning) => /not a Zotero document/iu.test(warning)),
-  );
 });
 
 // --- 6. Upgrading a 2.4.2 database ----------------------------------------

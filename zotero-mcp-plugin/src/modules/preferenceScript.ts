@@ -345,9 +345,6 @@ function bindPrefEvents() {
   // ============ Collapsible Panels ============
   bindCollapsiblePanels(doc);
 
-  // ============ Semantic Search Toggle ============
-  bindSemanticEnabledToggle(doc);
-
   // ============ Embedding API Settings ============
   bindEmbeddingSettings(doc);
 
@@ -1313,7 +1310,6 @@ function updateRateLimitSummary(doc: Document) {
   costInput?.addEventListener('change', update);
 }
 
-const PREF_SEMANTIC_ENABLED = 'extensions.zotero.zotero-mcp-plugin.semantic.enabled';
 const PREF_SERVER_ENABLED = 'extensions.zotero.zotero-mcp-plugin.mcp.server.enabled';
 
 // Module-level flag: suppress logging during auto-refresh
@@ -1328,46 +1324,6 @@ let _silentRefresh = false;
  * why every call site uses `?.()`.
  */
 let refreshIndexStatsAfterUsageReset: (() => void) | null = null;
-
-/**
- * Bind semantic search enable/disable toggle
- */
-function bindSemanticEnabledToggle(doc: Document) {
-  const checkbox = doc?.querySelector(
-    `#zotero-prefpane-${config.addonRef}-semantic-enabled`,
-  ) as HTMLInputElement;
-  const settingsContainer = doc?.querySelector('#semantic-settings-container') as HTMLElement;
-  const disabledHint = doc?.querySelector('#semantic-disabled-hint') as HTMLElement;
-
-  if (!checkbox) return;
-
-  function updateSemanticUI(enabled: boolean) {
-    if (settingsContainer) {
-      settingsContainer.style.display = enabled ? '' : 'none';
-    }
-    if (disabledHint) {
-      disabledHint.style.display = enabled ? 'none' : 'block';
-    }
-  }
-
-  // Initialize state
-  const currentEnabled = Zotero.Prefs.get(PREF_SEMANTIC_ENABLED, true);
-  if (currentEnabled === undefined) {
-    Zotero.Prefs.set(PREF_SEMANTIC_ENABLED, false, true);
-  }
-  const isEnabled = currentEnabled !== false && currentEnabled !== undefined;
-
-  checkbox.checked = isEnabled;
-  updateSemanticUI(isEnabled);
-
-  // Listen for toggle (HTML checkbox uses 'change' event)
-  checkbox.addEventListener("change", () => {
-    const checked = checkbox.checked;
-    Zotero.Prefs.set(PREF_SEMANTIC_ENABLED, checked, true);
-    updateSemanticUI(checked);
-    ztoolkit.log(`[PreferenceScript] Semantic search ${checked ? 'enabled' : 'disabled'}`);
-  });
-}
 
 // Embedding provider presets - only apiBase and hints, model/dimensions filled by user
 const EMBEDDING_PROVIDER_PRESETS: Record<string, { apiBase: string; modelPlaceholder: string; needsApiKey: boolean }> = {
@@ -2140,13 +2096,11 @@ function bindSemanticStatsSettings(doc: Document) {
     void loadSemanticStats(true);
   };
 
-  // Auto-refresh stats every 5 seconds (silent mode: no loading flash, no log spam)
-  // Skip when server or semantic search is disabled
+  // Auto-refresh stats every 5 seconds (silent mode: no loading flash, no log spam).
+  // Search is always enabled, so only the MCP server state can pause this UI refresh.
   const autoRefreshInterval = setInterval(() => {
     const serverEnabled = Zotero.Prefs.get(PREF_SERVER_ENABLED, true);
     if (serverEnabled === false) return;
-    const semanticEnabled = Zotero.Prefs.get(PREF_SEMANTIC_ENABLED, true);
-    if (semanticEnabled === false || semanticEnabled === undefined) return;
     refreshAllStats(true);
   }, 5000);
 

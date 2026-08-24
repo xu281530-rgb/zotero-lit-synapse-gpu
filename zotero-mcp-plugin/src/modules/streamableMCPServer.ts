@@ -209,6 +209,8 @@ export const MUTATING_TOOL_NAMES = new Set<string>([
   'delete_collection',
   'add_items_to_collection',
   'remove_items_from_collection',
+  'wiki_set_reading_expert',
+  'wiki_update_reading_note',
 ]);
 
 /**
@@ -416,6 +418,15 @@ Allow this change?`,
     ztoolkit.log(`[StreamableMCP] User declined mutation: ${toolName}`, 'warn');
     throw new Error(`The user declined the requested ${toolName} operation.`);
   }
+}
+
+async function authorizeZoteroWrite(
+  toolName: string,
+  args: any,
+): Promise<true> {
+  assertWriteEnabled(toolName);
+  await assertMutationConfirmed(toolName, args);
+  return true;
 }
 
 async function assertWikiCommitConfirmed(args: any): Promise<void> {
@@ -786,6 +797,8 @@ export class StreamableMCPServer {
       serverInfo: this.serverInfo,
       instructions: `This server retrieves literature through a funnel and never calls an LLM of its own, so YOU are the query-understanding stage at EVERY step. Each stage looks at fewer documents in more depth: many candidates -> a few abstracts you chose to read -> passages from one paper.
 
+如果说明要求使用的工具在当前 MCP 工具列表中不存在，请提示用户到 Zotero MCP 设置中启用对应功能，不要尝试调用不存在的工具。
+
 STAGE 0 - decide where to look (get_collections, only when it helps):
 0. When the question is plainly confined to part of the user's library, call get_collections first and read their real folder names, then pass the relevant ones to hybrid_search as collectionKeys. The scope is applied before scoring, so it removes work rather than filtering results. Decide per collection: include what the user named, include what obviously relates to the question, exclude only what obviously does not, and INCLUDE anything whose subject you cannot determine — "待读", "综述", "课题资料", "论文写作" and similar names say nothing about content and frequently hold the most relevant papers. If most names are opaque to you, or the question spans fields, skip this stage entirely and search the whole library. Scanning extra documents costs a little time; missing one costs the user the paper.
 
@@ -814,7 +827,7 @@ STAGE 4 - keep what you just learned (wiki_update_reading_note, then wiki_prepar
 16. List only what you READ. Retrieval returning a passage is not reading it: a chunk you skimmed past, or that turned out to be about something else, is not in readChunkIds. The server counts what you declare and will stand behind exactly that. Re-listing a chunk you had already read is free and never double-counted.
 17. Then update the Wiki from those notes, in that order, every time reading actually added something: wiki_prepare_update, then wiki_commit. Extend the Page, Claim, Concept and relations that already exist rather than creating parallel ones beside them, and quote every Evidence excerpt from the paper's own chunks - never from the note, which is your memory of the paper rather than the paper. Evidence from this kind of reading is chunk_local or section_read; paper_reviewed belongs to a full-text read alone.
 18. A turn that read nothing new - the answer came from what was already understood, or nothing retrieved was relevant - skips both calls. Say so and move on. What is NOT optional is the order: a paper whose last reading is still only in its note refuses to be read again until a commit cites it, because a conversation that improves ten notes and writes no Claims has left nothing behind.
-19. Reading a paper END TO END is a different act and a different tool: wiki_build_from_paper, only on explicit user request. It continues this same note and this same chunk ledger, asks only for what questions never reached, and is the only path to the whole-paper synthesis that whole-paper depth requires.
+19. Reading a paper END TO END is a different act and a different tool: wiki_build_from_paper, only on explicit user request. It continues this same note and this same chunk ledger, asks only for what questions never reached, and is the only path to the whole-paper synthesis that whole-paper depth requires. Its completion order is fixed: wiki_build_from_paper until coverage is complete -> wiki_update_reading_note with finalSynthesis true -> wiki_record_concepts with final true -> wiki_prepare_update with the five-axis Wiki Review covering pages, claims, evidence, concepts and relations -> wiki_commit.
 
 Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accepted, at both stage 1 and stage 3. If you omit keywords the server falls back to mechanical tokenization, returns keywordSource "fallback" with degraded: true, and you should redo that call ONCE with proper terms. Never perform unscoped whole-library full-text search.
 BEYOND THE FUNNEL - the other tools, and when each one is the right call:
@@ -880,11 +893,6 @@ Nothing in this server returns a whole document in one response. Every reading t
    */
   private getAvailableTools(): ToolDefinition[] {
     return filterToolCatalog({
-      semanticEnabled:
-        Zotero.Prefs.get(
-          'extensions.zotero.zotero-mcp-plugin.semantic.enabled',
-          true,
-        ) !== false,
       wikiEnabled: getWikiSettings().enabled,
       writeEnabled: isWriteEnabled(),
       mutatingToolNames: MUTATING_TOOL_NAMES,
@@ -1163,15 +1171,21 @@ Nothing in this server returns a whole document in one response. Every reading t
         case 'wiki_commit': {
           await assertWikiCommitConfirmed(args);
           const libraryID = args.libraryID ?? Zotero.Libraries.userLibraryID;
-          result = await getWikiService().commit({
-            libraryID,
-            userInitiated: true,
-            prepareToken: args.prepareToken,
-            readingSessionId: Number.isInteger(args.readingSessionId)
-              ? args.readingSessionId
-              : undefined,
-            actions: args.actions,
-          });
+          result = await getWikiService().commit(
+            {
+              libraryID,
+              userInitiated: true,
+              prepareToken: args.prepareToken,
+              readingSessionId: Number.isInteger(args.readingSessionId)
+                ? args.readingSessionId
+                : undefined,
+              actions: args.actions,
+            },
+            {
+              authorizeNoteStatusWrite: () =>
+                authorizeZoteroWrite('wiki_commit', args),
+            },
+          );
           break;
         }
         case 'wiki_search': {
@@ -1296,12 +1310,18 @@ Nothing in this server returns a whole document in one response. Every reading t
               'outcome must be "skipped" (read but not written up) or "failed" (reading could not be completed). A paper written up with wiki_commit closes itself.',
             );
           }
-          result = await getWikiService().finishReading({
-            libraryID: args?.libraryID ?? Zotero.Libraries.userLibraryID,
-            itemKey: args?.itemKey,
-            outcome,
-            note: args?.note,
-          });
+          result = await getWikiService().finishReading(
+            {
+              libraryID: args?.libraryID ?? Zotero.Libraries.userLibraryID,
+              itemKey: args?.itemKey,
+              outcome,
+              note: args?.note,
+            },
+            {
+              authorizeNoteStatusWrite: () =>
+                authorizeZoteroWrite('wiki_finish_reading', args),
+            },
+          );
           break;
         }
 
@@ -1312,15 +1332,6 @@ Nothing in this server returns a whole document in one response. Every reading t
         case 'find_similar':
         case 'semantic_status':
         case 'build_search_index': {
-          const semEnabled = Zotero.Prefs.get(
-            'extensions.zotero.zotero-mcp-plugin.semantic.enabled',
-            true,
-          );
-          if (semEnabled === false) {
-            throw new Error(
-              'Semantic search is disabled. Enable it in Zotero MCP Plugin preferences.',
-            );
-          }
           if (name === 'build_search_index') {
             const libraryID =
               args?.libraryID ?? Zotero.Libraries.userLibraryID;
@@ -1696,12 +1707,6 @@ Nothing in this server returns a whole document in one response. Every reading t
     const lexicalDeadlineAt =
       lexicalStartedAt +
       Math.max(1, Math.floor(settings.keywordSearchTimeoutMs * 0.9));
-    const semanticEnabled =
-      Zotero.Prefs.get(
-        'extensions.zotero.zotero-mcp-plugin.semantic.enabled',
-        true,
-      ) !== false;
-
     // Both branches must be able to stop, not just be stopped waiting for:
     // an abandoned embedding request or library scan would otherwise keep
     // burning time (and API quota) after the hybrid deadline has passed.
@@ -1742,11 +1747,6 @@ Nothing in this server returns a whole document in one response. Every reading t
           lexicalCancelled = true;
         },
         semanticSearch: async (): Promise<SemanticSearchItem[]> => {
-          if (!semanticEnabled) {
-            throw new Error(
-              'semantic search is disabled in plugin preferences',
-            );
-          }
           const semanticService = getSemanticSearchService();
           return semanticService.search(args.query, {
             exhaustive: true,
@@ -3275,16 +3275,6 @@ Nothing in this server returns a whole document in one response. Every reading t
    * a different candidate set (this paper's chunks instead of the library).
    */
   private async callSearchFulltext(args: any): Promise<any> {
-    const semanticEnabled = Zotero.Prefs.get(
-      'extensions.zotero.zotero-mcp-plugin.semantic.enabled',
-      true,
-    );
-    if (semanticEnabled === false) {
-      throw new Error(
-        'search_fulltext needs indexed full text. Enable search in Zotero MCP Plugin preferences and build the search index first.',
-      );
-    }
-
     // Context-expansion mode: no query, no ranking, just neighbours.
     if (Array.isArray(args?.chunkIds) && args.chunkIds.length > 0) {
       return expandChunkContext({

@@ -1,7 +1,7 @@
 /**
  * Unified PDF body-text source for the MCP content tools.
  *
- * get_content 和 search_fulltext 以前各自实现了一遍「先问 MinerU、不行再回退」的
+ * 附件正文读取和 search_fulltext 以前各自实现了一遍「先问 MinerU、不行再回退」的
  * 逻辑，两边的参数并不一致。这里把它收成唯一入口，两个工具的 PDF 正文获取策略
  * 完全相同，并统一受「允许 MCP 接口即时解析」(mineru.blockingOnDemand) 控制。
  *
@@ -14,9 +14,6 @@ declare let ztoolkit: ZToolkit;
 
 /** Title prefix of the Markdown attachments MinerUService writes. */
 const MARKDOWN_ATTACHMENT_PREFIX = "MinerU Markdown";
-/** Master switch for semantic search; mirrors the constant used in hooks.ts. */
-const SEMANTIC_ENABLED_PREF =
-  "extensions.zotero.zotero-mcp-plugin.semantic.enabled";
 
 /**
  * How the PDF body text was obtained, surfaced as `extractionMethod` so the
@@ -198,13 +195,6 @@ async function refreshParentSemanticIndexImpl(attachment: any): Promise<void> {
         `[PDFTextSource] Index refresh already running for ${parent.key}, reusing it`,
       );
       await running;
-      return;
-    }
-
-    if (Zotero.Prefs.get(SEMANTIC_ENABLED_PREF, true) === false) {
-      ztoolkit.log(
-        `[PDFTextSource] Semantic search disabled, skipping index update for ${parent.key}`,
-      );
       return;
     }
 

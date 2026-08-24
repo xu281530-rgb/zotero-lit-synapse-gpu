@@ -20,8 +20,6 @@ const RESET_PREF =
   "extensions.zotero.zotero-mcp-plugin.semantic.pendingIndexReset";
 const LEGACY_QUEUE_INVALIDATED_PREF =
   "extensions.zotero.zotero-mcp-plugin.semantic.pendingIndexRefreshInvalidated";
-const SEMANTIC_ENABLED_PREF =
-  "extensions.zotero.zotero-mcp-plugin.semantic.enabled";
 
 /** Refresh entries beyond this are dropped oldest-first; deletions are retained. */
 const MAX_QUEUE_ENTRIES = 500;
@@ -650,18 +648,6 @@ export async function processIndexRefreshQueue(
         processed,
         failed,
         remaining: survivors.length,
-      };
-    }
-
-    if (Zotero.Prefs.get(SEMANTIC_ENABLED_PREF, true) === false) {
-      // Deletion cleanup still ran above. Refreshes wait in case the user
-      // enables indexing again later.
-      writeDrainResult([...survivors, ...refreshEntries]);
-      return {
-        outcome: "disabled",
-        processed,
-        failed,
-        remaining: survivors.length + refreshEntries.length,
       };
     }
 

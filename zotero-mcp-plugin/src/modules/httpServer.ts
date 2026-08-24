@@ -22,6 +22,7 @@ import {
 import { MAX_HYBRID_KEYWORDS } from "./hybridSearch";
 import { describePrivateText, sanitizeForPrivacy } from "../utils/privacy";
 import { config } from "../../package.json";
+import { getWikiSettings } from "./wiki";
 
 declare let ztoolkit: ZToolkit;
 
@@ -642,11 +643,7 @@ export class HttpServer {
  */
 private projectCatalogForCapabilities(): any[] {
   const tools = filterToolCatalog({
-    semanticEnabled:
-      Zotero.Prefs.get(
-        "extensions.zotero.zotero-mcp-plugin.semantic.enabled",
-        true,
-      ) !== false,
+    wikiEnabled: getWikiSettings().enabled,
     writeEnabled: isWriteEnabled(),
     mutatingToolNames: MUTATING_TOOL_NAMES,
   });

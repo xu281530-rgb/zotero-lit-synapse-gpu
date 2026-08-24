@@ -27,7 +27,6 @@ const {
   buildToolCatalog,
   filterToolCatalog,
   REMOVED_TOOL_REPLACEMENTS,
-  SEMANTIC_TOOL_NAMES,
   WIKI_TOOL_NAMES,
 } = await import("../src/modules/toolCatalog.ts");
 
@@ -41,6 +40,8 @@ const MUTATING = new Set([
   "delete_collection",
   "add_items_to_collection",
   "remove_items_from_collection",
+  "wiki_set_reading_expert",
+  "wiki_update_reading_note",
 ]);
 
 const tests = [];
@@ -136,7 +137,7 @@ test("the new tools are present with the shapes their callers depend on", () => 
   assert.ok(builder.inputSchema.properties.itemKeys.maxItems >= 2);
 
   // get_attachment_text must be able to page and to select an attachment,
-  // which is the whole difference from the get_content it replaced.
+  // which is the whole difference from the catch-all content tool it replaced.
   const attachment = byName.get("get_attachment_text").inputSchema.properties;
   for (const param of ["itemKey", "attachmentKey", "offset", "limit"]) {
     assert.ok(param in attachment, `get_attachment_text lacks ${param}`);
@@ -214,44 +215,12 @@ test("fixed-default tools no longer expose content modes", () => {
   }
 });
 
-test("disabling semantic search hides exactly the semantic tools", () => {
-  const all = filterToolCatalog({
-    semanticEnabled: true,
-    writeEnabled: true,
-    mutatingToolNames: MUTATING,
-  }).map((tool) => tool.name);
-  const withoutSemantic = filterToolCatalog({
-    semanticEnabled: false,
-    writeEnabled: true,
-    mutatingToolNames: MUTATING,
-  }).map((tool) => tool.name);
-
-  const hidden = all.filter((name) => !withoutSemantic.includes(name));
-  assert.deepEqual(
-    new Set(hidden),
-    new Set([...SEMANTIC_TOOL_NAMES].filter((name) => all.includes(name))),
-  );
-  // The tools that need the vector index must be in that set: serving them
-  // with the index switched off is advertising a call that always fails.
-  for (const name of [
-    "semantic_search",
-    "keyword_search",
-    "search_fulltext",
-    "get_document_chunks",
-    "find_similar",
-  ]) {
-    assert.ok(hidden.includes(name), `${name} survived semanticEnabled: false`);
-  }
-});
-
 test("disabling writes hides every mutating tool and nothing else", () => {
   const all = filterToolCatalog({
-    semanticEnabled: true,
     writeEnabled: true,
     mutatingToolNames: MUTATING,
   }).map((tool) => tool.name);
   const readOnly = filterToolCatalog({
-    semanticEnabled: true,
     writeEnabled: false,
     mutatingToolNames: MUTATING,
   }).map((tool) => tool.name);
@@ -264,17 +233,26 @@ test("disabling writes hides every mutating tool and nothing else", () => {
   for (const name of readOnly) {
     assert.ok(!MUTATING.has(name), `${name} is mutating but survived`);
   }
+  for (const wikiDatabaseTool of [
+    "wiki_record_concepts",
+    "wiki_prepare_update",
+    "wiki_commit",
+    "wiki_finish_reading",
+  ]) {
+    assert.ok(
+      readOnly.includes(wikiDatabaseTool),
+      `${wikiDatabaseTool} must remain available when Zotero writes are disabled`,
+    );
+  }
 });
 
 test("disabling Wiki hides exactly the Wiki tools", () => {
   const all = filterToolCatalog({
-    semanticEnabled: true,
     wikiEnabled: true,
     writeEnabled: true,
     mutatingToolNames: MUTATING,
   }).map((tool) => tool.name);
   const withoutWiki = filterToolCatalog({
-    semanticEnabled: true,
     wikiEnabled: false,
     writeEnabled: true,
     mutatingToolNames: MUTATING,
@@ -290,7 +268,7 @@ test("the /capabilities projection cannot drift from the catalog", () => {
   // Testing the transformation rather than the transcription is the point:
   // there is no second list left to compare against.
   const tools = filterToolCatalog({
-    semanticEnabled: true,
+    wikiEnabled: false,
     writeEnabled: false,
     mutatingToolNames: MUTATING,
   });
@@ -311,6 +289,7 @@ test("the /capabilities projection cannot drift from the catalog", () => {
   assert.equal(projected.length, tools.length);
   for (const entry of projected) {
     assert.ok(!MUTATING.has(entry.name), `${entry.name} leaked into read-only`);
+    assert.ok(!WIKI_TOOL_NAMES.has(entry.name), `${entry.name} leaked from disabled Wiki`);
   }
   const chunks = projected.find((t) => t.name === "get_document_chunks");
   assert.equal(chunks.parameters.itemKey.required, false);

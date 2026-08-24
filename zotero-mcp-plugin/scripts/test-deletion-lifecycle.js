@@ -327,10 +327,6 @@ preferences.set(
     },
   ]),
 );
-preferences.set(
-  "extensions.zotero.zotero-mcp-plugin.semantic.enabled",
-  true,
-);
 globalThis.Zotero.Items.getByLibraryAndKeyAsync = async (libraryID, itemKey) =>
   libraryID === 2 && itemKey === "REFRESHING"
     ? { key: itemKey, libraryID, isRegularItem: () => true }

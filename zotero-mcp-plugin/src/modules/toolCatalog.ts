@@ -46,17 +46,6 @@ export type ToolCategory =
   | "wiki"
   | "write";
 
-/** Tools that only exist when semantic search is switched on. */
-export const SEMANTIC_TOOL_NAMES: ReadonlySet<string> = new Set([
-  "semantic_search",
-  "keyword_search",
-  "find_similar",
-  "semantic_status",
-  "search_fulltext",
-  "get_document_chunks",
-  "build_search_index",
-]);
-
 export const WIKI_TOOL_NAMES: ReadonlySet<string> = new Set([
   "wiki_prepare_update",
   "wiki_commit",
@@ -1127,6 +1116,8 @@ export function buildToolCatalog(): ToolDefinition[] {
     description: [
       'Apply only controlled Wiki actions. The plugin validates pages, claims, Zotero documents, actual indexed chunks, excerpts, duplicates, versions and the two-page creation ceiling. It never accepts SQL. When automatic Wiki writing is disabled, Zotero asks the user to confirm this Wiki-only database update.',
       '',
+      'ZOTERO NOTE STATUS IS SEPARATE. A commit that completes an open full-text reading session also tries to mark its Markdown reading note completed. That small Zotero write uses the Zotero write permission and confirmation; if it is not authorized, the Wiki commit and session close still succeed and noteStatusWrite reports not_authorized.',
+      '',
       'SETTLING WHAT A QUESTION READ. Chunks read while answering a question owe the Wiki something until this call accounts for them, ONE BY ONE. A chunk is settled by an Evidence excerpt quoting it, or by a SKIP action naming it with a reason — and citing one chunk of the five a question read settles that one only. Whatever is left unsettled keeps its paper closed to further question-driven reading; the Claims you did write are still committed and permanent. wiki_prepare_update lists exactly which chunk ids are outstanding.',
       '',
       'A SKIP that carries itemKey, chunkIds and reason is how you record that read text established nothing the Wiki did not already hold — a restated definition, a caption confirming a known number, a paragraph of related work. That is a legitimate and common outcome, and a whole turn may be settled this way. What it is not is a formality: the reason must say what those passages actually establish and which Page, Claim, Concept or relation already covers it. "Nothing new" is refused, because it is exactly what a reader who checked nothing would also write. One reason may cover a group of chunks; you are never asked to explain each chunk separately. Every reason is kept in the reading ledger permanently.'
@@ -1315,7 +1306,7 @@ export function buildToolCatalog(): ToolDefinition[] {
     description: [
       'Record the professional concepts you recognised while ACTUALLY READING a paper - DRX, CET, columnar grain, dislocation density - into the independent concept library. This is not keyword extraction: a concept goes in only when the text you read establishes what it means in this field.',
       '',
-      'WHEN TO CALL, and this changed in 2.4.4. Calls WITHOUT final are STAGED on the open reading session: they are checked and held, nothing is written, and the user is not asked to confirm anything. Use them to note candidates as you read. Then call ONCE with final true after the whole paper has been delivered and synthesised; that call writes everything you staged plus everything you pass to it, in a single database write and a single confirmation. Read the paper, understand it, decide which terms are genuinely concepts of the field, then write. wiki_prepare_update refuses to start the write-up until the final pass has happened. A paper that introduced nothing new is answered with an empty concepts list and noConceptsReason.',
+      'WHEN TO CALL. Calls WITHOUT final are STAGED on the open reading session: they are checked and held, nothing is written, and the user is not asked to confirm anything. Use them to note candidates as you read. Then call ONCE with final true after the whole paper has been delivered and synthesised; that call writes everything you staged plus everything you pass to it, in a single database write and a single confirmation. Read the paper, understand it, decide which terms are genuinely concepts of the field, then write. wiki_prepare_update refuses to start the write-up until the final pass has happened. A paper that introduced nothing new is answered with an empty concepts list and noConceptsReason.',
       '',
       'ONE CONCEPT, MANY TERMS. A concept entity has one primary term and any number of alias terms, and EVERY term has the same three fields: zh (Chinese full name), en (English full name), abbr (abbreviation). Put every name for the same thing in ONE entity - the server decides which is primary and files the rest as aliases. Do not submit "动态再结晶" and "Dynamic Recrystallization" as two concepts.',
       '',
@@ -1337,7 +1328,7 @@ export function buildToolCatalog(): ToolDefinition[] {
         libraryID: { type: 'number' },
         itemKey: {
           type: 'string',
-          description: 'Optional guard and source default: fails if a different paper is the open one.'
+          description: 'Zotero paper source for every concept that does not carry its own valid sources. It may be omitted only when the open reading session supplies the real Zotero itemKey or every submitted concept/term already names a valid Zotero source; source-free concepts are rejected.'
         },
         final: {
           type: 'boolean',
@@ -1470,7 +1461,7 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'INTEGRATION GATE. After each page, rewrite the WHOLE reading note with wiki_update_reading_note — merging the new text into one continuous account of the paper and correcting whatever the new text overtakes. Do not write per-page notes: "new in chunks 8-15" headings are refused. At most one delivered batch may be outstanding; asking for another page while two are is refused. A batch that genuinely adds nothing can be answered with unchanged: true and unchangedReason, but not twice in a row. Re-reading a chunk you were already given (to quote Evidence) is free and never counts against the gate.',
       '',
-      'ONE PAPER AT A TIME. Starting a different paper while this one is unfinished is refused. Finish the open one first: read it out, do the final synthesis, then wiki_prepare_update and wiki_commit — or wiki_finish_reading with outcome "skipped" to close it without writing.',
+      'ONE PAPER AT A TIME. Starting a different paper while this one is unfinished is refused. Finish the open one first through the fixed chain: read it out; rewrite the note with finalSynthesis true; call wiki_record_concepts with final true; call wiki_prepare_update with the five-axis Wiki Review covering pages, claims, evidence, concepts and relations; then wiki_commit. Or use wiki_finish_reading with outcome "skipped" to close it without a Wiki write.',
       '',
       'READ DEPTH. Evidence submitted with read_depth paper_reviewed or cross_paper is stored at section_read unless BOTH pagination.coverageComplete is true for that paper AND the whole-paper final synthesis has been recorded. Delivery is not understanding. Coverage accumulated by answering questions never qualifies on its own, however complete it becomes: only a full-text read can do the synthesis, and only the synthesis unlocks whole-paper depth.',
       '',
@@ -1564,7 +1555,7 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'unchanged: true (with unchangedReason) records that a batch — references, acknowledgements, a repeated caption — leaves the account intact. It cannot be used twice in a row and cannot be used for the final synthesis.',
       '',
-      'finalSynthesis: true is the whole-paper pass, available only once every chunk has been delivered THROUGH A FULL-TEXT READ. It is required before wiki_prepare_update will start the write-up, and before Evidence can be stored at paper_reviewed or cross_paper depth. It is refused on a paper read only by questions, however much of it they have accumulated: whole-paper depth names an act — reading it through, then reconciling it as one thing — that scattered passages never perform. Open it with wiki_build_from_paper, which continues this same note and asks only for what questions never reached.',
+      'finalSynthesis: true is the whole-paper pass, available only once every chunk has been delivered THROUGH A FULL-TEXT READ. It is followed by wiki_record_concepts final true, then wiki_prepare_update with the five-axis Wiki Review, then wiki_commit. It is required before the terminology final pass or Wiki write-up can begin, and before Evidence can be stored at paper_reviewed or cross_paper depth. It is refused on a paper read only by questions, however much of it they have accumulated: whole-paper depth names an act — reading it through, then reconciling it as one thing — that scattered passages never perform. Open it with wiki_build_from_paper, which continues this same note and asks only for what questions never reached.',
       '',
       'The note is your reading memory, never Evidence. Claims still need excerpts quoted from the paper\'s own chunks — and wiki_commit refuses an excerpt from a chunk that was never recorded as read here, which is the other half of "note first, Wiki second".'
     ].join('\n'),
@@ -1632,7 +1623,7 @@ export function buildToolCatalog(): ToolDefinition[] {
   {
     name: 'wiki_finish_reading',
     category: 'wiki',
-    description: 'Close the paper currently open for Wiki reading WITHOUT writing anything, so the next paper can be started. Use outcome "skipped" for the normal case — the paper was read and judged not worth a Wiki page — and "failed" when reading could not be completed. A paper written up with wiki_commit closes itself and does not need this call.',
+    description: 'Close the paper currently open for Wiki reading without creating or changing Wiki Pages, Claims, Concepts or relations, so the next paper can be started. Use outcome "skipped" for the normal case — the paper was read and judged not worth a Wiki page — and "failed" when reading could not be completed. Closing the Wiki reading state never depends on Zotero write permission; the tool separately tries to stamp the retained Markdown reading note with the terminal status, and reports noteStatusWrite not_authorized when that Zotero write is unavailable. A paper written up with wiki_commit closes itself and does not need this call.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1828,19 +1819,15 @@ export function buildToolCatalog(): ToolDefinition[] {
 }
 
 /**
- * The catalog after the two preference gates, which is exactly what
+ * The catalog after the feature and Zotero-write gates, which is exactly what
  * `tools/list` serves and exactly what `/capabilities` advertises.
  */
 export function filterToolCatalog(options: {
-  semanticEnabled: boolean;
   wikiEnabled?: boolean;
   writeEnabled: boolean;
   mutatingToolNames: ReadonlySet<string>;
 }): ToolDefinition[] {
   return buildToolCatalog().filter((tool) => {
-    if (!options.semanticEnabled && SEMANTIC_TOOL_NAMES.has(tool.name)) {
-      return false;
-    }
     if (options.wikiEnabled === false && WIKI_TOOL_NAMES.has(tool.name)) {
       return false;
     }

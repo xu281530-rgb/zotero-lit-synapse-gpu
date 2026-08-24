@@ -20,8 +20,6 @@ import {
 } from "./modules/wiki/wikiPanel";
 import { getWikiService } from "./modules/wiki/wikiService";
 
-// Preference keys for semantic search settings
-const PREF_SEMANTIC_ENABLED = 'extensions.zotero.zotero-mcp-plugin.semantic.enabled';
 const PREF_SEMANTIC_AUTO_UPDATE = 'extensions.zotero.zotero-mcp-plugin.semantic.autoUpdate';
 
 // Store notifier ID for cleanup
@@ -161,10 +159,6 @@ function requeueAutoUpdates(batch: Map<string, boolean>, reason: string): void {
 async function processPendingAutoUpdates() {
   if (isShuttingDown || semanticAutoUpdatesSuspended) return;
   if (pendingAutoUpdateKeys.size === 0) return;
-
-  // Check if semantic search is enabled
-  const semanticEnabled = Zotero.Prefs.get(PREF_SEMANTIC_ENABLED, true);
-  if (semanticEnabled === false) return;
 
   // Another build (periodic auto-index, or a user-triggered one) holds the
   // service. Keep the queue and come back rather than racing it into 'busy'.
@@ -661,9 +655,8 @@ function registerItemNotifier() {
       // Don't process refresh events during auto-indexing (prevent loops)
       if (isAutoIndexing) return;
 
-      // Check if semantic search and auto-update are enabled
-      const semanticOn = Zotero.Prefs.get(PREF_SEMANTIC_ENABLED, true);
-      if (semanticOn === false) return;
+      // Automatic refresh remains optional; the search infrastructure itself
+      // is always available.
       const enabled = Zotero.Prefs.get(PREF_SEMANTIC_AUTO_UPDATE, true);
       if (!enabled) return;
 
@@ -820,13 +813,6 @@ async function triggerAutoIndexBuild() {
     const enabled = Zotero.Prefs.get(PREF_SEMANTIC_AUTO_UPDATE, true);
     if (!enabled) {
       ztoolkit.log("[MCP Plugin] Auto-update disabled, skipping auto index check");
-      return;
-    }
-
-    // Check if semantic search is enabled
-    const semanticEnabled = Zotero.Prefs.get(PREF_SEMANTIC_ENABLED, true);
-    if (semanticEnabled === false) {
-      ztoolkit.log("[MCP Plugin] Semantic search disabled, skipping auto index check");
       return;
     }
 

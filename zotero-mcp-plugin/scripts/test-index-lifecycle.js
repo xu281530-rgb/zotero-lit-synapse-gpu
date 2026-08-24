@@ -794,6 +794,11 @@ assert.ok(
 );
 assert.match(
   serviceSource,
+  /getIndexTextForAttachment\([\s\S]*?allowParse:\s*false[\s\S]*?ignoreEnabled:\s*true[\s\S]*?getIndexTextForAttachment\([\s\S]*?allowParse:\s*true/,
+  "indexing must reuse existing Markdown even when MinerU parsing is disabled before it considers a new parse",
+);
+assert.match(
+  serviceSource,
   /const extracted = await this\.extractItemContent\([\s\S]*?const content = extracted\.text;[\s\S]*?this\.textChunker\.chunk\(content\)/,
   "resolved item text flows directly into chunking without a SQLite body cache",
 );

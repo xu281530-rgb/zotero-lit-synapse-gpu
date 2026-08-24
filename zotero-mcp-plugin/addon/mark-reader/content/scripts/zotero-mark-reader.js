@@ -3,7 +3,6 @@ ZoteroMarkReader = (() => {
   const PREF_PREFIX = "extensions.zotero.zotero-mcp-plugin.";
   const LEGACY_PREF_PREFIX = `extensions.zotero.${ADDON_REF}.`;
   const DATA_DIR_NAME = "zotero-mcp";
-  const MARKDOWN_TITLE_PREFIX = "MinerU Markdown";
   const PARSE_SCHEMA_VERSION = 2;
   const TRANSLATION_CACHE_SCHEMA_VERSION = 1;
   const TRANSLATION_PROTOCOL_VERSION = 1;
@@ -1517,32 +1516,6 @@ Do not return prose or Markdown fences outside the JSON object.`;
     };
   }
 
-  async function syncEditedMarkdown(attachment, markdown) {
-    const bridge = getPrecisionBridge();
-    if (bridge?.updateCachedMarkdown) {
-      await bridge.updateCachedMarkdown(attachment, markdown);
-      return;
-    }
-    const dir = await getAttachmentDataDir(attachment);
-    await IOUtils.writeUTF8(joinPath(dir, "full.md"), markdown);
-    if (!attachment.parentItemID) {
-      return;
-    }
-    const parentItem = Zotero.Items.get(attachment.parentItemID);
-    const title = `${MARKDOWN_TITLE_PREFIX} (${attachment.key}).md`;
-    for (const id of parentItem?.getAttachments?.() || []) {
-      const child = Zotero.Items.get(id);
-      if (child?.getField("title") !== title) {
-        continue;
-      }
-      const existingPath = await child.getFilePathAsync();
-      if (existingPath) {
-        await IOUtils.writeUTF8(existingPath, markdown);
-      }
-      return;
-    }
-  }
-
   async function loadParseForAttachment(attachment) {
     const dir = await getAttachmentDataDir(attachment);
     const path = joinPath(dir, "parse.json");
@@ -1623,54 +1596,6 @@ Do not return prose or Markdown fences outside the JSON object.`;
   async function saveParseForAttachment(attachment, parse) {
     const dir = await getAttachmentDataDir(attachment);
     await writeJSON(joinPath(dir, "parse.json"), parse);
-  }
-
-  function replaceBlockMarkdown(documentMarkdown, blocks, targetIndex, nextMarkdown) {
-    const source = String(documentMarkdown || "");
-    if (
-      !Array.isArray(blocks) ||
-      targetIndex < 0 ||
-      targetIndex >= blocks.length
-    ) {
-      return { markdown: source, replaced: false };
-    }
-    let cursor = 0;
-    for (let index = 0; index <= targetIndex; index++) {
-      const current = String(blocks[index]?.markdown || "");
-      if (!current) {
-        continue;
-      }
-      const position = source.indexOf(current, cursor);
-      if (index !== targetIndex) {
-        if (position >= 0) {
-          cursor = position + current.length;
-        }
-        continue;
-      }
-      const targetPosition = position >= 0 ? position : source.indexOf(current);
-      if (targetPosition < 0) {
-        return { markdown: source, replaced: false };
-      }
-      return {
-        markdown: `${source.slice(0, targetPosition)}${nextMarkdown}${source.slice(
-          targetPosition + current.length,
-        )}`,
-        replaced: true,
-      };
-    }
-    return { markdown: source, replaced: false };
-  }
-
-  function editedParseSourceHash(parse) {
-    return hashString(
-      stableStringify({
-        markdown: parse?.markdown || "",
-        blocks: (parse?.blocks || []).map((block) => ({
-          id: block.id,
-          markdown: block.markdown,
-        })),
-      }),
-    );
   }
 
   async function upgradeParseForAttachment(attachment, parse) {
@@ -2516,10 +2441,6 @@ Do not return prose or Markdown fences outside the JSON object.`;
           onRetranslate: () => this.translateBlock(block, { force: true }),
           onAdvancedRetranslate: () =>
             this.translateBlock(block, { force: true, advanced: true }),
-          onSaveSource: async (markdown) => {
-            await this.saveBlockSource(block, markdown);
-            activeDetails = {};
-          },
           onSaveTranslation: (markdown) =>
             this.saveBlockTranslation(
               block,
@@ -2676,82 +2597,6 @@ Do not return prose or Markdown fences outside the JSON object.`;
       await this.queueRender();
     }
 
-    async saveBlockSource(block, markdown) {
-      markdown = String(markdown || "").trim();
-      if (!markdown) {
-        throw new Error("原文不能为空。");
-      }
-      await this.ensureTranslationCacheLoaded();
-      const blocks = this.parse?.blocks || [];
-      const blockIndex = blocks.indexOf(block);
-      if (blockIndex < 0) {
-        throw new Error("无法定位当前段落。");
-      }
-      const previousMarkdown = block.markdown;
-      if (previousMarkdown === markdown) {
-        return;
-      }
-      const replacement = replaceBlockMarkdown(
-        this.parse.markdown,
-        blocks,
-        blockIndex,
-        markdown,
-      );
-      const previousState = {
-        documentMarkdown: this.parse.markdown,
-        parseSourceHash: this.parse.sourceHash,
-        parseUpdatedAt: this.parse.updatedAt,
-        blockEditedAt: block.editedAt,
-        blockSourceEdited: block.sourceEdited,
-        blockSourceHashes: blocks.map((item) => item.sourceHash),
-        cacheSourceHash: this.translationCache.sourceHash,
-        cacheAnalyses: this.translationCache.analyses,
-      };
-      block.markdown = markdown;
-      block.sourceEdited = true;
-      block.editedAt = new Date().toISOString();
-      if (replacement.replaced) {
-        this.parse.markdown = replacement.markdown;
-      }
-      this.parse.updatedAt = block.editedAt;
-      this.parse.sourceHash = editedParseSourceHash(this.parse);
-      for (const item of blocks) {
-        item.sourceHash = this.parse.sourceHash;
-      }
-      this.translationCache.sourceHash = this.parse.sourceHash;
-      this.translationCache.analyses = {};
-      try {
-        await saveParseForAttachment(this.attachment, this.parse);
-      } catch (error) {
-        block.markdown = previousMarkdown;
-        block.sourceEdited = previousState.blockSourceEdited;
-        block.editedAt = previousState.blockEditedAt;
-        this.parse.markdown = previousState.documentMarkdown;
-        this.parse.sourceHash = previousState.parseSourceHash;
-        this.parse.updatedAt = previousState.parseUpdatedAt;
-        blocks.forEach((item, index) => {
-          item.sourceHash = previousState.blockSourceHashes[index];
-        });
-        this.translationCache.sourceHash = previousState.cacheSourceHash;
-        this.translationCache.analyses = previousState.cacheAnalyses;
-        throw error;
-      }
-      if (replacement.replaced) {
-        try {
-          await syncEditedMarkdown(this.attachment, this.parse.markdown);
-        } catch (error) {
-          Zotero.logError(error);
-        }
-      }
-      try {
-        await saveTranslationCache(this.attachment, this.translationCache);
-      } catch (error) {
-        Zotero.logError(error);
-        notifyTranslationCacheChanged(this.attachment.key);
-      }
-      await this.queueRender();
-    }
-
     closeTranslationWindow() {
       this.translationRequest?.abort?.();
       this.translationRequest = null;
@@ -2881,7 +2726,7 @@ Do not return prose or Markdown fences outside the JSON object.`;
     let translationError = false;
     let editButton = null;
     let saveButton = null;
-    if (options.onSaveSource || options.onSaveTranslation) {
+    if (options.onSaveTranslation) {
       editButton = createIconAction(doc, "编辑译文", TOOL_ICONS.edit, () => {
         toggleEditing();
       });
@@ -3013,23 +2858,21 @@ Do not return prose or Markdown fences outside the JSON object.`;
         renderCurrentView();
         return;
       }
-      if (translationLoading || saving) {
+      if (showingSource || translationLoading || saving) {
         return;
       }
-      const saver = showingSource
-        ? options.onSaveSource
-        : options.onSaveTranslation;
+      const saver = options.onSaveTranslation;
       if (!saver) {
         return;
       }
       editing = true;
       editDirty = false;
-      editOriginalValue = showingSource ? sourceMarkdown : translationCopyText;
+      editOriginalValue = translationCopyText;
       copyText = editOriginalValue;
-      title.textContent = showingSource ? "编辑原文" : "编辑译文";
+      title.textContent = "编辑译文";
       popover.classList.remove("is-error");
       frameView.setEditor(editOriginalValue, {
-        label: showingSource ? "编辑段落原文" : "编辑段落译文",
+        label: "编辑段落译文",
         onInput: (value) => {
           copyText = value;
           editDirty = value !== editOriginalValue;
@@ -3045,13 +2888,10 @@ Do not return prose or Markdown fences outside the JSON object.`;
       }
       const nextMarkdown = String(frameView.getEditorValue() || "").trim();
       if (!nextMarkdown) {
-        showToast(doc, showingSource ? "原文不能为空。" : "译文不能为空。");
+        showToast(doc, "译文不能为空。");
         return;
       }
-      const savingSource = showingSource;
-      const saver = savingSource
-        ? options.onSaveSource
-        : options.onSaveTranslation;
+      const saver = options.onSaveTranslation;
       if (!saver) {
         return;
       }
@@ -3059,22 +2899,15 @@ Do not return prose or Markdown fences outside the JSON object.`;
       updateActionState();
       try {
         await saver(nextMarkdown);
-        if (savingSource) {
-          sourceMarkdown = nextMarkdown;
-          if (translationCopyText) {
-            translationTitle = "段落翻译（原文已修改，译文待更新）";
-          }
-        } else {
-          translationCopyText = nextMarkdown;
-          translationContent = renderMarkdown(nextMarkdown);
-          translationHTML = true;
-          translationLoading = false;
-          translationError = false;
-          translationTitle = "段落翻译（人工编辑）";
-        }
+        translationCopyText = nextMarkdown;
+        translationContent = renderMarkdown(nextMarkdown);
+        translationHTML = true;
+        translationLoading = false;
+        translationError = false;
+        translationTitle = "段落翻译（人工编辑）";
         editing = false;
         editDirty = false;
-        showToast(doc, savingSource ? "原文已保存。" : "译文已保存。");
+        showToast(doc, "译文已保存。");
         renderCurrentView();
       } catch (error) {
         Zotero.logError(error);
@@ -3110,24 +2943,18 @@ Do not return prose or Markdown fences outside the JSON object.`;
         sourceButton.disabled = locked;
       }
       if (editButton) {
-        const label = editing
-          ? "取消编辑"
-          : showingSource
-            ? "编辑原文"
-            : "编辑译文";
+        const label = editing ? "取消编辑" : "编辑译文";
         editButton.title = label;
         editButton.setAttribute("aria-label", label);
         editButton.setAttribute("aria-pressed", String(editing));
+        editButton.hidden = showingSource;
         editButton.disabled = translationLoading || saving;
       }
       if (saveButton) {
-        const label = saving
-          ? "正在保存..."
-          : showingSource
-            ? "保存原文"
-            : "保存译文";
+        const label = saving ? "正在保存..." : "保存译文";
         saveButton.title = label;
         saveButton.setAttribute("aria-label", label);
+        saveButton.hidden = showingSource;
         saveButton.disabled = !editing || !editDirty || saving;
         saveButton.setAttribute("aria-busy", String(saving));
       }
@@ -3977,7 +3804,6 @@ Do not return prose or Markdown fences outside the JSON object.`;
             findCachedTranslation,
             storeCachedTranslation,
             migrateLegacyTranslations,
-            replaceBlockMarkdown,
             createTranslationBatches,
             parseBatchTranslations,
             parseJSONPayload,

@@ -650,7 +650,7 @@ export async function handleGetCollectionItems(
 // tool was removed. Use get_collections(parentCollection) or, to walk the
 // library a level at a time, get_collection_items.
 
-// REMOVED: handleGetPDFContent - replaced by unified get_content tool
+// REMOVED: handleGetPDFContent - attachment text is read with get_attachment_text
 
 
 // REMOVED: handleSearchAnnotations - replaced by SmartAnnotationExtractor in MCP tools
@@ -836,9 +836,9 @@ export async function handleGetItemAnnotations(
 
 // REMOVED: handleGetAnnotationsBatch - replaced by SmartAnnotationExtractor in MCP tools
 
-// REMOVED: handleGetItemFulltext - replaced by unified get_content tool
+// REMOVED: handleGetItemFulltext - indexed bodies are read with get_document_chunks
 
-// REMOVED: handleGetAttachmentContent - replaced by unified get_content tool
+// REMOVED: handleGetAttachmentContent - attachments are read with get_attachment_text
 
 /**
  * Handles GET /search/fulltext endpoint.

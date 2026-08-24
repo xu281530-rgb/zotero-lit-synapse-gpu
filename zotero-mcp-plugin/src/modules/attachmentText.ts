@@ -2,7 +2,7 @@
  * `get_attachment_text`: the text of ONE attachment, named by source, served
  * in windows.
  *
- * This replaces the item-level half of the old `get_content`, which took an
+ * This replaces the item-level half of the removed catch-all content tool, which took an
  * itemKey and returned the abstract, the notes, every attachment's text and a
  * webpage snapshot fused into one object. Three separate problems came out of
  * that shape:

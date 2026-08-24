@@ -54,6 +54,25 @@ function loadMarkReaderTestExports() {
     ),
     "utf8",
   );
+  for (const removedSourceEditor of [
+    "saveBlockSource",
+    "replaceBlockMarkdown",
+    "syncEditedMarkdown",
+    "onSaveSource",
+    "编辑原文",
+    "保存原文",
+  ]) {
+    assert.ok(
+      !source.includes(removedSourceEditor),
+      `PDF Reader still exposes source editing through ${removedSourceEditor}`,
+    );
+  }
+  assert.ok(
+    source.includes("saveBlockTranslation") &&
+      source.includes("saveTranslationCache") &&
+      source.includes("translation-cache.json"),
+    "translation editing and translation-cache.json persistence must remain",
+  );
   const context = {
     console,
     // The file gates its internals behind this flag.

@@ -767,7 +767,7 @@ test("dual-index operations are not described as semantic-only", async () => {
   );
   assert.doesNotMatch(
     serverSource,
-    /search_fulltext needs the semantic index|Enable semantic search in Zotero MCP Plugin preferences/i,
+    /search_fulltext needs the semantic index/i,
   );
   assert.doesNotMatch(
     bodyStateSource,
