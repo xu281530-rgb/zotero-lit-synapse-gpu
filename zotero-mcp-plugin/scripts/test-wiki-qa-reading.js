@@ -148,7 +148,8 @@ embeddingService.embed = async () => ({ embedding: new Float32Array([1, 0]) });
 const dbPath = path.join(tempDir, "wiki.sqlite");
 const sqlite = new DatabaseSync(dbPath);
 sqlite.exec("PRAGMA foreign_keys = ON");
-const store = new WikiStore(adapt(sqlite));
+const database = adapt(sqlite);
+const store = new WikiStore(database);
 await store.initialize();
 const service = new WikiService(store);
 
@@ -700,7 +701,91 @@ block("a full-text read inherits the chunks and the note the questions left", as
   assert.equal(synthesised.finalSynthesis, true);
 });
 
-block("only after the whole-Wiki review does the write-up start", async () => {
+block("failed final concept writes preserve staged data until retry", async () => {
+  await service.recordConcepts({
+    libraryID: 1,
+    itemKey: "PAPRTHRE",
+    concepts: [
+      {
+        primaryTerm: { en: "melt-pool depth" },
+        sources: [{ itemKey: "PAPRTHRE" }],
+      },
+    ],
+  });
+
+  await assert.rejects(
+    () =>
+      service.recordConcepts({
+        libraryID: 1,
+        itemKey: "PAPRTHRE",
+        final: true,
+        concepts: [],
+        confirmWrite: async () => {
+          throw new Error("user cancelled concept confirmation");
+        },
+      }),
+    /user cancelled concept confirmation/u,
+  );
+  const sessions = await store.readingSessions();
+  const assertConceptRetryState = async () => {
+    const session = await sessions.openForItem(1, "PAPRTHRE");
+    assert.equal(session.stagedConcepts.length, 1);
+    assert.equal(session.conceptsRecordedAt, null);
+  };
+  await assertConceptRetryState();
+
+  const getByLibraryAndKeyAsync = fake.Zotero.Items.getByLibraryAndKeyAsync;
+  fake.Zotero.Items.getByLibraryAndKeyAsync = async () => {
+    throw new Error("concept source validation failed");
+  };
+  try {
+    await assert.rejects(
+      () =>
+        service.recordConcepts({
+          libraryID: 1,
+          itemKey: "PAPRTHRE",
+          final: true,
+          concepts: [],
+          confirmWrite: async () => {},
+        }),
+      /concept source validation failed/u,
+    );
+  } finally {
+    fake.Zotero.Items.getByLibraryAndKeyAsync = getByLibraryAndKeyAsync;
+  }
+  await assertConceptRetryState();
+
+  const queryAsync = database.queryAsync;
+  database.queryAsync = async (sql, params) => {
+    if (/^\s*INSERT INTO wiki_concepts\b/iu.test(sql)) {
+      throw new Error("concept database write failed");
+    }
+    return queryAsync(sql, params);
+  };
+  try {
+    await assert.rejects(
+      () =>
+        service.recordConcepts({
+          libraryID: 1,
+          itemKey: "PAPRTHRE",
+          final: true,
+          concepts: [],
+          confirmWrite: async () => {},
+        }),
+      /concept database write failed/u,
+    );
+  } finally {
+    database.queryAsync = queryAsync;
+  }
+  await assertConceptRetryState();
+  assert.equal(
+    sqlite
+      .prepare("SELECT COUNT(*) AS count FROM wiki_concepts WHERE canonical_name = ?")
+      .get("melt-pool depth").count,
+    0,
+    "the failed concept transaction must leave no partial concept row",
+  );
+
   await service.recordConcepts({
     libraryID: 1,
     itemKey: "PAPRTHRE",
@@ -709,7 +794,19 @@ block("only after the whole-Wiki review does the write-up start", async () => {
     noConceptsReason: "nothing beyond what the library already holds",
     confirmWrite: async () => {},
   });
+  const afterRetry = await sessions.openForItem(1, "PAPRTHRE");
+  assert.equal(afterRetry.stagedConcepts.length, 0);
+  assert.notEqual(afterRetry.conceptsRecordedAt, null);
+  assert.equal(
+    sqlite
+      .prepare("SELECT COUNT(*) AS count FROM wiki_concepts WHERE canonical_name = ?")
+      .get("melt-pool depth").count,
+    1,
+    "a successful retry writes the staged concept exactly once",
+  );
+});
 
+block("only after the whole-Wiki review does the write-up start", async () => {
   await assert.rejects(
     () =>
       service.prepareUpdate({

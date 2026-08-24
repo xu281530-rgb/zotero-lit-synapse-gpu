@@ -993,31 +993,24 @@ export class WikiReadingSessions {
     return staged.length;
   }
 
-  /** Take everything staged and empty the buffer, in one step. */
-  async drainStagedConcepts(sessionId: number): Promise<unknown[]> {
+  /** Read everything staged without consuming it. */
+  async readStagedConcepts(sessionId: number): Promise<unknown[]> {
     const session = await this.get(sessionId);
-    const staged = session?.stagedConcepts ?? [];
-    if (staged.length) {
-      await this.db.queryAsync(
-        `UPDATE wiki_reading_sessions
-         SET staged_concepts = '', updated_at = ?
-         WHERE session_id = ?`,
-        [Date.now(), sessionId],
-      );
-    }
-    return staged;
+    return session?.stagedConcepts ?? [];
   }
 
-  async recordConceptSubmission(
+  /** Consume staged concepts and record the final pass in one database write. */
+  async completeConceptSubmission(
     sessionId: number,
     options: { final: boolean },
   ): Promise<void> {
     if (!options.final) return;
+    const now = Date.now();
     await this.db.queryAsync(
       `UPDATE wiki_reading_sessions
-       SET concepts_recorded_at = ?, updated_at = ?
+       SET staged_concepts = '', concepts_recorded_at = ?, updated_at = ?
        WHERE session_id = ?`,
-      [Date.now(), Date.now(), sessionId],
+      [now, now, sessionId],
     );
   }
 

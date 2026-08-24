@@ -2541,7 +2541,7 @@ export class WikiService {
 
     // ---- The write -------------------------------------------------------
     const staged = open
-      ? ((await sessions.drainStagedConcepts(open.sessionId)) as Array<
+      ? ((await sessions.readStagedConcepts(open.sessionId)) as Array<
           WikiConceptEntityInput & { itemKey?: string }
         >)
       : [];
@@ -2600,12 +2600,15 @@ export class WikiService {
     const result = await library.record({
       libraryID: options.libraryID,
       entities: prepared,
+      ...(open
+        ? {
+            onRecorded: () =>
+              sessions.completeConceptSubmission(open.sessionId, {
+                final: options.final === true,
+              }),
+          }
+        : {}),
     });
-    if (open) {
-      await sessions.recordConceptSubmission(open.sessionId, {
-        final: options.final === true,
-      });
-    }
     return {
       ...result,
       written: true,
