@@ -702,6 +702,36 @@ block("a full-text read inherits the chunks and the note the questions left", as
 });
 
 block("failed final concept writes preserve staged data until retry", async () => {
+  const sessions = await store.readingSessions();
+  await assert.rejects(
+    () =>
+      service.recordConcepts({
+        libraryID: 1,
+        itemKey: "PAPRTHRE",
+        concepts: [{ primaryTerm: { abbr: "MPD" } }],
+      }),
+    /staged concept batch is invalid.*Nothing was staged/iu,
+  );
+  await assert.rejects(
+    () =>
+      service.recordConcepts({
+        libraryID: 1,
+        itemKey: "PAPRTHRE",
+        concepts: [
+          {
+            primaryTerm: { en: "invalid staged source" },
+            sources: [{ itemKey: "NOTFOUND" }],
+          },
+        ],
+      }),
+    /NOTFOUND is not a Zotero document.*Nothing was staged/iu,
+  );
+  assert.equal(
+    (await sessions.openForItem(1, "PAPRTHRE")).stagedConcepts.length,
+    0,
+    "invalid staging is atomic and a corrected call can retry directly",
+  );
+
   await service.recordConcepts({
     libraryID: 1,
     itemKey: "PAPRTHRE",
@@ -726,7 +756,6 @@ block("failed final concept writes preserve staged data until retry", async () =
       }),
     /user cancelled concept confirmation/u,
   );
-  const sessions = await store.readingSessions();
   const assertConceptRetryState = async () => {
     const session = await sessions.openForItem(1, "PAPRTHRE");
     assert.equal(session.stagedConcepts.length, 1);

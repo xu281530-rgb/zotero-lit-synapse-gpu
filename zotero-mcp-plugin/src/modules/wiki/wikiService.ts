@@ -2502,16 +2502,34 @@ export class WikiService {
 
     // ---- Staging: no write, no prompt ------------------------------------
     if (options.final !== true && open) {
-      const warnings = this.inspectConceptShapes(entities);
+      const stagedEntities = entities.map((entity) => ({
+        ...entity,
+        itemKey: defaultItemKey,
+      }));
+      const shapeFailures = this.inspectConceptShapes(stagedEntities);
+      const stagedPreparation = await this.prepareConceptEntities(
+        options.libraryID,
+        stagedEntities,
+        defaultItemKey,
+      );
+      const stagingFailures = [
+        ...shapeFailures,
+        ...stagedPreparation.sourceValidationFailures,
+      ];
+      if (stagingFailures.length) {
+        throw new Error(
+          `The staged concept batch is invalid: ${stagingFailures.join(" ")} Nothing was staged; correct the batch and retry.`,
+        );
+      }
       const totalStaged = await sessions.stageConcepts(
         open.sessionId,
-        entities.map((entity) => ({ ...entity, itemKey: defaultItemKey })),
+        stagedEntities,
       );
       return {
         staged: entities.length,
         totalStaged,
         written: false,
-        warnings,
+        warnings: stagedPreparation.warnings,
         readingSession: {
           sessionId: open.sessionId,
           itemKey: open.itemKey,
@@ -2561,57 +2579,21 @@ export class WikiService {
           `${shapeFailures.join(" ")} Nothing was written or marked complete, and all staged concepts remain staged.`,
       );
     }
-    const warnings: string[] = [];
-    const sourceValidationFailures: string[] = [];
-    const prepared: Array<
-      WikiConceptEntityInput & { sources?: WikiPreparedSource[] }
-    > = [];
-    for (const entity of combined) {
-      // A staged entity remembers which paper it was staged for, so a stretch
-      // read before the reader moved on still cites the right document.
-      const itemKey =
-        String((entity as { itemKey?: string }).itemKey ?? "").trim() ||
-        defaultItemKey;
-      prepared.push({
-        ...entity,
-        sources: await this.prepareTermSources(
-          options.libraryID,
-          entity.sources,
-          itemKey,
-          warnings,
-          sourceValidationFailures,
-        ),
-        primaryTerm: entity.primaryTerm
-          ? {
-              ...entity.primaryTerm,
-              sources: await this.prepareTermSources(
-                options.libraryID,
-                entity.primaryTerm.sources,
-                "",
-                warnings,
-                sourceValidationFailures,
-              ),
-            }
-          : undefined,
-        terms: await Promise.all(
-          (entity.terms ?? []).map(async (term) => ({
-            ...term,
-            sources: await this.prepareTermSources(
-              options.libraryID,
-              term.sources,
-              "",
-              warnings,
-              sourceValidationFailures,
-            ),
-          })),
-        ),
-      });
-    }
-    if (options.final === true && open && sourceValidationFailures.length) {
+    const preparation = await this.prepareConceptEntities(
+      options.libraryID,
+      combined,
+      defaultItemKey,
+    );
+    if (
+      options.final === true &&
+      open &&
+      preparation.sourceValidationFailures.length
+    ) {
       throw new Error(
-        `${sourceValidationFailures.join(" ")} Nothing was written or marked complete, and all staged concepts remain staged.`,
+        `${preparation.sourceValidationFailures.join(" ")} Nothing was written or marked complete, and all staged concepts remain staged.`,
       );
     }
+    const { prepared, warnings } = preparation;
     if (prepared.length) await options.confirmWrite?.(prepared.length);
     const library = await this.store.concepts();
     const result = await library.record({
@@ -2646,12 +2628,10 @@ export class WikiService {
   }
 
   /**
-   * Check staged entities for the one shape the store will refuse.
+   * Check entities for shapes the concept store cannot persist.
    *
-   * Staging must not silently accept a term the final pass will drop, or the
-   * model learns about the abbreviation rule at the end of the paper instead
-   * of at the point it wrote the offending term. Nothing is stored or
-   * rejected here - the warnings just travel back with the staging reply.
+   * Staging rejects these before it changes the session, so a malformed
+   * candidate cannot become an entry that every final retry is forced to read.
    */
   private inspectConceptShapes(entities: WikiConceptEntityInput[]): string[] {
     const warnings: string[] = [];
@@ -2673,6 +2653,64 @@ export class WikiService {
       }
     }
     return warnings;
+  }
+
+  private async prepareConceptEntities(
+    libraryID: number,
+    entities: Array<WikiConceptEntityInput & { itemKey?: string }>,
+    defaultItemKey: string,
+  ): Promise<{
+    prepared: Array<
+      WikiConceptEntityInput & { sources?: WikiPreparedSource[] }
+    >;
+    warnings: string[];
+    sourceValidationFailures: string[];
+  }> {
+    const warnings: string[] = [];
+    const sourceValidationFailures: string[] = [];
+    const prepared: Array<
+      WikiConceptEntityInput & { sources?: WikiPreparedSource[] }
+    > = [];
+    for (const entity of entities) {
+      // A staged entity remembers which paper it was staged for, so a stretch
+      // read before the reader moved on still cites the right document.
+      const itemKey = String(entity.itemKey ?? "").trim() || defaultItemKey;
+      prepared.push({
+        ...entity,
+        sources: await this.prepareTermSources(
+          libraryID,
+          entity.sources,
+          itemKey,
+          warnings,
+          sourceValidationFailures,
+        ),
+        primaryTerm: entity.primaryTerm
+          ? {
+              ...entity.primaryTerm,
+              sources: await this.prepareTermSources(
+                libraryID,
+                entity.primaryTerm.sources,
+                "",
+                warnings,
+                sourceValidationFailures,
+              ),
+            }
+          : undefined,
+        terms: await Promise.all(
+          (entity.terms ?? []).map(async (term) => ({
+            ...term,
+            sources: await this.prepareTermSources(
+              libraryID,
+              term.sources,
+              "",
+              warnings,
+              sourceValidationFailures,
+            ),
+          })),
+        ),
+      });
+    }
+    return { prepared, warnings, sourceValidationFailures };
   }
 
   /**
