@@ -1130,7 +1130,7 @@ async function onMainWindowLoad(win: _ZoteroTypes.MainWindow): Promise<void> {
   // Register context menu for search indexing
   registerSemanticIndexMenu(win);
 
-  // Persistent top-left entry for the long-term LLM Wiki.
+  // Persistent toolbar entry for the long-term LLM Wiki.
   registerWikiPanel(win);
 
   // Register search index status column

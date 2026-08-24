@@ -247,7 +247,9 @@ const { WikiStore, resetWikiStore } = await import(
 const { resetWikiService } = await import(
   "../src/modules/wiki/wikiService.ts"
 );
-const { openWikiPanel } = await import("../src/modules/wiki/wikiPanel.ts");
+const { openWikiPanel, registerWikiPanel } = await import(
+  "../src/modules/wiki/wikiPanel.ts"
+);
 const { hashWikiText } = await import(
   "../src/modules/wiki/wikiCanonicalizer.ts"
 );
@@ -282,6 +284,28 @@ function createWindow() {
       close() {},
     },
   };
+}
+
+// --- The toolbar entry follows the plugin load order -----------------------
+
+{
+  const win = createWindow();
+  const toolbar = createNode("toolbar");
+  for (const id of ["other-plugin-one", "other-plugin-two"]) {
+    const button = createNode("toolbarbutton");
+    button.id = id;
+    toolbar.appendChild(button);
+  }
+  win.document.getElementById = (id) =>
+    id === "zotero-toolbar" ? toolbar : null;
+
+  registerWikiPanel(win);
+
+  assert.deepEqual(
+    toolbar.children.map((child) => child.id),
+    ["other-plugin-one", "other-plugin-two", "zotero-mcp-wiki-button"],
+    "the MCP icon is appended after plugins loaded before it",
+  );
 }
 
 async function seed(sqlite) {

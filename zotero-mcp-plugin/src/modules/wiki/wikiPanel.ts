@@ -408,7 +408,9 @@ export function registerWikiPanel(win: _ZoteroTypes.MainWindow): void {
   );
   entry.setAttribute("tooltiptext", "打开 LLM 知识库");
   entry.addEventListener("click", () => void openWikiPanel(win));
-  toolbar.insertBefore(entry, toolbar.firstChild);
+  // Plugin buttons already registered in this toolbar keep their positions;
+  // the Wiki entry belongs after them rather than claiming the far-left slot.
+  toolbar.appendChild(entry);
 }
 
 export function unregisterWikiPanel(win: Window): void {
