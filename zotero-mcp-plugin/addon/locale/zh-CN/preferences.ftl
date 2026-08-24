@@ -206,7 +206,7 @@ pref-contact-wechat = 微信公众号：未来论文实验室
 pref-mineru-title = PDF 高精度解析（MinerU）
 pref-mineru-desc = 在把 PDF 交给向量索引和 MCP 全文工具之前，先用 MinerU 做版面还原，得到带标题层级、公式与表格的 Markdown，替代 Zotero 内置的裸文本提取。
 pref-mineru-enable-text = 启用 MinerU 解析
-pref-mineru-enable-sub = 搜索索引与 PDF 阅读共用同一份 MinerU Markdown；关闭后含 PDF 的条目不会回退生成第二份文本
+pref-mineru-enable-sub = 始终优先复用已有 Doc2X/MinerU Markdown；仅在不存在 Markdown 时，索引才以 PDFWorker 作为唯一正文兜底，不会混用两份正文
 pref-mineru-mode-label = 部署方式
 pref-mineru-mode-cloud = 云端 API（mineru.net）
 pref-mineru-mode-local = 本地 mineru-api
@@ -302,7 +302,7 @@ pref-translation-concurrency-label = 并发请求
 pref-translation-retries-label = 失败重试
 
 # Unified PDF Markdown pipeline
-pref-mineru-unified-flow = 统一流程：建立搜索索引时会先生成或复用 MinerU Markdown，再由同一份 Markdown 建立语义向量索引与正文关键词索引，并驱动 PDF 阅读、段落覆盖与翻译；无需再单独解析一次 PDF。
+pref-mineru-unified-flow = 统一流程：已有 Doc2X/MinerU Markdown 时，由同一份 Markdown 建立两类搜索索引并驱动 PDF 阅读、段落覆盖与翻译；只有不存在 Markdown 时，索引才以 PDFWorker 作为唯一正文兜底。
 
 # --- 混合检索 ---
 pref-hybrid-title = 混合检索

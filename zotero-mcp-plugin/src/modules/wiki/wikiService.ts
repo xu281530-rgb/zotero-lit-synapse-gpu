@@ -2541,7 +2541,7 @@ export class WikiService {
    * means dynamic recrystallization and not something else - rather than at
    * the moment somebody decides a topic deserves a page.
    *
-   * TWO MODES, and the difference is the whole point of 2.4.4:
+   * TWO MODES, separated by the whole-paper final pass:
    *
    *   - Without `final`, while a paper is open, the entities are STAGED. They
    *     are checked for shape and held on the reading session; nothing reaches

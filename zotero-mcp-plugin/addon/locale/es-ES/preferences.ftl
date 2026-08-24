@@ -206,7 +206,7 @@ pref-contact-wechat = WeChat: 未来论文实验室
 pref-mineru-title = High-precision PDF parsing (MinerU)
 pref-mineru-desc = Run PDFs through MinerU for layout reconstruction before they reach the vector index and the MCP full-text tools, yielding Markdown with heading structure, formulas and tables instead of Zotero's raw text extraction.
 pref-mineru-enable-text = Enable MinerU parsing
-pref-mineru-enable-sub = El indice de busqueda y la lectura de PDF comparten el mismo Markdown de MinerU; no se genera una segunda fuente de texto
+pref-mineru-enable-sub = Siempre se reutiliza el Markdown de Doc2X/MinerU existente. Solo si no existe Markdown, la indexacion usa PDFWorker como unica fuente alternativa; nunca se combinan dos textos
 pref-mineru-mode-label = Deployment
 pref-mineru-mode-cloud = Cloud API (mineru.net)
 pref-mineru-mode-local = Local mineru-api
@@ -302,7 +302,7 @@ pref-translation-concurrency-label = Solicitudes simultáneas
 pref-translation-retries-label = Reintentos tras fallos
 
 # Flujo unificado de Markdown PDF
-pref-mineru-unified-flow = Flujo unificado: al indexar se genera o reutiliza primero el Markdown de MinerU. Esa misma fuente crea el índice vectorial semántico y el índice de palabras clave del texto completo, y alimenta las capas del lector PDF y la traducción. No es necesario analizar de nuevo el PDF.
+pref-mineru-unified-flow = Flujo unificado: el Markdown de Doc2X/MinerU existente crea ambos indices de busqueda y alimenta el lector PDF y la traduccion. Solo cuando no existe Markdown, la indexacion usa PDFWorker como unica fuente alternativa.
 
 # --- Hybrid search ---
 pref-hybrid-title = Hybrid Search
