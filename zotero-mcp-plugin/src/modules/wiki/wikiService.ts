@@ -927,6 +927,14 @@ export class WikiService {
         citedChunkIdsByItem.set(itemKey, set);
       }
     }
+    // A write-off is a statement ABOUT a paper just as much as Evidence is, so
+    // it counts as this commit concerning that paper. Without this, a commit
+    // whose only business was settling the last outstanding chunk - which is
+    // exactly the commit that finishes a paper - looked to the session logic
+    // like a commit about some other paper entirely, and left the one it had
+    // just finished open.
+    for (const writeOff of writeOffs) citedKeys.add(writeOff.itemKey);
+
     const questionReading = await this.settleQuestionReading(
       input.libraryID,
       citedChunkIdsByItem,
@@ -1163,6 +1171,79 @@ export class WikiService {
     }
 
     if (coverage.complete) {
+      // Delivering every chunk is the FIRST of four conditions, and for a long
+      // time it was treated as all of them.
+      //
+      // The other three are already enforced at wiki_prepare_update - but only
+      // a commit containing CREATE_PAGE has to pass through prepare at all, so
+      // an ADD_CLAIM-only commit reached this line having answered none of
+      // them, and closed the paper as `committed` with no whole-paper
+      // synthesis, no terminology pass and no Wiki review. Checking them here
+      // as well is not redundant: this is where "committed" is actually
+      // written, and it is the only place that catches the path around the
+      // gate rather than through it.
+      //
+      // The fourth is the reason this check exists at all. A paper questions
+      // had been reading carries per-chunk Wiki debt into the full-text read
+      // when its session is promoted. Closing on coverage alone discarded it:
+      // `listPendingWiki` only looks at OPEN sessions, so the moment the
+      // session closed the outstanding chunks stopped being visible anywhere.
+      // The reading was recorded, the Wiki never learned it, and nothing was
+      // left to say so.
+      const outstanding = await sessions.pendingWikiChunks(open.sessionId);
+      const blockers: string[] = [];
+      if (open.finalSynthesisAt === null) {
+        blockers.push(
+          "the reading note has not been rewritten as one account of the complete paper — call " +
+            "wiki_update_reading_note with finalSynthesis true",
+        );
+      }
+      if (open.conceptsRecordedAt === null) {
+        blockers.push(
+          "the terminology this paper established has not been reviewed as a whole — call " +
+            "wiki_record_concepts once with final true, an empty list and a reason if it introduced " +
+            "nothing new",
+        );
+      }
+      if (open.wikiReviewAt === null) {
+        blockers.push(
+          "the whole Wiki has not been reviewed against the finished paper — call " +
+            "wiki_prepare_update with wikiReview answering pages, claims, evidence, concepts and " +
+            "relations",
+        );
+      }
+      if (outstanding.length) {
+        blockers.push(
+          `chunk(s) ${outstanding.map((chunk) => chunk.chunkId).join(", ")} were read while answering ` +
+            "questions and have still not reached the Wiki — settle each one, with Evidence quoting it " +
+            "or a SKIP action naming it and saying what already covers it",
+        );
+      }
+
+      if (blockers.length) {
+        // The write stands and the paper stays open. Everything committed here
+        // is durable; what is refused is the CLAIM THAT THE PAPER IS FINISHED.
+        await sessions.markReading(open.sessionId);
+        return {
+          ...base,
+          state: "reading",
+          released: false,
+          ...(outstanding.length
+            ? {
+                outstandingQuestionChunkIds: outstanding.map(
+                  (chunk) => chunk.chunkId,
+                ),
+              }
+            : {}),
+          note:
+            `Every chunk of ${open.itemKey} has been delivered and these claims are committed, but the ` +
+            `paper is not finished, so it stays open and keeps the library. Outstanding: ` +
+            blockers.map((line, index) => `(${index + 1}) ${line}`).join("; ") +
+            `. Do those, then commit again — the last commit closes it. To abandon it instead, use ` +
+            `wiki_finish_reading with itemKey "${open.itemKey}" and outcome "skipped".`,
+        };
+      }
+
       await sessions.close(open.sessionId, "committed");
       // The note is kept permanently, so it becomes this paper's long-term
       // reading memory rather than scaffolding: a later re-read continues it,
@@ -1172,7 +1253,7 @@ export class WikiService {
         ...base,
         state: "committed",
         released: true,
-        note: `Paper ${open.itemKey} was fully read and is now closed. Its reading note stays on the Zotero item, marked completed. The library is free for the next paper.`,
+        note: `Paper ${open.itemKey} was read in full, synthesised, its terminology and the Wiki reviewed, and every chunk it owed the Wiki settled. It is now closed. Its reading note stays on the Zotero item, marked completed. The library is free for the next paper.`,
       };
     }
 
@@ -1496,18 +1577,22 @@ export class WikiService {
       body = submitted;
     }
 
+    // Body before ledger, for the same reason as the question path above: an
+    // integration recorded against a note that never saved would mean the
+    // batch is never offered again and what it said is gone. Here it also
+    // guards the whole-paper synthesis, which is what `paper_reviewed` rests
+    // on - recording it before the synthesised note is on disk would let the
+    // deepest claim in the system be backed by a file that does not exist.
+    const status = finalSynthesis ? "synthesized" : "reading";
+    const written = await this.writeNote(item, session, body, status);
+
     await sessions.recordIntegration(session.sessionId, {
       unchanged,
       integratedChunks: coverage.deliveredChunks,
       finalSynthesis,
     });
     const refreshed = (await sessions.get(session.sessionId)) ?? session;
-    const written = await this.writeNote(
-      item,
-      refreshed,
-      body,
-      finalSynthesis ? "synthesized" : "reading",
-    );
+    await this.refreshNoteHeader(item, refreshed, body, status);
 
     return {
       itemKey: session.itemKey,
@@ -1693,6 +1778,25 @@ export class WikiService {
     assertChunkCitations(submitted);
     assertNoNoteRegression(previousBody, submitted, { finalSynthesis: false });
 
+    // THE ORDER HERE IS THE POINT, and it used to be the other way round.
+    //
+    // A chunk counts as read because its content reached the reading note. The
+    // ledger was being written first, so a note write that failed - a full
+    // disk, a locked attachment, a Zotero API error - left the chunk recorded
+    // as read, counted towards coverage and owing the Wiki, while the sentence
+    // that was supposed to preserve what it said existed nowhere. The reader
+    // would never be handed that text again, because the ledger says it has
+    // been read.
+    //
+    // The two stores cannot be made atomic - one is a file, the other is a
+    // database - so the order is chosen for which way a failure leans. Body
+    // first means a crash in between UNDER-counts: the note holds text the
+    // ledger does not credit, so the chunk is offered again and the model
+    // rewrites a note that already covers it. That is wasted work. Ledger
+    // first OVER-counts, which is silent, permanent data loss.
+    const written = await this.writeNote(item, session, submitted, "reading");
+
+    // Durable. Only now is the reading real.
     const booked = await sessions.recordReadChunkIds(
       session.sessionId,
       options.readChunkIds,
@@ -1705,7 +1809,12 @@ export class WikiService {
       finalSynthesis: false,
     });
     const refreshed = (await sessions.get(session.sessionId)) ?? session;
-    const written = await this.writeNote(item, refreshed, submitted, "reading");
+    // The machine block was rendered from the ledger as it stood BEFORE the
+    // booking, so it now understates what has been read. Re-render it. This is
+    // deliberately best-effort: the body is safe and the ledger is right, and
+    // the block is derived from the ledger on every save, so a failure here
+    // costs a stale header until the next write rather than anything real.
+    await this.refreshNoteHeader(item, refreshed, submitted, "reading");
 
     // The debt is booked by `recordReadChunkIds` itself now - every newly read
     // chunk is written with owes_wiki set - so there is no separate counter to
@@ -1971,6 +2080,37 @@ export class WikiService {
       status,
       bodyChars: stripMachineBlock(body).length,
     };
+  }
+
+  /**
+   * Re-render the machine block after the ledger has moved on.
+   *
+   * The note is written before the ledger is updated, so the block it carries
+   * describes the reading as it stood one step earlier. This brings it level.
+   *
+   * Best-effort ON PURPOSE, and it is the one place in this file where
+   * swallowing an error is right: by the time it runs, the two things that
+   * carry meaning are already safe - the model's text is on disk and the
+   * ledger says what was read - and the block is regenerated from that same
+   * ledger on every subsequent save. Turning a stale header into a thrown
+   * error would fail a call whose real work had entirely succeeded, and the
+   * caller's only sensible response would be to repeat work that is done.
+   */
+  private async refreshNoteHeader(
+    item: any,
+    session: WikiReadingSessionRecord,
+    body: string,
+    status: WikiReadingNoteStatus,
+  ): Promise<void> {
+    try {
+      await this.writeNote(item, session, body, status);
+    } catch (error) {
+      ztoolkit?.log?.(
+        `[WikiService] reading note header for ${session.itemKey} is one step stale; ` +
+          `the body and the ledger are correct and the next save will bring it level: ${error}`,
+        "warn",
+      );
+    }
   }
 
   /**

@@ -64,6 +64,8 @@ const { parseReadingNote, formatCoverageMap } = await import(
 /** Long enough that scattered reading is visibly scattered. */
 const LONG = 80;
 const SHORT = 6;
+/** Small enough that one page finishes it, for the close-condition blocks. */
+const TINY = 8;
 
 function chunksFor(key, count, base) {
   return Array.from({ length: count }, (_, i) => ({
@@ -80,6 +82,7 @@ const indexedChunks = new Map([
   ["PAPERTWO", chunksFor("PAPERTWO", LONG, 2000)],
   ["PAPRTHRE", chunksFor("PAPRTHRE", SHORT, 3000)],
   ["ABSTONLY", chunksFor("ABSTONLY", 2, 4000)],
+  ["PAPERFIV", chunksFor("PAPERFIV", TINY, 5000)],
 ]);
 
 for (const key of indexedChunks.keys()) {
@@ -1360,6 +1363,330 @@ block("the final review is refused, and not stored, on an unfinished paper", asy
   await service.finishReading({
     libraryID: 1,
     itemKey: "PAPERTWO",
+    outcome: "skipped",
+  });
+});
+
+// =========================================================================
+// 12. A chunk is read because its content reached the note, not before
+// =========================================================================
+
+block("a note that fails to save records no reading at all", async () => {
+  const sessions = await store.readingSessions();
+  const notes = service.notes;
+  const realWrite = notes.write.bind(notes);
+
+  const body = note([
+    "Stations 2 and 3 rise linearly with the imposed gradient (chunk 2, chunk 3).",
+  ]);
+
+  notes.write = async () => {
+    throw new Error("simulated disk failure");
+  };
+  await assert.rejects(
+    () =>
+      service.updateReadingNote({
+        libraryID: 1,
+        itemKey: "PAPERFIV",
+        readChunkIds: [2, 3].map((i) => chunkId("PAPERFIV", i)),
+        domain: "physical metallurgy",
+        expertRole: "solidification specialist",
+        markdown: body,
+      }),
+    /simulated disk failure/u,
+    "the failure surfaces rather than being swallowed",
+  );
+  notes.write = realWrite;
+
+  // Nothing moved. This is the whole point: a chunk counts as read because its
+  // content reached the note, so a note that never saved cannot have made
+  // anything read - not the coverage, not the ledger, not the Wiki debt.
+  const opened = await sessions.openForItem(1, "PAPERFIV");
+  if (opened) {
+    const coverage = await sessions.coverage(opened.sessionId);
+    assert.equal(coverage.deliveredChunks, 0, "no chunk was recorded as read");
+    assert.equal(
+      (await sessions.pendingWikiChunks(opened.sessionId)).length,
+      0,
+      "and none of them owes the Wiki anything",
+    );
+    assert.equal(opened.integratedChunks, 0);
+  }
+
+  // Retrying the same call once the disk is healthy just works.
+  const retried = await service.updateReadingNote({
+    libraryID: 1,
+    itemKey: "PAPERFIV",
+    readChunkIds: [2, 3].map((i) => chunkId("PAPERFIV", i)),
+    domain: "physical metallurgy",
+    expertRole: "solidification specialist",
+    markdown: body,
+  });
+  assert.deepEqual(retried.reading.newChunks, [2, 3]);
+  assert.deepEqual(retried.wikiDebt.chunkIndexes, [2, 3]);
+
+  // And the content really is on disk, not merely reported as saved.
+  const raw = await noteOnDisk("PAPERFIV");
+  assert.match(parseReadingNote(raw).body, /chunk 2, chunk 3/u);
+  const after = await sessions.openForItem(1, "PAPERFIV");
+  assert.equal((await sessions.coverage(after.sessionId)).deliveredChunks, 2);
+});
+
+block("a full-text integration that fails to save records nothing either", async () => {
+  const sessions = await store.readingSessions();
+  const notes = service.notes;
+  const realWrite = notes.write.bind(notes);
+
+  // Write up chunk 2 but deliberately NOT chunk 3: the next block is about
+  // that leftover surviving the promotion to a full-text read.
+  await writeUp({
+    title: "Linear rise",
+    claimText: "Depth rises linearly with the imposed gradient early on.",
+    evidence: [evidenceFrom("PAPERFIV", 2)],
+    settle: false,
+  });
+
+  await service.buildFromPaper({
+    libraryID: 1,
+    userRequested: true,
+    itemKey: "PAPERFIV",
+  });
+  await service.setReadingExpert({
+    libraryID: 1,
+    itemKey: "PAPERFIV",
+    persona:
+      "A solidification metallurgist reading this paper end to end to establish the depth response over the whole traverse.",
+    focus: ["the depth response", "the gradient range covered"],
+  });
+  const page = await service.buildFromPaper({
+    libraryID: 1,
+    userRequested: true,
+    itemKey: "PAPERFIV",
+    limit: TINY,
+  });
+  assert.equal(page.pagination.coverageComplete, true);
+
+  const session = await sessions.openForItem(1, "PAPERFIV");
+  const integratedBefore = session.integratedChunks;
+
+  const whole = note([
+    "Stations 2 and 3 rise linearly with the imposed gradient (chunk 2, chunk 3).",
+    "Across the whole traverse the rise continues without a plateau, and the paper reports no departure from it (chunk 0, chunk 1, chunk 4, chunk 5, chunk 6, chunk 7).",
+  ]);
+  notes.write = async () => {
+    throw new Error("simulated disk failure");
+  };
+  await assert.rejects(
+    () =>
+      service.updateReadingNote({
+        libraryID: 1,
+        itemKey: "PAPERFIV",
+        finalSynthesis: true,
+        markdown: whole,
+      }),
+    /simulated disk failure/u,
+  );
+  notes.write = realWrite;
+
+  const stillOpen = await sessions.openForItem(1, "PAPERFIV");
+  assert.equal(
+    stillOpen.finalSynthesisAt,
+    null,
+    "a synthesis recorded against a note that never saved would let paper_reviewed rest on a file that does not exist",
+  );
+  assert.equal(stillOpen.integratedChunks, integratedBefore);
+
+  const done = await service.updateReadingNote({
+    libraryID: 1,
+    itemKey: "PAPERFIV",
+    finalSynthesis: true,
+    markdown: whole,
+  });
+  assert.equal(done.finalSynthesis, true);
+  assert.match(
+    parseReadingNote(await noteOnDisk("PAPERFIV")).body,
+    /without a plateau/u,
+  );
+});
+
+// =========================================================================
+// 13. A paper is not finished until all four things are true
+// =========================================================================
+
+/** Set by the block below, reused by the one after it. */
+let wholeTraversePageId;
+
+block("a QA debt carried into a full-text read still has to be settled", async () => {
+  const sessions = await store.readingSessions();
+
+  // Chunk 3 was read by the question above and never written up: the Claim
+  // cited chunk 2 and the write-off covered nothing else. Check that this
+  // survived the promotion rather than being lost with the mode change.
+  const session = await sessions.openForItem(1, "PAPERFIV");
+  assert.equal(session.mode, "fulltext");
+  const owed = await sessions.pendingWikiChunks(session.sessionId);
+  assert.deepEqual(
+    owed.map((chunk) => chunk.chunkId),
+    [chunkId("PAPERFIV", 3)],
+    "the question-era debt is carried into the full-text read, not dropped",
+  );
+
+  await service.recordConcepts({
+    libraryID: 1,
+    itemKey: "PAPERFIV",
+    final: true,
+    concepts: [],
+    noConceptsReason: "nothing beyond what the concept library already holds",
+    confirmWrite: async () => {},
+  });
+
+  // Everything else done, one question-era chunk still owing.
+  const prepared = await service.prepareUpdate({
+    libraryID: 1,
+    query: "Whole traverse",
+    proposedPageTitles: ["Whole traverse"],
+    wikiReview: {
+      pages: "The Linear rise Page covers this; it is extended rather than duplicated.",
+      claims: "The early claim is confirmed by the rest of the traverse and needs no correction.",
+      evidence: "The claim is thin; the completed read attaches a second excerpt at full depth.",
+      concepts: "No terminology beyond what the concept library already holds anywhere.",
+      relations: "No relation between stored concepts is added or withdrawn by this paper.",
+    },
+  });
+  const blocked = await service.commit({
+    libraryID: 1,
+    userInitiated: true,
+    prepareToken: prepared.prepareToken,
+    actions: [
+      { action: "CREATE_PAGE", ref: "p", canonicalTitle: "Whole traverse" },
+      {
+        action: "ADD_CLAIM",
+        ref: "c",
+        pageId: "p",
+        claimText: "The depth rise continues across the whole traverse.",
+        claimType: "mechanism",
+        epistemicStatus: "provisional",
+        coverageLevel: "paper_reviewed",
+        confidence: 0.8,
+        evidence: [evidenceFrom("PAPERFIV", 6, "paper_reviewed")],
+      },
+    ],
+  });
+  assert.equal(
+    blocked.readingSession.state,
+    "reading",
+    "a paper still owing the Wiki is not finished, however completely it was read",
+  );
+  assert.equal(blocked.readingSession.released, false);
+  assert.deepEqual(blocked.readingSession.outstandingQuestionChunkIds, [
+    chunkId("PAPERFIV", 3),
+  ]);
+  assert.match(blocked.readingSession.note, /chunk\(s\) 5003/u);
+
+  // The Claim itself is committed and permanent; only the closure was refused.
+  assert.equal(blocked.committed, true);
+  wholeTraversePageId = blocked.refs.p;
+  const claim = await store.getClaim(blocked.refs.c);
+  assert.equal(claim.evidence[0].readDepth, "paper_reviewed");
+
+  // And the debt is STILL VISIBLE, which is the thing that used to be lost.
+  assert.deepEqual(
+    (await sessions.listPendingWiki(1)).map((entry) => entry.session.itemKey),
+    ["PAPERFIV"],
+  );
+
+  // Settle it, and the same commit shape now closes the paper.
+  const closing = await service.commit({
+    libraryID: 1,
+    userInitiated: true,
+    actions: [
+      {
+        action: "SKIP",
+        itemKey: "PAPERFIV",
+        chunkIds: [chunkId("PAPERFIV", 3)],
+        reason:
+          "Station 3 restates the same linear rise the Whole traverse claim already carries, at the " +
+          "same values, and adds no condition, parameter or mechanism beyond it.",
+      },
+    ],
+  });
+  assert.equal(closing.readingSession.state, "committed");
+  assert.equal(closing.readingSession.released, true);
+  assert.deepEqual(await sessions.listPendingWiki(1), []);
+});
+
+block("the three whole-paper passes are checked where committed is written", async () => {
+  const sessions = await store.readingSessions();
+
+  // Read the paper again, in full and from scratch, doing NONE of the three
+  // passes. A commit with no CREATE_PAGE never goes through
+  // wiki_prepare_update, so it answers none of that call's gates - which is
+  // why they are checked here too, where "committed" is actually written.
+  await service.buildFromPaper({
+    libraryID: 1,
+    userRequested: true,
+    itemKey: "PAPERFIV",
+  });
+  await service.setReadingExpert({
+    libraryID: 1,
+    itemKey: "PAPERFIV",
+    persona:
+      "A solidification metallurgist re-reading this paper end to end to check the traverse against the stored claims.",
+    focus: ["the depth response", "the reported uncertainty"],
+  });
+  const page = await service.buildFromPaper({
+    libraryID: 1,
+    userRequested: true,
+    itemKey: "PAPERFIV",
+    limit: TINY,
+  });
+  assert.equal(page.pagination.coverageComplete, true, "every chunk delivered");
+
+  const fresh = await sessions.openForItem(1, "PAPERFIV");
+  assert.equal(fresh.finalSynthesisAt, null);
+  assert.equal(fresh.conceptsRecordedAt, null);
+  assert.equal(fresh.wikiReviewAt, null);
+  assert.equal(
+    (await sessions.pendingWikiChunks(fresh.sessionId)).length,
+    0,
+    "and a full-text read incurs no per-chunk debt of its own",
+  );
+
+  const bypass = await service.commit({
+    libraryID: 1,
+    userInitiated: true,
+    actions: [
+      {
+        action: "ADD_CLAIM",
+        ref: "c",
+        pageId: wholeTraversePageId,
+        claimText: "The traverse shows no departure from the linear rise.",
+        claimType: "mechanism",
+        epistemicStatus: "provisional",
+        coverageLevel: "chunk_local",
+        confidence: 0.6,
+        evidence: [evidenceFrom("PAPERFIV", 5, "chunk_local")],
+      },
+    ],
+  });
+  assert.equal(bypass.committed, true, "the Claim itself is written");
+  assert.equal(
+    bypass.readingSession.state,
+    "reading",
+    "but delivery alone does not finish a paper, even on a path that skips prepare",
+  );
+  assert.equal(bypass.readingSession.released, false);
+  for (const owed of [
+    /finalSynthesis true/u,
+    /wiki_record_concepts once with final true/u,
+    /wikiReview answering pages, claims, evidence, concepts and relations/u,
+  ]) {
+    assert.match(bypass.readingSession.note, owed);
+  }
+
+  await service.finishReading({
+    libraryID: 1,
+    itemKey: "PAPERFIV",
     outcome: "skipped",
   });
 });

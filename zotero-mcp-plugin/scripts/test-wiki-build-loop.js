@@ -233,16 +233,25 @@ async function readToEnd(itemKey, limit = 20) {
     concepts: [],
     noConceptsReason: "fixture paper: no terminology beyond what is already held",
   });
+  // 2.5.1: and one pass over the Wiki itself. A commit is what CLOSES a paper,
+  // so all three passes are checked where "committed" is written, not only at
+  // wiki_prepare_update - otherwise an ADD_CLAIM-only commit, which never has
+  // to go through prepare, closes a paper that answered none of them. Reading
+  // a paper to the end therefore means doing the review too.
+  await service.prepareUpdate({
+    libraryID: 1,
+    query: itemKey,
+    proposedPageTitles: [itemKey],
+    wikiReview: WIKI_REVIEW,
+  });
   return pages;
 }
 
 /**
  * The whole-Wiki review a completed full-text read owes before the write-up.
  *
- * Sent on every prepare in these fixtures because it is ignored unless a paper
- * is actually finished, and the blocks below are about paging, sessions and
- * commits rather than about the review itself - which is tested in
- * test-wiki-qa-reading.js.
+ * The blocks below are about paging, sessions and commits rather than about
+ * the review itself, which is tested in test-wiki-qa-reading.js.
  */
 const WIKI_REVIEW = {
   pages: "The existing Page covers this subject; no new Page and no retitling needed.",
