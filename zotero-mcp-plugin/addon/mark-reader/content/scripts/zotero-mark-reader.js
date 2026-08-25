@@ -346,13 +346,16 @@ Translate the above text enclosed with <translate_input> into {{target_language}
       {
         markdown: shared.markdown || "",
         rawFiles: shared.rawFiles || shared.files || {},
+        blocks: shared.blocks || [],
+        structuredHash: shared.structuredHash || "",
+        assemblerVersion: shared.assemblerVersion || 0,
       },
       attachment,
     );
     if (!normalized.markdown.trim()) {
       throw new Error("MinerU 返回了空的 Markdown。");
     }
-    await saveParseForAttachment(attachment, normalized);
+    await removeLegacyParseCache(attachment);
     state.translationCaches.delete(attachment.key);
     notifyTranslationCacheChanged(attachment.key);
     return normalized;
@@ -1519,18 +1522,10 @@ Do not return prose or Markdown fences outside the JSON object.`;
   async function loadParseForAttachment(attachment) {
     const dir = await getAttachmentDataDir(attachment);
     const path = joinPath(dir, "parse.json");
-    let existingParse = null;
-    if (await exists(path)) {
-      try {
-        existingParse = await readJSON(path);
-      } catch (error) {
-        Zotero.logError(error);
-      }
-    }
+    await IOUtils.remove(path, { ignoreAbsent: true });
 
-    // The MCP MinerU service owns cache freshness. Indexing writes full.md and
-    // raw coordinate files there; the reader derives its overlay from exactly
-    // those files instead of maintaining a second parse source.
+    // The MCP MinerU service owns cache freshness. The reader receives the
+    // canonical Zotero attachment text plus blocks assembled from cached JSON.
     const bridge = getPrecisionBridge();
     if (bridge?.getCachedParse) {
       try {
@@ -1538,137 +1533,52 @@ Do not return prose or Markdown fences outside the JSON object.`;
         if (!shared?.markdown?.trim()) {
           return null;
         }
-        if (
-          existingParse &&
-          Number(existingParse.schemaVersion) >= PARSE_SCHEMA_VERSION &&
-          existingParse.markdown === shared.markdown
-        ) {
-          return existingParse;
-        }
         const normalized = normalizeMinerUResult(
           {
             markdown: shared.markdown,
             rawFiles: shared.rawFiles || shared.files || {},
+            blocks: shared.blocks || [],
+            structuredHash: shared.structuredHash || "",
+            assemblerVersion: shared.assemblerVersion || 0,
           },
           attachment,
         );
         if (!normalized.blocks.length) {
           return null;
         }
-        await saveParseForAttachment(attachment, normalized);
         return normalized;
       } catch (error) {
         Zotero.logError(error);
         debug(`Failed to load shared MinerU cache for ${attachment.key}: ${error}`);
-        if (existingParse) {
-          return existingParse;
-        }
         return null;
       }
     }
-
-    // Compatibility path for the rare case where the MCP core did not start.
-    if (!existingParse) {
-      const markdownPath = joinPath(dir, "full.md");
-      if (!(await exists(markdownPath))) {
-        return null;
-      }
-      try {
-        const markdown = await IOUtils.readUTF8(markdownPath);
-        const rawFiles = await readSavedRawFiles(attachment);
-        const normalized = normalizeMinerUResult({ markdown, rawFiles }, attachment);
-        if (!normalized.blocks.length) {
-          return null;
-        }
-        await saveParseForAttachment(attachment, normalized);
-        return normalized;
-      } catch (error) {
-        Zotero.logError(error);
-        return null;
-      }
-    }
-    if (Number(existingParse.schemaVersion) >= PARSE_SCHEMA_VERSION) {
-      return existingParse;
-    }
-    return (await upgradeParseForAttachment(attachment, existingParse)) || existingParse;
+    return null;
   }
 
-  async function saveParseForAttachment(attachment, parse) {
+  async function removeLegacyParseCache(attachment) {
     const dir = await getAttachmentDataDir(attachment);
-    await writeJSON(joinPath(dir, "parse.json"), parse);
-  }
-
-  async function upgradeParseForAttachment(attachment, parse) {
-    try {
-      const rawFiles = await readSavedRawFiles(attachment);
-      if (!Object.keys(rawFiles).length) {
-        return null;
-      }
-      const normalized = normalizeMinerUResult(
-        {
-          markdown: parse.markdown || "",
-          rawFiles,
-        },
-        attachment,
-      );
-      await saveParseForAttachment(attachment, normalized);
-      return normalized;
-    } catch (error) {
-      Zotero.logError(error);
-      return null;
-    }
-  }
-
-  async function readSavedRawFiles(attachment) {
-    const dir = await getAttachmentDataDir(attachment);
-    if (!IOUtils.getChildren) {
-      return {};
-    }
-    const rawFiles = {};
-    let totalBytes = 0;
-    const readDir = async (folder, prefix = "") => {
-      if (!(await exists(folder))) {
-        return;
-      }
-      for (const child of await IOUtils.getChildren(folder)) {
-        const childPath = String(child).startsWith(folder)
-          ? child
-          : joinPath(folder, child);
-        const name = baseName(childPath);
-        if (!/\.(?:md|json)$/i.test(name)) {
-          continue;
-        }
-        if (["meta.json", "parse.json", TRANSLATION_CACHE_FILE].includes(name)) {
-          continue;
-        }
-        try {
-          const stat = await IOUtils.stat(childPath);
-          const size = Number(stat.size) || 0;
-          if (size > 16 * 1024 * 1024 || totalBytes + size > 64 * 1024 * 1024) {
-            continue;
-          }
-          rawFiles[`${prefix}${name}`] = await IOUtils.readUTF8(childPath);
-          totalBytes += size;
-        } catch (error) {
-          Zotero.logError(error);
-        }
-      }
-    };
-    await readDir(dir);
-    await readDir(joinPath(dir, "raw"), "raw/");
-    return rawFiles;
+    await IOUtils.remove(joinPath(dir, "parse.json"), { ignoreAbsent: true });
   }
 
   function normalizeMinerUResult(result, attachment) {
-    const sourceHash = hashString(result.markdown || JSON.stringify(result.rawFiles));
-    const contentV2 = pickJSON(result.rawFiles, "content_list_v2");
-    const contentLegacy = pickJSON(result.rawFiles, "content_list");
-    const modelJSON = pickJSON(result.rawFiles, "model");
-    const blocks =
-      normalizeContentListV2(contentV2, attachment, sourceHash) ||
-      normalizeContentList(contentLegacy, attachment, sourceHash) ||
-      normalizeModelJSON(modelJSON, attachment, sourceHash) ||
-      [];
+    const assemblerVersion = Number(result.assemblerVersion) || 0;
+    const structuredHash =
+      result.structuredHash || hashString(JSON.stringify(result.rawFiles || {}));
+    const sourceHash = hashString(
+      `${structuredHash}|assembler:${assemblerVersion}`,
+    );
+    const blocks = Array.isArray(result.blocks)
+      ? result.blocks.map((block) =>
+          createBlock(
+            attachment,
+            block,
+            Number(block.pageIndex) || 0,
+            block.markdown || "",
+            sourceHash,
+          ),
+        )
+      : [];
 
     return {
       schemaVersion: PARSE_SCHEMA_VERSION,
@@ -1681,74 +1591,9 @@ Do not return prose or Markdown fences outside the JSON object.`;
       mineru: {
         mode: getPref("mineru.mode") || "cloud",
         modelVersion: getPref("mineru.modelVersion") || "vlm",
+        assemblerVersion,
       },
     };
-  }
-
-  function pickJSON(rawFiles, token) {
-    for (const [name, content] of Object.entries(rawFiles || {})) {
-      if (name.toLowerCase().includes(token) && name.endsWith(".json")) {
-        try {
-          return JSON.parse(content);
-        } catch (error) {
-          Zotero.logError(error);
-        }
-      }
-    }
-    return null;
-  }
-
-  function normalizeContentListV2(contentList, attachment, sourceHash) {
-    if (!Array.isArray(contentList) || !Array.isArray(contentList[0])) {
-      return null;
-    }
-    const blocks = [];
-    contentList.forEach((pageItems, pageIndex) => {
-      for (const item of pageItems || []) {
-        const markdown = markdownFromV2Item(item);
-        if (!markdown || !item.bbox) {
-          continue;
-        }
-        blocks.push(createBlock(attachment, item, pageIndex, markdown, sourceHash));
-      }
-    });
-    return blocks;
-  }
-
-  function normalizeContentList(contentList, attachment, sourceHash) {
-    if (!Array.isArray(contentList)) {
-      return null;
-    }
-    return contentList
-      .filter((item) => item?.bbox && Number.isInteger(item.page_idx))
-      .map((item) =>
-        createBlock(
-          attachment,
-          item,
-          item.page_idx,
-          markdownFromLegacyItem(item),
-          sourceHash,
-        ),
-      )
-      .filter((block) => block.markdown);
-  }
-
-  function normalizeModelJSON(modelJSON, attachment, sourceHash) {
-    if (!Array.isArray(modelJSON) || !Array.isArray(modelJSON[0])) {
-      return null;
-    }
-    const blocks = [];
-    modelJSON.forEach((items, pageIndex) => {
-      for (const item of items || []) {
-        if (!item?.bbox || !item.content) {
-          continue;
-        }
-        const markdown =
-          item.type === "equation" ? ensureDisplayMath(item.content) : item.content;
-        blocks.push(createBlock(attachment, item, pageIndex, markdown, sourceHash));
-      }
-    });
-    return blocks;
   }
 
   function createBlock(attachment, item, pageIndex, markdown, sourceHash) {
@@ -1777,203 +1622,6 @@ Do not return prose or Markdown fences outside the JSON object.`;
       return values.map((value) => Math.round(value * 1000));
     }
     return values.map((value) => Math.round(value));
-  }
-
-  function baseName(path) {
-    const parts = String(path || "").split(/[\\/]/);
-    return parts[parts.length - 1] || "";
-  }
-
-  function markdownFromV2Item(item) {
-    const content = item.content || {};
-    switch (item.type) {
-      case "title": {
-        const level = Math.max(1, Math.min(Number(content.level) || 1, 6));
-        return `${"#".repeat(level)} ${spanListToMarkdown(content.title_content).trim()}`;
-      }
-      case "paragraph":
-        return spanListToMarkdown(content.paragraph_content).trim();
-      case "equation_interline":
-        return ensureDisplayMath(
-          spanListToMarkdown(content.math_content, { rawMath: true }),
-        );
-      case "list":
-      case "index":
-        return (content.list_items || [])
-          .map((itemText) => `- ${spanListToMarkdown(itemText).trim()}`)
-          .join("\n");
-      case "code":
-        return fencedCode(
-          spanListToMarkdown(content.code_content),
-          content.code_language,
-        );
-      case "algorithm":
-        return fencedCode(spanListToMarkdown(content.algorithm_content), "");
-      case "table":
-        return [
-          spanListToMarkdown(content.table_caption).trim(),
-          spanListToMarkdown(content.table_body).trim(),
-          spanListToMarkdown(content.table_footnote).trim(),
-        ]
-          .filter(Boolean)
-          .join("\n\n");
-      case "image":
-      case "chart":
-        return [
-          spanListToMarkdown(content.image_caption || content.chart_caption).trim(),
-          spanListToMarkdown(content.image_footnote || content.chart_footnote).trim(),
-        ]
-          .filter(Boolean)
-          .join("\n\n");
-      default: {
-        const key = Object.keys(content).find((name) => name.endsWith("_content"));
-        return key ? spanListToMarkdown(content[key]).trim() : "";
-      }
-    }
-  }
-
-  function markdownFromLegacyItem(item) {
-    if (item.type === "equation") {
-      return ensureDisplayMath(item.text || item.content || "");
-    }
-    if (item.text) {
-      const text = String(item.text).trim();
-      if (item.text_level) {
-        return `${"#".repeat(Math.min(Number(item.text_level), 6))} ${text}`;
-      }
-      return text;
-    }
-    if (item.type === "list") {
-      return (item.list_items || []).map((value) => `- ${value}`).join("\n");
-    }
-    if (item.type === "code") {
-      return fencedCode(item.code_body || "", "");
-    }
-    if (item.type === "table") {
-      return [item.table_caption?.join("\n"), item.table_body, item.table_footnote?.join("\n")]
-        .filter(Boolean)
-        .join("\n\n");
-    }
-    if (item.type === "image" || item.type === "chart") {
-      return [
-        item.image_caption?.join("\n") || item.chart_caption?.join("\n"),
-        item.content,
-      ]
-        .filter(Boolean)
-        .join("\n\n");
-    }
-    return item.content || "";
-  }
-
-  function spanListToMarkdown(value, options = {}) {
-    if (!value) {
-      return "";
-    }
-    if (typeof value === "string") {
-      return value;
-    }
-    if (Array.isArray(value)) {
-      return value.map((item) => spanListToMarkdown(item, options)).join("");
-    }
-    if (typeof value === "object") {
-      const type = String(
-        value.type ||
-          value.sub_type ||
-          value.content_type ||
-          value.text_format ||
-          value.format ||
-          "",
-      ).toLowerCase();
-      if (Array.isArray(value.children)) {
-        const content = value.children
-          .map((child) => spanListToMarkdown(child, options))
-          .join("");
-        return formatSpanMarkdown(value, type, content, options);
-      }
-      const content = spanListToMarkdown(pickSpanContent(value), options);
-      return formatSpanMarkdown(value, type, content, options);
-    }
-    return String(value);
-  }
-
-  function formatSpanMarkdown(value, type, content, options) {
-    if (isMathSpan(value, type)) {
-      if (options.rawMath) {
-        return stripMathDelimiters(content);
-      }
-      if (isDisplayMathSpan(value, type, options)) {
-        return `\n\n${ensureDisplayMath(content)}\n\n`;
-      }
-      return ensureInlineMath(content);
-    }
-    if (type === "hyperlink" && value.url && content) {
-      const linkText = content.replace(/\]/g, "\\]");
-      const linkURL = String(value.url).replace(/\)/g, "%29");
-      return `[${linkText}](${linkURL})`;
-    }
-    return content;
-  }
-
-  function pickSpanContent(value) {
-    for (const key of ["content", "text", "latex", "math_content", "value"]) {
-      if (value[key] !== undefined && value[key] !== null) {
-        return value[key];
-      }
-    }
-    return "";
-  }
-
-  function isMathSpan(value, type) {
-    const textFormat = String(value.text_format || value.format || "").toLowerCase();
-    const mathType = String(value.math_type || "").toLowerCase();
-    return (
-      type.includes("equation") ||
-      type.includes("formula") ||
-      type === "math" ||
-      textFormat === "latex" ||
-      mathType === "latex"
-    );
-  }
-
-  function isDisplayMathSpan(value, type, options) {
-    const mathType = String(value.math_type || value.display || "").toLowerCase();
-    return (
-      Boolean(options.displayMath) ||
-      type.includes("interline") ||
-      type.includes("display") ||
-      mathType.includes("interline") ||
-      mathType.includes("display") ||
-      mathType.includes("block")
-    );
-  }
-
-  function ensureInlineMath(value) {
-    const text = stripMathDelimiters(value);
-    return text ? `$${text}$` : "";
-  }
-
-  function ensureDisplayMath(value) {
-    const text = stripMathDelimiters(value);
-    return text ? `$$\n${text}\n$$` : "";
-  }
-
-  function stripMathDelimiters(value) {
-    let text = String(value || "").trim();
-    if (text.startsWith("$$") && text.endsWith("$$")) {
-      text = text.slice(2, -2).trim();
-    } else if (text.startsWith("\\[") && text.endsWith("\\]")) {
-      text = text.slice(2, -2).trim();
-    } else if (text.startsWith("\\(") && text.endsWith("\\)")) {
-      text = text.slice(2, -2).trim();
-    } else if (
-      text.startsWith("$") &&
-      text.endsWith("$") &&
-      !text.startsWith("$$") &&
-      !text.endsWith("$$")
-    ) {
-      text = text.slice(1, -1).trim();
-    }
-    return text;
   }
 
   function fencedCode(code, language) {
@@ -3780,9 +3428,6 @@ Do not return prose or Markdown fences outside the JSON object.`;
     typeof process !== "undefined" && process.env.ZMR_TEST === "1"
       ? {
           __test: {
-            markdownFromV2Item,
-            markdownFromLegacyItem,
-            normalizeModelJSON,
             parseChatCompletionStreamEvent,
             parseChatCompletionText,
             renderPromptTemplate,
@@ -3804,6 +3449,7 @@ Do not return prose or Markdown fences outside the JSON object.`;
             findCachedTranslation,
             storeCachedTranslation,
             migrateLegacyTranslations,
+            normalizeMinerUResult,
             createTranslationBatches,
             parseBatchTranslations,
             parseJSONPayload,

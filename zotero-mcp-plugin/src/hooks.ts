@@ -21,6 +21,14 @@ import {
 import { getWikiService } from "./modules/wiki/wikiService";
 
 const PREF_SEMANTIC_AUTO_UPDATE = 'extensions.zotero.zotero-mcp-plugin.semantic.autoUpdate';
+const GENERATED_MINERU_MARKDOWN_TITLE =
+  /^MinerU Markdown \(([A-Z0-9]+)\)\.md$/i;
+
+function generatedMinerUSourceKey(value: any): string | null {
+  const title =
+    typeof value === "string" ? value : value?.getField?.("title") || "";
+  return String(title).match(GENERATED_MINERU_MARKDOWN_TITLE)?.[1] || null;
+}
 
 // Store notifier ID for cleanup
 let itemNotifierID: string | null = null;
@@ -329,7 +337,14 @@ export function resumeSemanticAutoUpdates(): void {
  */
 const childParentMemory = new Map<
   number,
-  { parentKey: string; libraryID: number; isAnnotation: boolean }
+  {
+    parentKey: string;
+    libraryID: number;
+    isAnnotation: boolean;
+    isPDFAttachment: boolean;
+    title: string;
+    itemKey: string;
+  }
 >();
 const CHILD_PARENT_MEMORY_LIMIT = 5000;
 
@@ -360,6 +375,9 @@ function rememberChildParent(item: any): void {
       parentKey,
       libraryID: item.libraryID,
       isAnnotation: item.isAnnotation?.() === true,
+      isPDFAttachment: item.isPDFAttachment?.() === true,
+      title: item.getField?.("title") || "",
+      itemKey: item.key || "",
     });
   } catch {
     // Remembering is best effort; extraData is the primary source.
@@ -436,11 +454,26 @@ async function queueModifiedItems(
       }
 
       const removedFromLibrary = options.trashed === true || item.deleted === true;
+      const generatedSourceKey = generatedMinerUSourceKey(item);
+      if (generatedSourceKey && removedFromLibrary) {
+        if (!getMinerUService().consumeOwnReplacementDeletion(item.key)) {
+          await getMinerUService().suppressAutomaticMarkdown(
+            item.libraryID,
+            generatedSourceKey,
+          );
+        }
+      }
       // The Markdown attachments the indexer writes itself must never re-queue
       // their own parent — but a Markdown attachment leaving or returning to
       // the library genuinely changes the parent's body text.
       if (item.attachmentContentType === "text/markdown" && !removedFromLibrary) {
         if (item.id !== undefined && trashedChildren.delete(item.id)) {
+          if (generatedSourceKey) {
+            await getMinerUService().allowAutomaticMarkdown(
+              item.libraryID,
+              generatedSourceKey,
+            );
+          }
           const restoredParent = resolveParentKeyOf(item);
           if (restoredParent) {
             scheduleAutoUpdate(restoredParent, item.libraryID, true);
@@ -481,6 +514,48 @@ async function queueModifiedItems(
 }
 
 /**
+ * Persist generated-MinerU attachment deletion/restoration intent when index
+ * scheduling is disabled or temporarily suspended.
+ */
+async function trackMinerUMarkdownLifecycle(
+  numericIds: number[],
+  event: string,
+): Promise<void> {
+  let items: any[] = [];
+  try {
+    items = Zotero.Items.get(numericIds) as any[];
+  } catch (error) {
+    ztoolkit.log(`[MCP Plugin] Could not resolve MinerU attachment lifecycle: ${error}`, "warn");
+    return;
+  }
+  for (const item of items) {
+    if (!item) continue;
+    const sourceKey = generatedMinerUSourceKey(item);
+    if (!sourceKey) continue;
+    const removed = event === "trash" || item.deleted === true;
+    if (removed) {
+      if (!getMinerUService().consumeOwnReplacementDeletion(item.key)) {
+        await getMinerUService().suppressAutomaticMarkdown(
+          item.libraryID,
+          sourceKey,
+        );
+      }
+      if (item.id !== undefined) trashedChildren.add(item.id);
+      continue;
+    }
+    const restored =
+      event === "add" ||
+      (item.id !== undefined && trashedChildren.delete(item.id));
+    if (restored) {
+      await getMinerUService().allowAutomaticMarkdown(
+        item.libraryID,
+        sourceKey,
+      );
+    }
+  }
+}
+
+/**
  * Handle permanently erased items.
  *
  * A deleted PDF is not a deleted paper. Removing vectors under the deleted
@@ -507,6 +582,8 @@ async function handleItemsDeleted(itemIds: number[], extraData: any) {
       libraryID?: number;
       parentKey: string | null;
       knownAnnotation: boolean;
+      knownPDFAttachment: boolean;
+      title: string;
     }
 
     const itemIdentities: DeletedIdentity[] = [];
@@ -530,6 +607,10 @@ async function handleItemsDeleted(itemIds: number[], extraData: any) {
         libraryID: oldData?.libraryID ?? remembered?.libraryID,
         parentKey,
         knownAnnotation: remembered?.isAnnotation === true,
+        knownPDFAttachment:
+          remembered?.isPDFAttachment === true ||
+          oldData?.contentType === "application/pdf",
+        title: oldData?.title || remembered?.title || "",
       });
     }
 
@@ -541,13 +622,24 @@ async function handleItemsDeleted(itemIds: number[], extraData: any) {
     ztoolkit.log(`[MCP Plugin] Cleaning up indexes for ${itemIdentities.length} deleted items`);
 
     for (const identity of itemIdentities) {
-      const { itemKey, libraryID, parentKey, knownAnnotation } = identity;
+      const {
+        itemKey,
+        libraryID,
+        parentKey,
+        knownAnnotation,
+        knownPDFAttachment,
+        title,
+      } = identity;
       try {
         if (!parentKey) {
           // Top-level item: its own index is the one that has to go.
           if (!itemKey) continue;
           const effectiveLibraryID =
             libraryID ?? Zotero.Libraries.userLibraryID;
+          await getMinerUService().forgetAutomaticMarkdownStateForParent(
+            effectiveLibraryID,
+            itemKey,
+          );
           try {
             const { getWikiStore } = await import("./modules/wiki/wikiStore");
             await getWikiStore().markSourceDeleted(effectiveLibraryID, itemKey);
@@ -576,6 +668,22 @@ async function handleItemsDeleted(itemIds: number[], extraData: any) {
 
         const effectiveLibraryID =
           libraryID ?? Zotero.Libraries.userLibraryID;
+        if (knownPDFAttachment && itemKey) {
+          await getMinerUService().forgetAutomaticMarkdownState(
+            effectiveLibraryID,
+            itemKey,
+          );
+        }
+        const generatedSourceKey = generatedMinerUSourceKey(title);
+        if (
+          generatedSourceKey &&
+          !getMinerUService().consumeOwnReplacementDeletion(itemKey || "")
+        ) {
+          await getMinerUService().suppressAutomaticMarkdown(
+            effectiveLibraryID,
+            generatedSourceKey,
+          );
+        }
         const owner = await Zotero.Items.getByLibraryAndKeyAsync(
           effectiveLibraryID,
           parentKey,
@@ -652,13 +760,15 @@ function registerItemNotifier() {
         return;
       }
 
-      // Don't process refresh events during auto-indexing (prevent loops)
-      if (isAutoIndexing) return;
-
       // Automatic refresh remains optional; the search infrastructure itself
       // is always available.
       const enabled = Zotero.Prefs.get(PREF_SEMANTIC_AUTO_UPDATE, true);
-      if (!enabled) return;
+      if (isAutoIndexing || !enabled) {
+        if (event === 'add' || event === 'modify' || event === 'trash') {
+          await trackMinerUMarkdownLifecycle(numericIds, event);
+        }
+        return;
+      }
 
       // add / modify / trash / delete. `modify` used to be dropped outright,
       // which is why editing a title or abstract never reached the index, and
@@ -697,6 +807,13 @@ function registerItemNotifier() {
           // because suppressing it is what keeps the new attachment invisible
           // in the items tree until a restart.
           if (item.attachmentContentType === "text/markdown") {
+            const generatedSourceKey = generatedMinerUSourceKey(item);
+            if (generatedSourceKey) {
+              await getMinerUService().allowAutomaticMarkdown(
+                item.libraryID,
+                generatedSourceKey,
+              );
+            }
             continue;
           }
           // A PDF normally lands a few seconds after its parent, long after the
@@ -1003,6 +1120,16 @@ async function onStartup() {
   ztoolkit.log("[MCP Plugin] [STARTUP] Zotero initialization promises resolved");
 
   initLocale();
+
+  try {
+    await getMinerUService().migrateLegacyCaches();
+    ztoolkit.log("[MCP Plugin] [STARTUP] MinerU structured-cache migration completed");
+  } catch (error) {
+    ztoolkit.log(
+      `[MCP Plugin] [STARTUP] MinerU cache migration failed: ${error}`,
+      "warn",
+    );
+  }
 
   clearDeprecatedContentSettings();
 

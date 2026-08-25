@@ -94,14 +94,19 @@ export async function getPDFTextFromMarkdown(
     //    模型如实报告来源，就不能把它们都叫 mineru_cache。
     let reuseOrigin: "doc2x" | "mineru_cache" | "mineru_attachment" | null =
       null;
+    let attachmentChanged = false;
     const existing = await minerUService.getMarkdownForAttachment(attachment, {
       allowParse: false,
       ignoreEnabled: true,
+      onAttachmentChanged: () => {
+        attachmentChanged = true;
+      },
       onOrigin: (origin) => {
         if (origin !== "mineru_parsed") reuseOrigin = origin;
       },
     });
     if (existing) {
+      if (attachmentChanged) await refreshParentSemanticIndex(attachment);
       const reused = markdownToIndexText(existing).trim();
       if (reused) {
         ztoolkit.log(
@@ -170,7 +175,9 @@ export async function getPDFTextFromMarkdown(
  * 路径会认为「没变化」而跳过，旧的 PDF Worker 向量就留在库里了。重新抽取时会
  * 再次命中刚写好的 MinerU 缓存，不会二次调用 MinerU。
  */
-async function refreshParentSemanticIndex(attachment: any): Promise<void> {
+export async function refreshParentSemanticIndex(
+  attachment: any,
+): Promise<void> {
   if (semanticIndexRefreshSuspended) return;
   activeSemanticIndexRefreshes += 1;
   try {

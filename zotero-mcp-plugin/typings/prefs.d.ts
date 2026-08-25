@@ -57,7 +57,6 @@ declare namespace _ZoteroTypes {
       "mineru.maxFileSizeMB": number;
       "mineru.concurrency": number;
       "mineru.blockingOnDemand": boolean;
-      "mineru.attachMarkdown": boolean;
       "llm.provider": string;
       "llm.baseURL": string;
       "llm.apiKey": string;

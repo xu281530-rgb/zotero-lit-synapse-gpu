@@ -68,7 +68,6 @@ pref("mineru.timeoutSeconds", 600);
 pref("mineru.maxFileSizeMB", 50);
 pref("mineru.concurrency", 1);
 pref("mineru.blockingOnDemand", false);
-pref("mineru.attachMarkdown", true);
 pref("llm.provider", "OpenRouter");
 pref("llm.baseURL", "https://openrouter.ai/api/v1");
 pref("llm.apiKey", "");

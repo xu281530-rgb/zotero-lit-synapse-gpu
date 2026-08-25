@@ -10,8 +10,13 @@
  * - local: 自建 mineru-api
  *     POST {baseURL}/file_parse     -> multipart/form-data，直接返回 zip 或 JSON
  *
- * 两条路径最终都归一到 { markdown, contentList, files }。
+ * 两条路径最终都归一为经过选择和校验的结构化 JSON 文件集合。
  */
+
+import {
+  selectStructuredSource,
+  type StructuredSource,
+} from "./structuredDocumentAssembler";
 
 declare const Zotero: any;
 declare const IOUtils: any;
@@ -39,11 +44,9 @@ export interface MinerUClientConfig {
 }
 
 export interface MinerUParseResult {
-  /** 解析出的 Markdown 正文（通常来自 full.md） */
-  markdown: string;
-  /** MinerU 的结构化输出（content_list.json），可能为 null */
-  contentList: string | null;
-  /** 结果包中所有 .md / .json 文本文件 */
+  /** 按优先级选出的结构化解析结果。 */
+  structuredSource: StructuredSource;
+  /** 结果包中所有允许缓存的 JSON 文本文件。 */
   files: Record<string, string>;
 }
 
@@ -118,8 +121,10 @@ export function normalizeMinerUBaseURL(mode: MinerUMode, value: any): string {
 
 export class MinerUClient {
   private readonly baseURL: string;
+  private readonly config: MinerUClientConfig;
 
-  constructor(private readonly config: MinerUClientConfig) {
+  constructor(config: MinerUClientConfig) {
+    this.config = config;
     this.baseURL = config.baseURL.replace(/\/+$/, "");
   }
 
@@ -233,7 +238,7 @@ export class MinerUClient {
         ["parse_method", this.config.enableOCR ? "ocr" : "auto"],
         ["formula_enable", String(this.config.enableFormula)],
         ["table_enable", String(this.config.enableTable)],
-        ["return_md", "true"],
+        ["return_md", "false"],
         ["return_content_list", "true"],
         ["return_model_output", "true"],
         ["response_format_zip", "true"],
@@ -276,12 +281,7 @@ export class MinerUClient {
     } catch {
       throw new Error("本地 MinerU API 返回了无法解析的响应。");
     }
-    const files = localResponseToFiles(data);
-    const parsed = this.toParseResult(files);
-    if (!parsed.markdown) {
-      parsed.markdown = data.markdown || data.full_md || "";
-    }
-    return parsed;
+    return this.toParseResult(localResponseToStructuredFiles(data));
   }
 
   // ============== 通用 ==============
@@ -368,14 +368,13 @@ export class MinerUClient {
 
   private toParseResult(files: Record<string, string>): MinerUParseResult {
     return {
-      markdown: pickMarkdown(files),
-      contentList: pickContentList(files),
+      structuredSource: selectStructuredSource(files),
       files,
     };
   }
 
   /**
-   * 解包 MinerU 结果 zip，只取出 .md / .json 文本文件。
+   * 解包 MinerU 结果 zip，只取出 JSON 文件。
    * nsIZipReader 只能读磁盘文件，所以先落到临时目录，读完即删。
    */
   private async extractZipTextFiles(
@@ -407,7 +406,7 @@ export class MinerUClient {
       const MAX_TOTAL_EXTRACTED_BYTES = 64 * 1024 * 1024;
       while (entries.hasMore()) {
         const name = entries.getNext();
-        if (!/\.(md|json)$/i.test(name)) continue;
+        if (!/\.json$/i.test(name)) continue;
         entryCount++;
         if (entryCount > MAX_ENTRY_COUNT) {
           throw new Error("MinerU archive contains too many text entries");
@@ -459,83 +458,41 @@ function cloudModelVersion(modelVersion: string): string {
 /**
  * 本地 mineru-api 的 backend 取值与云端 model_version 不同名。
  *
- * VLM 特意继续发旧名 "vlm-auto-engine"：MinerU 3.4 的 backend_options 里有别名表
- * 会把它规范化成 "vlm-engine"，而新名在 2.7 上并不存在，所以旧名同时兼容两代。
- * "hybrid-engine" 是 3.4 才有的后端，没有向下兼容的旧名。
+ * MinerU 3.4 的 /file_parse 接受 "vlm-engine" 和 "hybrid-engine"。
  */
 function localMinerUBackend(modelVersion: string): string {
   if (modelVersion === "pipeline") return "pipeline";
   if (modelVersion === "hybrid") return "hybrid-engine";
-  return "vlm-auto-engine";
-}
-
-/** 结果包里优先取 full.md，其次取任意 .md */
-export function pickMarkdown(files: Record<string, string>): string {
-  const entries = Object.entries(files || {});
-  const preferred = entries.find(([name]) =>
-    name.toLowerCase().endsWith("full.md"),
-  );
-  if (preferred) return preferred[1];
-  const anyMarkdown = entries.find(([name]) =>
-    name.toLowerCase().endsWith(".md"),
-  );
-  return anyMarkdown?.[1] || "";
-}
-
-/** 取 content_list.json（MinerU 的结构化段落输出） */
-export function pickContentList(files: Record<string, string>): string | null {
-  const entry = Object.entries(files || {}).find(([name]) =>
-    name.toLowerCase().endsWith("content_list.json"),
-  );
-  return entry?.[1] || null;
+  return "vlm-engine";
 }
 
 /** 本地 API 的 JSON 响应转成与 zip 一致的文件表 */
-function localResponseToFiles(data: any): Record<string, string> {
+export function localResponseToStructuredFiles(
+  data: any,
+): Record<string, string> {
   const files: Record<string, string> = {};
-  const results = data?.results || {};
-  for (const [name, value] of Object.entries<any>(results)) {
-    if (typeof value?.md_content === "string") {
-      files[`${name}/full.md`] = value.md_content;
+  const append = (prefix: string, value: any) => {
+    if (!value || typeof value !== "object") return;
+    const mappings: Array<[string, string]> = [
+      ["content_list_v2", "content_list_v2.json"],
+      ["content_list", "content_list.json"],
+      ["model", "model.json"],
+      ["model_output", "model.json"],
+      ["layout", "layout.json"],
+      ["middle_json", "middle.json"],
+    ];
+    for (const [key, fileName] of mappings) {
+      if (value[key] === undefined || value[key] === null) continue;
+      files[`${prefix}${fileName}`] =
+        typeof value[key] === "string"
+          ? value[key]
+          : JSON.stringify(value[key]);
     }
-    if (value?.content_list_v2) {
-      files[`${name}/content_list_v2.json`] =
-        typeof value.content_list_v2 === "string"
-          ? value.content_list_v2
-          : JSON.stringify(value.content_list_v2);
-    }
-    if (value?.content_list) {
-      files[`${name}/content_list.json`] =
-        typeof value.content_list === "string"
-          ? value.content_list
-          : JSON.stringify(value.content_list);
-    }
-    if (value?.model) {
-      files[`${name}/model.json`] =
-        typeof value.model === "string"
-          ? value.model
-          : JSON.stringify(value.model);
-    }
+  };
+  for (const [name, value] of Object.entries<any>(data?.results || {})) {
+    append(`${name}/`, value);
   }
-  if (typeof data?.md_content === "string") {
-    files["full.md"] = data.md_content;
-  }
-  if (data?.content_list_v2) {
-    files["content_list_v2.json"] =
-      typeof data.content_list_v2 === "string"
-        ? data.content_list_v2
-        : JSON.stringify(data.content_list_v2);
-  }
-  if (data?.content_list) {
-    files["content_list.json"] =
-      typeof data.content_list === "string"
-        ? data.content_list
-        : JSON.stringify(data.content_list);
-  }
-  if (data?.model) {
-    files["model.json"] =
-      typeof data.model === "string" ? data.model : JSON.stringify(data.model);
-  }
+  append("", data);
   return files;
 }
 

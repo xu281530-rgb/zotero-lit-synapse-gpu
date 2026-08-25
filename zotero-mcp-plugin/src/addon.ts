@@ -4,6 +4,7 @@ import { HttpServer, httpServer } from "./modules/httpServer";
 import { serverPreferences } from "./modules/serverPreferences";
 import hooks, { getMinerUService } from "./hooks";
 import { getOriginalPDFAttachmentsForItem } from "./modules/mineru";
+import { refreshParentSemanticIndex } from "./modules/pdfTextSource";
 import { createZToolkit } from "./utils/ztoolkit";
 
 class Addon {
@@ -59,23 +60,39 @@ class Addon {
           options: { force?: boolean } = {},
         ) => {
           const service = getMinerUService();
+          let attachmentChanged = false;
           const result = await service.getRichParseForAttachment(attachment, {
             allowParse: true,
             ignoreFailureCache: true,
             ignoreEnabled: true,
             force: options.force === true,
+            userInitiated: true,
+            onAttachmentChanged: () => {
+              attachmentChanged = true;
+            },
           });
           if (!result) {
             throw new Error("No reusable Doc2X/MinerU Markdown or new high-precision PDF result was available");
+          }
+          if (attachmentChanged) {
+            await refreshParentSemanticIndex(attachment);
           }
           return result;
         },
         getCachedParse: async (attachment: Zotero.Item) => {
           const service = getMinerUService();
-          return service.getRichParseForAttachment(attachment, {
+          let attachmentChanged = false;
+          const result = await service.getRichParseForAttachment(attachment, {
             allowParse: false,
             ignoreEnabled: true,
+            onAttachmentChanged: () => {
+              attachmentChanged = true;
+            },
           });
+          if (attachmentChanged) {
+            await refreshParentSemanticIndex(attachment);
+          }
+          return result;
         },
         selectOriginalPDFAttachments: async (items: Zotero.Item[]) => {
           const selected: Zotero.Item[] = [];

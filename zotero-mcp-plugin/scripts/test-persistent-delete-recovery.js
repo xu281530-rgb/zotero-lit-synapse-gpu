@@ -314,7 +314,7 @@ const notifier = hooksSource.slice(
 const deleteBranch = notifier.indexOf("if (event === 'delete')");
 assert.ok(deleteBranch >= 0, "the notifier must handle permanent deletion");
 assert.ok(
-  deleteBranch < notifier.indexOf("if (isAutoIndexing)"),
+  deleteBranch < notifier.indexOf("if (isAutoIndexing || !enabled)"),
   "an active build must defer deletion cleanup, not drop the notifier event",
 );
 assert.ok(
@@ -322,6 +322,18 @@ assert.ok(
   "permanent deletion cleanup must not depend on the auto-refresh preference",
 );
 assert.match(notifier, /await handleItemsDeleted\(numericIds, extraData\)/);
+const autoUpdatePreference = notifier.indexOf(
+  "const enabled = Zotero.Prefs.get(PREF_SEMANTIC_AUTO_UPDATE",
+);
+const lifecycleCall = notifier.indexOf(
+  "await trackMinerUMarkdownLifecycle(numericIds, event)",
+  autoUpdatePreference,
+);
+assert.ok(lifecycleCall >= 0);
+assert.ok(
+  lifecycleCall < notifier.indexOf("return;", lifecycleCall),
+  "generated Markdown deletion state must be recorded even when semantic auto-update is disabled",
+);
 
 sqlite.close();
 fs.rmSync(tempDir, { recursive: true, force: true });

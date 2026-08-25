@@ -1,22 +1,27 @@
 /**
  * MinerU 解析服务
  *
- * Responsibilities:
- * 1. Read MinerU preferences and maintain per-attachment persistent caches.
- * 2. Deduplicate concurrent parsing and normalize Markdown for indexing.
- *     ├── full.md            解析出的 Markdown
- *     ├── content_list.json  MinerU 结构化输出（如果有）
- *     meta.json          Cache metadata used for invalidation.
+ * 保存每个 PDF 的结构化 JSON 缓存，并将组装后的 Markdown 仅作为 Zotero
+ * 子附件保存。缓存目录不保存 Markdown 正文副本。
  */
 
 import {
   MinerUClient,
-  MinerUMode,
+  type MinerUMode,
+  type MinerUParseResult,
   normalizeMinerUBaseURL,
   resolveAbortController,
   resolveFetch,
   sanitizeFileName,
 } from "./minerUClient";
+import {
+  ASSEMBLER_VERSION,
+  assembleStructuredDocument,
+  hashDocumentText,
+  selectStructuredSource,
+  type AssembledDocument,
+  type StructuredSource,
+} from "./structuredDocumentAssembler";
 
 declare const Zotero: any;
 declare const IOUtils: any;
@@ -26,7 +31,7 @@ declare const ztoolkit: ZToolkit;
 const PREF_PREFIX = "extensions.zotero.zotero-mcp-plugin.";
 
 /** 缓存格式版本，格式变更时递增即可让旧缓存自动失效 */
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
 
 /** 解析失败后多久才允许再次尝试，避免每轮索引都去撞同一个坏文件 */
 const FAILURE_RETRY_MS = 6 * 60 * 60 * 1000;
@@ -46,8 +51,6 @@ export interface MinerUServiceConfig {
   concurrency: number;
   /** Allow synchronous MCP paths to block on a cache miss. */
   blockingOnDemand: boolean;
-  /** Attach successful Markdown output to the Zotero item. */
-  attachMarkdown: boolean;
 }
 
 /** Parsing progress reported to the UI. */
@@ -72,12 +75,21 @@ const MARKDOWN_ATTACHMENT_PREFIX = "MinerU Markdown";
 interface CacheMeta {
   version: number;
   attachmentKey: string;
+  libraryID?: number;
   fileName: string;
   fileSize: number;
   fileMTime: number;
   signature: string;
   parsedAt: string;
   markdownLength: number;
+  parserVersion?: string | null;
+  structuredFormat?: string;
+  structuredFileName?: string;
+  structuredHash?: string;
+  assemblerVersion?: number;
+  markdownHash?: string;
+  generatedAttachmentKey?: string;
+  generatedAt?: string;
   error?: string;
   failedAt?: number;
 }
@@ -97,6 +109,10 @@ export interface GetMarkdownOptions {
   ignoreEnabled?: boolean;
   /** Ignore all reusable results and force a new parse. */
   force?: boolean;
+  /** The user explicitly requested a new parse/regeneration. */
+  userInitiated?: boolean;
+  /** Reports that the canonical Zotero Markdown attachment changed. */
+  onAttachmentChanged?: () => void;
   /**
    * Called with which of the four reuse paths actually produced the Markdown.
    *
@@ -123,6 +139,24 @@ export type MarkdownOrigin =
 /** Prevent local health checks from hanging on silently dropped connections. */
 const LOCAL_PROBE_TIMEOUT_MS = 8000;
 
+/**
+ * Flatten a ZIP entry into a Windows-safe cache filename without truncating
+ * the structured-format suffix that source selection relies on.
+ */
+function structuredCacheFileName(value: string): string {
+  const leaf = String(value || "structured.json")
+    .split(/[\\/]/)
+    .pop()!
+    .replace(/[\\/:*?"<>|\r\n]/g, "_");
+  if (leaf.length <= 180) return leaf;
+  const sourceSuffix =
+    leaf.match(/(?:content_list_v2|content_list|model|layout)\.json$/i)?.[0] ||
+    "structured.json";
+  const identity = hashDocumentText(value).replace(/^.*:/, "");
+  const tail = `-${identity}_${sourceSuffix}`;
+  return `${leaf.slice(0, 180 - tail.length)}${tail}`;
+}
+
 function getPrefValue<T>(key: string, fallback: T): T {
   try {
     const value = Zotero.Prefs.get(`${PREF_PREFIX}${key}`, true);
@@ -139,8 +173,11 @@ function getPrefValue<T>(key: string, fallback: T): T {
 class Semaphore {
   private queue: Array<() => void> = [];
   private active = 0;
+  private limit: number;
 
-  constructor(private limit: number) {}
+  constructor(limit: number) {
+    this.limit = limit;
+  }
 
   setLimit(limit: number): void {
     this.limit = Math.max(1, limit);
@@ -173,6 +210,27 @@ class Semaphore {
   }
 }
 
+interface CachedStructuredResult {
+  meta: CacheMeta;
+  source: StructuredSource;
+  assembled: AssembledDocument;
+}
+
+interface CachedStructuredFailure {
+  skipReason: string;
+}
+
+interface GeneratedMarkdownAttachment {
+  item: any;
+  key: string;
+  markdown: string;
+}
+
+interface MarkdownAttachmentState {
+  version: 1;
+  suppressed: Record<string, { deletedAt: string; parentKey?: string }>;
+}
+
 export class MinerUService {
   private semaphore = new Semaphore(2);
   /** In-flight work keyed by attachment to prevent duplicate parsing. */
@@ -183,6 +241,9 @@ export class MinerUService {
   private runAttachments = 0;
   /** 界面进度监听器；解析是分钟级操作，没有它用户只能盯着一个不动的弹窗 */
   private progressListener: MinerUProgressListener | null = null;
+  private attachmentState: MarkdownAttachmentState | null = null;
+  private attachmentStateWrite: Promise<void> = Promise.resolve();
+  private ownReplacementAttachmentKeys = new Set<string>();
 
   /** 注册/注销解析进度监听（同一时刻只有一个索引任务，单个监听器足够） */
   setProgressListener(listener: MinerUProgressListener | null): void {
@@ -239,8 +300,6 @@ export class MinerUService {
       ),
       blockingOnDemand:
         getPrefValue<boolean>("mineru.blockingOnDemand", false) === true,
-      attachMarkdown:
-        getPrefValue<boolean>("mineru.attachMarkdown", true) !== false,
     };
   }
 
@@ -254,12 +313,135 @@ export class MinerUService {
     return PathUtils.join(Zotero.DataDirectory.dir, "zotero-mcp", "mineru");
   }
 
+  private getAttachmentStatePath(): string {
+    return PathUtils.join(
+      Zotero.DataDirectory.dir,
+      "zotero-mcp",
+      "mineru-attachment-state.json",
+    );
+  }
+
   private getAttachmentDir(attachmentKey: string): string {
     return PathUtils.join(this.getCacheRoot(), sanitizeFileName(attachmentKey));
   }
 
   private getTmpDir(): string {
     return PathUtils.join(this.getCacheRoot(), "tmp");
+  }
+
+  private sourceIdentity(libraryID: number, attachmentKey: string): string {
+    return `${Number(libraryID) || Zotero.Libraries.userLibraryID}:${attachmentKey}`;
+  }
+
+  private async readAttachmentState(): Promise<MarkdownAttachmentState> {
+    if (this.attachmentState) return this.attachmentState;
+    try {
+      const parsed = JSON.parse(
+        await IOUtils.readUTF8(this.getAttachmentStatePath()),
+      );
+      if (parsed?.version === 1 && parsed?.suppressed) {
+        this.attachmentState = parsed as MarkdownAttachmentState;
+        return this.attachmentState;
+      }
+    } catch {
+      // First run or damaged state: start empty and rewrite on the next change.
+    }
+    this.attachmentState = { version: 1, suppressed: {} };
+    return this.attachmentState;
+  }
+
+  private async writeAttachmentState(): Promise<void> {
+    const state = await this.readAttachmentState();
+    this.attachmentStateWrite = this.attachmentStateWrite.then(async () => {
+      const path = this.getAttachmentStatePath();
+      await IOUtils.makeDirectory(PathUtils.parent(path), {
+        ignoreExisting: true,
+        createAncestors: true,
+      });
+      await IOUtils.writeUTF8(path, JSON.stringify(state, null, 2));
+    });
+    await this.attachmentStateWrite;
+  }
+
+  async suppressAutomaticMarkdown(
+    libraryID: number,
+    sourceAttachmentKey: string,
+  ): Promise<void> {
+    if (!sourceAttachmentKey) return;
+    const state = await this.readAttachmentState();
+    let parentKey: string | undefined;
+    try {
+      const source = await Zotero.Items.getByLibraryAndKeyAsync?.(
+        libraryID,
+        sourceAttachmentKey,
+      );
+      parentKey =
+        source?.parentItem?.key ||
+        source?.parentItemKey ||
+        (source?.parentItemID
+          ? (await Zotero.Items.getAsync(source.parentItemID))?.key
+          : undefined);
+    } catch {
+      // Deletion notifications may arrive after the source PDF is gone.
+    }
+    state.suppressed[this.sourceIdentity(libraryID, sourceAttachmentKey)] = {
+      deletedAt: new Date().toISOString(),
+      parentKey,
+    };
+    await this.writeAttachmentState();
+  }
+
+  async allowAutomaticMarkdown(
+    libraryID: number,
+    sourceAttachmentKey: string,
+  ): Promise<void> {
+    if (!sourceAttachmentKey) return;
+    const state = await this.readAttachmentState();
+    const identity = this.sourceIdentity(libraryID, sourceAttachmentKey);
+    if (!(identity in state.suppressed)) return;
+    delete state.suppressed[identity];
+    await this.writeAttachmentState();
+  }
+
+  async forgetAutomaticMarkdownState(
+    libraryID: number,
+    sourceAttachmentKey: string,
+  ): Promise<void> {
+    await this.allowAutomaticMarkdown(libraryID, sourceAttachmentKey);
+  }
+
+  async forgetAutomaticMarkdownStateForParent(
+    libraryID: number,
+    parentKey: string,
+  ): Promise<void> {
+    if (!parentKey) return;
+    const state = await this.readAttachmentState();
+    let changed = false;
+    for (const [identity, entry] of Object.entries(state.suppressed)) {
+      if (
+        identity.startsWith(`${Number(libraryID)}:`) &&
+        entry.parentKey === parentKey
+      ) {
+        delete state.suppressed[identity];
+        changed = true;
+      }
+    }
+    if (changed) await this.writeAttachmentState();
+  }
+
+  async isAutomaticMarkdownSuppressed(attachment: any): Promise<boolean> {
+    const state = await this.readAttachmentState();
+    return Boolean(
+      state.suppressed[
+        this.sourceIdentity(attachment?.libraryID, attachment?.key || "")
+      ],
+    );
+  }
+
+  consumeOwnReplacementDeletion(attachmentKey: string): boolean {
+    if (!this.ownReplacementAttachmentKeys.has(attachmentKey)) return false;
+    this.ownReplacementAttachmentKeys.delete(attachmentKey);
+    return true;
   }
 
   /**
@@ -468,7 +650,7 @@ export class MinerUService {
   private async readFreshMinerUMarkdownAttachment(
     attachment: any,
     stat: { size: number; mtime: number } | null,
-  ): Promise<{ markdown: string } | null> {
+  ): Promise<GeneratedMarkdownAttachment | null> {
     const parentItemID = attachment?.parentItemID;
     if (!parentItemID) return null;
     const fileName = attachment.attachmentFilename || `${attachment.key}.pdf`;
@@ -504,7 +686,7 @@ export class MinerUService {
         ztoolkit.log(
           `[MinerU] reusing generated Markdown attachment ${child.key} for PDF ${attachment.key}`,
         );
-        return { markdown };
+        return { item: child, key: child.key, markdown };
       }
     } catch (error) {
       ztoolkit.log(
@@ -571,43 +753,77 @@ export class MinerUService {
         return doc2x.markdown;
       }
 
-      // 1) 先查缓存
+      // Structured cache may upgrade an existing attachment, but it must not
+      // recreate one that the user removed.
       const cached =
         options.force === true
           ? null
-          : await this.readCache(attachment.key, config, stat);
-      if (cached?.markdown) {
-        ztoolkit.log(
-          `[MinerU] 命中缓存 ${attachment.key}（${cached.markdown.length} 字符）`,
-        );
-        if (config.attachMarkdown) {
-          await this.syncMarkdownAttachment(
-            attachment,
-            cached.markdown,
-            attachment.attachmentFilename || `${attachment.key}.pdf`,
-            { replaceExisting: false },
-          );
-        }
-        options.onOrigin?.("mineru_cache");
-        return cached.markdown;
-      }
+          : await this.readStructuredCache(attachment.key, config, stat);
+      const structured =
+        cached && "assembled" in cached ? cached : null;
       const attachedMinerU =
         options.force === true
           ? null
           : await this.readFreshMinerUMarkdownAttachment(attachment, stat);
-      if (attachedMinerU?.markdown) {
+
+      if (structured && attachedMinerU) {
+        const currentAttachment =
+          structured.meta.assemblerVersion === ASSEMBLER_VERSION &&
+          structured.meta.structuredHash === structured.source.structuredHash &&
+          structured.meta.generatedAttachmentKey === attachedMinerU.key &&
+          structured.meta.markdownHash ===
+            hashDocumentText(attachedMinerU.markdown);
+        if (!currentAttachment) {
+          const synced = await this.syncMarkdownAttachment(
+            attachment,
+            structured.assembled.markdown,
+            attachment.attachmentFilename || `${attachment.key}.pdf`,
+            { replaceExisting: true },
+          );
+          if (!synced) return null;
+          await this.updateCacheAttachmentMeta(
+            attachment.key,
+            structured,
+            synced,
+          );
+          options.onAttachmentChanged?.();
+          options.onOrigin?.("mineru_attachment");
+          return synced.markdown;
+        }
         options.onOrigin?.("mineru_attachment");
         return attachedMinerU.markdown;
       }
-      if (cached?.skipReason) {
+
+      if (structured && !options.userInitiated) {
+        await this.suppressAutomaticMarkdown(
+          attachment.libraryID,
+          attachment.key,
+        );
+        ztoolkit.log(
+          `[MinerU] structured cache exists but generated Markdown is absent; respecting deletion for ${attachment.key}`,
+        );
+        return null;
+      }
+
+      if (cached && "skipReason" in cached) {
         if (options.ignoreFailureCache) {
           ztoolkit.log(
-            `[MinerU] ${attachment.key} 上次解析失败（${cached.skipReason}），本次为强制重试，忽略冷却`,
+            `[MinerU] retrying ${attachment.key} despite cached failure: ${cached.skipReason}`,
           );
         } else {
-          ztoolkit.log(`[MinerU] 跳过 ${attachment.key}：${cached.skipReason}`);
+          ztoolkit.log(`[MinerU] skipping ${attachment.key}: ${cached.skipReason}`);
           return null;
         }
+      }
+
+      if (
+        !options.userInitiated &&
+        (await this.isAutomaticMarkdownSuppressed(attachment))
+      ) {
+        ztoolkit.log(
+          `[MinerU] automatic Markdown regeneration suppressed for ${attachment.key}`,
+        );
+        return null;
       }
 
       if (!allowParse) {
@@ -636,6 +852,7 @@ export class MinerUService {
         filePath,
         stat,
         config,
+        options,
       ).finally(() => {
         this.inFlight.delete(attachment.key);
       });
@@ -647,6 +864,7 @@ export class MinerUService {
         `[MinerU] getMarkdownForAttachment 失败 ${attachment?.key}: ${error}`,
         "warn",
       );
+      if (options.userInitiated) throw error;
       return null;
     }
   }
@@ -681,17 +899,23 @@ export class MinerUService {
       if (!stat) return false;
       const doc2x = await this.readFreshDoc2XMarkdown(attachment, stat);
       if (doc2x?.markdown?.trim()) return true;
-      const cached = await this.readCache(
+      const cached = await this.readStructuredCache(
         attachment.key,
         this.getConfig(),
         stat,
       );
-      if (cached?.markdown?.trim()) return true;
       const attachedMinerU = await this.readFreshMinerUMarkdownAttachment(
         attachment,
         stat,
       );
-      return Boolean(attachedMinerU?.markdown?.trim());
+      if (!attachedMinerU?.markdown?.trim()) return false;
+      if (!cached || !("assembled" in cached)) return false;
+      return (
+        cached.meta.assemblerVersion === ASSEMBLER_VERSION &&
+        cached.meta.structuredHash === cached.source.structuredHash &&
+        cached.meta.generatedAttachmentKey === attachedMinerU.key &&
+        cached.meta.markdownHash === hashDocumentText(attachedMinerU.markdown)
+      );
     } catch (error) {
       ztoolkit.log(
         `[MinerU] cache freshness check failed ${attachment?.key}: ${error}`,
@@ -738,17 +962,188 @@ export class MinerUService {
     try {
       const children = await IOUtils.getChildren(root);
       for (const dir of children) {
-        const mdPath = PathUtils.join(dir, "full.md");
-        const stat = await this.statFile(mdPath);
-        if (stat) {
-          entries++;
-          bytes += stat.size;
+        const meta = await this.statFile(PathUtils.join(dir, "meta.json"));
+        if (!meta) continue;
+        entries++;
+        bytes += meta.size;
+        try {
+          for (const artifact of await IOUtils.getChildren(
+            PathUtils.join(dir, "raw"),
+          )) {
+            const stat = await this.statFile(artifact);
+            if (stat) bytes += stat.size;
+          }
+        } catch {
+          // A failure-only cache entry has no raw directory.
         }
       }
     } catch {
       /* 目录尚不存在 */
     }
     return { entries, bytes };
+  }
+
+  /** Remove legacy Markdown copies and normalize persistent caches to JSON. */
+  async migrateLegacyCaches(): Promise<void> {
+    let directories: string[] = [];
+    try {
+      directories = await IOUtils.getChildren(this.getCacheRoot());
+    } catch {
+      return;
+    }
+
+    for (const dir of directories) {
+      const attachmentKey = String(dir).split(/[\\/]/).pop() || "";
+      if (!attachmentKey || attachmentKey === "tmp") continue;
+      let meta: CacheMeta;
+      try {
+        meta = JSON.parse(
+          await IOUtils.readUTF8(PathUtils.join(dir, "meta.json")),
+        ) as CacheMeta;
+      } catch {
+        continue;
+      }
+
+      const removeLegacyCopies = async (): Promise<void> => {
+        for (const name of ["full.md", "parse.json"]) {
+          await IOUtils.remove(PathUtils.join(dir, name), {
+            ignoreAbsent: true,
+          });
+        }
+        try {
+          for (const child of await IOUtils.getChildren(
+            PathUtils.join(dir, "raw"),
+          )) {
+            if (/\.md$/i.test(String(child))) {
+              await IOUtils.remove(child, { ignoreAbsent: true });
+            }
+          }
+        } catch {
+          // Failure-only and partially migrated entries may have no raw dir.
+        }
+      };
+
+      await removeLegacyCopies();
+      if (meta.version >= CACHE_VERSION) {
+        continue;
+      }
+
+      const files = await this.readArtifactFiles(attachmentKey);
+      let source: StructuredSource | null = null;
+      let assembled: AssembledDocument | null = null;
+      let migrationError: string | null = null;
+      try {
+        source = selectStructuredSource(files);
+        assembled = assembleStructuredDocument(source);
+      } catch (error) {
+        migrationError = `legacy structured cache is invalid: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+      }
+
+      const rawDir = PathUtils.join(dir, "raw");
+      if (source && assembled) {
+        await IOUtils.remove(rawDir, { recursive: true, ignoreAbsent: true });
+        await IOUtils.makeDirectory(rawDir, {
+          ignoreExisting: true,
+          createAncestors: true,
+        });
+        let totalBytes = 0;
+        for (const [name, content] of Object.entries(files)) {
+          if (!/\.json$/i.test(name)) continue;
+          const baseName = name.split(/[\\/]/).pop()?.toLowerCase() || "";
+          if (
+            [
+              "meta.json",
+              "parse.json",
+              "translation-cache.json",
+              "doc2x-meta.json",
+            ].includes(baseName)
+          ) {
+            continue;
+          }
+          const byteLength = new TextEncoder().encode(content).byteLength;
+          if (byteLength > 16 * 1024 * 1024 || totalBytes + byteLength > 64 * 1024 * 1024) {
+            continue;
+          }
+          totalBytes += byteLength;
+          await IOUtils.writeUTF8(
+            PathUtils.join(rawDir, structuredCacheFileName(name)),
+            content,
+          );
+        }
+      }
+
+      let children: string[] = [];
+      try {
+        children = await IOUtils.getChildren(dir);
+      } catch {
+        // The entry disappeared while migrating.
+      }
+      for (const child of children) {
+        const name = String(child).split(/[\\/]/).pop()?.toLowerCase() || "";
+        if (
+          (Boolean(source && assembled) &&
+            /\.json$/i.test(name) &&
+            ![
+              "meta.json",
+              "doc2x-meta.json",
+              "translation-cache.json",
+            ].includes(name))
+        ) {
+          await IOUtils.remove(child, { ignoreAbsent: true });
+        }
+      }
+
+      let generated: GeneratedMarkdownAttachment | null = null;
+      let sourceAttachment: any = null;
+      try {
+        sourceAttachment = await Zotero.Items.getByLibraryAndKeyAsync?.(
+          meta.libraryID ?? Zotero.Libraries.userLibraryID,
+          attachmentKey,
+        );
+        if (sourceAttachment) {
+          generated = await this.readFreshMinerUMarkdownAttachment(
+            sourceAttachment,
+            null,
+          );
+        }
+      } catch {
+        // Binding is best effort; the next access can bind the attachment.
+      }
+
+      const migrated: CacheMeta = {
+        ...meta,
+        version: CACHE_VERSION,
+        signature:
+          source && assembled
+            ? this.getSignature(this.getConfig())
+            : meta.signature,
+        parserVersion: source?.parserVersion ?? null,
+        structuredFormat: source?.format,
+        structuredFileName: source?.fileName,
+        structuredHash: source?.structuredHash,
+        // Existing Markdown came from MinerU full.md and must be rebuilt.
+        assemblerVersion: generated ? 0 : undefined,
+        generatedAttachmentKey: generated?.key,
+        markdownHash: generated
+          ? hashDocumentText(generated.markdown)
+          : undefined,
+        markdownLength: generated?.markdown.length ?? 0,
+        error: migrationError || undefined,
+        failedAt: migrationError ? Date.now() : undefined,
+      };
+      await IOUtils.writeUTF8(
+        PathUtils.join(dir, "meta.json"),
+        JSON.stringify(migrated, null, 2),
+      );
+      if (!generated) {
+        await this.suppressAutomaticMarkdown(
+          meta.libraryID ?? Zotero.Libraries.userLibraryID,
+          attachmentKey,
+        );
+      }
+    }
   }
 
   /**
@@ -896,6 +1291,7 @@ export class MinerUService {
     filePath: string,
     stat: { size: number; mtime: number },
     config: MinerUServiceConfig,
+    options: GetMarkdownOptions,
   ): Promise<string | null> {
     if (isDoc2XGeneratedPDFAttachment(attachment)) {
       ztoolkit.log(
@@ -935,34 +1331,45 @@ export class MinerUService {
         fileName,
         attachment.key,
       );
-
-      if (!result.markdown || !result.markdown.trim()) {
-        throw new Error("MinerU returned empty Markdown");
-      }
-
-      await this.writeCache(attachment.key, config, stat, fileName, result);
-      ztoolkit.log(
-        `[MinerU] 解析完成 ${fileName}：${result.markdown.length} 字符，耗时 ${((Date.now() - started) / 1000).toFixed(1)}s`,
+      const assembled = assembleStructuredDocument(result.structuredSource);
+      await this.writeCache(
+        attachment,
+        config,
+        stat,
+        fileName,
+        result,
+        assembled,
       );
-      // Cache paths are opaque, so attach Markdown to make results visible in Zotero.
-      if (config.attachMarkdown) {
-        await this.syncMarkdownAttachment(
-          attachment,
-          result.markdown,
-          fileName,
-          {
-            replaceExisting: true,
-          },
-        );
+      const synced = await this.syncMarkdownAttachment(
+        attachment,
+        assembled.markdown,
+        fileName,
+        { replaceExisting: true },
+      );
+      if (!synced) {
+        throw new Error("Could not create the canonical Zotero Markdown attachment");
       }
+      const cached: CachedStructuredResult = {
+        meta: await this.readMeta(attachment.key),
+        source: result.structuredSource,
+        assembled,
+      };
+      await this.updateCacheAttachmentMeta(attachment.key, cached, synced);
+      if (options.userInitiated) {
+        await this.allowAutomaticMarkdown(attachment.libraryID, attachment.key);
+      }
+      options.onAttachmentChanged?.();
+      ztoolkit.log(
+        `[MinerU] structured parse completed ${fileName}: ${synced.markdown.length} Markdown characters in ${((Date.now() - started) / 1000).toFixed(1)}s`,
+      );
       this.emitProgress({
         phase: "done",
         attachmentKey: attachment.key,
         fileName,
-        markdownLength: result.markdown.length,
+        markdownLength: synced.markdown.length,
         elapsedMs: Date.now() - started,
       });
-      return result.markdown;
+      return synced.markdown;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       ztoolkit.log(`[MinerU] 解析失败 ${fileName}: ${message}`, "warn");
@@ -975,6 +1382,7 @@ export class MinerUService {
         elapsedMs: Date.now() - started,
       });
       await this.writeFailure(attachment.key, config, stat, fileName, message);
+      if (options.userInitiated) throw error;
       return null;
     } finally {
       release();
@@ -993,13 +1401,13 @@ export class MinerUService {
     markdown: string,
     fileName: string,
     options: { replaceExisting: boolean },
-  ): Promise<void> {
+  ): Promise<GeneratedMarkdownAttachment | null> {
     const parentItemID = attachment?.parentItemID;
     if (!parentItemID) {
       ztoolkit.log(
         `[MinerU] ${attachment?.key} 没有父条目，跳过 Markdown 附件挂载`,
       );
-      return;
+      return null;
     }
 
     const baseName = sanitizeFileName(fileName.replace(/\.pdf$/i, ""));
@@ -1010,9 +1418,10 @@ export class MinerUService {
       `${sanitizeFileName(attachment.key)}-${baseName}.md`,
     );
 
+    let imported: any = null;
     try {
       const parent = await Zotero.Items.getAsync(parentItemID);
-      if (!parent) return;
+      if (!parent) return null;
 
       // Find generated Markdown attachments already associated with this PDF.
       const existing: any[] = [];
@@ -1043,6 +1452,7 @@ export class MinerUService {
             ztoolkit.log(
               `[MinerU] removing duplicate generated Markdown attachment ${child.key}`,
             );
+            this.ownReplacementAttachmentKeys.add(child.key);
             await child.eraseTx();
           } catch (error) {
             ztoolkit.log(
@@ -1051,21 +1461,12 @@ export class MinerUService {
             );
           }
         }
-        return;
-      }
-
-      for (const child of existing) {
-        try {
-          ztoolkit.log(
-            `[MinerU] Replacing existing Markdown attachment ${child.key}`,
-          );
-          await child.eraseTx();
-        } catch (e) {
-          ztoolkit.log(
-            `[MinerU] Failed to delete old Markdown attachment: ${e}`,
-            "warn",
-          );
-        }
+        const keepPath = keep.getFilePathAsync
+          ? await keep.getFilePathAsync()
+          : keep.getFilePath?.();
+        if (!keepPath) return null;
+        const keepMarkdown = await IOUtils.readUTF8(keepPath);
+        return { item: keep, key: keep.key, markdown: keepMarkdown };
       }
 
       await IOUtils.makeDirectory(this.getTmpDir(), {
@@ -1074,23 +1475,63 @@ export class MinerUService {
       });
       await IOUtils.writeUTF8(tmpPath, markdown);
 
-      const imported = await Zotero.Attachments.importFromFile({
+      imported = await Zotero.Attachments.importFromFile({
         file: tmpPath,
         parentItemID,
         title,
         contentType: "text/markdown",
         charset: "utf-8",
       });
-      this.runAttachments++;
       ztoolkit.log(
         `[MinerU] Attached Markdown ${imported?.key} to item ${parent.key}: ${title}`,
       );
+      const importedPath = imported?.getFilePathAsync
+        ? await imported.getFilePathAsync()
+        : imported?.getFilePath?.();
+      if (!imported?.key || !importedPath) {
+        throw new Error("Zotero imported the Markdown attachment without a readable file");
+      }
+      const importedMarkdown = await IOUtils.readUTF8(importedPath);
+      if (!importedMarkdown?.trim()) {
+        throw new Error("The imported Zotero Markdown attachment is empty");
+      }
+      this.runAttachments++;
+      for (const child of existing) {
+        try {
+          ztoolkit.log(
+            `[MinerU] Replacing existing Markdown attachment ${child.key}`,
+          );
+          this.ownReplacementAttachmentKeys.add(child.key);
+          await child.eraseTx();
+        } catch (e) {
+          ztoolkit.log(
+            `[MinerU] Failed to delete old Markdown attachment: ${e}`,
+            "warn",
+          );
+        }
+      }
+      return {
+        item: imported,
+        key: imported.key,
+        markdown: importedMarkdown,
+      };
     } catch (error) {
-      // Attachment failures do not invalidate the Markdown retained in cache.
+      if (imported?.key) {
+        try {
+          this.ownReplacementAttachmentKeys.add(imported.key);
+          await imported.eraseTx?.();
+        } catch (cleanupError) {
+          ztoolkit.log(
+            `[MinerU] failed to remove unreadable imported Markdown ${imported.key}: ${cleanupError}`,
+            "warn",
+          );
+        }
+      }
       ztoolkit.log(
         `[MinerU] 挂载 Markdown 附件失败 ${attachment?.key}：${error}`,
         "warn",
       );
+      return null;
     } finally {
       try {
         await IOUtils.remove(tmpPath, { ignoreAbsent: true });
@@ -1112,11 +1553,16 @@ export class MinerUService {
     markdown: string;
     rawFiles: Record<string, string>;
     files: Record<string, string>;
+    blocks: AssembledDocument["blocks"];
+    structuredHash: string | null;
+    assemblerVersion: number;
   } | null> {
     const markdown = await this.getMarkdownForAttachment(attachment, options);
     if (!markdown) return null;
 
     let rawFiles: Record<string, string> = {};
+    let blocks: AssembledDocument["blocks"] = [];
+    let structuredHash: string | null = null;
     try {
       const filePath = attachment.getFilePathAsync
         ? await attachment.getFilePathAsync()
@@ -1128,10 +1574,16 @@ export class MinerUService {
           : await this.readFreshDoc2XMarkdown(attachment, stat);
       if (!doc2x?.markdown) {
         const cached = stat
-          ? await this.readCache(attachment.key, this.getConfig(), stat)
+          ? await this.readStructuredCache(
+              attachment.key,
+              this.getConfig(),
+              stat,
+            )
           : null;
-        if (cached?.markdown) {
+        if (cached && "assembled" in cached) {
           rawFiles = await this.readArtifactFiles(attachment.key);
+          blocks = cached.assembled.blocks;
+          structuredHash = cached.source.structuredHash;
         }
       } else {
         ztoolkit.log(
@@ -1145,10 +1597,14 @@ export class MinerUService {
       );
     }
 
-    // The selected Markdown is authoritative. Always overwrite full.md so
-    // stale artifacts can never override the Doc2X/MinerU reuse decision.
-    rawFiles["full.md"] = markdown;
-    return { markdown, rawFiles, files: rawFiles };
+    return {
+      markdown,
+      rawFiles,
+      files: rawFiles,
+      blocks,
+      structuredHash,
+      assemblerVersion: ASSEMBLER_VERSION,
+    };
   }
 
   private async readArtifactFiles(
@@ -1167,7 +1623,7 @@ export class MinerUService {
       }
       for (const child of children) {
         const name = String(child).split(/[\\/]/).pop() || "";
-        if (!/\.(?:md|json)$/i.test(name)) continue;
+        if (!/\.json$/i.test(name)) continue;
         if (
           ["meta.json", "parse.json", "translation-cache.json"].includes(
             name.toLowerCase(),
@@ -1212,37 +1668,41 @@ export class MinerUService {
     }
   }
 
-  private async readCache(
+  private async readMeta(attachmentKey: string): Promise<CacheMeta> {
+    const raw = await IOUtils.readUTF8(
+      PathUtils.join(this.getAttachmentDir(attachmentKey), "meta.json"),
+    );
+    return JSON.parse(raw) as CacheMeta;
+  }
+
+  private async readStructuredCache(
     attachmentKey: string,
     config: MinerUServiceConfig,
     stat: { size: number; mtime: number },
-  ): Promise<{ markdown?: string; skipReason?: string } | null> {
-    const dir = this.getAttachmentDir(attachmentKey);
-    const metaPath = PathUtils.join(dir, "meta.json");
-
+  ): Promise<CachedStructuredResult | CachedStructuredFailure | null> {
     let meta: CacheMeta | null = null;
     try {
-      const raw = await IOUtils.readUTF8(metaPath);
-      meta = JSON.parse(raw) as CacheMeta;
+      meta = await this.readMeta(attachmentKey);
     } catch {
       return null;
     }
     if (!meta) return null;
 
     const sourceFresh =
-      meta.version === CACHE_VERSION &&
+      (meta.version === 1 || meta.version === CACHE_VERSION) &&
       meta.fileSize === stat.size &&
       meta.fileMTime === stat.mtime;
     if (!sourceFresh) {
       ztoolkit.log(
-        `[MinerU] PDF 已变更，已有 Markdown 不再复用：${attachmentKey}`,
+        `[MinerU] PDF changed; structured cache is stale for ${attachmentKey}`,
       );
       return null;
     }
     if (meta.signature !== this.getSignature(config)) {
       ztoolkit.log(
-        `[MinerU] Parse config changed but PDF did not; reusing Markdown for ${attachmentKey}`,
+        `[MinerU] parse settings changed; structured cache is stale for ${attachmentKey}`,
       );
+      return null;
     }
     if (meta.error) {
       const elapsed = Date.now() - (meta.failedAt || 0);
@@ -1255,44 +1715,54 @@ export class MinerUService {
     }
 
     try {
-      const markdown = await IOUtils.readUTF8(PathUtils.join(dir, "full.md"));
-      return markdown?.trim() ? { markdown } : null;
-    } catch {
-      return null;
+      const files = await this.readArtifactFiles(attachmentKey);
+      const source = selectStructuredSource(files);
+      return {
+        meta,
+        source,
+        assembled: assembleStructuredDocument(source),
+      };
+    } catch (error) {
+      return {
+        skipReason: `structured MinerU cache is invalid: ${error instanceof Error ? error.message : String(error)}`,
+      };
     }
   }
 
   private async writeCache(
-    attachmentKey: string,
+    attachment: any,
     config: MinerUServiceConfig,
     stat: { size: number; mtime: number },
     fileName: string,
-    result: {
-      markdown: string;
-      contentList: string | null;
-      files?: Record<string, string>;
-    },
+    result: MinerUParseResult,
+    assembled: AssembledDocument,
   ): Promise<void> {
+    const attachmentKey = attachment.key;
     const dir = this.getAttachmentDir(attachmentKey);
     await IOUtils.makeDirectory(dir, {
       ignoreExisting: true,
       createAncestors: true,
     });
-    // A new MinerU result invalidates reader block geometry and translations
-    // generated from the previous source. The reader will rebuild parse.json
-    // lazily from this same full.md/raw cache on first use.
+    // Canonical Markdown lives only in Zotero. Derived Reader/translation data
+    // is invalidated whenever the structured source changes.
+    await IOUtils.remove(PathUtils.join(dir, "full.md"), {
+      ignoreAbsent: true,
+    });
     await IOUtils.remove(PathUtils.join(dir, "parse.json"), {
       ignoreAbsent: true,
     });
     await IOUtils.remove(PathUtils.join(dir, "translation-cache.json"), {
       ignoreAbsent: true,
     });
-    await IOUtils.writeUTF8(PathUtils.join(dir, "full.md"), result.markdown);
-    if (result.contentList) {
-      await IOUtils.writeUTF8(
-        PathUtils.join(dir, "content_list.json"),
-        result.contentList,
-      );
+    for (const legacyName of [
+      "content_list.json",
+      "content_list_v2.json",
+      "model.json",
+      "layout.json",
+    ]) {
+      await IOUtils.remove(PathUtils.join(dir, legacyName), {
+        ignoreAbsent: true,
+      });
     }
     const rawDir = PathUtils.join(dir, "raw");
     await IOUtils.remove(rawDir, { recursive: true, ignoreAbsent: true });
@@ -1302,8 +1772,7 @@ export class MinerUService {
     });
     let rawTotalBytes = 0;
     for (const [name, content] of Object.entries(result.files || {})) {
-      if (typeof content !== "string" || !/\.(?:md|json)$/i.test(name))
-        continue;
+      if (typeof content !== "string" || !/\.json$/i.test(name)) continue;
       const bytes = new TextEncoder().encode(content).byteLength;
       if (
         bytes > 16 * 1024 * 1024 ||
@@ -1314,22 +1783,53 @@ export class MinerUService {
       }
       rawTotalBytes += bytes;
       await IOUtils.writeUTF8(
-        PathUtils.join(rawDir, sanitizeFileName(name)),
+        PathUtils.join(rawDir, structuredCacheFileName(name)),
         content,
       );
     }
     const meta: CacheMeta = {
       version: CACHE_VERSION,
       attachmentKey,
+      libraryID: attachment.libraryID,
       fileName,
       fileSize: stat.size,
       fileMTime: stat.mtime,
       signature: this.getSignature(config),
       parsedAt: new Date().toISOString(),
-      markdownLength: result.markdown.length,
+      markdownLength: assembled.markdown.length,
+      parserVersion: result.structuredSource.parserVersion,
+      structuredFormat: result.structuredSource.format,
+      structuredFileName: result.structuredSource.fileName,
+      structuredHash: result.structuredSource.structuredHash,
+      assemblerVersion: ASSEMBLER_VERSION,
+      markdownHash: hashDocumentText(assembled.markdown),
     };
     await IOUtils.writeUTF8(
       PathUtils.join(dir, "meta.json"),
+      JSON.stringify(meta, null, 2),
+    );
+  }
+
+  private async updateCacheAttachmentMeta(
+    attachmentKey: string,
+    cached: CachedStructuredResult,
+    attached: GeneratedMarkdownAttachment,
+  ): Promise<void> {
+    const meta: CacheMeta = {
+      ...cached.meta,
+      version: CACHE_VERSION,
+      parserVersion: cached.source.parserVersion,
+      structuredFormat: cached.source.format,
+      structuredFileName: cached.source.fileName,
+      structuredHash: cached.source.structuredHash,
+      assemblerVersion: ASSEMBLER_VERSION,
+      markdownLength: attached.markdown.length,
+      markdownHash: hashDocumentText(attached.markdown),
+      generatedAttachmentKey: attached.key,
+      generatedAt: new Date().toISOString(),
+    };
+    await IOUtils.writeUTF8(
+      PathUtils.join(this.getAttachmentDir(attachmentKey), "meta.json"),
       JSON.stringify(meta, null, 2),
     );
   }
