@@ -213,6 +213,35 @@ assert.match(
 );
 assert.doesNotMatch(rich, /(?:^|\n)7(?:\n|$)/);
 
+const legacyPublicationMetadataFootnote = assembleStructuredDocument(
+  selectStructuredSource({
+    "content_list.json": JSON.stringify([
+      {
+        type: "page_footnote",
+        text: "收稿日期: 2009-06-17; 修订日期: 2009-12-14",
+        page_idx: 0,
+        bbox: [80, 803, 376, 816],
+      },
+      {
+        type: "page_footnote",
+        text: "测量误差为一个标准差。",
+        page_idx: 0,
+        bbox: [80, 817, 376, 830],
+      },
+    ]),
+  }),
+).markdown;
+assert.doesNotMatch(
+  legacyPublicationMetadataFootnote,
+  /收稿日期|修订日期|2009-06-17|2009-12-14/,
+  "Chinese submission and revision metadata is page furniture, not document body text",
+);
+assert.match(
+  legacyPublicationMetadataFootnote,
+  /测量误差为一个标准差。/,
+  "scientific page footnotes remain in the assembled document",
+);
+
 const legacy = assembleStructuredDocument(
   selectStructuredSource({
     "content_list.json": JSON.stringify([
@@ -294,14 +323,31 @@ const repairedLegacyFormulaBoundaries = assembleStructuredDocument(
       type: "text",
       page_idx: 0,
       bbox: [10, 10, 90, 30],
-      text: "The$N _ { V }$is measured as 10$^\\circ$C, while ($x$). Escaped \\$5, $$E = mc^2$$, and $unclosed remain.",
+      text: "The$N _ { V }$is measured as 10$^\\circ$C, while ($x$), $ \\alpha$, and $x $. Escaped \\$5, $$E = mc^2$$, and $unclosed remain.",
     }]),
   }),
 ).markdown;
 assert.equal(
   repairedLegacyFormulaBoundaries,
-  "The $N _ { V }$ is measured as 10 $^\\circ$ C, while ($x$). Escaped \\$5, $$E = mc^2$$, and $unclosed remain.",
+  "The $N _ { V }$ is measured as 10 $^\\circ$ C, while ($x$), $\\alpha$, and $x$. Escaped \\$5, $$E = mc^2$$, and $unclosed remain.",
 );
+
+const htmlScriptToFormula = assembleStructuredDocument(
+  selectStructuredSource({
+    "content_list.json": JSON.stringify([{
+      type: "text",
+      page_idx: 0,
+      bbox: [10, 10, 90, 30],
+      text: "The <sub>γ</sub> phase <sup>［3］</sup> ends <sub>。</sub>",
+    }]),
+  }),
+).markdown;
+assert.equal(
+  htmlScriptToFormula,
+  "The $_{γ}$ phase $^{［3］}$ ends $_{。}$",
+  "HTML subscript and superscript wrappers become inline formulas without consuming surrounding spaces",
+);
+assert.doesNotMatch(htmlScriptToFormula, /<\/?(?:sup|sub)>/i);
 
 const legacyCurrency = assembleStructuredDocument(
   selectStructuredSource({
@@ -506,6 +552,91 @@ assert.match(
   adjacentPageMixedContinuation,
   /The response depends on the applied pressure\.[\s\S]*Previous-page image\.[\s\S]*Next-page chart\.[\s\S]*Table 1 Next-page values\./,
   "a mixed layout run may continue onto the adjacent page before the body resumes",
+);
+
+const iuzpmr24DeepPageFigureContinuation = assembleStructuredDocument(
+  selectStructuredSource({
+    "content_list.json": JSON.stringify([
+      {
+        type: "text",
+        page_idx: 3,
+        bbox: [507, 791, 939, 938],
+        text: "At the same time, they tended to",
+      },
+      ...[
+        [75, 68, 357, 226],
+        [357, 68, 638, 226],
+        [640, 68, 922, 226],
+        [75, 228, 357, 385],
+        [357, 228, 640, 385],
+        [640, 228, 922, 385],
+      ].map((bbox) => ({
+        type: "image",
+        page_idx: 4,
+        bbox,
+        image_caption: [],
+        content: "",
+      })),
+      {
+        type: "chart",
+        page_idx: 4,
+        bbox: [77, 390, 492, 635],
+        chart_caption: [],
+        content: "",
+      },
+      {
+        type: "chart",
+        page_idx: 4,
+        bbox: [499, 390, 921, 636],
+        chart_caption: [
+          "Fig. 3. Microstructure and grain size under different pressures.",
+        ],
+        content: "",
+      },
+      {
+        type: "text",
+        page_idx: 4,
+        bbox: [55, 687, 487, 925],
+        text: "aggregate at the shrinkage holes.",
+      },
+    ]),
+  }),
+).markdown;
+assert.match(
+  iuzpmr24DeepPageFigureContinuation,
+  /At the same time, they tended to aggregate at the shrinkage holes\.[\s\S]*Fig\. 3\./,
+  "a page-top figure group may occupy more than half the page before its interrupted sentence resumes",
+);
+
+const tooDeepPageFigureContinuation = assembleStructuredDocument(
+  selectStructuredSource({
+    "content_list.json": JSON.stringify([
+      {
+        type: "text",
+        page_idx: 3,
+        bbox: [100, 820, 900, 900],
+        text: "The response depends on",
+      },
+      {
+        type: "image",
+        page_idx: 4,
+        bbox: [100, 50, 900, 820],
+        image_caption: [],
+        content: "",
+      },
+      {
+        type: "text",
+        page_idx: 4,
+        bbox: [100, 880, 900, 920],
+        text: "the applied pressure.",
+      },
+    ]),
+  }),
+).markdown;
+assert.doesNotMatch(
+  tooDeepPageFigureContinuation,
+  /The response depends on the applied pressure\./,
+  "a continuation near the next page bottom remains too ambiguous to merge",
 );
 
 const crossPageLayoutAfterContinuation = assembleStructuredDocument(

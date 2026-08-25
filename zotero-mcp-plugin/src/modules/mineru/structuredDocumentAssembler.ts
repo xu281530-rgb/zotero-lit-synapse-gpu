@@ -1,4 +1,4 @@
-export const ASSEMBLER_VERSION = 4;
+export const ASSEMBLER_VERSION = 5;
 
 export type MinerUStructuredFormat =
   | "content_list_v2"
@@ -460,17 +460,17 @@ function makeBlock(
   item: any,
   markdown: string,
 ): NormalizedBlock {
-  const publicationContactFootnote =
-    type === "page_footnote" && isPublicationContactFootnote(markdown);
+  const publicationMetadataFootnote =
+    type === "page_footnote" && isPublicationMetadataFootnote(markdown);
   return {
     type,
     pageIndex,
     bbox: normalizeBBox(item?.bbox),
-    markdown: publicationContactFootnote ? "" : cleanBlock(markdown),
+    markdown: publicationMetadataFootnote ? "" : cleanBlock(markdown),
     sourceOrder: -1,
     mergePrev: item?.merge_prev === true || item?.content?.merge_prev === true,
-    ignoredFurniture: FURNITURE_TYPES.has(type) || publicationContactFootnote,
-    bridgeKind: FURNITURE_TYPES.has(type) || publicationContactFootnote
+    ignoredFurniture: FURNITURE_TYPES.has(type) || publicationMetadataFootnote,
+    bridgeKind: FURNITURE_TYPES.has(type) || publicationMetadataFootnote
       ? "furniture"
       : VISUAL_ANCHOR_TYPES.has(type)
         ? "visual-anchor"
@@ -484,8 +484,11 @@ function makeBlock(
   };
 }
 
-function isPublicationContactFootnote(markdown: string): boolean {
-  return /\b(?:corresponding\s+author|e-?mail\s+address)\b/i.test(markdown);
+function isPublicationMetadataFootnote(markdown: string): boolean {
+  return (
+    /\b(?:corresponding\s+author|e-?mail\s+address)\b/i.test(markdown) ||
+    /(?:^|[\n;；])\s*(?:收稿日期|修订日期)\s*[:：]/u.test(markdown)
+  );
 }
 
 function renderList(content: any): string {
@@ -1208,7 +1211,7 @@ function isLikelyPageBoundary(
   );
   return (
     visualTop <= pageExtent * 0.2 &&
-    nextTop <= pageExtent * 0.55 &&
+    nextTop <= pageExtent * 0.8 &&
     visualBottom <= nextTop &&
     nextTop - visualBottom <= pageExtent * 0.08
   );
@@ -1279,13 +1282,23 @@ function pageExtentFor(blocks: NormalizedBlock[]): number | null {
 
 function cleanBlock(value: string): string {
   return normalizeInlineFormulaBoundaries(
-    stripImageReferences(String(value || "")),
+    normalizeHTMLScripts(stripImageReferences(String(value || ""))),
   )
     .replace(/\r\n?/g, "\n")
     .replace(/[ \t]+$/gm, "")
     .replace(/[ \t]{2,}/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+function normalizeHTMLScripts(value: string): string {
+  return value.replace(
+    /<(sub|sup)\b[^>]*>([\s\S]*?)<\/\1\s*>/giu,
+    (_match, rawTag: string, content: string) => {
+      const operator = rawTag.toLowerCase() === "sub" ? "_" : "^";
+      return `$${operator}{${content}}$`;
+    },
+  );
 }
 
 function normalizeInlineFormulaBoundaries(value: string): string {
@@ -1320,8 +1333,14 @@ function normalizeInlineFormulaBoundaries(value: string): string {
       index += 1;
       continue;
     }
+    const formulaContent = value.slice(index + 1, inlineEnd).trim();
+    if (!formulaContent) {
+      result += value.slice(index, inlineEnd + 1);
+      index = inlineEnd + 1;
+      continue;
+    }
     if (endsWithWordCharacter(result)) result += " ";
-    result += value.slice(index, inlineEnd + 1);
+    result += `$${formulaContent}$`;
     const following = value[inlineEnd + 1] || "";
     if (startsWithWordCharacter(following)) result += " ";
     index = inlineEnd + 1;
