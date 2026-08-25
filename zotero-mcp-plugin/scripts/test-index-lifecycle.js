@@ -27,6 +27,12 @@ const vectorStoreSource = fs.readFileSync(
   path.join(root, "src/modules/semantic/vectorStore.ts"),
   "utf8",
 );
+const preferenceSource = fs.readFileSync(
+  path.join(root, "src/modules/preferenceScript.ts"),
+  "utf8",
+);
+const source = (relativePath) =>
+  fs.readFileSync(path.join(root, relativePath), "utf8");
 
 function mockStore(gpuBackend) {
   const failureRows = new Map();
@@ -794,8 +800,22 @@ assert.ok(
 );
 assert.match(
   serviceSource,
-  /getIndexTextForAttachment\([\s\S]*?allowParse:\s*false[\s\S]*?ignoreEnabled:\s*true[\s\S]*?getIndexTextForAttachment\([\s\S]*?allowParse:\s*true/,
-  "indexing must reuse existing Markdown even when MinerU parsing is disabled before it considers a new parse",
+  /getIndexTextForAttachment\([\s\S]*?allowParse:\s*false[\s\S]*?ignoreEnabled:\s*true[\s\S]*?restoreMissingMarkdown:\s*true[\s\S]*?getIndexTextForAttachment\([\s\S]*?allowParse:\s*true[\s\S]*?ignoreEnabled:\s*true[\s\S]*?ignoreFailureCache:\s*true[\s\S]*?restoreMissingMarkdown:\s*true/,
+  "every index build must restore a missing MD from cache or retry MinerU before PDFWorker",
+);
+assert.ok(
+  (preferenceSource.match(/showMinerUFallbackWarning\(/g) ?? []).length >= 4,
+  "settings-page build, retry, and resume completion paths must expose PDFWorker fallback",
+);
+const englishLocale = source("addon/locale/en-US/addon.ftl");
+const chineseLocale = source("addon/locale/zh-CN/addon.ftl");
+assert.match(
+  englishLocale,
+  /notice-mineru-fallback\s*=.*built-in PDF extraction.*instead of high-precision MinerU text/i,
+);
+assert.match(
+  chineseLocale,
+  /notice-mineru-fallback\s*=.*内置 PDF.*未使用 MinerU 高精度正文/,
 );
 assert.match(
   serviceSource,

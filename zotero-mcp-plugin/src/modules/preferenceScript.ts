@@ -2157,7 +2157,7 @@ function bindSemanticStatsSettings(doc: Document) {
           `${getString("pref-semantic-index-error" as any) || "Indexing failed"} (${result.processed}/${result.total}, ${result.failedCount} ${getString("pref-semantic-index-failed-items" as any) || "items failed"})`,
           "error"
         );
-      } else {
+      } else if (!showMinerUFallbackWarning(result)) {
         showMessage(getString("pref-semantic-index-completed" as any) + ` (${result.processed}/${result.total})`, "success");
       }
 
@@ -2250,7 +2250,9 @@ function bindSemanticStatsSettings(doc: Document) {
               loadSemanticStats();
 
               if (p.status === 'completed') {
-                showMessage(getString("pref-semantic-index-completed" as any) || "Indexing completed!", "success");
+                if (!showMinerUFallbackWarning(p)) {
+                  showMessage(getString("pref-semantic-index-completed" as any) || "Indexing completed!", "success");
+                }
               } else if (p.status === 'failed') {
                 showMessage(
                   `${getString("pref-semantic-index-error" as any) || "Indexing failed"} (${p.processed}/${p.total}, ${p.failedCount || 0} ${getString("pref-semantic-index-failed-items" as any) || "items failed"})`,
@@ -2400,10 +2402,12 @@ function bindSemanticStatsSettings(doc: Document) {
       if (result.status === 'busy') {
         showMessage(getString("pref-semantic-index-busy" as any) || "An index build is already running, please wait for it to finish", "warning");
       } else if (result.status === 'completed') {
-        if (result.total === 0) {
-          showMessage(getString("pref-semantic-index-no-items" as any) || "No items need indexing", "info");
-        } else {
-          showMessage(getString("pref-semantic-index-completed" as any) + ` (${result.processed}/${result.total})`, "success");
+        if (!showMinerUFallbackWarning(result)) {
+          if (result.total === 0) {
+            showMessage(getString("pref-semantic-index-no-items" as any) || "No items need indexing", "info");
+          } else {
+            showMessage(getString("pref-semantic-index-completed" as any) + ` (${result.processed}/${result.total})`, "success");
+          }
         }
         if (rebuild) updateChunkStaleWarning(doc);
       } else if (result.status === 'incomplete') {
@@ -2533,6 +2537,19 @@ function bindSemanticStatsSettings(doc: Document) {
         messageTimeout = null;
       }, 5000);
     }
+  }
+
+  function showMinerUFallbackWarning(result: any): boolean {
+    const failures = Number(result?.minerUFailures || 0);
+    if (failures <= 0) return false;
+    const summary =
+      `${getString("notice-mineru-failed" as any) || "High-precision MinerU text unavailable"}: ${failures} — ` +
+      `${getString("notice-mineru-fallback" as any) || "built-in PDF extraction was used instead of high-precision MinerU text"}`;
+    const detail = result?.minerULastError
+      ? `\n${String(result.minerULastError).slice(0, 240)}`
+      : "";
+    showMessage(summary + detail, "warning");
+    return true;
   }
 
   function startProgressUpdates() {

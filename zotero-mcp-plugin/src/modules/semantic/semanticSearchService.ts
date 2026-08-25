@@ -2877,14 +2877,18 @@ export class SemanticSearchService {
               await minerUService.getIndexTextForAttachment(attachment, {
                 allowParse: false,
                 ignoreEnabled: true,
+                restoreMissingMarkdown: true,
               });
             const minerUText =
               reusableMarkdownText ??
               (await minerUService.getIndexTextForAttachment(attachment, {
                 allowParse: true,
-                // A forced re-index is the user asking us to try again,
-                // so don't sit on a cached parse failure.
-                ignoreFailureCache: this._forceRun,
+                ignoreEnabled: true,
+                // Every index build is an explicit request for complete body
+                // text, so retry stale failures instead of silently falling
+                // through to Zotero's lower-fidelity PDF extraction.
+                ignoreFailureCache: true,
+                restoreMissingMarkdown: true,
               }));
             if (minerUText) {
               // The complete body text is indexed. It used to be cut at
@@ -2900,6 +2904,10 @@ export class SemanticSearchService {
 
             // No reusable or newly parsed Markdown exists. In this case the
             // Zotero PDF worker is the sole body source for this index build.
+            minerUService.recordIndexFallback(
+              attachment,
+              "MinerU did not produce a canonical Markdown attachment for this index build",
+            );
             // Use shared processor if provided (much faster for batch processing)
             const processor = sharedProcessor || new PDFProcessor(ztoolkit);
             const shouldTerminate = !sharedProcessor;  // Only terminate if we created it

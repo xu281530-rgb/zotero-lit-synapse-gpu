@@ -138,6 +138,9 @@ async function writeStructuredCache(pdf, markdownAttachmentKey = undefined) {
   );
 }
 
+const { ASSEMBLER_VERSION } = await import(
+  "../src/modules/mineru/structuredDocumentAssembler.ts"
+);
 const { MinerUService } = await import("../src/modules/mineru/minerUService.ts");
 const service = new MinerUService();
 
@@ -186,6 +189,17 @@ assert.equal(
 assert.equal(imports, 1);
 assert.equal(changed, 1);
 assert.equal(parent.attachmentIDs.length, 2, "one PDF and one replacement MD remain");
+const upgradedMeta = JSON.parse(
+  await fs.readFile(
+    path.join(tempDir, "zotero-mcp", "mineru", pdf.key, "meta.json"),
+    "utf8",
+  ),
+);
+assert.equal(
+  upgradedMeta.assemblerVersion,
+  ASSEMBLER_VERSION,
+  "an assembler-only upgrade records the new version without parsing the PDF",
+);
 
 const parentFailedUpgrade = parentItem(30, "PARENTFAILED");
 items.set(parentFailedUpgrade.id, parentFailedUpgrade);
@@ -289,6 +303,15 @@ assert.equal(
   null,
   "a generated MD without its authoritative structured cache is not reusable",
 );
+assert.equal(
+  await service.getMarkdownForAttachment(attachmentOnlyPDF, {
+    allowParse: false,
+    ignoreEnabled: true,
+    restoreMissingMarkdown: true,
+  }),
+  "# Existing attachment without JSON cache",
+  "an index build reads an existing canonical MD before considering cache recovery",
+);
 
 preferences.set("extensions.zotero.zotero-mcp-plugin.mineru.language", "en");
 assert.equal(
@@ -317,22 +340,185 @@ const pdf2 = {
 items.set(pdf2.id, pdf2);
 parent2.attachmentIDs.push(pdf2.id);
 await writeStructuredCache(pdf2);
+await service.suppressAutomaticMarkdown(1, pdf2.key);
+assert.equal(await service.isAutomaticMarkdownSuppressed(pdf2), true);
 
-const absent = await service.getMarkdownForAttachment(pdf2, {
-  allowParse: true,
+const restoredFromStructuredCache = await service.getMarkdownForAttachment(pdf2, {
+  allowParse: false,
   ignoreEnabled: true,
+  restoreMissingMarkdown: true,
 });
-assert.equal(absent, null);
-assert.equal(imports, 1, "a missing generated MD is never recreated from cache");
-const state = JSON.parse(
-  await fs.readFile(
-    path.join(tempDir, "zotero-mcp", "mineru-attachment-state.json"),
-    "utf8",
+assert.equal(
+  restoredFromStructuredCache,
+  "# New Canonical Title\n\nUNIQUE_STRUCTURED_BODY_8127",
+  "an index build restores a missing Markdown attachment from structured JSON",
+);
+assert.equal(imports, 2, "cache recovery imports one new Zotero Markdown attachment");
+assert.equal(parent2.attachmentIDs.length, 2, "the recovered MD is attached beside the PDF");
+assert.equal(
+  await service.isAutomaticMarkdownSuppressed(pdf2),
+  false,
+  "successful index recovery clears the prior deletion suppression",
+);
+
+preferences.set("extensions.zotero.zotero-mcp-plugin.mineru.mode", "local");
+preferences.set(
+  "extensions.zotero.zotero-mcp-plugin.mineru.baseURL",
+  "http://127.0.0.1:18101",
+);
+const invalidParent = parentItem(60, "PARENTINVALID");
+items.set(invalidParent.id, invalidParent);
+const invalidPDFPath = path.join(tempDir, "invalid-cache.pdf");
+await fs.writeFile(invalidPDFPath, "invalid cache PDF fixture");
+const invalidPDF = {
+  id: 61,
+  key: "INVALIDJSON1",
+  libraryID: 1,
+  parentItemID: invalidParent.id,
+  attachmentFilename: "invalid-cache.pdf",
+  isPDFAttachment: () => true,
+  getFilePathAsync: async () => invalidPDFPath,
+};
+items.set(invalidPDF.id, invalidPDF);
+invalidParent.attachmentIDs.push(invalidPDF.id);
+await writeStructuredCache(invalidPDF);
+const invalidCacheDir = path.join(
+  tempDir,
+  "zotero-mcp",
+  "mineru",
+  invalidPDF.key,
+);
+const invalidMetaPath = path.join(invalidCacheDir, "meta.json");
+const invalidMeta = JSON.parse(await fs.readFile(invalidMetaPath, "utf8"));
+invalidMeta.signature = "v2|local|vlm|ch|noocr|formula|table";
+await fs.writeFile(invalidMetaPath, JSON.stringify(invalidMeta));
+await fs.writeFile(
+  path.join(invalidCacheDir, "raw", "content_list_v2.json"),
+  "{broken",
+);
+await fs.writeFile(
+  path.join(invalidCacheDir, "obsolete-cache-marker.txt"),
+  "must be removed before reparsing",
+);
+await service.suppressAutomaticMarkdown(1, invalidPDF.key);
+
+let minerURequests = 0;
+const fetchBeforeRecovery = globalThis.fetch;
+globalThis.fetch = async () => {
+  minerURequests += 1;
+  return new Response(
+    JSON.stringify({
+      content_list_v2: [[
+        {
+          type: "title",
+          content: {
+            level: 1,
+            title_content: [{ type: "text", content: "Reparsed Title" }],
+          },
+        },
+        {
+          type: "paragraph",
+          content: {
+            paragraph_content: [{
+              type: "text",
+              content: "REPARSED_AFTER_INVALID_CACHE_4419",
+            }],
+          },
+        },
+      ]],
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+};
+try {
+  assert.equal(
+    await service.getMarkdownForAttachment(invalidPDF, {
+      allowParse: true,
+      ignoreEnabled: true,
+      ignoreFailureCache: true,
+      restoreMissingMarkdown: true,
+    }),
+    "# Reparsed Title\n\nREPARSED_AFTER_INVALID_CACHE_4419",
+    "an index build reparses a PDF whose structured cache is damaged",
+  );
+} finally {
+  globalThis.fetch = fetchBeforeRecovery;
+}
+assert.equal(minerURequests, 1, "damaged structured cache triggers one MinerU request");
+await assert.rejects(
+  fs.access(path.join(invalidCacheDir, "obsolete-cache-marker.txt")),
+  undefined,
+  "the damaged per-PDF cache directory is removed before MinerU reparses it",
+);
+assert.equal(
+  await service.isAutomaticMarkdownSuppressed(invalidPDF),
+  false,
+  "successful reparsing clears the prior deletion suppression",
+);
+
+const missingParent = parentItem(70, "PARENTMISSING");
+items.set(missingParent.id, missingParent);
+const missingPDFPath = path.join(tempDir, "missing-cache.pdf");
+await fs.writeFile(missingPDFPath, "missing cache PDF fixture");
+const missingPDF = {
+  id: 71,
+  key: "MISSINGCACHE1",
+  libraryID: 1,
+  parentItemID: missingParent.id,
+  attachmentFilename: "missing-cache.pdf",
+  isPDFAttachment: () => true,
+  getFilePathAsync: async () => missingPDFPath,
+};
+items.set(missingPDF.id, missingPDF);
+missingParent.attachmentIDs.push(missingPDF.id);
+await service.suppressAutomaticMarkdown(1, missingPDF.key);
+let missingCacheRequests = 0;
+globalThis.fetch = async () => {
+  missingCacheRequests += 1;
+  return new Response(
+    JSON.stringify({
+      content_list_v2: [[{
+        type: "paragraph",
+        content: {
+          paragraph_content: [{
+            type: "text",
+            content: "PARSED_WITHOUT_PRIOR_CACHE_9934",
+          }],
+        },
+      }]],
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+};
+try {
+  assert.equal(
+    await service.getMarkdownForAttachment(missingPDF, {
+      allowParse: true,
+      ignoreEnabled: true,
+      ignoreFailureCache: true,
+      restoreMissingMarkdown: true,
+    }),
+    "PARSED_WITHOUT_PRIOR_CACHE_9934",
+    "an index build calls MinerU when neither Markdown nor structured cache exists",
+  );
+} finally {
+  globalThis.fetch = fetchBeforeRecovery;
+}
+assert.equal(missingCacheRequests, 1);
+assert.equal(await service.isAutomaticMarkdownSuppressed(missingPDF), false);
+await fs.access(
+  path.join(
+    tempDir,
+    "zotero-mcp",
+    "mineru",
+    missingPDF.key,
+    "raw",
+    "content_list_v2.json",
   ),
 );
-assert.ok(state.suppressed["1:PDFKEY2"]);
-await service.forgetAutomaticMarkdownState(1, pdf2.key);
-assert.equal(await service.isAutomaticMarkdownSuppressed(pdf2), false);
+
+preferences.delete("extensions.zotero.zotero-mcp-plugin.mineru.mode");
+preferences.delete("extensions.zotero.zotero-mcp-plugin.mineru.baseURL");
 await service.suppressAutomaticMarkdown(1, pdf2.key);
 assert.equal(await service.isAutomaticMarkdownSuppressed(pdf2), true);
 await service.forgetAutomaticMarkdownStateForParent(1, parent2.key);
@@ -533,6 +719,7 @@ globalThis.fetch = async () =>
     { status: 200, headers: { "content-type": "application/json" } },
   );
 try {
+  service.resetRunStats();
   await assert.rejects(
     service.getMarkdownForAttachment(pdf3, {
       allowParse: true,
@@ -543,6 +730,17 @@ try {
     /content_list_v2 JSON is invalid/i,
     "an explicit Reader parse reports the structured-data failure without fallback",
   );
+  service.recordIndexFallback(
+    pdf3,
+    "built-in PDF extraction was used after MinerU failed",
+  );
+  service.recordIndexFallback(
+    pdf3,
+    "duplicate fallback for the same PDF must not be counted twice",
+  );
+  const failureStats = service.getRunStats();
+  assert.equal(failureStats.failures, 1);
+  assert.match(failureStats.lastError, /content_list_v2 JSON is invalid/i);
 } finally {
   globalThis.fetch = originalFetch;
 }

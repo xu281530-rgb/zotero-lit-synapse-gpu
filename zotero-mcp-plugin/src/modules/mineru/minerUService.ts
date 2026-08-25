@@ -111,6 +111,11 @@ export interface GetMarkdownOptions {
   force?: boolean;
   /** The user explicitly requested a new parse/regeneration. */
   userInitiated?: boolean;
+  /**
+   * An index build found the canonical Markdown missing. Recreate it from a
+   * valid structured cache, or allow a new parse when no cache can be used.
+   */
+  restoreMissingMarkdown?: boolean;
   /** Reports that the canonical Zotero Markdown attachment changed. */
   onAttachmentChanged?: () => void;
   /**
@@ -218,6 +223,8 @@ interface CachedStructuredResult {
 
 interface CachedStructuredFailure {
   skipReason: string;
+  /** This entry cannot be reused and must be discarded before a retry. */
+  discardBeforeRetry?: boolean;
 }
 
 interface GeneratedMarkdownAttachment {
@@ -235,8 +242,11 @@ export class MinerUService {
   private semaphore = new Semaphore(2);
   /** In-flight work keyed by attachment to prevent duplicate parsing. */
   private inFlight = new Map<string, Promise<string | null>>();
-  /** Failures recorded during the current indexing run. */
-  private runFailures: Array<{ fileName: string; message: string }> = [];
+  /** MinerU failures/fallbacks in the current indexing run, deduplicated by PDF. */
+  private runFailures = new Map<
+    string,
+    { fileName: string; message: string }
+  >();
   /** Markdown attachments created during the current indexing run. */
   private runAttachments = 0;
   /** 界面进度监听器；解析是分钟级操作，没有它用户只能盯着一个不动的弹窗 */
@@ -794,6 +804,37 @@ export class MinerUService {
         return attachedMinerU.markdown;
       }
 
+      if (attachedMinerU && options.restoreMissingMarkdown) {
+        await this.allowAutomaticMarkdown(
+          attachment.libraryID,
+          attachment.key,
+        );
+        options.onOrigin?.("mineru_attachment");
+        return attachedMinerU.markdown;
+      }
+
+      if (structured && options.restoreMissingMarkdown) {
+        const synced = await this.syncMarkdownAttachment(
+          attachment,
+          structured.assembled.markdown,
+          attachment.attachmentFilename || `${attachment.key}.pdf`,
+          { replaceExisting: true },
+        );
+        if (!synced) return null;
+        await this.updateCacheAttachmentMeta(
+          attachment.key,
+          structured,
+          synced,
+        );
+        await this.allowAutomaticMarkdown(
+          attachment.libraryID,
+          attachment.key,
+        );
+        options.onAttachmentChanged?.();
+        options.onOrigin?.("mineru_cache");
+        return synced.markdown;
+      }
+
       if (structured && !options.userInitiated) {
         await this.suppressAutomaticMarkdown(
           attachment.libraryID,
@@ -810,6 +851,19 @@ export class MinerUService {
           ztoolkit.log(
             `[MinerU] retrying ${attachment.key} despite cached failure: ${cached.skipReason}`,
           );
+          if (
+            options.restoreMissingMarkdown &&
+            allowParse &&
+            cached.discardBeforeRetry
+          ) {
+            await IOUtils.remove(this.getAttachmentDir(attachment.key), {
+              recursive: true,
+              ignoreAbsent: true,
+            });
+            ztoolkit.log(
+              `[MinerU] removed unusable structured cache before index recovery for ${attachment.key}`,
+            );
+          }
         } else {
           ztoolkit.log(`[MinerU] skipping ${attachment.key}: ${cached.skipReason}`);
           return null;
@@ -818,6 +872,7 @@ export class MinerUService {
 
       if (
         !options.userInitiated &&
+        !options.restoreMissingMarkdown &&
         (await this.isAutomaticMarkdownSuppressed(attachment))
       ) {
         ztoolkit.log(
@@ -929,8 +984,23 @@ export class MinerUService {
    * Reset statistics so each indexing result covers only the current run.
    */
   resetRunStats(): void {
-    this.runFailures = [];
+    this.runFailures.clear();
     this.runAttachments = 0;
+  }
+
+  /** Record that an index build had to use Zotero's built-in PDF extractor. */
+  recordIndexFallback(attachment: any, message?: string): void {
+    const key = String(attachment?.key || attachment?.attachmentFilename || "pdf");
+    if (this.runFailures.has(key)) return;
+    const fileName = String(
+      attachment?.attachmentFilename || attachment?.key || "PDF",
+    );
+    this.runFailures.set(key, {
+      fileName,
+      message:
+        message ||
+        "MinerU did not produce a canonical Markdown attachment; Zotero PDF extraction was used",
+    });
   }
 
   /** Failures and generated attachments from the current run. */
@@ -939,9 +1009,10 @@ export class MinerUService {
     lastError?: string;
     attachments: number;
   } {
-    const last = this.runFailures[this.runFailures.length - 1];
+    const failures = [...this.runFailures.values()];
+    const last = failures[failures.length - 1];
     return {
-      failures: this.runFailures.length,
+      failures: failures.length,
       lastError: last ? `${last.fileName}: ${last.message}` : undefined,
       attachments: this.runAttachments,
     };
@@ -1355,7 +1426,7 @@ export class MinerUService {
         assembled,
       };
       await this.updateCacheAttachmentMeta(attachment.key, cached, synced);
-      if (options.userInitiated) {
+      if (options.userInitiated || options.restoreMissingMarkdown) {
         await this.allowAutomaticMarkdown(attachment.libraryID, attachment.key);
       }
       options.onAttachmentChanged?.();
@@ -1373,7 +1444,10 @@ export class MinerUService {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       ztoolkit.log(`[MinerU] 解析失败 ${fileName}: ${message}`, "warn");
-      this.runFailures.push({ fileName, message });
+      this.runFailures.set(String(attachment.key || fileName), {
+        fileName,
+        message,
+      });
       this.emitProgress({
         phase: "failed",
         attachmentKey: attachment.key,
@@ -1709,6 +1783,7 @@ export class MinerUService {
       if (elapsed < FAILURE_RETRY_MS) {
         return {
           skipReason: `上次解析失败（${meta.error}），冷却中`,
+          discardBeforeRetry: true,
         };
       }
       return null;
@@ -1725,6 +1800,7 @@ export class MinerUService {
     } catch (error) {
       return {
         skipReason: `structured MinerU cache is invalid: ${error instanceof Error ? error.message : String(error)}`,
+        discardBeforeRetry: true,
       };
     }
   }

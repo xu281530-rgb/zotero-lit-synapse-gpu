@@ -10,7 +10,7 @@ export async function resolve(specifier, context, nextResolve) {
     });
   }
   if (STUBBED.has(specifier)) {
-    return nextResolve("./fixtures/stub-build-indexing-deps.mjs", {
+    return nextResolve("./stub-build-indexing-deps.mjs", {
       ...context,
       parentURL: import.meta.url,
     });

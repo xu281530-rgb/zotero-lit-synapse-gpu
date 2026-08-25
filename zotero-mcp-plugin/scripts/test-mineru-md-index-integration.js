@@ -45,8 +45,12 @@ const PARENT_KEY = "PARENTPAPER";
 const PDF_ATTACHMENT_KEY = "PDFATT01";
 const MD_ATTACHMENT_KEY = "MDATT001";
 const UNIQUE_TERM = "XENOTHERMALPHASE8127";
+const BRIDGE_TERM = "POLYVISUALBRIDGE9271";
+const RAW_SPLIT_SENTENCE =
+  `${UNIQUE_TERM} appears only in the archi tecture pro cesses described here.`;
 const UNIQUE_SENTENCE =
-  `${UNIQUE_TERM} appears only in the structured MinerU Markdown attachment.`;
+  `${UNIQUE_TERM} appears only in the architecture processes described here.`;
+const BRIDGE_SENTENCE = `${BRIDGE_TERM} appears at extreme values.`;
 
 const structured = [[
   {
@@ -59,7 +63,80 @@ const structured = [[
   {
     type: "paragraph",
     content: {
-      paragraph_content: [{ type: "text", content: UNIQUE_SENTENCE }],
+      paragraph_content: [{
+        type: "text",
+        content: "Architecture processes are established in this paper.",
+      }],
+    },
+  },
+  {
+    type: "paragraph",
+    content: {
+      paragraph_content: [{
+        type: "text",
+        content: "Architecture processes remain independently observable.",
+      }],
+    },
+  },
+  {
+    type: "paragraph",
+    content: {
+      paragraph_content: [{ type: "text", content: RAW_SPLIT_SENTENCE }],
+    },
+  },
+  {
+    type: "paragraph",
+    content: {
+      paragraph_content: [
+        { type: "text", content: "The" },
+        { type: "equation_inline", content: "N _ { V }" },
+        { type: "text", content: "is indexed." },
+      ],
+    },
+  },
+  {
+    type: "paragraph",
+    bbox: [100, 350, 900, 390],
+    content: {
+      paragraph_content: [{
+        type: "text",
+        content: `${BRIDGE_TERM} appears at`,
+      }],
+    },
+  },
+  {
+    type: "image",
+    bbox: [100, 400, 900, 480],
+    content: {
+      image_caption: [
+        { type: "text", content: "Time=18 s" },
+        { type: "text", content: "Fig. 2. Retained bridge figure." },
+      ],
+    },
+  },
+  {
+    type: "table",
+    bbox: [100, 490, 900, 570],
+    content: {
+      table_caption: ["Table 1", "Retained values."],
+      html: "<table><tr><td>A</td></tr></table>",
+    },
+  },
+  {
+    type: "chart",
+    bbox: [100, 580, 900, 660],
+    content: { chart_caption: [{ type: "text", content: "t (s)" }] },
+  },
+  {
+    type: "image",
+    bbox: [100, 670, 900, 750],
+    content: { image_caption: [{ type: "text", content: "温度分布" }] },
+  },
+  {
+    type: "paragraph",
+    bbox: [100, 760, 900, 800],
+    content: {
+      paragraph_content: [{ type: "text", content: "extreme values." }],
     },
   },
   {
@@ -75,6 +152,11 @@ const assembled = assembleStructuredDocument(
     "paper_content_list_v2.json": JSON.stringify(structured),
   }),
 );
+assert.match(assembled.markdown, /architecture processes described here/);
+assert.doesNotMatch(assembled.markdown, /archi tecture|pro cesses/);
+assert.match(assembled.markdown, /The \$N _ \{ V \}\$ is indexed\./);
+assert.match(assembled.markdown, new RegExp(BRIDGE_SENTENCE));
+assert.doesNotMatch(assembled.markdown, /Time=18 s|t \(s\)|温度分布/);
 
 const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zmp-mineru-index-"));
 const markdownPath = path.join(
@@ -107,11 +189,123 @@ const semanticService = Object.create(SemanticSearchService.prototype);
 const extracted = await semanticService.extractItemContent(parentItem, null);
 const attachmentMarkdown = extracted.text;
 assert.match(attachmentMarkdown, new RegExp(UNIQUE_TERM));
+assert.match(attachmentMarkdown, /architecture processes described here/);
+assert.doesNotMatch(attachmentMarkdown, /archi tecture|pro cesses/);
+assert.match(attachmentMarkdown, /The \$N _ \{ V \}\$ is indexed\./);
+assert.match(attachmentMarkdown, new RegExp(BRIDGE_SENTENCE));
+assert.doesNotMatch(attachmentMarkdown, /Time=18 s|t \(s\)|温度分布/);
 assert.doesNotMatch(attachmentMarkdown, /plot\.png|!\[/);
 assert.deepEqual(
   extracted.bodySources,
   [`markdown:${MD_ATTACHMENT_KEY}`],
   "production attachment discovery reads the Zotero MD child directly",
+);
+
+const fallbackPDFPath = path.join(tempDir, "fallback.pdf");
+await fs.writeFile(fallbackPDFPath, "PDF fixture", "utf8");
+const fallbackPDF = {
+  id: 3,
+  key: "FALLBACKPDF1",
+  attachmentFilename: "fallback.pdf",
+  attachmentContentType: "application/pdf",
+  isPDFAttachment: () => true,
+  getFilePathAsync: async () => fallbackPDFPath,
+};
+zoteroItems.set(fallbackPDF.id, fallbackPDF);
+const fallbackParent = {
+  key: "FALLBACKPARENT",
+  libraryID: LIBRARY_ID,
+  itemType: "journalArticle",
+  isRegularItem: () => true,
+  getAttachments: () => [fallbackPDF.id],
+  getDisplayTitle: () => "Fallback Paper",
+  getField: () => "",
+  getNotes: () => [],
+};
+const recoveryControl = {
+  originalPDFs: [fallbackPDF],
+  results: [null, null],
+  options: [],
+  events: [],
+  fallbacks: [],
+  pdfWorkerText: "BUILTIN_PDFWORKER_TEXT_7721",
+};
+globalThis.__minerUIndexRecoveryTest = recoveryControl;
+const fallbackExtracted = await semanticService.extractItemContent(
+  fallbackParent,
+  null,
+);
+delete globalThis.__minerUIndexRecoveryTest;
+assert.deepEqual(
+  recoveryControl.events,
+  ["minerU:reuse", "minerU:parse", "pdfWorker:" + fallbackPDFPath],
+  "PDFWorker runs only after cache recovery and a fresh MinerU parse both fail",
+);
+assert.equal(recoveryControl.options.length, 2);
+assert.deepEqual(
+  recoveryControl.options[0],
+  {
+    allowParse: false,
+    ignoreEnabled: true,
+    restoreMissingMarkdown: true,
+  },
+  "the index reuse pass may recreate a missing MD from structured cache",
+);
+assert.deepEqual(
+  recoveryControl.options[1],
+  {
+    allowParse: true,
+    ignoreEnabled: true,
+    ignoreFailureCache: true,
+    restoreMissingMarkdown: true,
+  },
+  "every index build retries MinerU when no valid structured cache exists",
+);
+assert.equal(
+  recoveryControl.fallbacks.length,
+  1,
+  "using Zotero PDFWorker is recorded as a visible high-precision fallback",
+);
+assert.deepEqual(
+  fallbackExtracted.bodySources,
+  [`pdf:${fallbackPDF.key} (pdfWorker)`],
+);
+assert.match(fallbackExtracted.text, /BUILTIN_PDFWORKER_TEXT_7721/);
+
+const pairedPDF = {
+  ...fallbackPDF,
+  id: 4,
+  key: PDF_ATTACHMENT_KEY,
+};
+zoteroItems.set(pairedPDF.id, pairedPDF);
+const pairedParent = {
+  ...fallbackParent,
+  key: "PAIREDPARENT",
+  getAttachments: () => [pairedPDF.id, markdownAttachment.id],
+};
+const pairedControl = {
+  originalPDFs: [pairedPDF],
+  results: [attachmentMarkdown],
+  options: [],
+  events: [],
+  fallbacks: [],
+  pdfWorkerText: "must not be used",
+};
+globalThis.__minerUIndexRecoveryTest = pairedControl;
+const pairedExtracted = await semanticService.extractItemContent(
+  pairedParent,
+  null,
+);
+delete globalThis.__minerUIndexRecoveryTest;
+assert.deepEqual(
+  pairedExtracted.bodySources,
+  [`pdf:${PDF_ATTACHMENT_KEY} (MinerU)`],
+  "matching PDF and MinerU MD attachments contribute one canonical body",
+);
+assert.equal(
+  pairedExtracted.text.split(UNIQUE_TERM).length - 1,
+  1,
+  "the same Markdown body is not indexed twice through its PDF and MD sibling",
 );
 
 const chunker = new TextChunker({
@@ -121,9 +315,11 @@ const chunker = new TextChunker({
 });
 const chunks = chunker.chunk(attachmentMarkdown);
 assert.ok(chunks.some((chunk) => chunk.includes(UNIQUE_SENTENCE)));
+assert.ok(chunks.some((chunk) => chunk.includes(BRIDGE_SENTENCE)));
+assert.ok(chunks.every((chunk) => !/Time=18 s|t \(s\)|温度分布/.test(chunk)));
 
 const embeddingStub = (text) =>
-  text.includes(UNIQUE_TERM)
+  text.includes(UNIQUE_TERM) || text.includes(BRIDGE_TERM)
     ? new Float32Array([1, 0])
     : new Float32Array([0, 1]);
 const vectorBytes = (vector) =>
@@ -202,6 +398,20 @@ const semanticHits = await vectorStore.search(embeddingStub(UNIQUE_TERM), {
 assert.ok(semanticHits.length > 0);
 assert.equal(semanticHits[0].itemKey, PARENT_KEY);
 assert.match(semanticHits[0].chunkText, new RegExp(UNIQUE_TERM));
+const bridgeSemanticHits = await vectorStore.search(embeddingStub(BRIDGE_TERM), {
+  groupByItem: true,
+  documentLimit: 10,
+  maxChunksPerItem: 10,
+  libraryID: LIBRARY_ID,
+  minScore: 0.5,
+});
+assert.ok(
+  bridgeSemanticHits.some(
+    (hit) =>
+      hit.itemKey === PARENT_KEY && hit.chunkText.includes(BRIDGE_SENTENCE),
+  ),
+  "the paragraph repaired across mixed layout blocks is retrieved semantically",
+);
 
 let transactionDepth = 0;
 const sqlite = new DatabaseSync(path.join(tempDir, "keyword.sqlite"));
@@ -255,33 +465,54 @@ const resolver = {
     );
   },
 };
+const repairedWordKeywordRun = await runBodyKeywordSearch(keywordStore, resolver, {
+  libraryID: LIBRARY_ID,
+  probes: [{ text: "architecture", weight: 1 }],
+});
+assert.equal(repairedWordKeywordRun.results[0].itemKey, PARENT_KEY);
+assert.match(
+  repairedWordKeywordRun.results[0].evidence[0].text,
+  /architecture processes/i,
+  "the repaired word is written to and retrieved from the keyword index",
+);
+
 const keywordRun = await runBodyKeywordSearch(keywordStore, resolver, {
   libraryID: LIBRARY_ID,
   probes: [{ text: UNIQUE_TERM, weight: 1 }],
 });
 assert.equal(keywordRun.results[0].itemKey, PARENT_KEY);
 assert.match(keywordRun.results[0].evidence[0].text, new RegExp(UNIQUE_TERM));
+const bridgeKeywordRun = await runBodyKeywordSearch(keywordStore, resolver, {
+  libraryID: LIBRARY_ID,
+  probes: [{ text: BRIDGE_TERM, weight: 1 }],
+});
+assert.equal(bridgeKeywordRun.results[0].itemKey, PARENT_KEY);
+assert.match(
+  bridgeKeywordRun.results[0].evidence[0].text,
+  new RegExp(BRIDGE_SENTENCE),
+  "the paragraph repaired across mixed layout blocks is retrieved by keyword",
+);
 
 const semanticResults = [{
   itemKey: PARENT_KEY,
   libraryID: LIBRARY_ID,
   title: "Canonical Indexed Paper",
-  score: semanticHits[0].score,
-  matchedChunks: semanticHits.map((hit) => ({
+  score: bridgeSemanticHits[0].score,
+  matchedChunks: bridgeSemanticHits.map((hit) => ({
     chunkId: hit.chunkId,
     text: hit.chunkText,
     score: hit.score,
   })),
 }];
-const keywordResults = keywordRun.results.map((result) => ({
+const keywordResults = bridgeKeywordRun.results.map((result) => ({
   ...result,
   key: result.itemKey,
   libraryID: LIBRARY_ID,
 }));
 const hybrid = await runHybridSearch(
   {
-    query: UNIQUE_SENTENCE,
-    keywords: [UNIQUE_TERM],
+    query: BRIDGE_SENTENCE,
+    keywords: [BRIDGE_TERM, "extreme", "values"],
     topK: 10,
     rrfK: 60,
     keywordWeight: 1,
