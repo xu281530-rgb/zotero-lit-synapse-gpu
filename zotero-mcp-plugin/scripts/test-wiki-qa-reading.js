@@ -167,10 +167,14 @@ function note(facts) {
     "# Melt-pool geometry under imposed thermal gradients",
     "",
     "## Research question",
-    "How melt-pool depth responds to the imposed thermal gradient along the rig, and where the response stops being linear (chunk 0).",
+    // Short framing lines, and deliberately uncited: this note is written by
+    // questions, so its standing header cannot cite chunk 0 - most turns have
+    // never been given chunk 0, and a citation the reading cannot resolve is
+    // refused. The facts, and their citations, live in the sections below.
+    "How melt-pool depth responds to the imposed thermal gradient, and where that response stops being linear.",
     "",
     "## Materials and method",
-    "A nickel-base superalloy on a directional solidification rig, with depth measured at numbered stations along the traverse (chunk 1).",
+    "A nickel-base superalloy on a directional solidification rig, with depth measured at numbered stations.",
     "",
     "## Findings",
     ...facts,
@@ -688,15 +692,46 @@ block("a full-text read inherits the chunks and the note the questions left", as
     "and it is the SAME note, not a fresh one",
   );
 
-  // Now - and only now - the synthesis is available.
+  // Now - and only now - the synthesis is available. It is also the one call
+  // whose sentences are checked against the chunks, and this note has the
+  // shape that check exists for: one sentence generalising across every chunk
+  // of the paper. Sent without proof it is refused, and nothing is written.
+  const acrossEveryChunk =
+    "Every station of this short paper reports the same depth to within the stated uncertainty (chunk 0, chunk 1, chunk 2, chunk 3, chunk 4, chunk 5).";
+  const bounded =
+    "Read as a whole the paper is a single-condition confirmation, bounded by the one gradient range it covers (chunk 0).";
+  const synthesisNote = () => note([acrossEveryChunk, bounded]);
+
+  const refused = await service
+    .updateReadingNote({
+      libraryID: 1,
+      itemKey: "PAPRTHRE",
+      finalSynthesis: true,
+      markdown: synthesisNote(),
+    })
+    .then(
+      () => null,
+      (error) => error,
+    );
+  assert.ok(refused, "a generalisation across six chunks is not written unproved");
+  assert.equal(refused.name, "WikiSynthesisAuditRequired");
+  assert.match(refused.message, /multi-chunk-fusion/u);
+
+  // Proved, one quotation per cited chunk, copied verbatim out of each.
   const synthesised = await service.updateReadingNote({
     libraryID: 1,
     itemKey: "PAPRTHRE",
     finalSynthesis: true,
-    markdown: note([
-      "Every station of this short paper reports the same depth to within the stated uncertainty (chunk 0, chunk 1, chunk 2, chunk 3, chunk 4, chunk 5).",
-      "Read as a whole the paper is a single-condition confirmation, and its uniformity claim is bounded by the one gradient range it covers.",
-    ]),
+    markdown: synthesisNote(),
+    synthesisAudit: [
+      {
+        sentence: acrossEveryChunk,
+        support: Array.from({ length: 6 }, (_, i) => ({
+          chunkId: i,
+          quote: indexedChunks.get("PAPRTHRE")[i].text.slice(21),
+        })),
+      },
+    ],
   });
   assert.equal(synthesised.finalSynthesis, true);
 });
@@ -1401,10 +1436,14 @@ block("paging over holes converges rather than stalling", async () => {
 
 block("paging walks the unread chunks, wherever the holes are", async () => {
   // Scattered reading, deliberately not a prefix: {1, 3} of a six-chunk paper.
+  // The note cites only what this question was actually shown. Citing chunks
+  // 0, 2, 4 and 5 here would be the failure the citation rule catches: a
+  // reading that has seen two chunks of six cannot have taken anything from
+  // the other four, and a number that resolves to nothing is worse than none.
   await readByQuestion("PAPRTHRE", [1, 3], [
-    "Every station of this short paper reports the same depth to within the stated uncertainty (chunk 0, chunk 1, chunk 2, chunk 3, chunk 4, chunk 5).",
-    "Read as a whole the paper is a single-condition confirmation, and its uniformity claim is bounded by the one gradient range it covers.",
-    "Stations 1 and 3 agree to within the stated uncertainty, re-checked for this question (chunk 1, chunk 3).",
+    "Stations 1 and 3 report the same depth to within the stated uncertainty (chunk 1, chunk 3).",
+    "What the two stations have in common is the single gradient condition they were measured under (chunk 1).",
+    "Whether the remaining stations agree is not established by this reading (chunk 3).",
   ]);
   await writeUp({
     title: "Short paper agreement",
@@ -1659,9 +1698,13 @@ block("a full-text integration that fails to save records nothing either", async
   const session = await sessions.openForItem(1, "PAPERFIV");
   const integratedBefore = session.integratedChunks;
 
+  // Written so the synthesis gate passes: what is under test here is what a
+  // DISK failure leaves behind, and a note refused before it is ever written
+  // would never reach the failing write at all.
   const whole = note([
-    "Stations 2 and 3 rise linearly with the imposed gradient (chunk 2, chunk 3).",
-    "Across the whole traverse the rise continues without a plateau, and the paper reports no departure from it (chunk 0, chunk 1, chunk 4, chunk 5, chunk 6, chunk 7).",
+    "Station 2 reports a melt-pool depth measured under the imposed gradient stated for that station (chunk 2).",
+    "Station 3 reports its depth measured under the gradient stated for that station as well (chunk 3).",
+    "The traverse is covered station by station, with its own stated gradient (chunk 0).",
   ]);
   notes.write = async () => {
     throw new Error("simulated disk failure");
@@ -1695,7 +1738,7 @@ block("a full-text integration that fails to save records nothing either", async
   assert.equal(done.finalSynthesis, true);
   assert.match(
     parseReadingNote(await noteOnDisk("PAPERFIV")).body,
-    /without a plateau/u,
+    /The traverse is covered station by station/u,
   );
 });
 

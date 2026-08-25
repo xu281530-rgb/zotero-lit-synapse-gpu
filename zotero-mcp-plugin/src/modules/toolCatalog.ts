@@ -1555,7 +1555,15 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'unchanged: true (with unchangedReason) records that a batch — references, acknowledgements, a repeated caption — leaves the account intact. It cannot be used twice in a row and cannot be used for the final synthesis.',
       '',
+      'CITE PER BLOCK, NOT PER DOCUMENT. Every paragraph and every bullet that states a fact, a parameter, a result, a mechanism or a conclusion names the chunk it came from. One citation somewhere in the note no longer satisfies this. The number also has to resolve: a chunk this paper actually has, and one this reading has actually been given. Cite the number the page reported — chunkIndex and chunkId are both accepted.',
+      '',
+      'WHEN A SENTENCE NAMES SEVERAL CHUNKS, EACH ONE HAS TO CARRY IT ON ITS OWN. Two chunks discussing the same instrument are not joint support for a sentence about what that instrument achieves; they are two facts, and fusing them states a relationship neither chunk asserts. If one of the chunks only shares the topic, leave it out and make the sentence smaller. Prefer one mechanism per sentence over one elegant sentence per section.',
+      '',
+      'KEEP THE PAPER\'S OWN STRENGTH. This is the failure that survives a complete reading, so it is worth stating flatly: do not convert "difficult" into "cannot", "can be a solution" into "eliminates", "notably unique" into "irreplaceable", "high efficiency" into "maximises", "proposed" or "preliminary" into a finished capability, or "may" into "will". Do not widen a subject: a capability demonstrated for one imaging mode is not a capability of the whole technique family, and the family\'s merits are not that one mode\'s. Do not drop the limits — a difficulty, a failure condition, a boundary, a negative result, an item in a numbered list of essential points — because they are what makes the rest usable. A number keeps the conditions it was measured or calculated under.',
+      '',
       'finalSynthesis: true is the whole-paper pass, available only once every chunk has been delivered THROUGH A FULL-TEXT READ. It is followed by wiki_record_concepts final true, then wiki_prepare_update with the five-axis Wiki Review, then wiki_commit. It is required before the terminology final pass or Wiki write-up can begin, and before Evidence can be stored at paper_reviewed or cross_paper depth. It is refused on a paper read only by questions, however much of it they have accumulated: whole-paper depth names an act — reading it through, then reconciling it as one thing — that scattered passages never perform. Open it with wiki_build_from_paper, which continues this same note and asks only for what questions never reached.',
+      '',
+      'THE FINAL SYNTHESIS IS CHECKED AGAINST THE CHUNKS BEFORE IT IS WRITTEN, and that pass alone is — the batch integrations are not. The server reads the note you submit and lists back every sentence that reaches: absolute wording, a direction or a number, a negation, several chunks fused into one claim, a technique named that appears in none of the chunks it cites, a flat statement whose source hedged, an enumeration shorter than the one it summarises. Nothing is written on that call. You then either (a) send synthesisAudit with a VERBATIM quotation from each chunk that sentence cites — copied out of the chunk, not out of your note — or (b) rewrite the sentence at the strength the paper used, which removes it from the list and costs nothing. Option (b) is usually the right one. Deciding whether a quotation actually supports a sentence is yours; the server only checks that the quotation is really in that chunk, character for character.',
       '',
       'The note is your reading memory, never Evidence. Claims still need excerpts quoted from the paper\'s own chunks — and wiki_commit refuses an excerpt from a chunk that was never recorded as read here, which is the other half of "note first, Wiki second".'
     ].join('\n'),
@@ -1581,7 +1589,33 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         finalSynthesis: {
           type: 'boolean',
-          description: 'The whole-paper pass, once every chunk has been delivered by a full-text read. Not available on a paper read only through questions.'
+          description: 'The whole-paper pass, once every chunk has been delivered by a full-text read. Not available on a paper read only through questions. The note submitted with it is checked sentence by sentence against the chunks it cites before anything is written; see synthesisAudit.'
+        },
+        synthesisAudit: {
+          type: 'array',
+          description: 'Proof for the sentences the final-synthesis check flagged. Send it only on a finalSynthesis call, and only after a previous call listed those sentences — the list names them exactly, and an entry matching no flagged sentence is reported back rather than ignored. One entry per sentence you chose to keep as written; omit entries for sentences you rewrote instead, since a rewritten sentence is re-checked and usually is not flagged at all.',
+          items: {
+            type: 'object',
+            properties: {
+              sentence: {
+                type: 'string',
+                description: 'The sentence exactly as it stands in the markdown you are submitting on THIS call. Matched after whitespace normalisation, so reformatting is safe but rewording is not — if you reworded it, drop the entry and let the check re-read it.'
+              },
+              support: {
+                type: 'array',
+                description: 'One quotation per chunk the sentence cites. All of them are required: a sentence citing three chunks needs three quotations, because each cited chunk has to carry the sentence on its own. If a chunk cannot carry it, remove that chunk from the citation rather than quoting around it.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    chunkId: { type: 'integer', minimum: 0, description: 'The chunk this quotation is copied from.' },
+                    quote: { type: 'string', description: 'VERBATIM text from that chunk, at least 40 characters. Copy it from the chunk itself — re-reading a chunk you were already given is free and does not count against the integration gate — never from the reading note, which is your paraphrase. It is checked character for character after whitespace normalisation, exactly as Evidence excerpts are, and a near miss is refused with the divergence pointed out.' }
+                  },
+                  required: ['chunkId', 'quote']
+                }
+              }
+            },
+            required: ['sentence', 'support']
+          }
         },
         readChunkIds: {
           type: 'array',

@@ -231,7 +231,7 @@ function noteBody(sections) {
     ...sections,
     "",
     "## Scope and limits",
-    "Findings are established for one alloy and one rig geometry; transfer to other section thicknesses is not demonstrated in this paper.",
+    "Findings are established for one alloy and one rig geometry; transfer to other section thicknesses is not demonstrated in this paper (chunk 1).",
   ].join("\n");
 }
 
@@ -423,7 +423,7 @@ block("the first batch arrives and must be integrated as a whole", async () => {
     itemKey: "DEEPREAD",
     markdown: noteBody([
       "## Columnar-to-equiaxed transition",
-      "The paper places the transition at a thermal gradient of 12 K/mm for this alloy.",
+      "The paper places the transition at a thermal gradient of 12 K/mm for this alloy (chunk 2).",
     ]),
   });
   assert.equal(integrated.integrated, true);
@@ -453,7 +453,7 @@ block("the machine block tracks the ledger and ignores forgery", async () => {
     "",
     noteBody([
       "## Columnar-to-equiaxed transition",
-      "The paper places the transition at a thermal gradient of 12 K/mm for this alloy.",
+      "The paper places the transition at a thermal gradient of 12 K/mm for this alloy (chunk 2).",
     ]),
   ].join("\n");
 
@@ -528,10 +528,10 @@ block("one outstanding batch stops new paging but not re-reading", async () => {
     libraryID: 1,
     markdown: noteBody([
       "## Process chain",
-      "Directional solidification at 4 mm/min under an imposed gradient, then rapid hot pressing at 1180 C and 45 MPa for 90 s.",
+      "Directional solidification at 4 mm/min under an imposed gradient, then rapid hot pressing at 1180 C and 45 MPa for 90 s (chunk 10).",
       "",
       "## Columnar-to-equiaxed transition",
-      "The paper places the transition at a thermal gradient of 12 K/mm for this alloy.",
+      "The paper places the transition at a thermal gradient of 12 K/mm for this alloy (chunk 2).",
     ]),
   });
   assert.equal(caughtUp.readingSession.integrationDebt, 0);
@@ -551,10 +551,10 @@ block("one outstanding batch stops new paging but not re-reading", async () => {
     libraryID: 1,
     markdown: noteBody([
       "## Process chain",
-      "Directional solidification at 4 mm/min under an imposed gradient, then rapid hot pressing at 1180 C and 45 MPa for 90 s.",
+      "Directional solidification at 4 mm/min under an imposed gradient, then rapid hot pressing at 1180 C and 45 MPa for 90 s (chunk 10).",
       "",
       "## Columnar-to-equiaxed transition",
-      "The paper places the transition at a thermal gradient of 12 K/mm for this alloy.",
+      "The paper places the transition at a thermal gradient of 12 K/mm for this alloy (chunk 2).",
     ]),
   });
 
@@ -609,10 +609,10 @@ block("a retraction in section 5 rewrites what section 2 said", async () => {
     libraryID: 1,
     markdown: noteBody([
       "## Process chain",
-      "Directional solidification at 4 mm/min under an imposed gradient, then rapid hot pressing at 1180 C and 45 MPa for 90 s.",
+      "Directional solidification at 4 mm/min under an imposed gradient, then rapid hot pressing at 1180 C and 45 MPa for 90 s (chunk 10).",
       "",
       "## Columnar-to-equiaxed transition",
-      "The transition occurs at a thermal gradient of 8 K/mm. The value of 12 K/mm stated in section 2.1 is superseded: it came from an uncorrected thermocouple lag, and the corrected figure reconciles this paper with Ref. 14.",
+      "The transition occurs at a thermal gradient of 8 K/mm (chunk 26). The value of 12 K/mm stated in section 2.1 (chunk 2) is superseded: it came from an uncorrected thermocouple lag, and the corrected figure reconciles this paper with Ref. 14 (chunk 26).",
     ]),
   });
 
@@ -694,18 +694,91 @@ block("the write-up waits for the whole-paper pass", async () => {
     "neither the staged nor early-final term reached the concept library",
   );
 
+  // The whole-paper pass is the one call whose sentences are checked against
+  // the chunks they cite. This first attempt reaches in the two ways a good
+  // reading still reaches: it strengthens a schedule the paper states plainly
+  // into a claim about what the schedule guarantees, and it fuses the
+  // correction with the reconciliation into one sentence that neither chunk
+  // asserts on its own.
+  const drifted = () =>
+    service.updateReadingNote({
+      libraryID: 1,
+      finalSynthesis: true,
+      markdown: noteBody([
+        "## Process chain",
+        "Directional solidification at 4 mm/min under an imposed gradient, then rapid hot pressing at 1180 C and 45 MPa for 90 s, completely eliminating equiaxed nucleation (chunk 10).",
+        "",
+        "## Columnar-to-equiaxed transition",
+        "The corrected 8 K/mm threshold proves that the thermocouple lag reported in section 2.1 always causes the disagreement with Ref. 14 (chunk 2, chunk 26).",
+      ]),
+    });
+
+  const refusal = await drifted().then(
+    () => null,
+    (error) => error,
+  );
+  assert.ok(refusal, "a synthesis that reaches past its chunks is not written");
+  assert.equal(refusal.name, "WikiSynthesisAuditRequired");
+  assert.match(refusal.message, /eliminating/u, "the offending sentence is quoted back");
+  assert.match(refusal.message, /absolute-language/u, "and the reason is named");
+  assert.match(refusal.message, /multi-chunk-fusion/u);
+  assert.match(refusal.message, /synthesisAudit/u, "with the way to answer it");
+  assert.equal(
+    parseReadingNote((await readNoteFromDisk("DEEPREAD")).raw).metadata.coverage
+      .finalSynthesis,
+    false,
+    "nothing is written on a refused synthesis, so the ledger cannot claim one",
+  );
+
+  // Answering it with a quotation that is not in the chunk is refused too:
+  // being nearly right is exactly the case worth catching.
+  const forged = await service
+    .updateReadingNote({
+      libraryID: 1,
+      finalSynthesis: true,
+      markdown: noteBody([
+        "## Process chain",
+        "Directional solidification at 4 mm/min under an imposed gradient, then rapid hot pressing at 1180 C and 45 MPa for 90 s, completely eliminating equiaxed nucleation (chunk 10).",
+        "",
+        "## Columnar-to-equiaxed transition",
+        "The corrected 8 K/mm threshold proves that the thermocouple lag reported in section 2.1 always causes the disagreement with Ref. 14 (chunk 2, chunk 26).",
+      ]),
+      synthesisAudit: [
+        {
+          sentence:
+            "Directional solidification at 4 mm/min under an imposed gradient, then rapid hot pressing at 1180 C and 45 MPa for 90 s, completely eliminating equiaxed nucleation (chunk 10).",
+          support: [
+            {
+              chunkId: 10,
+              quote:
+                "directional solidification at 4 mm/min under an imposed gradient, completely eliminating equiaxed nucleation",
+            },
+          ],
+        },
+      ],
+    })
+    .then(
+      () => null,
+      (error) => error,
+    );
+  assert.ok(forged, "an invented quotation does not close the gate");
+  assert.match(forged.message, /character for character/u);
+
+  // The cheap way out, and the right one: write the sentences at the strength
+  // the paper used, and split the fusion into the two facts it was made of.
+  // Nothing then needs quoting at all.
   const finalPass = await service.updateReadingNote({
     libraryID: 1,
     finalSynthesis: true,
     markdown: noteBody([
       "## Process chain",
-      "Directional solidification at 4 mm/min under an imposed gradient of 8-14 K/mm, then rapid hot pressing at 1180 C and 45 MPa for 90 s, with the press closing within 6 s of the solidification front clearing the die.",
+      "Directional solidification at 4 mm/min under an imposed gradient, followed by rapid hot pressing at 1180 C and 45 MPa for 90 s (chunk 10).",
       "",
       "## Columnar-to-equiaxed transition",
-      "The transition occurs at a thermal gradient of 8 K/mm once thermocouple lag is corrected; the uncorrected 12 K/mm reported in section 2.1 is superseded.",
+      "Section 2.1 reported the transition at a thermal gradient of 12 K/mm (chunk 2).",
       "",
       "## Validation and contribution",
-      "The corrected threshold reconciles the disagreement with Ref. 14, and the two-stage schedule is the paper's contribution.",
+      "After correction for thermocouple lag the transition occurs at 8 K/mm, which also reconciles the disagreement with Ref. 14 (chunk 26).",
     ]),
   });
   assert.equal(finalPass.finalSynthesis, true);

@@ -75,6 +75,7 @@
     "test:wiki-row-serialization": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-row-serialization.js",
     "test:wiki-panel-render": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-panel-render.js",
     "test:wiki-build-loop": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-build-loop.js",
+    "test:wiki-synthesis-audit": "node --experimental-strip-types scripts/test-wiki-synthesis-audit.js",
     "test:wiki-reading-note": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-reading-note.js",
     "test:wiki-qa-reading": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-qa-reading.js",
     "test:zotero9-runtime-compat": "node scripts/test-zotero9-runtime-compat.js",

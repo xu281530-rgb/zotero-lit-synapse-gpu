@@ -27,7 +27,9 @@ import {
   WIKI_EXPERT_OPEN_SCOPE_MANDATE,
   WIKI_READING_NOTE_SCHEMA,
   WikiReadingNoteStore,
+  assertBlockCitations,
   assertChunkCitations,
+  assertChunkCitationsResolvable,
   assertHolisticBody,
   assertNoNoteRegression,
   formatChunkRanges,
@@ -39,6 +41,16 @@ import {
   type WikiReadingNoteMetadata,
   type WikiReadingNoteStatus,
 } from "./wikiReadingNote";
+import {
+  WIKI_SYNTHESIS_MIN_QUOTE_CHARS,
+  WikiSynthesisAuditRequired,
+  auditSynthesis,
+  describeFlaggedSentences,
+  verifySynthesisAudit,
+  type WikiAuditChunk,
+  type WikiSynthesisAuditEntry,
+} from "./wikiSynthesisAudit";
+import { describeEvidenceMismatch } from "./wikiEvidenceDiagnostics";
 import type { WikiEmbeddingWorkUnit } from "./wikiEmbeddingQueue";
 import {
   decodeChunkCursor,
@@ -182,6 +194,134 @@ function clampCoverageToVerifiedEvidence(
  * when it is treating the write-back as a formality to get the next page, and
  * accepting them would make the whole integration gate ceremonial.
  */
+/**
+ * Refuse a whole-paper synthesis whose reaching sentences are not backed by
+ * the chunks they cite.
+ *
+ * This is the evidence-closure pass, and it runs at exactly one moment: the
+ * call that turns a working note into the paper's settled account of itself.
+ * Not on every batch - a mid-reading note is allowed to be provisional, that
+ * is what mid-reading means, and paying for a full justification seven times
+ * per paper would buy nothing the final pass does not already cover. Not
+ * never, which is what shipped before and is how "notably unique" became
+ * "irreplaceable" with `finalSynthesis: true` stamped beside it.
+ *
+ * The division of labour is the point. `auditSynthesis` decides WHICH
+ * sentences have to be proved, using nothing but the shapes a drifting
+ * sentence takes. The model decides whether its quotation actually supports
+ * the sentence - a judgement no string rule can make, and one this code does
+ * not pretend to make. `verifySynthesisAudit` checks the only thing left that
+ * is mechanically checkable, and checks it exactly as strictly as Evidence is
+ * checked: the quotation is really in that chunk, character for character.
+ *
+ * A model has two ways past this, and the cheaper one is the honest one:
+ * quote the source, or write the sentence at the strength the source used, at
+ * which point it stops being flagged and costs nothing at all.
+ */
+function assertSynthesisEvidenceClosure(
+  body: string,
+  chunks: readonly WikiAuditChunk[],
+  submittedAudit: readonly WikiSynthesisAuditEntry[],
+): void {
+  const flagged = auditSynthesis(body, { chunks });
+  if (!flagged.length) return;
+
+  if (!submittedAudit.length) {
+    throw new WikiSynthesisAuditRequired(
+      `The whole-paper synthesis has ${flagged.length} sentence(s) that reach past what the chunks they ` +
+        "cite can be shown to say, so nothing was written. This is the one gate between a finished " +
+        "reading and the paper's settled account of itself, and it exists because coverage cannot " +
+        "catch this: every chunk really was delivered, and the drift happened afterwards, while the " +
+        "note was being made to read well.\n\n" +
+        "FOR EACH SENTENCE BELOW, DO ONE OF TWO THINGS.\n" +
+        "(a) Prove it. Re-read the chunks it cites and copy out, VERBATIM, the passage that carries " +
+        "it - one quotation per cited chunk, at least " +
+        `${WIKI_SYNTHESIS_MIN_QUOTE_CHARS} characters each. Copy from the CHUNK, never from the note: ` +
+        "the note is your paraphrase, and a quotation that is not in the chunk character for " +
+        "character is refused. Re-reading a chunk you have already been given is free and does not " +
+        "count against the integration gate.\n" +
+        "(b) Cheaper, and usually right: rewrite the sentence so it says what the paper says, at the " +
+        "strength the paper says it. Keep the hedge the source used. Do not widen the subject - a " +
+        "capability shown for one technique is not a capability of the family it belongs to, and a " +
+        "family's capability is not that one technique's. Split a sentence that fuses several " +
+        "mechanisms into one sentence each, so each cites only the chunk that carries it. Restore a " +
+        "dropped item from an enumeration, especially when the dropped one was the difficulty. A " +
+        "rewritten sentence is not flagged and needs no quotation.\n\n" +
+        "Then resubmit the WHOLE note with finalSynthesis true and synthesisAudit carrying one entry " +
+        "for every sentence that is still flagged:\n" +
+        '  synthesisAudit: [{ "sentence": "<the sentence exactly as it stands in the note you ' +
+        'submit>", "support": [{ "chunkId": 18, "quote": "<verbatim from chunk 18>" }, ...] }]' +
+        "\nOmit an entry for any sentence you rewrote. Sentences you neither prove nor rewrite " +
+        "are refused again.\n\n" +
+        `SENTENCES TO ANSWER (${flagged.length}):\n${describeFlaggedSentences(flagged)}`,
+      { flagged: flagged.length },
+    );
+  }
+
+  const problems = verifySynthesisAudit(flagged, submittedAudit, chunks);
+  if (!problems.length) return;
+  const shown = problems.slice(0, 25);
+  throw new WikiSynthesisAuditRequired(
+    `The synthesis audit does not close: ${problems.length} problem(s), so nothing was written. Fix ` +
+      "these and resubmit the whole note with finalSynthesis true. Remember that rewriting a " +
+      "sentence to the paper's own strength removes the need to justify it at all.\n\n" +
+      shown
+        .map(
+          (problem, index) =>
+            `${index + 1}. "${problem.sentence.slice(0, 200)}"\n   -> ${problem.problem}`,
+        )
+        .join("\n") +
+      (problems.length > shown.length
+        ? `\n... and ${problems.length - shown.length} more.`
+        : ""),
+    { flagged: flagged.length, problems: problems.length },
+  );
+}
+
+/**
+ * Name the exact place in the submitted commit that an Evidence entry sits.
+ *
+ * `actions[3] ADD_CLAIM ... evidence[1]` is enough for a model to find the
+ * entry in the payload it just wrote without re-deriving anything; the Claim
+ * text (truncated) is there so a person reading the log knows what failed
+ * without the payload in front of them.
+ */
+function describeEvidenceLocation(
+  action: WikiCommitAction,
+  actionIndex: number,
+  entryIndex: number,
+): string {
+  const parts = [`actions[${actionIndex}] ${action.action}`];
+  if ("claimText" in action && action.claimText) {
+    const text = String(action.claimText);
+    parts.push(
+      `claim "${text.length > 90 ? `${text.slice(0, 90)}...` : text}"`,
+    );
+  }
+  if ("claimId" in action && action.claimId !== undefined) {
+    parts.push(`claimId ${String(action.claimId)}`);
+  }
+  if ("pageId" in action && action.pageId !== undefined) {
+    parts.push(`pageId ${String(action.pageId)}`);
+  }
+  parts.push(`evidence[${entryIndex}]`);
+  return parts.join(", ");
+}
+
+/**
+ * What a model is told about the synthesis gate BEFORE it meets it.
+ *
+ * Repeated at every point that points forward to the whole-paper pass,
+ * because the gate is cheapest to satisfy while the note is still being
+ * written: a sentence kept at its source's strength is never flagged, and a
+ * model that only learns the rule from the refusal has already paid for one
+ * full submission of the document.
+ */
+const GATE_HINT =
+  "Every sentence of that note is checked against the chunks it cites before anything is written, so " +
+  "keep each sentence at the strength its source used, and let a sentence cite only the chunks that " +
+  "carry it on their own.";
+
 const MIN_READING_NOTE_BODY_CHARS = 200;
 
 export class WikiService {
@@ -542,16 +682,70 @@ export class WikiService {
     return { ...page, primaryConcept: concept, aliases, relations };
   }
 
+  /**
+   * The chunks a note is allowed to cite, addressed the way the model saw them.
+   *
+   * `wiki_build_from_paper` hands back both a `chunkIndex` (position in the
+   * paper) and a `chunkId` (the row in the index), and they coincide for
+   * almost every document - which is exactly why a rule that accepted only one
+   * of them would look correct for a year and then refuse a perfectly good
+   * note on the one paper whose index was rebuilt with a gap. So both
+   * addresses resolve to the same text here, and a citation is accepted if it
+   * matches either.
+   *
+   * Undelivered chunks are excluded on purpose. The note may only cite what
+   * this reading has actually been shown; a number from the half it has not
+   * reached is either a typo or an invention, and both are worth refusing
+   * while the reader can still say which it was.
+   */
+  private async readableChunks(
+    libraryID: number,
+    itemKey: string,
+    deliveredIndexes: readonly number[],
+  ): Promise<WikiAuditChunk[]> {
+    const vectorStore = getVectorStore();
+    await vectorStore.initialize();
+    const chunks = await vectorStore.getChunksForItem(itemKey, libraryID);
+    const out: WikiAuditChunk[] = [];
+    const seen = new Set<number>();
+    for (const index of deliveredIndexes) {
+      const chunk = chunks[index];
+      if (!chunk) continue;
+      for (const address of [index, chunk.chunkId]) {
+        if (seen.has(address)) continue;
+        seen.add(address);
+        out.push({ chunkId: address, text: chunk.text });
+      }
+    }
+    return out.sort((a, b) => a.chunkId - b.chunkId);
+  }
+
   private async hydrateEvidence(
     entry: any,
     libraryID: number,
     warnings: string[],
+    /**
+     * Which action and Claim this excerpt belongs to.
+     *
+     * A commit routinely carries a dozen excerpts across several Claims, and a
+     * refusal that does not say which one failed leaves the model to resubmit
+     * all of them or none. Threaded down from `hydrateActions` rather than
+     * reconstructed here, because only the caller knows the action's index in
+     * the array the model wrote.
+     */
+    context?: string,
   ): Promise<WikiEvidenceInput> {
     if (Number(entry.libraryID ?? libraryID) !== libraryID) {
-      throw new Error("Evidence must belong to the Wiki page's library");
+      throw new Error(
+        `Evidence must belong to the Wiki page's library${context ? ` (${context})` : ""}`,
+      );
     }
     const itemKey = String(entry.itemKey ?? "").trim();
-    if (!itemKey) throw new Error("Evidence itemKey is required");
+    if (!itemKey) {
+      throw new Error(
+        `Evidence itemKey is required${context ? ` (${context})` : ""}`,
+      );
+    }
     const item = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, itemKey);
     if (!item || item.deleted || !item.isRegularItem?.()) {
       throw new Error(
@@ -578,7 +772,21 @@ export class WikiService {
     }
     if (!chunk) {
       throw new Error(
-        `Evidence excerpt could not be verified in ${itemKey}'s indexed chunks`,
+        describeEvidenceMismatch({
+          itemKey,
+          excerpt: String(entry.excerpt ?? ""),
+          chunkIdSnapshot:
+            entry.chunkIdSnapshot === undefined ||
+            entry.chunkIdSnapshot === null ||
+            !Number.isFinite(Number(entry.chunkIdSnapshot))
+              ? null
+              : Number(entry.chunkIdSnapshot),
+          chunks: chunks.map((candidate) => ({
+            chunkId: candidate.chunkId,
+            text: candidate.text,
+          })),
+          context,
+        }),
       );
     }
     const status = await vectorStore.getIndexStatus(itemKey, libraryID);
@@ -713,7 +921,8 @@ export class WikiService {
       `Evidence from ${itemKey} asked for read_depth "${requested}", but the server has ${read}. ` +
         `It was stored as "section_read". Whole-paper depth needs both: read every chunk through ` +
         `wiki_build_from_paper (follow pagination.nextCursor to the end), then rewrite the reading ` +
-        `note as one account of the complete paper with wiki_update_reading_note and finalSynthesis true.`,
+        `note as one account of the complete paper with wiki_update_reading_note and finalSynthesis true. ` +
+          `${GATE_HINT}`,
     );
     return "section_read";
   }
@@ -810,7 +1019,7 @@ export class WikiService {
   ): Promise<{ actions: WikiCommitAction[]; warnings: string[] }> {
     const hydrated: WikiCommitAction[] = [];
     const warnings: string[] = [];
-    for (const action of actions) {
+    for (const [actionIndex, action] of actions.entries()) {
       if (
         action.action !== "ADD_CLAIM" &&
         action.action !== "ATTACH_EVIDENCE" &&
@@ -821,9 +1030,14 @@ export class WikiService {
         continue;
       }
       const evidence: WikiEvidenceInput[] = [];
-      for (const entry of action.evidence ?? []) {
+      for (const [entryIndex, entry] of (action.evidence ?? []).entries()) {
         evidence.push(
-          await this.hydrateEvidence(entry, libraryID, warnings),
+          await this.hydrateEvidence(
+            entry,
+            libraryID,
+            warnings,
+            describeEvidenceLocation(action, actionIndex, entryIndex),
+          ),
         );
       }
       if (action.action === "ADD_CLAIM") {
@@ -1538,6 +1752,11 @@ export class WikiService {
     unchangedReason?: string;
     finalSynthesis?: boolean;
     /**
+     * Proof for the sentences the synthesis gate flagged; see
+     * `./wikiSynthesisAudit`. Only ever read on the final-synthesis pass.
+     */
+    synthesisAudit?: WikiSynthesisAuditEntry[];
+    /**
      * The chunk ids this turn actually READ and used, from `search_fulltext`
      * or `get_document_chunks`. Present only on the question-driven path.
      */
@@ -1633,7 +1852,24 @@ export class WikiService {
       }
       assertHolisticBody(submitted);
       assertChunkCitations(submitted);
+      const readable = await this.readableChunks(
+        session.libraryID,
+        session.itemKey,
+        await sessions.deliveredIndexes(session.sessionId),
+      );
+      assertChunkCitationsResolvable(submitted, {
+        allowedChunkIds: readable.map((chunk) => chunk.chunkId),
+        totalChunks: coverage.totalChunks,
+      });
+      assertBlockCitations(submitted);
       assertNoNoteRegression(previousBody, submitted, { finalSynthesis });
+      if (finalSynthesis) {
+        assertSynthesisEvidenceClosure(
+          submitted,
+          readable,
+          options.synthesisAudit ?? [],
+        );
+      }
       body = submitted;
     }
 
@@ -1679,7 +1915,8 @@ export class WikiService {
         : coverage.complete
           ? "Every chunk has been delivered. Do the whole-paper pass now: call wiki_update_reading_note " +
             "once more with finalSynthesis true and the note rewritten as a single coherent reading of " +
-            "the complete paper. Claims cannot be recorded at paper_reviewed depth until that is done."
+            "the complete paper. Claims cannot be recorded at paper_reviewed depth until that is done. " +
+            GATE_HINT
           : `Keep reading: ${coverage.remainingChunks} chunk(s) left, resume at chunk index ` +
             `${coverage.firstMissingIndex ?? coverage.deliveredChunks}.`,
     };
@@ -1838,6 +2075,27 @@ export class WikiService {
     }
     assertHolisticBody(submitted);
     assertChunkCitations(submitted);
+    // The chunks this note may cite are what the ledger already holds PLUS the
+    // ones this call is booking. They are booked after the note passes, so
+    // reading the ledger alone would refuse the very citations the caller is
+    // here to add - the note and its reading are submitted together on this
+    // path, which is the whole point of it being one call.
+    const citableChunks = await this.readableChunks(
+      session.libraryID,
+      itemKey,
+      [
+        ...(await sessions.deliveredIndexes(session.sessionId)),
+        ...documentChunks
+          .map((chunk, index) => ({ index, id: Number(chunk.chunkId) }))
+          .filter((entry) => options.readChunkIds.includes(entry.id))
+          .map((entry) => entry.index),
+      ],
+    );
+    assertChunkCitationsResolvable(submitted, {
+      allowedChunkIds: citableChunks.map((chunk) => chunk.chunkId),
+      totalChunks: documentChunks.length,
+    });
+    assertBlockCitations(submitted);
     assertNoNoteRegression(previousBody, submitted, { finalSynthesis: false });
 
     // THE ORDER HERE IS THE POINT, and it used to be the other way round.
@@ -3408,7 +3666,8 @@ export class WikiService {
       coverageInstruction: coverage.complete
         ? "Every chunk of this paper has been delivered. That is delivery, not understanding: " +
           "paper_reviewed also requires the whole-paper pass, so call wiki_update_reading_note with " +
-          "finalSynthesis true once the note reads as one coherent account of the complete paper."
+          "finalSynthesis true once the note reads as one coherent account of the complete paper. " +
+          GATE_HINT
         : `${coverage.deliveredChunks} of ${coverage.totalChunks} chunks delivered. wiki_commit will store evidence from this paper as section_read at best until the whole paper has been delivered; keep paging with pagination.nextCursor, or submit chunk_local / section_read / partial / incomplete now.`,
       nextStep: hasMore
         ? `You have read chunks ${range} of ${chunks.length}. Update the reading note, then continue with cursor set to pagination.nextCursor and nothing else changed. Continue until the whole paper is delivered; if you abandon the read instead, close it with wiki_finish_reading and outcome "skipped".`

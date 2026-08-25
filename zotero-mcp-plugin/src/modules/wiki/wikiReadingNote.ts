@@ -49,6 +49,8 @@ declare const PathUtils: any;
 declare let Zotero: any;
 declare let ztoolkit: ZToolkit;
 
+import { citedChunkIds, splitNoteBlocks } from "./wikiSynthesisAudit";
+
 export const WIKI_READING_NOTE_SCHEMA = 1;
 
 /**
@@ -263,6 +265,109 @@ export function assertChunkCitations(body: string): void {
       "has to quote the paper's own chunk, and without the number that chunk cannot be found again. " +
       "Put the citations in the TEXT, never in a heading: a heading naming chunks is a page log and is " +
       "refused separately.",
+  );
+}
+
+/**
+ * A prose block long enough that it is carrying something, rather than
+ * introducing the thing that follows it.
+ *
+ * The rule below refuses an uncited block of this length. The threshold is
+ * what separates "For example:" and "Two issues constrain reconstruction:" -
+ * connective lines that cite nothing because they assert nothing - from a
+ * paragraph or a bullet that states a finding. Set low enough that a single
+ * substantive sentence is caught, high enough that a section's opening clause
+ * is not.
+ */
+export const WIKI_NOTE_UNCITED_BLOCK_CHARS = 120;
+
+/**
+ * Every chunk number in the note has to be one this paper actually has, and
+ * one this reading has actually been given.
+ *
+ * The old rule accepted a note the moment ANY chunk number appeared anywhere
+ * in it, which made the citation a formality: a paper of 53 chunks could carry
+ * `(chunk 91)`, or hang a conclusion on a chunk that had not been delivered
+ * yet, and the trail back to the source - the entire point of the number -
+ * pointed nowhere. Nothing here reads the chunk's text or judges support; it
+ * only refuses a citation that cannot be resolved at all.
+ *
+ * `allowedChunkIds` is what has been DELIVERED, not what exists. A note
+ * written half way through a paper cites what it has been shown, and a number
+ * from the half it has not seen is either a typo or an invention.
+ *
+ * @throws WikiReadingNoteCitationError
+ */
+export function assertChunkCitationsResolvable(
+  body: string,
+  options: { allowedChunkIds: Iterable<number>; totalChunks: number },
+): void {
+  const allowed = new Set<number>();
+  for (const id of options.allowedChunkIds) allowed.add(Math.floor(id));
+  const cited = citedChunkIds(String(body ?? ""));
+  const unknown = cited.filter((id) => !allowed.has(id));
+  if (!unknown.length) return;
+  const beyond = unknown.filter((id) => id >= options.totalChunks);
+  const undelivered = unknown.filter((id) => id < options.totalChunks);
+  const parts: string[] = [
+    `The note cites chunk(s) ${unknown.join(", ")}, which this reading cannot resolve.`,
+  ];
+  if (beyond.length) {
+    parts.push(
+      `Chunk(s) ${beyond.join(", ")} do not exist: this paper is indexed as ${options.totalChunks} chunk(s), numbered 0 to ${options.totalChunks - 1}.`,
+    );
+  }
+  if (undelivered.length) {
+    parts.push(
+      `Chunk(s) ${undelivered.join(", ")} exist but have not been delivered to this reading yet, so nothing in the note can have come from them. Read them first, or cite the chunk the fact actually came from.`,
+    );
+  }
+  parts.push(
+    "A chunk number is the trail back to the source; one that resolves to nothing is worse than none, " +
+      "because a Claim will later be built on it and its Evidence will be quoted from the wrong passage.",
+  );
+  throw new WikiReadingNoteCitationError(parts.join(" "));
+}
+
+/**
+ * Refuse a substantive paragraph or bullet that names no chunk.
+ *
+ * The note's contract has always been that every fact carries its chunk
+ * number. Checked once per document, that contract was satisfiable by one
+ * citation in fifty paragraphs - and that is exactly the shape a drifting
+ * synthesis has: the passages that quote a measurement keep their numbers,
+ * and the paragraphs that generalise across the paper quietly lose them.
+ * Those generalising paragraphs are the ones that need the trail most.
+ *
+ * Headings, block quotes, tables and fenced code are exempt: a heading naming
+ * a chunk is a page log and is refused by `assertHolisticBody`, so requiring
+ * one here would make the two rules unsatisfiable together.
+ *
+ * @throws WikiReadingNoteCitationError naming the blocks, because the model
+ *   has to fix them without being able to ask which ones.
+ */
+export function assertBlockCitations(body: string): void {
+  const uncited = splitNoteBlocks(String(body ?? ""))
+    .filter((block) => block.prose)
+    .filter((block) => block.text.length >= WIKI_NOTE_UNCITED_BLOCK_CHARS)
+    .filter((block) => citedChunkIds(block.text).length === 0);
+  if (!uncited.length) return;
+  const shown = uncited
+    .slice(0, 6)
+    .map(
+      (block) =>
+        `line ${block.line}: "${block.text.slice(0, 110)}${block.text.length > 110 ? "..." : ""}"`,
+    );
+  throw new WikiReadingNoteCitationError(
+    `${uncited.length} paragraph(s) or bullet(s) in the note state something substantial without naming ` +
+      "a chunk. Every block that carries a fact, a parameter, a result, a mechanism or a conclusion has " +
+      "to name the chunk it came from, written in the prose - not once per document, once per block. A " +
+      "generalisation drawn across several chunks names all of them, and each one has to hold the claim " +
+      "on its own; if one of them only shares the topic, leave it out and make the sentence smaller. " +
+      `Uncited block(s): ${shown.join(" | ")}` +
+      (uncited.length > shown.length
+        ? ` (and ${uncited.length - shown.length} more)`
+        : ""),
   );
 }
 

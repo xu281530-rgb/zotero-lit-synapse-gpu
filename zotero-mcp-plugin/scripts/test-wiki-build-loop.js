@@ -163,7 +163,12 @@ const NOTE = [
   "Solidification runs at a series of imposed gradients, with the band width measured at fixed stations along the rig (chunk 1).",
   "",
   "## Results and mechanism",
-  "Band width narrows monotonically with increasing gradient over the range studied, consistent with a growth-front stability argument (chunk 2).",
+  // Written at the strength the chunk actually carries. An earlier version
+  // said the band narrowed "monotonically with increasing gradient", which
+  // the passage never states - and the whole-paper pass refuses a sentence
+  // that reaches, so this fixture would never have reached the loop it is
+  // here to exercise.
+  "Directional solidification narrows the columnar band at the gradient this station reports (chunk 2).",
   "",
   "## Scope and limits",
   "One alloy, one rig geometry; the transition threshold is reported but not independently verified here.",

@@ -827,7 +827,7 @@ STAGE 4 - keep what you just learned (wiki_update_reading_note, then wiki_prepar
 16. List only what you READ. Retrieval returning a passage is not reading it: a chunk you skimmed past, or that turned out to be about something else, is not in readChunkIds. The server counts what you declare and will stand behind exactly that. Re-listing a chunk you had already read is free and never double-counted.
 17. Then update the Wiki from those notes, in that order, every time reading actually added something: wiki_prepare_update, then wiki_commit. Extend the Page, Claim, Concept and relations that already exist rather than creating parallel ones beside them, and quote every Evidence excerpt from the paper's own chunks - never from the note, which is your memory of the paper rather than the paper. Evidence from this kind of reading is chunk_local or section_read; paper_reviewed belongs to a full-text read alone.
 18. A turn that read nothing new - the answer came from what was already understood, or nothing retrieved was relevant - skips both calls. Say so and move on. What is NOT optional is the order: a paper whose last reading is still only in its note refuses to be read again until a commit cites it, because a conversation that improves ten notes and writes no Claims has left nothing behind.
-19. Reading a paper END TO END is a different act and a different tool: wiki_build_from_paper, only on explicit user request. It continues this same note and this same chunk ledger, asks only for what questions never reached, and is the only path to the whole-paper synthesis that whole-paper depth requires. Its completion order is fixed: wiki_build_from_paper until coverage is complete -> wiki_update_reading_note with finalSynthesis true -> wiki_record_concepts with final true -> wiki_prepare_update with the five-axis Wiki Review covering pages, claims, evidence, concepts and relations -> wiki_commit.
+19. Reading a paper END TO END is a different act and a different tool: wiki_build_from_paper, only on explicit user request. It continues this same note and this same chunk ledger, asks only for what questions never reached, and is the only path to the whole-paper synthesis that whole-paper depth requires. Its completion order is fixed: wiki_build_from_paper until coverage is complete -> wiki_update_reading_note with finalSynthesis true -> wiki_record_concepts with final true -> wiki_prepare_update with the five-axis Wiki Review covering pages, claims, evidence, concepts and relations -> wiki_commit. The finalSynthesis call is checked sentence by sentence against the chunks each sentence cites before the note is written: keep every sentence at the strength its source used, keep the paper's limits and difficulties in, and let a sentence cite only the chunks that carry it on their own. A sentence that reaches has to be answered with a verbatim quotation from each chunk it names, or rewritten.
 
 Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accepted, at both stage 1 and stage 3. If you omit keywords the server falls back to mechanical tokenization, returns keywordSource "fallback" with degraded: true, and you should redo that call ONCE with proper terms. Never perform unscoped whole-library full-text search.
 BEYOND THE FUNNEL - the other tools, and when each one is the right call:
@@ -1287,6 +1287,11 @@ Nothing in this server returns a whole document in one response. Every reading t
             unchanged: args?.unchanged === true,
             unchangedReason: args?.unchangedReason,
             finalSynthesis: args?.finalSynthesis === true,
+            // Proof for the sentences the synthesis gate flagged. Coerced
+            // rather than passed through: it arrives as free-form JSON from a
+            // model, and a malformed entry should be reported as an audit
+            // problem naming the sentence, not as a TypeError.
+            synthesisAudit: this.coerceSynthesisAudit(args?.synthesisAudit),
             // The presence of readChunkIds is what selects the question-driven
             // path, so an empty array must not be mistaken for one: a caller
             // that read nothing new is on the full-text path, where a batch was
@@ -3223,6 +3228,42 @@ Nothing in this server returns a whole document in one response. Every reading t
       .filter((entry) => Number.isFinite(entry) && entry >= 0)
       .map((entry) => Math.floor(entry));
     return ids.length ? ids : undefined;
+  }
+
+  /**
+   * Normalise the synthesis audit a model sends back.
+   *
+   * Shape only - nothing here decides whether a quotation supports anything;
+   * that is `verifySynthesisAudit`, against the real chunk text. Malformed
+   * entries are kept rather than dropped so the verifier can name them in its
+   * refusal: a silently discarded entry reads to the model as "I sent it and
+   * it was ignored", which is the one failure mode it cannot debug.
+   *
+   * A JSON string is accepted as well as an array, because clients that
+   * serialise nested tool arguments are common enough that refusing them would
+   * look like the gate itself was broken.
+   */
+  private coerceSynthesisAudit(value: unknown): any[] | undefined {
+    let raw = value;
+    if (typeof raw === 'string') {
+      const trimmed = raw.trim();
+      if (!trimmed) return undefined;
+      try {
+        raw = JSON.parse(trimmed);
+      } catch {
+        return undefined;
+      }
+    }
+    if (!Array.isArray(raw) || raw.length === 0) return undefined;
+    return raw.map((entry: any) => ({
+      sentence: String(entry?.sentence ?? ''),
+      support: Array.isArray(entry?.support)
+        ? entry.support.map((item: any) => ({
+            chunkId: Number(item?.chunkId),
+            quote: String(item?.quote ?? ''),
+          }))
+        : [],
+    }));
   }
 
   private coerceStringArray(value: unknown): string[] | undefined {
@@ -5236,8 +5277,6 @@ Nothing in this server returns a whole document in one response. Every reading t
    */
   private formatObjectAsText(obj: any, toolName: string): string {
     switch (toolName) {
-      case 'get_content':
-        return this.formatContentAsText(obj);
       case 'search_library':
         return this.formatSearchResultsAsText(obj);
       case 'get_annotations':
@@ -5245,36 +5284,6 @@ Nothing in this server returns a whole document in one response. Every reading t
       default:
         return JSON.stringify(obj, null, 2);
     }
-  }
-
-  private formatContentAsText(contentResult: any): string {
-    const parts = [];
-
-    if (contentResult.title) {
-      parts.push(`TITLE: ${contentResult.title}\n`);
-    }
-
-    if (contentResult.content) {
-      if (contentResult.content.abstract) {
-        parts.push(`ABSTRACT:\n${contentResult.content.abstract.content}\n`);
-      }
-
-      if (contentResult.content.attachments) {
-        for (const att of contentResult.content.attachments) {
-          parts.push(
-            `ATTACHMENT (${att.filename || att.type}):\n${att.content}\n`,
-          );
-        }
-      }
-
-      if (contentResult.content.notes) {
-        for (const note of contentResult.content.notes) {
-          parts.push(`NOTE (${note.title}):\n${note.content}\n`);
-        }
-      }
-    }
-
-    return parts.join('\n---\n\n');
   }
 
   private formatSearchResultsAsText(searchResult: any): string {
