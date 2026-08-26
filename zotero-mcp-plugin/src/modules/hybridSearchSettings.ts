@@ -422,7 +422,13 @@ export function getChunkingSignature(
   // front matter the item record already holds — title, abstract, authors,
   // affiliations, keywords, identifiers — is dropped from the body before
   // chunking instead of being embedded twice.
-  return `paragraph-v4:${settings.chunkTargetChars}:${settings.chunkAppendToleranceChars}`;
+  //
+  // v5: a heading is never published on its own. It stays with the paragraph
+  // it introduces even when that paragraph is too long to fit under the target,
+  // and consecutive headings stack rather than each becoming an empty chunk.
+  // Affiliation detection was also fixed, so "Key Laboratory of …" front matter
+  // is recognised; both move boundaries.
+  return `paragraph-v5:${settings.chunkTargetChars}:${settings.chunkAppendToleranceChars}`;
 }
 
 export const INDEX_CHUNK_SIGNATURE_PREF = `${PREF_PREFIX}semantic.indexChunkSignature`;

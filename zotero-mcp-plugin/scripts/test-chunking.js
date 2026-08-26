@@ -475,14 +475,16 @@ const sectioned = [
 ].join("\n\n");
 const sectionedChunks = headingChunker.chunk(sectioned);
 
-// Every chunk sits inside exactly one section: a heading may only ever be the
-// chunk's first line.
-for (const chunk of sectionedChunks) {
+// Every chunk sits inside exactly one section: once body text has started, no
+// further heading may appear. Consecutive headings before any body are a stack
+// resolving to the deepest of them, and are allowed.
+const spansSection = (chunk) => {
   const lines = chunk.split("\n").filter((line) => line.trim());
-  assert.ok(
-    !lines.slice(1).some(isHeading),
-    `chunk must not span a heading: ${JSON.stringify(chunk)}`,
-  );
+  const firstBody = lines.findIndex((line) => !isHeading(line));
+  return firstBody >= 0 && lines.slice(firstBody).some(isHeading);
+};
+for (const chunk of sectionedChunks) {
+  assert.ok(!spansSection(chunk), `chunk must not span a section: ${JSON.stringify(chunk)}`);
 }
 assert.deepEqual(sectionedChunks, [
   "## 1. Introduction\n\nShort opening line.",
@@ -512,6 +514,29 @@ assert.ok(
   !oversized.some((chunk) => chunk.trim() === "## 3. Results"),
   "no chunk may consist of nothing but a heading",
 );
+
+// A heading is never published on its own, whatever the size arithmetic says.
+// Its section's first paragraph may be too long to fit under the target and
+// too long to count as a tail, which used to orphan the heading.
+const orphanCheck = headingChunker.chunk(
+  `## 1. Introduction\n\n${"Body sentence that runs long. ".repeat(45)}`,
+);
+assert.ok(
+  orphanCheck[0].startsWith("## 1. Introduction\n\n"),
+  "a heading must stay with the paragraph it introduces",
+);
+assert.ok(
+  !orphanCheck.some((chunk) => !/\n/.test(chunk) && isHeading(chunk)),
+  "no chunk may hold only a heading",
+);
+
+// Consecutive headings stack instead of each becoming an empty chunk.
+const stacked = headingChunker.chunk(
+  "## 2. Method\n\n### 2.1 Setup\n\nThe setup is described here.",
+);
+assert.deepEqual(stacked, [
+  "## 2. Method\n\n### 2.1 Setup\n\nThe setup is described here.",
+]);
 
 // Sizing is otherwise untouched: paragraphs inside one section still fill to
 // the target and absorb a short tail exactly as before.

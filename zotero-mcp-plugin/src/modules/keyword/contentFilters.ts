@@ -355,8 +355,11 @@ function isPatentCoverBlock(paragraph: string): boolean {
 }
 
 /** Organisation words that make a line an affiliation rather than prose. */
+// Each Latin alternative has to end on a real word boundary. `laborator` did
+// not — the trailing \b could never follow it in "Laboratory", so every
+// "Key Laboratory of …" affiliation went unrecognised.
 const AFFILIATION_ORG_PATTERN =
-  /\b(?:department|dept\.|university|universit[ée]|institute|institut|laborator|college|faculty|school\s+of|academy|hospital|centre|center for|co\.,?\s*ltd|corporation)\b|大学|學院|学院|研究所|研究院|实验室|實驗室|重点实验室|科学院|集团|有限公司|公司/iu;
+  /\b(?:department|dept\b|universit(?:y|ies|é|e)|institut(?:e|es|ion)?|laborator(?:y|ies)|college|faculty|school\s+of|academy|hospital|centre|center\s+for|co\.,?\s*ltd|corporation)\b|大学|學院|学院|研究所|研究院|实验室|實驗室|重点实验室|科学院|集团|有限公司|公司/iu;
 
 /** Evidence that an organisation line is an address block, not a sentence. */
 const AFFILIATION_ADDRESS_PATTERN =

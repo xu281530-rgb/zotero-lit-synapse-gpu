@@ -379,6 +379,14 @@ export class TextChunker {
       // chunk from straddling a section break, so a passage returned by search
       // belongs to exactly one section.
       if (HEADING_LINE_PATTERN.test(paragraph)) {
+        // Consecutive headings are a stack, not two sections: cutting between
+        // them would publish a chunk holding a section name and no section.
+        // The stack still resolves to one section — the deepest heading in it —
+        // so the chunk does not straddle a section break.
+        if (buffer && bufferIsOnlyHeadings()) {
+          buffer = `${buffer}\n\n${paragraph}`;
+          continue;
+        }
         flush();
         buffer = paragraph;
         continue;
@@ -406,6 +414,18 @@ export class TextChunker {
               : piece,
           );
         });
+        continue;
+      }
+
+      // A heading labels the content that follows it, so it always takes the
+      // next paragraph. Letting the size arithmetic run here would publish the
+      // heading on its own whenever the section's first paragraph is too long
+      // to fit under the target and too long to count as a tail — which is the
+      // common case, not an edge one, and leaves an index entry carrying a
+      // section name and no section.
+      if (buffer && bufferIsOnlyHeadings()) {
+        buffer = `${buffer}\n\n${paragraph}`;
+        if (buffer.length >= target) flush();
         continue;
       }
 
