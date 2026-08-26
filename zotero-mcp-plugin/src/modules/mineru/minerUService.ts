@@ -155,7 +155,9 @@ function structuredCacheFileName(value: string): string {
     .replace(/[\\/:*?"<>|\r\n]/g, "_");
   if (leaf.length <= 180) return leaf;
   const sourceSuffix =
-    leaf.match(/(?:content_list_v2|content_list|model|layout)\.json$/i)?.[0] ||
+    leaf.match(
+      /(?:content_list_v2|content_list|model|layout|middle)\.json$/i,
+    )?.[0] ||
     "structured.json";
   const identity = hashDocumentText(value).replace(/^.*:/, "");
   const tail = `-${identity}_${sourceSuffix}`;

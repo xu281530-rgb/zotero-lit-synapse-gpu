@@ -1594,4 +1594,337 @@ assert.throws(
   /unsupported text block type/i,
 );
 
+// ---------------------------------------------------------------------------
+// Heading level reconstruction
+// ---------------------------------------------------------------------------
+
+const v2Title = (text, level, bbox = [10, 10, 400, 30]) => ({
+  type: "title",
+  bbox,
+  content: {
+    ...(level === null ? {} : { level }),
+    title_content: [{ type: "text", content: text }],
+  },
+});
+const v2Para = (text, bbox = [10, 40, 400, 60]) => ({
+  type: "paragraph",
+  bbox,
+  content: { paragraph_content: [{ type: "text", content: text }] },
+});
+
+const headingDoc = assembleStructuredDocument(
+  selectStructuredSource({
+    "content_list_v2.json": JSON.stringify([
+      [
+        v2Title("A Study of Things", 1),
+        v2Title("Abstract", 2),
+        v2Title("1. Introduction", 2),
+        v2Para("Body."),
+        v2Title("2. Method", 2),
+        v2Title("2.1. Setup", 2),
+        v2Title("2.3.1. Reward functions", 2),
+        v2Title("Step 2: Scoring", 2),
+        v2Title("(3) Emergency mechanism", 2),
+        v2Title("A.1 Filter type", 2),
+        v2Title("0 引言", 2),
+        v2Title("参考文献", 2),
+        v2Title("Some Unlabelled Heading", 2),
+      ],
+    ]),
+  }),
+);
+const headingLine = (needle) =>
+  headingDoc.markdown
+    .split("\n")
+    .find((line) => line.includes(needle) && /^#{1,6} /.test(line));
+
+assert.equal(headingLine("A Study of Things"), "# A Study of Things");
+assert.equal(headingLine("Abstract"), "## Abstract");
+assert.equal(headingLine("1. Introduction"), "## 1. Introduction");
+assert.equal(headingLine("2. Method"), "## 2. Method");
+assert.equal(
+  headingLine("2.1. Setup"),
+  "### 2.1. Setup",
+  "numbering depth 2 must render as a third-level heading",
+);
+assert.equal(
+  headingLine("2.3.1. Reward functions"),
+  "#### 2.3.1. Reward functions",
+  "MinerU caps level at 2; depth must come from the section number",
+);
+assert.equal(
+  headingLine("Step 2: Scoring"),
+  "##### Step 2: Scoring",
+  "an enumeration nests one level under the section it sits in",
+);
+assert.equal(headingLine("(3) Emergency mechanism"), "##### (3) Emergency mechanism");
+assert.equal(headingLine("A.1 Filter type"), "### A.1 Filter type");
+assert.equal(headingLine("0 引言"), "## 0 引言");
+assert.equal(headingLine("参考文献"), "## 参考文献");
+assert.equal(
+  headingLine("Some Unlabelled Heading"),
+  "## Some Unlabelled Heading",
+  "an unplaceable heading keeps MinerU's own class instead of being invented",
+);
+
+const headingBlocks = headingDoc.blocks.filter((block) => block.type === "title");
+assert.equal(
+  headingBlocks.find((b) => b.markdown.includes("Reward functions"))
+    .headingLevelSource,
+  "numbering",
+);
+assert.equal(
+  headingBlocks.find((b) => b.markdown.includes("参考文献")).headingLevelSource,
+  "section-name",
+);
+assert.equal(
+  headingBlocks.find((b) => b.markdown.includes("Step 2")).headingLevelSource,
+  "enumeration",
+);
+assert.equal(
+  headingBlocks.find((b) => b.markdown.includes("Some Unlabelled"))
+    .headingLevelSource,
+  "fallback",
+  "a guessed level must be reported as a guess",
+);
+assert.equal(
+  headingBlocks.find((b) => b.markdown === "# A Study of Things").headingLevel,
+  1,
+);
+
+// A second document title (bilingual title page, reparsed running head) drops
+// a level so the document keeps exactly one top-level block.
+const twoDocTitles = assembleStructuredDocument(
+  selectStructuredSource({
+    "content_list_v2.json": JSON.stringify([
+      [
+        v2Title("冷坩埚定向凝固 TiAl 基合金热处理", 1),
+        v2Title("Heat treatment of TiAl-based alloy slabs", 1),
+        v2Title("1 实验材料及方法", 2),
+        v2Para("正文。"),
+      ],
+    ]),
+  }),
+).markdown;
+assert.match(twoDocTitles, /^# 冷坩埚定向凝固 TiAl 基合金热处理$/m);
+assert.match(twoDocTitles, /^## Heat treatment of TiAl-based alloy slabs$/m);
+assert.equal(
+  (twoDocTitles.match(/^# [^#]/gm) || []).length,
+  1,
+  "only the first MinerU doc_title may occupy the top level",
+);
+
+// A missing level must be answered by another JSON, never defaulted to 1.
+const crossSource = assembleStructuredDocument(
+  selectStructuredSource({
+    "content_list_v2.json": JSON.stringify([
+      [v2Title("Paper Title", 1), v2Title("Orphan Section", null), v2Para("Body.")],
+    ]),
+    "middle.json": JSON.stringify({
+      pdf_info: [
+        {
+          page_idx: 0,
+          para_blocks: [
+            {
+              type: "title",
+              level: 3,
+              bbox: [10, 10, 400, 30],
+              lines: [{ spans: [{ type: "text", content: "Orphan Section" }] }],
+            },
+          ],
+        },
+      ],
+    }),
+  }),
+);
+assert.match(
+  crossSource.markdown,
+  /^### Orphan Section$/m,
+  "a level missing from the body source must be taken from middle.json",
+);
+assert.equal(
+  crossSource.blocks.find((b) => b.markdown.includes("Orphan Section"))
+    .headingLevelSource,
+  "middle",
+);
+
+// Without any corroborating JSON, a level-less heading must not become `#`.
+const noEvidence = assembleStructuredDocument(
+  selectStructuredSource({
+    "content_list_v2.json": JSON.stringify([
+      [v2Title("Nameless Heading", null), v2Para("Body.")],
+    ]),
+  }),
+).markdown;
+assert.doesNotMatch(
+  noEvidence,
+  /^# Nameless Heading$/m,
+  "a heading with no stated level must never be promoted to the doc title",
+);
+assert.match(noEvidence, /^## Nameless Heading$/m);
+
+// model.json states no level at all; its two title classes must still map to
+// the same 1/2 split MinerU's own post-processing applies, and section numbers
+// must still recover the deeper levels.
+const modelDoc = assembleStructuredDocument(
+  selectStructuredSource({
+    "model.json": JSON.stringify([
+      [
+        { type: "doc_title", bbox: [10, 10, 400, 30], content: "Model Paper" },
+        { type: "paragraph_title", bbox: [10, 40, 400, 60], content: "1. Intro" },
+        {
+          type: "paragraph_title",
+          bbox: [10, 70, 400, 90],
+          content: "1.2.3 Deep part",
+        },
+        { type: "text", bbox: [10, 100, 400, 120], content: "Body." },
+      ],
+    ]),
+  }),
+).markdown;
+assert.match(modelDoc, /^# Model Paper$/m);
+assert.match(modelDoc, /^## 1\. Intro$/m);
+assert.match(
+  modelDoc,
+  /^#### 1\.2\.3 Deep part$/m,
+  "model.json paragraph_title must not flatten every subsection to `##`",
+);
+
+// Figure captions and filename-like years must not be read as section numbers.
+const notSections = assembleStructuredDocument(
+  selectStructuredSource({
+    "content_list_v2.json": JSON.stringify([
+      [
+        v2Title("Fig. 5 Loss evolution", 2),
+        v2Title("2011 - A forging process", 2),
+        v2Para("Body."),
+      ],
+    ]),
+  }),
+).markdown;
+assert.match(notSections, /^## Fig\. 5 Loss evolution$/m);
+assert.match(notSections, /^## 2011 - A forging process$/m);
+
+// ---------------------------------------------------------------------------
+// Inline formula delimiters and HTML sub/superscripts
+// ---------------------------------------------------------------------------
+
+const inlineText = (content) => ({ type: "text", content });
+const inlineEq = (content) => ({ type: "equation_inline", content });
+const renderSpans = (spans) =>
+  assembleStructuredDocument(
+    selectStructuredSource({
+      "content_list_v2.json": JSON.stringify([
+        [
+          {
+            type: "paragraph",
+            bbox: [0, 0, 9, 9],
+            content: { paragraph_content: spans },
+          },
+        ],
+      ]),
+    }),
+  ).markdown;
+
+// Two adjacent inline formulas must not fuse into a `$$` display fence.
+assert.equal(
+  renderSpans([inlineEq("A"), inlineEq("B")]),
+  "$A$ $B$",
+  "back-to-back inline formulas need a separator or Markdown reads `$$`",
+);
+assert.equal(
+  renderSpans([
+    inlineText("are denoted by "),
+    inlineEq("{ W } ^ { k } \\in"),
+    inlineEq("\\mathbb { R } ^ { N _ { k - } }"),
+    inlineText("<sup>1</sup> and "),
+    inlineEq("b ^ { k }"),
+    inlineText("respectively."),
+  ]),
+  "are denoted by ${ W } ^ { k } \\in$ $\\mathbb { R } ^ { N _ { k - } }$ $^{1}$ and $b ^ { k }$ respectively.",
+);
+// A `<sup>` landing straight after a closing `$` gets the same treatment.
+assert.equal(renderSpans([inlineText("x<sup>1</sup><sub>2</sub>y")]), "x$^{1}$ $_{2}$y");
+
+// Spacing rules around single-`$` inline formulas are unchanged.
+assert.equal(
+  renderSpans([inlineText("片层"), inlineEq("\\gamma"), inlineText("组织")]),
+  "片层$\\gamma$组织",
+  "CJK text stays flush against inline formulas",
+);
+assert.equal(
+  renderSpans([inlineText("the"), inlineEq("\\gamma"), inlineText("phase")]),
+  "the $\\gamma$ phase",
+  "Latin words keep a space either side of an inline formula",
+);
+assert.equal(
+  renderSpans([inlineText("温度为"), inlineEq("T_0"), inlineText("，随后")]),
+  "温度为$T_0$，随后",
+);
+assert.equal(
+  renderSpans([inlineEq("  \\alpha + \\beta  ")]),
+  "$\\alpha + \\beta$",
+  "no padding is introduced inside the delimiters",
+);
+
+// Display formulas keep their `$$` fences and stay on one line.
+assert.equal(
+  assembleStructuredDocument(
+    selectStructuredSource({
+      "content_list_v2.json": JSON.stringify([
+        [
+          {
+            type: "equation_interline",
+            bbox: [0, 0, 9, 9],
+            content: { math_content: "E = mc^2 \\tag{1}" },
+          },
+          {
+            type: "paragraph",
+            bbox: [0, 10, 9, 19],
+            content: { paragraph_content: [inlineText("after")] },
+          },
+        ],
+      ]),
+    }),
+  ).markdown,
+  "$$E = mc^2 \\tag{1}$$\n\nafter",
+);
+
+// Captions render each span separately, so the same guard has to apply there.
+assert.match(
+  assembleStructuredDocument(
+    selectStructuredSource({
+      "content_list_v2.json": JSON.stringify([
+        [
+          {
+            type: "image",
+            bbox: [0, 0, 9, 9],
+            content: {
+              image_source: { path: "images/x.jpg" },
+              image_caption: [
+                inlineText("Fig. 9. Settings of "),
+                inlineEq("3.6\\mathrm{m}"),
+                inlineEq("\\mathrm{s}^{-1}"),
+                inlineText("."),
+              ],
+            },
+          },
+        ],
+      ]),
+    }),
+  ).markdown,
+  /\$3\.6\\mathrm\{m\}\$ \$\\mathrm\{s\}\^\{-1\}\$\./,
+);
+
+// Punctuation-only and citation payloads keep their characters and lose only
+// the tag; everything else becomes Markdown maths with no added padding.
+assert.equal(renderSpans([inlineText("不然<sub>。</sub> 温度")]), "不然。 温度");
+assert.equal(renderSpans([inlineText("材料<sup>［1］</sup> 由于")]), "材料［1］ 由于");
+assert.equal(renderSpans([inlineText("材料<sup>[3]</sup> 由于")]), "材料[3] 由于");
+assert.equal(renderSpans([inlineText("110 mm<sub>、</sub> 高")]), "110 mm、 高");
+assert.equal(renderSpans([inlineText("片层<sub>γ</sub>组织")]), "片层$_{γ}$组织");
+assert.equal(renderSpans([inlineText("50 <sub>μ</sub>m")]), "50 $_{μ}$m");
+assert.equal(renderSpans([inlineText("H<sub>2</sub>O")]), "H$_{2}$O");
+assert.equal(renderSpans([inlineText("x<sup>a,b</sup>")]), "x$^{a,b}$");
+
 console.log("MinerU structured document assembler tests passed");
