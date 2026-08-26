@@ -1341,7 +1341,7 @@ function normalizeHTMLScripts(value: string): string {
     /<(sub|sup)\b[^>]*>([\s\S]*?)<\/\1\s*>/giu,
     (_match, rawTag: string, content: string) => {
       const normalized = content.trim();
-      if (!normalized || /^[\p{P}\p{S}\s]+$/u.test(normalized)) return "";
+      if (!normalized || /^[\p{P}\s]+$/u.test(normalized)) return "";
       if (isBracketedNumericCitation(normalized)) return normalized;
       const operator = rawTag.toLowerCase() === "sub" ? "_" : "^";
       return `$${operator}{${normalized}}$`;
