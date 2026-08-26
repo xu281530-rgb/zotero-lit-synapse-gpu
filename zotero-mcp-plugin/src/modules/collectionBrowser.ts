@@ -68,8 +68,16 @@ export interface CollectionBrowserDeps {
   getCollection(key: string): CollectionNode | null;
   /** Top-level collections of the library, in display order. */
   getTopLevelCollectionKeys(): string[];
-  /** Items that belong to no collection at all. */
-  getUnfiledItemKeys(): string[];
+  /**
+   * Items that belong to no collection at all.
+   *
+   * Allowed to be async: Zotero resolves this with a saved search, and
+   * `Zotero.Search.search()` returns a promise. Typing it as synchronous is
+   * what let the adapter hand back a Promise that `Array.isArray` quietly
+   * rejected, so the library root reported "no unfiled items" for every
+   * library including ones that had them.
+   */
+  getUnfiledItemKeys(): string[] | Promise<string[]>;
   /** Light metadata for one page of items. Order follows the keys given. */
   /**
    * `currentCollectionKey` is the folder being listed, or null at the library
@@ -303,7 +311,7 @@ export async function browseCollection(
     // At the root, "documents filed directly here" means the ones in no
     // collection at all. Listing every item in the library instead would make
     // the root the one level that is not browsable.
-    directItemKeys = deps.getUnfiledItemKeys();
+    directItemKeys = await deps.getUnfiledItemKeys();
   }
 
   const subcollections = childKeys

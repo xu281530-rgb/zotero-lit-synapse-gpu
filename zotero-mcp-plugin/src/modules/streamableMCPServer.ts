@@ -3153,13 +3153,17 @@ Nothing in this server returns a whole document in one response. Every reading t
           return [];
         }
       },
-      getUnfiledItemKeys: () => {
+      getUnfiledItemKeys: async () => {
         try {
           const search = new Zotero.Search();
           (search as any).libraryID = libraryID;
           search.addCondition('unfiled', 'true');
           search.addCondition('noChildren', 'true');
-          const ids = (search as any).search?.() ?? [];
+          // `search()` is async. Reading it synchronously produced a Promise
+          // that the Array.isArray guard below discarded without complaint,
+          // so this accessor returned [] for every library and the root level
+          // claimed no unfiled items even when there were several.
+          const ids = await (search as any).search?.();
           const resolved = Array.isArray(ids) ? ids : [];
           return (Zotero.Items.get(resolved) as unknown as any[])
             .filter((item: any) => item && !item.deleted)

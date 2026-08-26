@@ -116,6 +116,25 @@ test("page size is clamped", () => {
   assert.equal(resolveBrowsePageSize(100000), MAX_BROWSE_PAGE_SIZE);
 });
 
+test("an async unfiled-items accessor is awaited, not discarded", async () => {
+  // Zotero resolves unfiled items with `Zotero.Search.search()`, which is
+  // async. The adapter used to read it synchronously; `Array.isArray` then
+  // rejected the Promise without complaint and the root reported an empty
+  // library for every user who had unfiled items.
+  const deps = makeDeps({});
+  deps.getUnfiledItemKeys = async () => ["U1", "U2"];
+  const result = await browseCollection({}, deps, 1);
+  assert.equal(
+    result.itemPagination.total,
+    2,
+    "a promised list of unfiled items must be awaited, not treated as empty",
+  );
+  assert.deepEqual(
+    result.items.map((row) => row.itemKey),
+    ["U1", "U2"],
+  );
+});
+
 test("no collectionKey lists the library root", async () => {
   const deps = makeDeps();
   const result = await browseCollection({}, deps, LIBRARY);
