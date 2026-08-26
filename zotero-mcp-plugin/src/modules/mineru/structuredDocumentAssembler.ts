@@ -1338,13 +1338,18 @@ function cleanBlock(value: string): string {
 
 function normalizeHTMLScripts(value: string): string {
   return value.replace(
-    /<(sub|sup)\b[^>]*>([\s\S]*?)<\/\1\s*>/giu,
-    (_match, rawTag: string, content: string) => {
+    /([ \t]*)<(sub|sup)\b[^>]*>([\s\S]*?)<\/\2\s*>/giu,
+    (_match, leadingSpace: string, rawTag: string, content: string) => {
       const normalized = content.trim();
-      if (!normalized || /^[\p{P}\s]+$/u.test(normalized)) return "";
-      if (isBracketedNumericCitation(normalized)) return normalized;
+      if (!normalized) return leadingSpace;
+      if (
+        /^[\p{P}\s]+$/u.test(normalized) ||
+        isBracketedNumericCitation(normalized)
+      ) {
+        return normalized;
+      }
       const operator = rawTag.toLowerCase() === "sub" ? "_" : "^";
-      return `$${operator}{${normalized}}$`;
+      return `${leadingSpace}$${operator}{${normalized}}$`;
     },
   );
 }

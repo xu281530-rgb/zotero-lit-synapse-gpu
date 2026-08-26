@@ -348,14 +348,14 @@ const htmlScriptToFormula = assembleStructuredDocument(
       type: "text",
       page_idx: 0,
       bbox: [10, 10, 90, 30],
-      text: "相<sub>γ</sub>区，引用<sup>［3］</sup>。温度<sub>。</sub>。The <sub>β</sub> phase;The<sub>δ</sub>phase;charge<sup>+</sup> and angle<sub>°</sub>.",
+      text: "相<sub>γ</sub>区，引用 <sup>［3］</sup>。温度 <sub>。</sub>后。value <sup>,</sup>next. The <sub>β</sub> phase;The<sub>δ</sub>phase;charge<sup>+</sup> and angle<sub>°</sub>.",
     }]),
   }),
 ).markdown;
 assert.equal(
   htmlScriptToFormula,
-  "相$_{γ}$区，引用［3］。温度。The $_{β}$ phase;The$_{δ}$phase;charge$^{+}$ and angle$_{°}$.",
-  "HTML scripts keep citations, discard punctuation, and do not add outer spacing",
+  "相$_{γ}$区，引用［3］。温度。后。value,next. The $_{β}$ phase;The$_{δ}$phase;charge$^{+}$ and angle$_{°}$.",
+  "HTML scripts keep citations and punctuation without adding outer spacing",
 );
 assert.doesNotMatch(htmlScriptToFormula, /<\/?(?:sup|sub)>/i);
 
