@@ -1053,6 +1053,7 @@ function bindMinerUSettings(doc: Document) {
   const cacheResult = doc?.querySelector('#mineru-cache-result') as HTMLElement;
   const refreshCacheButton = doc?.querySelector('#refresh-mineru-cache-button') as HTMLButtonElement;
   const clearCacheButton = doc?.querySelector('#clear-mineru-cache-button') as HTMLButtonElement;
+  const clearMarkdownButton = doc?.querySelector('#clear-mineru-markdown-button') as HTMLButtonElement;
 
   const CLOUD_URL = "https://mineru.net";
   const LOCAL_URL = "http://127.0.0.1:8000";
@@ -1197,6 +1198,51 @@ function bindMinerUSettings(doc: Document) {
         cacheResult.textContent = String(error);
         cacheResult.style.color = 'var(--red)';
       }
+    }
+  });
+
+  // Deleting the generated Markdown is deliberately a separate action from
+  // clearing the parse cache: the cache is what makes regeneration free, so
+  // the two are almost never wanted together.
+  clearMarkdownButton?.addEventListener('click', async () => {
+    const win = addon.data.prefs?.window;
+    if (win && !win.confirm(getString('pref-mineru-markdown-clear-confirm' as any))) {
+      return;
+    }
+    const previousLabel = clearMarkdownButton.textContent;
+    clearMarkdownButton.disabled = true;
+    try {
+      const { getMinerUService } = await import('./mineru');
+      const { removed, failed } = await getMinerUService()
+        .clearGeneratedMarkdownAttachments();
+      if (cacheResult) {
+        if (failed > 0) {
+          cacheResult.textContent = getString(
+            'pref-mineru-markdown-clear-partial' as any,
+            { args: { count: removed, failed } },
+          );
+          cacheResult.style.color = 'var(--red)';
+        } else if (removed === 0) {
+          cacheResult.textContent = getString(
+            'pref-mineru-markdown-clear-none' as any,
+          );
+          cacheResult.style.color = 'var(--text-2)';
+        } else {
+          cacheResult.textContent = getString(
+            'pref-mineru-markdown-cleared' as any,
+            { args: { count: removed } },
+          );
+          cacheResult.style.color = 'var(--green)';
+        }
+      }
+    } catch (error) {
+      if (cacheResult) {
+        cacheResult.textContent = String(error);
+        cacheResult.style.color = 'var(--red)';
+      }
+    } finally {
+      clearMarkdownButton.disabled = false;
+      clearMarkdownButton.textContent = previousLabel;
     }
   });
 }

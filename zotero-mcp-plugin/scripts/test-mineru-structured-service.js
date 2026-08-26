@@ -41,12 +41,17 @@ globalThis.IOUtils = {
 globalThis.ztoolkit = { log: () => {} };
 globalThis.Zotero = {
   DataDirectory: { dir: tempDir },
-  Libraries: { userLibraryID: 1 },
+  Libraries: {
+    userLibraryID: 1,
+    getAll: () => [{ libraryID: 1 }],
+  },
   Prefs: { get: (key) => preferences.get(key) },
   Items: {
     getAsync: async (id) => items.get(id) || null,
     getByLibraryAndKeyAsync: async (_libraryID, key) =>
       [...items.values()].find((item) => item.key === key) || null,
+    getAll: async (libraryID) =>
+      [...items.values()].filter((item) => item.libraryID === libraryID),
   },
   Attachments: {
     importFromFile: async ({ file, parentItemID, title, contentType }) => {
@@ -744,6 +749,95 @@ try {
 } finally {
   globalThis.fetch = originalFetch;
 }
+
+// ---------------------------------------------------------------------------
+// Clearing the generated Markdown, without disabling future generation
+// ---------------------------------------------------------------------------
+
+const { isGeneratedMinerUMarkdownTitle } = await import(
+  "../src/modules/mineru/minerUService.ts"
+);
+
+assert.equal(isGeneratedMinerUMarkdownTitle("MinerU Markdown (ABCD1234).md"), true);
+assert.equal(isGeneratedMinerUMarkdownTitle("MinerU · 2024 - some paper"), true, "legacy titles count too");
+assert.equal(isGeneratedMinerUMarkdownTitle("full.md"), false);
+assert.equal(isGeneratedMinerUMarkdownTitle("Reading note.md"), false);
+assert.equal(isGeneratedMinerUMarkdownTitle(""), false);
+
+const clearParent = parentItem(nextItemID++, "CLRPARENT");
+items.set(clearParent.id, clearParent);
+const clearTargetDir = path.join(tempDir, "clear-md");
+await fs.mkdir(clearTargetDir, { recursive: true });
+
+const makeAttachment = async (title, name) => {
+  const id = nextItemID++;
+  const target = path.join(clearTargetDir, name);
+  await fs.writeFile(target, "# body\n", "utf8");
+  const item = markdownItem({
+    id,
+    key: `CLR${id}`,
+    parentItemID: clearParent.id,
+    title,
+    target,
+  });
+  items.set(id, item);
+  clearParent.attachmentIDs.push(id);
+  return item;
+};
+
+const generatedCurrent = await makeAttachment("MinerU Markdown (SOURCE01).md", "a.md");
+const generatedLegacy = await makeAttachment("MinerU · 2024 - a paper", "b.md");
+const unrelated = await makeAttachment("Reading note.md", "c.md");
+
+const clearService = new MinerUService();
+// Earlier cases in this file generated Markdown of their own, so the expected
+// count is whatever the library actually holds rather than a fixed number.
+const expectedRemovals = await clearService.countGeneratedMarkdownAttachments();
+assert.ok(
+  expectedRemovals >= 2,
+  "the two attachments just created must at least be counted",
+);
+const cleared = await clearService.clearGeneratedMarkdownAttachments();
+
+assert.equal(
+  cleared.removed,
+  expectedRemovals,
+  "every counted attachment, in both title forms, is removed",
+);
+assert.equal(cleared.failed, 0);
+assert.equal(items.has(generatedCurrent.id), false);
+assert.equal(items.has(generatedLegacy.id), false);
+assert.equal(
+  items.has(unrelated.id),
+  true,
+  "an attachment this plugin did not generate must be left alone",
+);
+
+// The removals must be attributable to the plugin, or the item observer would
+// read them as the user opting this PDF out of Markdown for good.
+assert.equal(
+  clearService.consumeOwnReplacementDeletion(generatedCurrent.key),
+  true,
+  "a bulk clear must not look like a manual deletion",
+);
+assert.equal(
+  clearService.consumeOwnReplacementDeletion("SOMEONE-ELSES-KEY"),
+  false,
+);
+
+// Nothing was suppressed, so the next index run is still allowed to rebuild.
+assert.equal(
+  await clearService.isAutomaticMarkdownSuppressed({
+    libraryID: 1,
+    key: "SOURCE01",
+  }),
+  false,
+  "clearing Markdown must not disable future generation",
+);
+
+const clearedAgain = await clearService.clearGeneratedMarkdownAttachments();
+assert.equal(clearedAgain.removed, 0, "a second run finds nothing to do");
+assert.equal(await clearService.countGeneratedMarkdownAttachments(), 0);
 
 await fs.rm(tempDir, { recursive: true, force: true });
 console.log("MinerU structured service tests passed");

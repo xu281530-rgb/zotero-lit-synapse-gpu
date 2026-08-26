@@ -72,6 +72,25 @@ export type MinerUProgressListener = (event: MinerUProgressEvent) => void;
  */
 const MARKDOWN_ATTACHMENT_PREFIX = "MinerU Markdown";
 
+/** Current title of a generated Markdown attachment. */
+const GENERATED_MARKDOWN_TITLE = /^MinerU Markdown \(([A-Z0-9]+)\)\.md$/i;
+
+/**
+ * Title used before attachments were keyed by their source PDF. Still present
+ * in libraries parsed by older builds, so bulk operations have to see it too.
+ */
+const LEGACY_GENERATED_MARKDOWN_TITLE = /^MinerU · .+/;
+
+/** Whether an attachment title marks Markdown this plugin generated. */
+export function isGeneratedMinerUMarkdownTitle(title: string): boolean {
+  const value = String(title || "").trim();
+  if (!value) return false;
+  return (
+    GENERATED_MARKDOWN_TITLE.test(value) ||
+    LEGACY_GENERATED_MARKDOWN_TITLE.test(value)
+  );
+}
+
 interface CacheMeta {
   version: number;
   attachmentKey: string;
@@ -1025,6 +1044,114 @@ export class MinerUService {
     const root = this.getCacheRoot();
     await IOUtils.remove(root, { recursive: true, ignoreAbsent: true });
     ztoolkit.log(`[MinerU] Cleared cache directory ${root}`);
+  }
+
+  /**
+   * Delete every Markdown attachment this plugin generated, in every library.
+   *
+   * Two things make this different from deleting the attachments by hand:
+   *
+   * 1. Each removal is registered through {@link ownReplacementAttachmentKeys},
+   *    so the item observer in hooks.ts reads it as the plugin's own work
+   *    rather than as "the user does not want Markdown for this PDF" — which
+   *    is what a manual delete means, and which would suppress generation for
+   *    that PDF permanently.
+   * 2. The structured parse cache is deliberately left alone. The next index
+   *    run asks with `restoreMissingMarkdown`, finds the cached JSON and
+   *    rebuilds the Markdown from it, so nothing is re-parsed and no MinerU
+   *    quota is spent.
+   *
+   * Existing suppressions from earlier manual deletions are not reset: this
+   * clears Markdown, it does not re-enable PDFs the user has already opted out
+   * of.
+   */
+  async clearGeneratedMarkdownAttachments(): Promise<{
+    removed: number;
+    failed: number;
+  }> {
+    let removed = 0;
+    let failed = 0;
+    const libraries: any[] = Zotero.Libraries.getAll?.() || [
+      { libraryID: Zotero.Libraries.userLibraryID },
+    ];
+
+    for (const library of libraries) {
+      const libraryID = library?.libraryID ?? library?.id;
+      if (libraryID === undefined || libraryID === null) continue;
+      let entries: any[] = [];
+      try {
+        entries = (await Zotero.Items.getAll(libraryID)) || [];
+      } catch (error) {
+        ztoolkit.log(
+          `[MinerU] could not enumerate library ${libraryID}: ${error}`,
+          "warn",
+        );
+        continue;
+      }
+
+      for (const entry of entries) {
+        let item = entry;
+        try {
+          // getAll may hand back ids rather than items depending on the caller
+          // and Zotero version; both are accepted here.
+          if (typeof entry === "number") {
+            item = await Zotero.Items.getAsync(entry);
+          }
+          if (!item?.isAttachment?.()) continue;
+          if (!isGeneratedMinerUMarkdownTitle(item.getField?.("title") || "")) {
+            continue;
+          }
+          this.ownReplacementAttachmentKeys.add(item.key);
+          await item.eraseTx();
+          removed += 1;
+        } catch (error) {
+          // The registration has to be undone, otherwise a later genuine
+          // user deletion of this same attachment would be mistaken for ours
+          // and silently fail to suppress regeneration.
+          if (item?.key) this.ownReplacementAttachmentKeys.delete(item.key);
+          failed += 1;
+          ztoolkit.log(
+            `[MinerU] failed to delete generated Markdown ${item?.key}: ${error}`,
+            "warn",
+          );
+        }
+      }
+    }
+
+    ztoolkit.log(
+      `[MinerU] cleared generated Markdown attachments: removed=${removed}, failed=${failed}`,
+    );
+    return { removed, failed };
+  }
+
+  /** How many generated Markdown attachments exist, for the preferences UI. */
+  async countGeneratedMarkdownAttachments(): Promise<number> {
+    let count = 0;
+    const libraries: any[] = Zotero.Libraries.getAll?.() || [
+      { libraryID: Zotero.Libraries.userLibraryID },
+    ];
+    for (const library of libraries) {
+      const libraryID = library?.libraryID ?? library?.id;
+      if (libraryID === undefined || libraryID === null) continue;
+      try {
+        for (const entry of (await Zotero.Items.getAll(libraryID)) || []) {
+          const item =
+            typeof entry === "number"
+              ? await Zotero.Items.getAsync(entry)
+              : entry;
+          if (!item?.isAttachment?.()) continue;
+          if (isGeneratedMinerUMarkdownTitle(item.getField?.("title") || "")) {
+            count += 1;
+          }
+        }
+      } catch (error) {
+        ztoolkit.log(
+          `[MinerU] could not count generated Markdown in library ${libraryID}: ${error}`,
+          "warn",
+        );
+      }
+    }
+    return count;
   }
 
   /** Cache entry and disk usage statistics for the preferences UI. */

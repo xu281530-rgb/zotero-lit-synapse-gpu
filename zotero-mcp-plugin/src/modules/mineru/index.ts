@@ -21,6 +21,7 @@ export {
   getMinerUService,
   markdownToIndexText,
   getAttachmentLabel,
+  isGeneratedMinerUMarkdownTitle,
   getOriginalPDFAttachmentsForItem,
   type MinerUServiceConfig,
   type GetMarkdownOptions,

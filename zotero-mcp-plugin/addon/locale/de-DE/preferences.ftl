@@ -242,6 +242,11 @@ pref-mineru-cache-refresh-button-text = Refresh cache stats
 pref-mineru-cache-clear-button-text = Clear parse cache
 pref-mineru-cache-clear-confirm = Dadurch wird der interne MinerU-Analysecache des Plugins geloescht. Vorhandene MinerU-Markdown-Anhaenge bleiben bei ihren Zotero-Eintraegen und werden beim naechsten Indizieren weiterhin wiederverwendet, ohne erneut Analyseressourcen zu verbrauchen. Fortfahren?
 pref-mineru-cache-cleared = Parse cache cleared
+pref-mineru-markdown-clear-button-text = Markdown-Text loeschen
+pref-mineru-markdown-clear-confirm = Dadurch werden alle von diesem Plugin erzeugten MinerU-Markdown-Anhaenge in allen Bibliotheken endgueltig geloescht (Titel wie "MinerU Markdown (XXXX).md"). Der Analysecache bleibt erhalten, sodass der naechste Indexlauf das Markdown daraus neu erzeugt, ohne erneut Analyseressourcen zu verbrauchen. Fortfahren?
+pref-mineru-markdown-cleared = { $count } Markdown-Anhaenge geloescht
+pref-mineru-markdown-clear-none = Keine vom Plugin erzeugten Markdown-Anhaenge gefunden
+pref-mineru-markdown-clear-partial = { $count } geloescht, { $failed } fehlgeschlagen (siehe Debug-Protokoll)
 
 
 

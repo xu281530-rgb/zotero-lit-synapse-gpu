@@ -242,6 +242,11 @@ pref-mineru-cache-refresh-button-text = 刷新缓存统计
 pref-mineru-cache-clear-button-text = 清空解析缓存
 pref-mineru-cache-clear-confirm = 这将删除插件内部的 MinerU 解析缓存。Zotero 条目下已有的 MinerU Markdown 附件不会被删除，下次索引仍会优先复用，不会为这些条目重新消耗解析资源。确定吗？
 pref-mineru-cache-cleared = 解析缓存已清空
+pref-mineru-markdown-clear-button-text = 清空 Markdown 正文
+pref-mineru-markdown-clear-confirm = 这将删除全库所有由本插件生成的 MinerU Markdown 附件（标题形如「MinerU Markdown (XXXX).md」），且不可撤销。解析缓存会保留，因此下次建立索引时会直接用缓存重新生成 Markdown，不会重新消耗解析资源。确定吗？
+pref-mineru-markdown-cleared = 已删除 { $count } 个 Markdown 附件
+pref-mineru-markdown-clear-none = 没有找到本插件生成的 Markdown 附件
+pref-mineru-markdown-clear-partial = 已删除 { $count } 个，{ $failed } 个失败（详见调试日志）
 
 
 

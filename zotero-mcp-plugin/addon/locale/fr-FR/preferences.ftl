@@ -242,6 +242,11 @@ pref-mineru-cache-refresh-button-text = Refresh cache stats
 pref-mineru-cache-clear-button-text = Clear parse cache
 pref-mineru-cache-clear-confirm = Cette action supprime le cache d'analyse MinerU interne du plugin. Les pieces jointes Markdown MinerU existantes restent dans leurs elements Zotero et seront reutilisees lors de la prochaine indexation, sans consommer de nouveau des ressources d'analyse. Continuer ?
 pref-mineru-cache-cleared = Parse cache cleared
+pref-mineru-markdown-clear-button-text = Effacer le texte Markdown
+pref-mineru-markdown-clear-confirm = Cette action supprime definitivement toutes les pieces jointes Markdown MinerU generees par le plugin, dans toutes les bibliotheques (titre du type "MinerU Markdown (XXXX).md"). Le cache d'analyse est conserve, la prochaine indexation regenerera donc le Markdown a partir de celui-ci sans consommer de ressources d'analyse. Continuer ?
+pref-mineru-markdown-cleared = { $count } pieces jointes Markdown supprimees
+pref-mineru-markdown-clear-none = Aucune piece jointe Markdown generee par le plugin n'a ete trouvee
+pref-mineru-markdown-clear-partial = { $count } supprimees, { $failed } en echec (voir le journal de debogage)
 
 
 

@@ -242,6 +242,11 @@ pref-mineru-cache-refresh-button-text = Refresh cache stats
 pref-mineru-cache-clear-button-text = Clear parse cache
 pref-mineru-cache-clear-confirm = プラグイン内部の MinerU 解析キャッシュを削除します。Zotero アイテムにある既存の MinerU Markdown 添付ファイルは削除されず、次回のインデックス作成でも再利用されるため、解析リソースを再度消費しません。続行しますか？
 pref-mineru-cache-cleared = Parse cache cleared
+pref-mineru-markdown-clear-button-text = Markdown 本文を削除
+pref-mineru-markdown-clear-confirm = すべてのライブラリで、このプラグインが生成した MinerU Markdown 添付ファイル（「MinerU Markdown (XXXX).md」形式のタイトル）をすべて完全に削除します。解析キャッシュは保持されるため、次回のインデックス作成時にキャッシュから Markdown を再生成でき、解析リソースを再度消費することはありません。続行しますか？
+pref-mineru-markdown-cleared = { $count } 件の Markdown 添付ファイルを削除しました
+pref-mineru-markdown-clear-none = プラグインが生成した Markdown 添付ファイルは見つかりませんでした
+pref-mineru-markdown-clear-partial = { $count } 件を削除、{ $failed } 件が失敗しました（デバッグログを参照）
 
 
 

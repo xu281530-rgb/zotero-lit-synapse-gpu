@@ -242,6 +242,11 @@ pref-mineru-cache-refresh-button-text = Refresh cache stats
 pref-mineru-cache-clear-button-text = Clear parse cache
 pref-mineru-cache-clear-confirm = Esto elimina la cache interna de analisis de MinerU del complemento. Los adjuntos Markdown de MinerU existentes permanecen en sus elementos de Zotero y se reutilizaran en la siguiente indexacion, sin volver a consumir recursos de analisis. Continuar?
 pref-mineru-cache-cleared = Parse cache cleared
+pref-mineru-markdown-clear-button-text = Borrar texto Markdown
+pref-mineru-markdown-clear-confirm = Esto elimina de forma permanente todos los adjuntos Markdown de MinerU generados por el complemento, en todas las bibliotecas (con titulo del tipo "MinerU Markdown (XXXX).md"). La cache de analisis se conserva, por lo que la siguiente indexacion volvera a generar el Markdown a partir de ella sin consumir recursos de analisis. Continuar?
+pref-mineru-markdown-cleared = { $count } adjuntos Markdown eliminados
+pref-mineru-markdown-clear-none = No se encontraron adjuntos Markdown generados por el complemento
+pref-mineru-markdown-clear-partial = { $count } eliminados, { $failed } con error (consulte el registro de depuracion)
 
 
 

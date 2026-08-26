@@ -242,6 +242,11 @@ pref-mineru-cache-refresh-button-text = Refresh cache stats
 pref-mineru-cache-clear-button-text = Clear parse cache
 pref-mineru-cache-clear-confirm = This deletes the plugin's internal MinerU parse cache. Existing MinerU Markdown attachments remain on their Zotero items and will still be reused by the next index run, without spending parse resources again. Continue?
 pref-mineru-cache-cleared = Parse cache cleared
+pref-mineru-markdown-clear-button-text = Clear Markdown text
+pref-mineru-markdown-clear-confirm = This permanently deletes every MinerU Markdown attachment this plugin generated, in all libraries (titled like "MinerU Markdown (XXXX).md"). The parse cache is kept, so the next index run rebuilds the Markdown from it without spending parse resources again. Continue?
+pref-mineru-markdown-cleared = Deleted { $count } Markdown attachments
+pref-mineru-markdown-clear-none = No plugin-generated Markdown attachments found
+pref-mineru-markdown-clear-partial = Deleted { $count }, { $failed } failed (see the debug log)
 
 
 
