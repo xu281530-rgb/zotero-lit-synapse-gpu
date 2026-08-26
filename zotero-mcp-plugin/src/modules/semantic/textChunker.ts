@@ -18,6 +18,9 @@ import { getHybridSearchSettings } from '../hybridSearchSettings';
 
 import { findReferencesBoundary } from "../keyword/contentFilters";
 
+/** A Markdown ATX heading occupying a whole paragraph. */
+const HEADING_LINE_PATTERN = /^\s{0,3}#{1,6}\s+\S/;
+
 export interface ChunkerOptions {
   maxChunkSize: number;      // Maximum chunk size (characters)
   minChunkSize: number;      // Minimum chunk size
@@ -353,19 +356,56 @@ export class TextChunker {
       if (trimmed) chunks.push(trimmed);
       buffer = '';
     };
+    /**
+     * Whether the open chunk is nothing but heading lines.
+     *
+     * `## 2. Method` immediately followed by `### 2.1 Setup` is a heading
+     * stack, not a section with content. Cutting between them would emit a
+     * chunk that says only "2. Method" — an index entry with nothing in it,
+     * which costs an embedding and can be returned as a search hit carrying no
+     * information. Letting the stack accumulate still leaves the chunk inside
+     * exactly one section: the deepest heading in the stack.
+     */
+    const bufferIsOnlyHeadings = () =>
+      buffer
+        .split('\n')
+        .filter((line) => line.trim())
+        .every((line) => HEADING_LINE_PATTERN.test(line));
 
     for (const paragraph of paragraphs) {
+      // A heading ends whatever chunk is open, however short it is, and opens
+      // the next one. Sizing is otherwise untouched: the target and the append
+      // tolerance still decide every other boundary. This is what keeps a
+      // chunk from straddling a section break, so a passage returned by search
+      // belongs to exactly one section.
+      if (HEADING_LINE_PATTERN.test(paragraph)) {
+        flush();
+        buffer = paragraph;
+        continue;
+      }
+
       // An oversized paragraph is handled on its own so the sentence splitter
       // never has to reason about what is already buffered.
       if (paragraph.length > target + tolerance) {
-        flush();
-        for (const piece of this.splitOversizedParagraph(
+        // A heading waiting in the buffer belongs to this paragraph. Flushing
+        // it here would publish a chunk containing nothing but the heading and
+        // then start the section's text in the next one; instead it rides
+        // along on the first piece, which is where it introduces content.
+        const carriedHeading = buffer.trim() && bufferIsOnlyHeadings() ? buffer.trim() : '';
+        if (carriedHeading) buffer = '';
+        else flush();
+        const pieces = this.splitOversizedParagraph(
           paragraph,
           target,
           tolerance,
-        )) {
-          chunks.push(piece);
-        }
+        );
+        pieces.forEach((piece, pieceIndex) => {
+          chunks.push(
+            pieceIndex === 0 && carriedHeading
+              ? `${carriedHeading}\n\n${piece}`
+              : piece,
+          );
+        });
         continue;
       }
 

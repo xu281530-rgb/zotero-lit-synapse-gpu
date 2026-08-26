@@ -416,7 +416,13 @@ export function getChunkingSignature(
   // which is what this string exists to announce — an index built under v2 stays
   // usable and simply gets the "consider rebuilding" notice, rather than being
   // rebuilt behind the user's back.
-  return `paragraph-v3:${settings.chunkTargetChars}:${settings.chunkAppendToleranceChars}`;
+  //
+  // v4: two changes move boundaries again. A Markdown heading now ends the open
+  // chunk whatever its length, so no chunk straddles a section break; and the
+  // front matter the item record already holds — title, abstract, authors,
+  // affiliations, keywords, identifiers — is dropped from the body before
+  // chunking instead of being embedded twice.
+  return `paragraph-v4:${settings.chunkTargetChars}:${settings.chunkAppendToleranceChars}`;
 }
 
 export const INDEX_CHUNK_SIGNATURE_PREF = `${PREF_PREFIX}semantic.indexChunkSignature`;

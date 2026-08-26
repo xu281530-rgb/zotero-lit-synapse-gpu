@@ -35,6 +35,10 @@ import {
   type SimilarScanBudget,
 } from './similarScanBudget';
 import { getTextChunker, TextChunker } from './textChunker';
+import {
+  stripFrontMatterDuplicates,
+  type FrontMatterMetadata,
+} from '../keyword/contentFilters';
 import { TextFormatter } from '../textFormatter';
 import { PDFProcessor } from '../pdfProcessor';
 import {
@@ -2718,6 +2722,25 @@ export class SemanticSearchService {
   ): Promise<ExtractedItemContent> {
     const parts: string[] = [];
     /**
+     * What the item record already knows, used to recognise the same content
+     * where it is repeated inside the PDF's own front matter.
+     */
+    const frontMatterMetadata: FrontMatterMetadata = {
+      title: item.getField?.('title') || item.getDisplayTitle?.() || '',
+      abstract: item.getField?.('abstractNote')
+        ? TextFormatter.htmlToText(item.getField('abstractNote'))
+        : '',
+      creators: (() => {
+        try {
+          return (item.getCreators?.() || []).map((creator: any) =>
+            `${creator.firstName || ''} ${creator.lastName || ''}`.trim(),
+          );
+        } catch {
+          return [];
+        }
+      })(),
+    };
+    /**
      * Body texts already collected, so the same body cannot be added twice.
      *
      * The title-based de-duplication only recognises Markdown that MinerU named
@@ -2739,7 +2762,19 @@ export class SemanticSearchService {
       if (!fingerprint) return false;
       if (bodyFingerprints.has(fingerprint)) return false;
       bodyFingerprints.add(fingerprint);
-      parts.push(text);
+      // The title and abstract were already pushed above, straight from the
+      // item record. The PDF's own copy of them — plus the author list,
+      // affiliations, keywords and bibliographic furniture around them — is
+      // duplication that would compete with real content for retrieval slots.
+      const stripped = stripFrontMatterDuplicates(text, frontMatterMetadata);
+      const dropped = text.length - stripped.text.length;
+      if (dropped > 0) {
+        ztoolkit.log(
+          `[SemanticSearch] extractItemContent() ${item.key}: dropped ${dropped} chars of front matter ` +
+            `(${JSON.stringify(stripped.removed)}, abstractMatched=${stripped.matchedAbstract})`,
+        );
+      }
+      parts.push(stripped.text || text);
       return true;
     };
     /** Sources that could have produced body text, whether or not they did. */

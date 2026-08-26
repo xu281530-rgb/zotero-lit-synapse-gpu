@@ -450,4 +450,181 @@ assert.ok(
 );
 prefs.clear();
 
+// ---------------------------------------------------------------------------
+// A heading always ends the open chunk
+// ---------------------------------------------------------------------------
+
+const { stripFrontMatterDuplicates } = await import(
+  "../src/modules/keyword/contentFilters.ts"
+);
+
+const headingChunker = new TextChunker({
+  targetChunkSize: 1000,
+  appendToleranceSize: 500,
+  skipReferences: true,
+});
+const isHeading = (line) => /^\s{0,3}#{1,6}\s+\S/.test(line);
+
+const sectioned = [
+  "## 1. Introduction",
+  "Short opening line.",
+  "## 2. Method",
+  "Another short line.",
+  "### 2.1 Setup",
+  "Setup detail.",
+].join("\n\n");
+const sectionedChunks = headingChunker.chunk(sectioned);
+
+// Every chunk sits inside exactly one section: a heading may only ever be the
+// chunk's first line.
+for (const chunk of sectionedChunks) {
+  const lines = chunk.split("\n").filter((line) => line.trim());
+  assert.ok(
+    !lines.slice(1).some(isHeading),
+    `chunk must not span a heading: ${JSON.stringify(chunk)}`,
+  );
+}
+assert.deepEqual(sectionedChunks, [
+  "## 1. Introduction\n\nShort opening line.",
+  "## 2. Method\n\nAnother short line.",
+  "### 2.1 Setup\n\nSetup detail.",
+]);
+
+// The cut happens however short the open chunk is — these three sections
+// together are far below the 1000-character target and would previously have
+// been merged into one chunk.
+assert.equal(
+  sectionedChunks.length,
+  3,
+  "a heading truncates the open chunk regardless of its length",
+);
+
+// A heading introducing an oversized paragraph rides along on the first piece
+// instead of being published as a chunk containing only the heading.
+const longBody = `${"This sentence carries the section's argument. ".repeat(60)}`;
+const oversized = headingChunker.chunk(`## 3. Results\n\n${longBody}`);
+assert.ok(oversized.length > 1, "the oversized paragraph must still be split");
+assert.ok(
+  oversized[0].startsWith("## 3. Results\n\n"),
+  "the heading must open the first piece of the section it introduces",
+);
+assert.ok(
+  !oversized.some((chunk) => chunk.trim() === "## 3. Results"),
+  "no chunk may consist of nothing but a heading",
+);
+
+// Sizing is otherwise untouched: paragraphs inside one section still fill to
+// the target and absorb a short tail exactly as before.
+const oneSection = [
+  "## 4. Discussion",
+  "a".repeat(600),
+  "b".repeat(300),
+  "c".repeat(80),
+].join("\n\n");
+const filled = headingChunker.chunk(oneSection);
+assert.equal(filled.length, 1, "paragraphs within a section still pack together");
+
+// ---------------------------------------------------------------------------
+// Front matter the item record already holds
+// ---------------------------------------------------------------------------
+
+const metadata = {
+  title: "A Study of Columnar Grains",
+  abstract:
+    "This work studies columnar grain growth under directional solidification " +
+    "and reports the resulting mechanical properties across five distinct heat " +
+    "treatment schedules applied to nickel superalloy blade specimens.",
+  creators: ["Jiayu Pan", "Feng Liu"],
+};
+const paper = [
+  "# A Study of Columnar Grains",
+  "Jiayu Pan $^{a}$ , Feng Liu $^{b,*}$",
+  "$^{a}$ Department of Mechanical Engineering, Tsinghua University, Beijing 100084, China",
+  "## ABSTRACT",
+  "This work studies columnar grain growth under directional solidification and " +
+    "reports the resulting mechanical properties across five distinct heat " +
+    "treatment schedules applied to nickel superalloy blade specimens.",
+  "Keywords: columnar grain, directional solidification",
+  "## 1. Introduction",
+  "Columnar grains matter because they set the creep life of a blade.",
+].join("\n\n");
+
+const stripped = stripFrontMatterDuplicates(paper, metadata);
+assert.equal(stripped.matchedAbstract, true);
+assert.equal(
+  stripped.text,
+  "## 1. Introduction\n\nColumnar grains matter because they set the creep life of a blade.",
+);
+
+// An abstract that differs slightly — a formula the record spells out — still
+// matches, because maths and punctuation are dropped before comparison.
+const withFormula = stripFrontMatterDuplicates(
+  [
+    "## Abstract",
+    "This work studies columnar grain growth under $\\alpha$ directional solidification and " +
+      "reports the resulting mechanical properties across five distinct heat " +
+      "treatment schedules applied to nickel superalloy blade specimens.",
+    "## 1. Introduction",
+    "Body text.",
+  ].join("\n\n"),
+  metadata,
+);
+assert.equal(withFormula.matchedAbstract, true);
+assert.equal(withFormula.text, "## 1. Introduction\n\nBody text.");
+
+// Nothing past the front matter is ever touched, even when it restates the
+// abstract closely — a conclusions section must survive.
+const withConclusion = stripFrontMatterDuplicates(
+  [
+    "## 1. Introduction",
+    "Body text.",
+    "## 5. Conclusions",
+    "This work studies columnar grain growth under directional solidification and " +
+      "reports the resulting mechanical properties across five distinct heat " +
+      "treatment schedules applied to nickel superalloy blade specimens.",
+  ].join("\n\n"),
+  metadata,
+);
+assert.match(withConclusion.text, /## 5\. Conclusions/);
+assert.match(withConclusion.text, /columnar grain growth under directional/);
+
+// When the record cannot vouch for the front matter — a translated PDF, or an
+// abstract that was never printed — nothing is cut.
+const unmatched = stripFrontMatterDuplicates(
+  ["# 完全不同的标题", "一段与元数据毫无关系的正文。"].join("\n\n"),
+  {
+    title: "Something Entirely Different",
+    abstract:
+      "An abstract with no shared vocabulary whatsoever regarding unrelated matters " +
+      "of astronomy and celestial navigation across the southern hemisphere.",
+    creators: ["Nobody At All"],
+  },
+);
+assert.equal(unmatched.matchedAbstract, false);
+assert.match(unmatched.text, /完全不同的标题/);
+assert.match(unmatched.text, /毫无关系的正文/);
+
+// A patent's claims restate the title in almost every clause; the length guard
+// is what keeps them from being deleted as title duplicates.
+const patent = stripFrontMatterDuplicates(
+  [
+    "## (54) 发明名称",
+    "一种单晶TiAl的等温锻造方法",
+    "## (57) 摘要",
+    "本发明公开了一种单晶TiAl的等温锻造方法，属于TiAl金属间化合物单晶材料加工技术领域，通过等温锻造获得单晶产品。",
+    "1.一种单晶TiAl的等温锻造方法，其特征在于：以PST单晶TiAl合金为原料，采用等温锻造，得到单晶产品。",
+    "2.根据权利要求1所述的一种单晶TiAl的等温锻造方法，其特征在于：锻造后仍保持单一取向层片的组织特征。",
+  ].join("\n\n"),
+  {
+    title: "一种单晶TiAl的等温锻造方法",
+    abstract:
+      "本发明公开了一种单晶TiAl的等温锻造方法，属于TiAl金属间化合物单晶材料加工技术领域，通过等温锻造获得单晶产品。",
+    creators: [],
+  },
+);
+assert.doesNotMatch(patent.text, /\(54\) 发明名称/);
+assert.doesNotMatch(patent.text, /^一种单晶TiAl的等温锻造方法$/m);
+assert.match(patent.text, /1\.一种单晶TiAl的等温锻造方法，其特征在于/);
+assert.match(patent.text, /2\.根据权利要求1所述/);
+
 console.log("Chunking and hybrid-settings regression tests passed");
