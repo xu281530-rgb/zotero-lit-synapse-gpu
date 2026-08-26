@@ -709,6 +709,56 @@ export function buildToolCatalog(): ToolDefinition[] {
     },
   },
   {
+    name: 'merge_items',
+    category: 'write',
+    description: [
+      'MERGE duplicate records: one survivor per group, everything else folded into it and trashed. This is how a duplicated document is removed from a library, and it is NOT the same as deleting the extra copies.',
+      '',
+      'WHY MERGE RATHER THAN DELETE. Zotero\'s merge moves the losing records\' attachments, notes and annotations onto the survivor, unions their collection memberships, and records a `dc:replaces` relation so a citation in an existing manuscript that points at a losing key still resolves to the survivor. Deleting throws all three away, and the broken citation only surfaces the next time the document is refreshed. There is deliberately no delete tool here.',
+      '',
+      'CHOOSING THE SURVIVOR. Omit masterItemKey and the most complete record wins — DOI, abstract and venue weigh most, then creators and attachments, with ties broken by how widely the record is filed and then by which was added first, so the same batch always plans the same way. The plan states which record won and on what grounds. Pass masterItemKey to override it for a group.',
+      '',
+      'ALL OR NOTHING AT THE PREFLIGHT. Missing items, trashed items, child notes or attachments, a group of fewer than two distinct items, a group mixing item types (Zotero cannot merge those), a master that is not in its own group, or one key appearing in two groups — any of these rejects the WHOLE batch with nothing written.',
+      '',
+      'PARTIAL APPLICATION IS POSSIBLE AFTER PREFLIGHT, unlike move_items_to_collection. Each group is merged atomically on its own, so a failure part-way through leaves earlier groups fully merged; the response then reports applied: "partial" and names them. Re-request the remainder.',
+      '',
+      'ALWAYS DRY RUN FIRST. dryRun: true runs the identical preflight and returns the identical plan — survivor, reason, what each losing record contributes — writing nothing and raising no confirmation prompt. Merging is the one operation here that is genuinely hard to undo: show the user the plan and get agreement before running it for real.',
+    ].join('\n'),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        libraryID: {
+          type: 'number',
+          description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
+        },
+        groups: {
+          type: 'array',
+          description: 'One entry per set of duplicates. Many groups can be merged in a single call, which is also a single confirmation prompt for the user.',
+          items: {
+            type: 'object',
+            properties: {
+              itemKeys: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'The duplicate records, at least two, all of the same item type.'
+              },
+              masterItemKey: {
+                type: 'string',
+                description: 'Optional: the record that must survive. Must be one of itemKeys. Omit to let the most complete record win.'
+              },
+            },
+            required: ['itemKeys'],
+          },
+        },
+        dryRun: {
+          type: 'boolean',
+          description: 'When true, validate and return the plan without merging anything and without prompting the user.'
+        },
+      },
+      required: ['groups'],
+    },
+  },
+  {
     name: 'search_fulltext',
     category: 'semantic',
     description: [

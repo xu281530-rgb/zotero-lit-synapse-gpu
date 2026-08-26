@@ -14,6 +14,7 @@ import {
   handleAddItemsToCollection,
   handleRemoveItemsFromCollection,
   handleMoveItemsToCollection,
+  handleMergeItems,
 } from './apiHandlers';
 import { describeNonDocumentKey, type ItemKeyKind } from './itemKeyKind';
 import { DEFAULT_FIELD_PARAMETERS } from './keyword/bm25f';
@@ -212,6 +213,7 @@ export const MUTATING_TOOL_NAMES = new Set<string>([
   'add_items_to_collection',
   'remove_items_from_collection',
   'move_items_to_collection',
+  'merge_items',
   'wiki_set_reading_expert',
   'wiki_update_reading_note',
 ]);
@@ -227,7 +229,11 @@ export const MUTATING_TOOL_NAMES = new Set<string>([
  * misleading answer.
  */
 function isMutationPreview(toolName: string, args: any): boolean {
-  return toolName === 'move_items_to_collection' && args?.dryRun === true;
+  return (
+    (toolName === 'move_items_to_collection' ||
+      toolName === 'merge_items') &&
+    args?.dryRun === true
+  );
 }
 
 /**
@@ -1148,6 +1154,16 @@ Nothing in this server returns a whole document in one response. Every reading t
             ...args,
             itemKeys: moveKeys,
           });
+          break;
+        }
+
+        case 'merge_items': {
+          if (!Array.isArray(args?.groups) || args.groups.length === 0) {
+            throw new Error(
+              'groups is required: an array of { itemKeys, masterItemKey? }, one entry per set of duplicates.',
+            );
+          }
+          result = await this.callMergeItems(args);
           break;
         }
 
@@ -3352,6 +3368,19 @@ Nothing in this server returns a whole document in one response. Every reading t
       { 1: collectionKey },
       { itemKeys, libraryID },
     );
+    return response.body ? JSON.parse(response.body) : response;
+  }
+
+  private async callMergeItems(args: any): Promise<any> {
+    const { groups, libraryID, dryRun } = args;
+    const response = await handleMergeItems({
+      groups: (groups as any[]).map((group: any) => ({
+        itemKeys: this.coerceStringArray(group?.itemKeys) ?? [],
+        masterItemKey: group?.masterItemKey,
+      })),
+      libraryID,
+      dryRun: dryRun === true,
+    });
     return response.body ? JSON.parse(response.body) : response;
   }
 

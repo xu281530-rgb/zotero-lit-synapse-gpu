@@ -41,6 +41,7 @@ const MUTATING = new Set([
   "add_items_to_collection",
   "remove_items_from_collection",
   "move_items_to_collection",
+  "merge_items",
   "wiki_set_reading_expert",
   "wiki_update_reading_note",
 ]);

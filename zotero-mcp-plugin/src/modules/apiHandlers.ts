@@ -17,6 +17,11 @@ import {
 } from "./collectionFormatter";
 import { buildCollectionListEnvelope } from "./collectionListEnvelope";
 import { planCollectionMove, type MoveCandidate } from "./collectionMovePlan";
+import {
+  planItemMerge,
+  type MergeCandidate,
+  type MergeGroupInput,
+} from "./itemMergePlan";
 import { handleSearchRequest, MCPError } from "./searchEngine";
 import { FulltextService } from "./fulltextService";
 import {
@@ -1621,4 +1626,197 @@ export async function handleMoveItemsToCollection(
       note: "The move runs in a single transaction, so a failure here means nothing was written.",
     });
   }
+}
+
+/**
+ * Merge groups of duplicate records, keeping one survivor per group.
+ *
+ * Deleting a duplicate and merging one are not the same operation, and the
+ * difference is why this tool exists instead of a `delete_item`. Zotero's
+ * merge moves the losing records' attachments, notes and annotations onto the
+ * survivor, unions their collection memberships, and — critically — records a
+ * `dc:replaces` relation so that a citation in an existing document that
+ * points at a losing key still resolves. A plain delete throws all three away,
+ * and the broken citation does not surface until the manuscript is next
+ * refreshed.
+ *
+ * NO OUTER TRANSACTION, on purpose. `Zotero.Items.merge` opens its own, so
+ * each group is atomic by itself; wrapping the batch would nest transactions
+ * on an assumption this plugin cannot verify from the type definitions. The
+ * cost is that a mid-batch failure leaves earlier groups merged — but a
+ * completed merge is a consistent state, not a half-written one, so the
+ * receipt names exactly which groups were applied and the rest can simply be
+ * requested again.
+ */
+export async function handleMergeItems(
+  body: {
+    groups: Array<{ itemKeys: string[]; masterItemKey?: string }>;
+    libraryID?: number;
+    dryRun?: boolean;
+  },
+): Promise<HttpResponse> {
+  const json = (status: number, statusText: string, payload: any): HttpResponse => ({
+    status,
+    statusText,
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+    body: JSON.stringify(payload),
+  });
+
+  try {
+    if (!Array.isArray(body.groups) || body.groups.length === 0) {
+      return json(400, "Bad Request", {
+        error:
+          'groups is required: an array of { itemKeys, masterItemKey? }, one entry per set of duplicates.',
+      });
+    }
+
+    const libraryID = body.libraryID ?? Zotero.Libraries.userLibraryID;
+    const items = new Map<string, Zotero.Item>();
+
+    // Resolve every key first; judge nothing here.
+    const inputs: MergeGroupInput[] = [];
+    for (const group of body.groups) {
+      const candidates: MergeCandidate[] = [];
+      for (const itemKey of group?.itemKeys ?? []) {
+        if (items.has(itemKey)) {
+          candidates.push(buildMergeCandidate(items.get(itemKey) as Zotero.Item));
+          continue;
+        }
+        const item = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, itemKey);
+        if (!item) {
+          candidates.push({ itemKey, found: false });
+          continue;
+        }
+        items.set(itemKey, item);
+        candidates.push(buildMergeCandidate(item));
+      }
+      inputs.push({ candidates, masterItemKey: group?.masterItemKey });
+    }
+
+    const planned = planItemMerge(inputs);
+
+    if (!planned.ok) {
+      return json(422, "Unprocessable Entity", {
+        error:
+          "The batch was rejected before anything was written: some groups cannot be merged. Nothing in your library changed. Fix or drop these groups and call again.",
+        preflight: "failed",
+        applied: false,
+        problems: planned.problems,
+        wouldHaveMerged: planned.wouldHaveMerged,
+      });
+    }
+
+    if (body.dryRun) {
+      return json(200, "OK", {
+        preflight: "passed",
+        applied: false,
+        dryRun: true,
+        summary: planned.summary,
+        groups: planned.groups,
+      });
+    }
+
+    // --- Commit, group by group ---
+    const merged: string[] = [];
+    let failure: { masterItemKey: string; error: string } | null = null;
+
+    for (const plan of planned.groups) {
+      try {
+        const master = items.get(plan.masterItemKey) as Zotero.Item;
+        const others = plan.merging.map(
+          (row) => items.get(row.itemKey) as Zotero.Item,
+        );
+        await (Zotero.Items as any).merge(master, others);
+        merged.push(plan.masterItemKey);
+      } catch (e) {
+        const error = e instanceof Error ? e : new Error(String(e));
+        Zotero.logError(error);
+        failure = { masterItemKey: plan.masterItemKey, error: error.message };
+        break;
+      }
+    }
+
+    ztoolkit.log(
+      `[ApiHandlers] Merged ${merged.length}/${planned.groups.length} duplicate groups`,
+    );
+
+    if (failure) {
+      return json(207, "Multi-Status", {
+        success: false,
+        preflight: "passed",
+        applied: "partial",
+        mergedGroups: merged,
+        stoppedAt: failure,
+        remaining: planned.groups.length - merged.length,
+        note: "Each group is merged atomically, so the groups listed in mergedGroups are complete and the rest were not started. Call again with the remaining groups.",
+      });
+    }
+
+    return json(200, "OK", {
+      success: true,
+      preflight: "passed",
+      applied: true,
+      summary: planned.summary,
+      mergedGroups: merged,
+      groups: planned.groups,
+    });
+  } catch (e) {
+    const error = e instanceof Error ? e : new Error(String(e));
+    Zotero.logError(error);
+    return json(500, "Internal Server Error", {
+      error: error.message,
+      applied: false,
+    });
+  }
+}
+
+/** Everything the merge planner needs to judge one record. */
+function buildMergeCandidate(item: Zotero.Item): MergeCandidate {
+  const fields: Record<string, string> = {};
+  for (const field of [
+    "DOI",
+    "abstractNote",
+    "publicationTitle",
+    "date",
+    "pages",
+    "volume",
+    "issue",
+    "url",
+    "ISSN",
+    "ISBN",
+    "language",
+    "publisher",
+    "bookTitle",
+    "conferenceName",
+  ]) {
+    try {
+      const value = item.getField(field as any);
+      if (value !== null && value !== undefined && String(value).trim()) {
+        fields[field] = String(value);
+      }
+    } catch {
+      // Not a field this item type has; absence is the answer.
+    }
+  }
+
+  let attachmentCount = 0;
+  try {
+    attachmentCount = (item.getAttachments() || []).length;
+  } catch {
+    attachmentCount = 0;
+  }
+
+  return {
+    itemKey: item.key,
+    found: true,
+    title: String(item.getField("title") || ""),
+    itemType: item.itemType,
+    isChildItem: Boolean(item.parentItemID),
+    inTrash: Boolean(item.deleted),
+    fields,
+    creatorCount: (item.getCreators() || []).length,
+    attachmentCount,
+    collections: describeItemCollections(item),
+    dateAdded: String(item.dateAdded || ""),
+  };
 }
