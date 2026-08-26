@@ -13,6 +13,7 @@ import {
   handleDeleteCollection,
   handleAddItemsToCollection,
   handleRemoveItemsFromCollection,
+  handleMoveItemsToCollection,
 } from './apiHandlers';
 import { describeNonDocumentKey, type ItemKeyKind } from './itemKeyKind';
 import { DEFAULT_FIELD_PARAMETERS } from './keyword/bm25f';
@@ -43,6 +44,7 @@ import {
   type CollectionBrowserDeps,
   type CollectionNode,
 } from './collectionBrowser';
+import { describeItemCollections } from './itemFormatter';
 import {
   COLLECTIONS_DEFAULT_LIMIT,
   prepareFixedContentToolArgs,
@@ -209,9 +211,24 @@ export const MUTATING_TOOL_NAMES = new Set<string>([
   'delete_collection',
   'add_items_to_collection',
   'remove_items_from_collection',
+  'move_items_to_collection',
   'wiki_set_reading_expert',
   'wiki_update_reading_note',
 ]);
+
+/**
+ * A call that inspects a mutation instead of performing one.
+ *
+ * `move_items_to_collection` with `dryRun` runs the same preflight and returns
+ * the same plan, but writes nothing, so asking the user to approve it would be
+ * asking them to approve nothing — and training them to click through the
+ * prompt that guards the real write. It still requires write operations to be
+ * ENABLED: previewing a capability the server would refuse to exercise is a
+ * misleading answer.
+ */
+function isMutationPreview(toolName: string, args: any): boolean {
+  return toolName === 'move_items_to_collection' && args?.dryRun === true;
+}
 
 /**
  * Trim a fused row to what a cached page can ever need.
@@ -358,6 +375,8 @@ function describeMutation(toolName: string, args: any): string {
   if (args?.parentKey) parts.push(`parent: ${String(args.parentKey)}`);
   if (args?.collectionKey)
     parts.push(`collection: ${String(args.collectionKey)}`);
+  if (args?.toCollectionKey)
+    parts.push(`into collection: ${String(args.toCollectionKey)}`);
   if (args?.name) parts.push(`name: ${String(args.name)}`);
   if (Array.isArray(args?.itemKeys))
     parts.push(`items: ${args.itemKeys.length}`);
@@ -907,7 +926,9 @@ Nothing in this server returns a whole document in one response. Every reading t
       // 每个 case 内原有的 write.enabled 检查保留，作为二次校验。
       if (MUTATING_TOOL_NAMES.has(name)) {
         assertWriteEnabled(name);
-        await assertMutationConfirmed(name, args);
+        if (!isMutationPreview(name, args)) {
+          await assertMutationConfirmed(name, args);
+        }
       }
 
       let result;
@@ -1107,6 +1128,25 @@ Nothing in this server returns a whole document in one response. Every reading t
           result = await this.callRemoveItemsFromCollection({
             ...args,
             itemKeys: removeKeys,
+          });
+          break;
+        }
+
+        case 'move_items_to_collection': {
+          if (!args?.toCollectionKey) {
+            throw new Error(
+              'toCollectionKey is required: the collection these items should end up in.',
+            );
+          }
+          const moveKeys = this.coerceStringArray(args?.itemKeys);
+          if (!moveKeys || moveKeys.length === 0) {
+            throw new Error(
+              `itemKeys array is required, e.g. ["ABCD1234"]. Received: ${JSON.stringify(args?.itemKeys)}`,
+            );
+          }
+          result = await this.callMoveItemsToCollection({
+            ...args,
+            itemKeys: moveKeys,
           });
           break;
         }
@@ -3120,7 +3160,7 @@ Nothing in this server returns a whole document in one response. Every reading t
           return [];
         }
       },
-      describeItems: async (itemKeys) => {
+      describeItems: async (itemKeys, currentCollectionKey) => {
         const rows: BrowsedItem[] = [];
         for (const itemKey of itemKeys) {
           try {
@@ -3129,6 +3169,12 @@ Nothing in this server returns a whole document in one response. Every reading t
               itemKey,
             );
             if (!item) continue;
+            // Only the OTHER folders: repeating the one being browsed on every
+            // row would be noise, while its absence is what makes a
+            // cross-filed document stand out in a listing.
+            const alsoIn = describeItemCollections(item).filter(
+              (entry) => entry.collectionKey !== currentCollectionKey,
+            );
             rows.push({
               itemKey: item.key,
               title:
@@ -3150,6 +3196,7 @@ Nothing in this server returns a whole document in one response. Every reading t
               publicationTitle:
                 String(item.getField?.('publicationTitle') || '') || undefined,
               DOI: String(item.getField?.('DOI') || '') || undefined,
+              ...(alsoIn.length > 0 ? { alsoIn } : {}),
             });
           } catch (error) {
             ztoolkit.log(
@@ -3304,6 +3351,15 @@ Nothing in this server returns a whole document in one response. Every reading t
     const response = await handleRemoveItemsFromCollection(
       { 1: collectionKey },
       { itemKeys, libraryID },
+    );
+    return response.body ? JSON.parse(response.body) : response;
+  }
+
+  private async callMoveItemsToCollection(args: any): Promise<any> {
+    const { toCollectionKey, itemKeys, libraryID, dryRun } = args;
+    const response = await handleMoveItemsToCollection(
+      { 1: toCollectionKey },
+      { itemKeys, libraryID, dryRun: dryRun === true },
     );
     return response.body ? JSON.parse(response.body) : response;
   }

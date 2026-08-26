@@ -57,6 +57,7 @@ assert.deepEqual(STANDARD_ITEM_DETAIL_FIELDS, [
   "hasAbstract",
   "noteCount",
   "attachments",
+  "collections",
 ]);
 
 const serverSource = fs.readFileSync(

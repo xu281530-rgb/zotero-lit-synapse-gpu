@@ -671,6 +671,44 @@ export function buildToolCatalog(): ToolDefinition[] {
     },
   },
   {
+    name: 'move_items_to_collection',
+    category: 'write',
+    description: [
+      'MOVE items into one collection, taking them OUT of every other collection they are currently filed in. This is the tool for reorganising a library; add_items_to_collection only ever adds, so a library reorganised with it accumulates old filings instead of losing them.',
+      '',
+      'MOVE MEANS MOVE. After this call each item is filed in exactly one place: toCollectionKey. If the user wants a document to stay in several folders — a paper that genuinely belongs to both a project and a reading list — do NOT use this tool for it; use add_items_to_collection, which leaves existing filings alone.',
+      '',
+      'ALL OR NOTHING. Every key is checked before anything is written: items that do not exist, items in the trash, and child notes or attachments (which cannot be filed in a collection at all) abort the whole batch. Nothing is written, the response names the offending keys, and you fix or drop them and call again. The write itself runs in one transaction, so a failure mid-way leaves the library untouched rather than half-reorganised.',
+      '',
+      'ALWAYS DRY RUN FIRST on a batch you have not shown the user. dryRun: true runs the identical preflight and returns the identical plan — which items, which filings each one loses — without writing anything and without prompting the user. Show them that plan, get their agreement, then repeat the call without dryRun.',
+      '',
+      'BATCH BY DESTINATION. itemKeys takes many items, and one call is one confirmation prompt for the user. Sorting a hundred papers into six folders is six calls, not a hundred.',
+    ].join('\n'),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        libraryID: {
+          type: 'number',
+          description: 'Optional target Zotero library ID. Defaults to the user library when omitted.'
+        },
+        toCollectionKey: {
+          type: 'string',
+          description: 'Key of the collection the items should end up in. It must already exist — create it with create_collection first if needed.'
+        },
+        itemKeys: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Item keys to move. Top-level items only; a child note or attachment key aborts the batch.'
+        },
+        dryRun: {
+          type: 'boolean',
+          description: 'When true, validate and return the plan without writing anything and without prompting the user. Use it to show the user what a batch would do before doing it.'
+        },
+      },
+      required: ['toCollectionKey', 'itemKeys'],
+    },
+  },
+  {
     name: 'search_fulltext',
     category: 'semantic',
     description: [

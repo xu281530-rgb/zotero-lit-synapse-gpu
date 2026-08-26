@@ -3,7 +3,12 @@
  */
 
 
-import { formatItem, formatItems } from "./itemFormatter";
+import {
+  collectionPath,
+  describeItemCollections,
+  formatItem,
+  formatItems,
+} from "./itemFormatter";
 import {
   formatCollection,
   formatCollectionBrief,
@@ -11,6 +16,7 @@ import {
   formatCollectionDetails,
 } from "./collectionFormatter";
 import { buildCollectionListEnvelope } from "./collectionListEnvelope";
+import { planCollectionMove, type MoveCandidate } from "./collectionMovePlan";
 import { handleSearchRequest, MCPError } from "./searchEngine";
 import { FulltextService } from "./fulltextService";
 import {
@@ -1450,5 +1456,169 @@ export async function handleRemoveItemsFromCollection(
       headers: { "Content-Type": "application/json; charset=utf-8" },
       body: JSON.stringify({ error: error.message }),
     };
+  }
+}
+
+/**
+ * Move items into one collection, taking them out of every other one.
+ *
+ * This is the operation a library reorganisation is actually made of, and it
+ * did not exist. Callers had to compose `remove_items_from_collection` and
+ * `add_items_to_collection`, which is two round trips, two confirmation
+ * prompts, and — when the second one fails or the client stops in between — a
+ * library left in a state nobody described: the document filed in both places
+ * at once, or in neither.
+ *
+ * PREFLIGHT THEN COMMIT. Every key is validated before anything is written,
+ * and a single bad entry aborts the whole batch without touching the library.
+ * The alternative — moving what can be moved and reporting the rest — leaves
+ * the caller holding a half-applied plan whose remainder it has to reconstruct
+ * from a receipt. A plan that cannot be executed as written is a plan to
+ * revise, not to partially apply.
+ *
+ * `dryRun` runs the preflight and reports exactly what WOULD happen, writing
+ * nothing. It is the same code path, so a dry run that passes is a real
+ * guarantee about the commit that follows, not a separate opinion about it.
+ */
+export async function handleMoveItemsToCollection(
+  params: Record<string, string>,
+  body: { itemKeys: string[]; libraryID?: number; dryRun?: boolean },
+): Promise<HttpResponse> {
+  const json = (status: number, statusText: string, payload: any): HttpResponse => ({
+    status,
+    statusText,
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+    body: JSON.stringify(payload),
+  });
+
+  try {
+    const toCollectionKey = params[1];
+    if (!toCollectionKey) {
+      return json(400, "Bad Request", {
+        error: "Missing toCollectionKey parameter",
+      });
+    }
+
+    if (!body.itemKeys || !Array.isArray(body.itemKeys) || body.itemKeys.length === 0) {
+      return json(400, "Bad Request", { error: "Missing or empty itemKeys array" });
+    }
+
+    const libraryID = body.libraryID ?? Zotero.Libraries.userLibraryID;
+    const target = await Zotero.Collections.getByLibraryAndKeyAsync(
+      libraryID,
+      toCollectionKey,
+    );
+
+    if (!target) {
+      return json(404, "Not Found", {
+        error: `Target collection ${toCollectionKey} not found in library ${libraryID}. Create it with create_collection, or list the existing folders with get_collections.`,
+      });
+    }
+
+    const targetPath = collectionPath(target);
+
+    // --- Resolve every key against the library, judge nothing yet ---
+    const items = new Map<string, Zotero.Item>();
+    const candidates: MoveCandidate[] = [];
+
+    for (const itemKey of body.itemKeys) {
+      if (items.has(itemKey)) {
+        // A repeated key needs no second lookup; planCollectionMove collapses
+        // it and reports the count.
+        candidates.push({ itemKey, found: true });
+        continue;
+      }
+      const item = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, itemKey);
+      if (!item) {
+        candidates.push({ itemKey, found: false });
+        continue;
+      }
+      items.set(itemKey, item);
+      candidates.push({
+        itemKey,
+        found: true,
+        title: String(item.getField("title") || ""),
+        // A child note or attachment lives under its parent, not in a folder.
+        isChildItem: Boolean(item.parentItemID),
+        inTrash: Boolean(item.deleted),
+        collections: describeItemCollections(item),
+      });
+    }
+
+    const planned = planCollectionMove(candidates, toCollectionKey);
+
+    if (!planned.ok) {
+      return json(422, "Unprocessable Entity", {
+        error:
+          "The batch was rejected before anything was written: some items cannot be moved. Nothing in your library changed. Fix or drop these entries and call again.",
+        preflight: "failed",
+        applied: false,
+        toCollection: { collectionKey: toCollectionKey, path: targetPath },
+        notFound: planned.notFound,
+        notFilable: planned.notFilable,
+        wouldHaveMoved: planned.wouldHaveMoved,
+      });
+    }
+
+    const { rows, summary } = planned;
+
+    if (body.dryRun) {
+      return json(200, "OK", {
+        preflight: "passed",
+        applied: false,
+        dryRun: true,
+        toCollection: { collectionKey: toCollectionKey, path: targetPath },
+        summary,
+        plan: rows,
+      });
+    }
+
+    // --- Commit: one transaction, so a failure leaves nothing half-moved ---
+    // Collections are resolved by key up front: inside the transaction a
+    // lookup miss would abort a batch that had already been half-applied.
+    const leavingByItem = new Map<string, Zotero.Collection[]>();
+    for (const row of rows) {
+      const item = items.get(row.itemKey) as Zotero.Item;
+      const sources = (describeItemCollections(item) || [])
+        .filter((entry) => entry.collectionKey !== toCollectionKey)
+        .map((entry) =>
+          Zotero.Collections.getByLibraryAndKey(libraryID, entry.collectionKey),
+        )
+        .filter(Boolean) as unknown as Zotero.Collection[];
+      leavingByItem.set(row.itemKey, sources);
+    }
+
+    await Zotero.DB.executeTransaction(async () => {
+      for (const row of rows) {
+        const item = items.get(row.itemKey) as Zotero.Item;
+        if (!row.alreadyInTarget) {
+          await target.addItems([item.id]);
+        }
+        for (const source of leavingByItem.get(row.itemKey) ?? []) {
+          await (source as any).removeItems([item.id]);
+        }
+      }
+    });
+
+    ztoolkit.log(
+      `[ApiHandlers] Moved ${rows.length} items into collection ${toCollectionKey}`,
+    );
+
+    return json(200, "OK", {
+      success: true,
+      preflight: "passed",
+      applied: true,
+      toCollection: { collectionKey: toCollectionKey, path: targetPath },
+      summary,
+      plan: rows,
+    });
+  } catch (e) {
+    const error = e instanceof Error ? e : new Error(String(e));
+    Zotero.logError(error);
+    return json(500, "Internal Server Error", {
+      error: error.message,
+      applied: false,
+      note: "The move runs in a single transaction, so a failure here means nothing was written.",
+    });
   }
 }

@@ -793,9 +793,9 @@ retrieved as if it were the paper.
 - `wiki_get_reading_note` — read back a paper's note, expert and exact resume point; the recovery path after a restart or a context compaction
 - `wiki_finish_reading` — close an open paper without writing it up (`skipped`). Without `itemKey` it closes the paper being read in full; with one it can also close a paper that questions have been reading, which releases the block on reading it further
 
-### 5. Write Operations (9 tools, can be disabled in preferences)
+### 5. Write Operations (10 tools, can be disabled in preferences)
 
-All nine are hidden from `tools/list` and from `/capabilities` when write
+All ten are hidden from `tools/list` and from `/capabilities` when write
 operations are disabled, which is the default — the server never advertises a
 capability it would refuse.
 
@@ -806,6 +806,21 @@ capability it would refuse.
 - `delete_collection` — `collectionKey` (required), `deleteItems`
 - `add_items_to_collection` — `collectionKey`, `itemKeys` (both required)
 - `remove_items_from_collection` — `collectionKey`, `itemKeys` (both required)
+- `move_items_to_collection` — `toCollectionKey`, `itemKeys` (both required), `dryRun`
+
+`move_items_to_collection` is the reorganisation tool, and the only one of the
+five whose result is a *placement* rather than an addition: each item ends up
+filed in `toCollectionKey` and nowhere else. Use `add_items_to_collection`
+instead when a document is meant to stay in several folders.
+
+The batch is all-or-nothing. Missing items, trashed items, and child notes or
+attachments are rejected during a preflight pass that runs before any write, so
+a bad key aborts the batch with nothing written rather than leaving the library
+half-reorganised; the write itself then runs in a single transaction. `dryRun`
+executes the same preflight and returns the same plan — which items move, which
+filings each one loses — without writing and without raising the confirmation
+prompt, which is what makes it safe to show a user a proposed reorganisation
+before performing it.
 
 #### Item and note mutation
 

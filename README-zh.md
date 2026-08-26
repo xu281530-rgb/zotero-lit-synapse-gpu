@@ -330,7 +330,7 @@ MCP 服务器已集成在插件内，位于 `src/modules/streamableMCPServer.ts`
 响应与 HTTP `/capabilities` 文档都由它投影得到。**不存在需要人工同步的第二份
 清单**，`npm run test:tool-catalog` 会在两份投影出现分歧时让构建失败。
 
-插件集成的 MCP 服务器提供以下 **38 个工具**，分为 5 大类：
+插件集成的 MCP 服务器提供以下 **46 个工具**，分为 5 大类：
 
 ### 一、搜索与查询（12 个）
 
@@ -823,9 +823,9 @@ Claim 只能建立在阅读总结已经涵盖的内容之上。该附件也被�
 - `wiki_get_reading_note` —— 取回某篇文献的总结、专家角色与准确续读位置；重启或对话中断后的恢复入口
 - `wiki_finish_reading` —— 只读不写地结束一篇打开的文献（`skipped`）。不传 `itemKey` 时结束当前全文阅读的那篇；传 `itemKey` 时也可结束一篇问答式阅读的文献，同时解除它「未写入 Wiki」的阻塞
 
-### 五、写入操作（9 个，可在偏好设置中禁用）
+### 五、写入操作（10 个，可在偏好设置中禁用）
 
-写入默认关闭。关闭时这 9 个工具在 `tools/list` 与 `/capabilities` 中都不出现——
+写入默认关闭。关闭时这 10 个工具在 `tools/list` 与 `/capabilities` 中都不出现——
 服务器绝不声明一个自己会拒绝执行的能力。
 
 #### 分类增删改
@@ -835,6 +835,19 @@ Claim 只能建立在阅读总结已经涵盖的内容之上。该附件也被�
 - `delete_collection` —— `collectionKey`（必需）、`deleteItems`
 - `add_items_to_collection` —— `collectionKey`、`itemKeys`（均必需）
 - `remove_items_from_collection` —— `collectionKey`、`itemKeys`（均必需）
+- `move_items_to_collection` —— `toCollectionKey`、`itemKeys`（均必需）、`dryRun`
+
+`move_items_to_collection` 是重新整理文献库用的工具，也是这几个里唯一结果为
+「归位」而非「追加」的一个：执行完每个条目只属于 `toCollectionKey` 一个分类，
+原有的其他归属全部解除。如果某篇文献本就该同时属于多处（比如既在课题分类里、
+又在待读清单里），请改用 `add_items_to_collection`，它不动已有归属。
+
+整批要么全成、要么全不动。执行前有一轮体检：条目不存在、条目在回收站、以及
+子笔记或子附件（这类条目根本不能归入分类）都会让整批中止，此时一个字节都没写，
+返回里会列出出问题的 key，你改好或剔除后重新调用即可；体检通过后的写入在单个
+事务里完成，中途失败也不会留下整理到一半的库。`dryRun` 跑的是同一套体检、返回
+同一份计划——哪些条目移动、每个条目会失去哪些归属——但不写入，也不弹确认框，
+因此可以放心用它把整理方案先摆给用户看，确认后再真正执行。
 
 #### 条目与笔记写入
 

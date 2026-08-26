@@ -1,11 +1,69 @@
 declare let ztoolkit: ZToolkit;
 
 /**
+ * Read a field without caring whether this item type has it.
+ *
+ * `formatItemBrief` is used for attachments as well as documents, and asking
+ * an attachment for `publicationTitle` is a question Zotero is entitled to
+ * refuse. An absent field is not an error here, it is an empty string.
+ */
+function safeField(item: Zotero.Item, field: string): string {
+  try {
+    const value = item.getField(field as any);
+    return value === null || value === undefined ? "" : String(value);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Where an item currently sits, as `{collectionKey, name, path}` rows.
+ *
+ * This is the answer to "which folders is this document filed in", which the
+ * library could compute all along but no tool ever asked for. Without it a
+ * caller can only learn an item's placement by listing every collection and
+ * inverting the result, which is what made reorganising a library — an
+ * operation that is fundamentally about MOVING things — impossible to plan.
+ *
+ * Everything here is an in-memory read off Zotero's collection cache, so it is
+ * cheap enough to attach to every row of a 200-item search page.
+ */
+export function describeItemCollections(
+  item: Zotero.Item,
+): Array<{ collectionKey: string; name: string; path: string }> {
+  try {
+    const collectionIDs = item.getCollections() || [];
+    if (collectionIDs.length === 0) return [];
+    return (Zotero.Collections.get(collectionIDs) as unknown as any[])
+      .filter(Boolean)
+      .map((collection: any) => ({
+        collectionKey: collection.key,
+        name: collection.name,
+        path: collectionPath(collection),
+      }));
+  } catch (e) {
+    ztoolkit.log(`[ItemFormatter] Error getting collections: ${e}`, "error");
+    return [];
+  }
+}
+
+/**
  * Formats a single Zotero item into a brief JSON object for search results.
+ *
+ * "Brief" means no CONTENT — no abstract text, no notes, no body. It does not
+ * mean "too little to act on": a row that carries only title, creators and
+ * year cannot tell a caller what kind of document it is, where it is published
+ * or where it is currently filed, which is everything you need to decide
+ * whether it is in the right folder. Those four fields are metadata the item
+ * already holds in memory, so they cost a page of results nothing to carry.
+ * `hasAbstract` is availability, not text — it says whether
+ * `get_item_abstract` would return anything.
+ *
  * @param item The Zotero.Item object to format.
  * @returns A JSON object with essential item details.
  */
 export function formatItemBrief(item: Zotero.Item): Record<string, any> {
+  const publicationTitle = safeField(item, "publicationTitle");
   return {
     key: item.key,
     libraryID: item.libraryID,
@@ -15,6 +73,10 @@ export function formatItemBrief(item: Zotero.Item): Record<string, any> {
       .map((c) => `${c.firstName || ""} ${c.lastName || ""}`.trim())
       .join(", "),
     date: item.getField("date")?.match(/\d{4}/)?.[0] || "", // Extract year
+    itemType: item.itemType,
+    ...(publicationTitle ? { publicationTitle } : {}),
+    hasAbstract: safeField(item, "abstractNote").trim().length > 0,
+    collections: describeItemCollections(item),
   };
 }
 
@@ -48,6 +110,7 @@ export const DEFAULT_ITEM_FIELDS = [
   "hasAbstract",
   "noteCount",
   "attachments",
+  "collections",
 ];
 
 /**
@@ -267,24 +330,7 @@ export async function formatItem(
           }
           break;
         case "collections":
-          try {
-            const collectionIDs = item.getCollections() || [];
-            formattedItem.collections = (
-              Zotero.Collections.get(collectionIDs) as unknown as any[]
-            )
-              .filter(Boolean)
-              .map((collection: any) => ({
-                collectionKey: collection.key,
-                name: collection.name,
-                path: collectionPath(collection),
-              }));
-          } catch (e) {
-            ztoolkit.log(
-              `[ItemFormatter] Error getting collections: ${e}`,
-              "error",
-            );
-            formattedItem.collections = [];
-          }
+          formattedItem.collections = describeItemCollections(item);
           break;
         default:
           try {
@@ -309,10 +355,15 @@ export async function formatItem(
 }
 
 /**
- * "Library/Parent/Child" for one collection, so a caller reading an item's
+ * "Parent/Child" for one collection, so a caller reading an item's
  * collections can see where it sits without walking the tree itself.
+ *
+ * Exported because every tool that reports a filing location has to agree on
+ * how a location is spelled; `collectionFormatter.getCollectionPath` renders
+ * the same tree as "Parent > Child" for display, and mixing the two inside a
+ * single response makes two spellings of one folder look like two folders.
  */
-function collectionPath(collection: any): string {
+export function collectionPath(collection: any): string {
   const segments: string[] = [];
   const seen = new Set<string>();
   let current: any = collection;

@@ -32,6 +32,7 @@
     "test:document-chunks": "node --experimental-strip-types scripts/test-document-chunks.js",
     "test:attachment-text": "node --experimental-strip-types scripts/test-attachment-text.js",
     "test:collection-browser": "node --experimental-strip-types scripts/test-collection-browser.js",
+    "test:collection-move-plan": "node --experimental-strip-types scripts/test-collection-move-plan.js",
     "test:annotation-params": "node --experimental-strip-types scripts/test-annotation-params.js",
     "test:deprecated-content-settings": "node --experimental-strip-types scripts/test-deprecated-content-settings.js",
     "test:content-tool-defaults": "node --experimental-strip-types scripts/test-content-tool-defaults.js",

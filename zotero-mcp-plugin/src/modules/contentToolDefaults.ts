@@ -18,6 +18,10 @@ export const STANDARD_ITEM_DETAIL_FIELDS = [
   'hasAbstract',
   'noteCount',
   'attachments',
+  // Where the item is filed. Metadata, not content, and the only way a caller
+  // can see that a document is in the wrong folder — or in five folders at
+  // once — without listing every collection in the library and inverting it.
+  'collections',
 ] as const;
 
 const LEGACY_CONTENT_CONTROL_FIELDS = new Set([

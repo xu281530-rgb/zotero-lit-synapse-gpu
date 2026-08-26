@@ -44,6 +44,14 @@ export interface BrowsedItem {
   itemType?: string;
   publicationTitle?: string;
   DOI?: string;
+  /**
+   * Every collection this document is filed in, INCLUDING the one being
+   * browsed. Present only when the document is filed somewhere other than
+   * here as well, because that is the whole signal: a row that carries this
+   * field is cross-filed, and a reorganisation has to decide what to do about
+   * it. Omitting it for the common case keeps a directory listing cheap.
+   */
+  alsoIn?: Array<{ collectionKey: string; name: string; path: string }>;
 }
 
 export interface CollectionNode {
@@ -63,7 +71,15 @@ export interface CollectionBrowserDeps {
   /** Items that belong to no collection at all. */
   getUnfiledItemKeys(): string[];
   /** Light metadata for one page of items. Order follows the keys given. */
-  describeItems(itemKeys: string[]): Promise<BrowsedItem[]>;
+  /**
+   * `currentCollectionKey` is the folder being listed, or null at the library
+   * root. It is passed so the adapter can report an item's OTHER collections
+   * without repeating the one the caller is already looking at.
+   */
+  describeItems(
+    itemKeys: string[],
+    currentCollectionKey: string | null,
+  ): Promise<BrowsedItem[]>;
   /** Display name of the library itself, used as the path root. */
   getLibraryName(): string;
 }
@@ -297,7 +313,7 @@ export async function browseCollection(
   const total = directItemKeys.length;
   offset = Math.min(offset, total);
   const pageKeys = directItemKeys.slice(offset, offset + pageSize);
-  const items = await deps.describeItems(pageKeys);
+  const items = await deps.describeItems(pageKeys, key);
   const end = offset + items.length;
   const hasMore = end < total;
 
