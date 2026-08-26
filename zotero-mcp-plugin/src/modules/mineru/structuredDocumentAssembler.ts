@@ -1,4 +1,4 @@
-export const ASSEMBLER_VERSION = 5;
+export const ASSEMBLER_VERSION = 6;
 
 export type MinerUStructuredFormat =
   | "content_list_v2"
@@ -227,7 +227,7 @@ export function assembleStructuredDocument(
       type,
       pageIndex,
       bbox,
-      markdown: cleanBlock(markdown),
+      markdown,
       sourceOrder,
     }));
   const markdown = cleanDocument(blocks.map((block) => block.markdown).join("\n\n"));
@@ -460,18 +460,19 @@ function makeBlock(
   item: any,
   markdown: string,
 ): NormalizedBlock {
-  const publicationMetadataFootnote =
-    type === "page_footnote" && isPublicationMetadataFootnote(markdown);
+  const pageFootnote = type === "page_footnote";
   return {
     type,
     pageIndex,
     bbox: normalizeBBox(item?.bbox),
-    markdown: publicationMetadataFootnote ? "" : cleanBlock(markdown),
+    markdown: pageFootnote ? "" : cleanBlock(markdown),
     sourceOrder: -1,
     mergePrev: item?.merge_prev === true || item?.content?.merge_prev === true,
-    ignoredFurniture: FURNITURE_TYPES.has(type) || publicationMetadataFootnote,
-    bridgeKind: FURNITURE_TYPES.has(type) || publicationMetadataFootnote
-      ? "furniture"
+    ignoredFurniture: FURNITURE_TYPES.has(type) || pageFootnote,
+    bridgeKind: pageFootnote
+      ? null
+      : FURNITURE_TYPES.has(type)
+        ? "furniture"
       : VISUAL_ANCHOR_TYPES.has(type)
         ? "visual-anchor"
         : VISUAL_DETAIL_TYPES.has(type)
@@ -482,13 +483,6 @@ function makeBlock(
               ? "table-detail"
           : null,
   };
-}
-
-function isPublicationMetadataFootnote(markdown: string): boolean {
-  return (
-    /\b(?:corresponding\s+author|e-?mail\s+address)\b/i.test(markdown) ||
-    /(?:^|[\n;；])\s*(?:收稿日期|修订日期)\s*[:：]/u.test(markdown)
-  );
 }
 
 function renderList(content: any): string {
@@ -823,7 +817,7 @@ function isInlineEquationSpan(value: any): boolean {
 }
 
 function isWordCharacter(value: string): boolean {
-  return /^[A-Za-z0-9\u3400-\u9fff]$/u.test(value);
+  return /^[A-Za-z0-9]$/u.test(value);
 }
 
 function startsWithWordCharacter(value: string): boolean {
@@ -998,11 +992,16 @@ function findBridgeTarget(
     const candidate = blocks[nextIndex];
     if (
       candidate.pageIndex < sourcePage ||
-      candidate.pageIndex > sourcePage + 1 ||
-      candidate.bridgeKind === null
+      candidate.pageIndex > sourcePage + 1
     ) {
       break;
     }
+    if (candidate.type === "paragraph" && !candidate.markdown.trim()) {
+      bridged.push(candidate);
+      nextIndex += 1;
+      continue;
+    }
+    if (candidate.bridgeKind === null) break;
     bridged.push(candidate);
     nextIndex += 1;
   }
@@ -1118,6 +1117,9 @@ function shouldMergeParagraphs(
   const hasVisualBridge = bridged.some(isVisualBridge);
   const hasTableBridge = bridged.some(isTableBridge);
   const hasLayoutBridge = hasVisualBridge || hasTableBridge;
+  const isColumnContinuation =
+    next.pageIndex === previous.pageIndex &&
+    isLikelySamePageColumnContinuation(previous, next);
   if (
     next.pageIndex === previous.pageIndex + 1 &&
     !isLikelyPageBoundary(previous, next, bridged)
@@ -1150,10 +1152,17 @@ function shouldMergeParagraphs(
     return true;
   }
   if (/[.!?。！？；;:]\s*$/u.test(previousText)) return false;
-  if (!/^(?:[a-z]|\[[0-9]|\([0-9]|[,.;:)}\]])/u.test(nextText)) {
+  const startsWithTextContinuation = /^(?:[a-z]|\[[0-9]|\([0-9]|[,.;:)}\]])/u.test(
+    nextText,
+  );
+  const startsWithColumnContinuation =
+    isColumnContinuation && /^(?:[0-9][\p{L}]?|[\p{Script=Greek}])/u.test(nextText);
+  if (!startsWithTextContinuation && !startsWithColumnContinuation) {
     return false;
   }
-  if (hasLayoutBridge) return endsWithDependencyWord(previousText);
+  if (hasLayoutBridge || isColumnContinuation) {
+    return endsWithDependencyWord(previousText);
+  }
   return true;
 }
 
@@ -1186,7 +1195,7 @@ function isLikelyPageBoundary(
   if (anchors.some((block) => !hasFiniteBBox(block))) return false;
   const positionedLayout = layout.filter(hasFiniteBBox);
   const pageExtent = pageExtentFor([previous, next, ...positionedLayout]);
-  if (!pageExtent || previousBottom < pageExtent * 0.7) return false;
+  if (!pageExtent) return false;
   const previousPageLayout = positionedLayout.filter(
     (block) => block.pageIndex === previous.pageIndex,
   );
@@ -1194,6 +1203,22 @@ function isLikelyPageBoundary(
     previousPageLayout.some((block) => block.bbox[1] < previousBottom)
   ) {
     return false;
+  }
+  const samePageAnchors = anchors.filter(
+    (block) => block.pageIndex === previous.pageIndex,
+  );
+  const hasFullPageTrailingVisual = samePageAnchors.some(
+    (block) =>
+      block.bbox[1] >= previousBottom &&
+      block.bbox[1] - previousBottom <= pageExtent * 0.1 &&
+      block.bbox[3] >= pageExtent * 0.9,
+  );
+  if (previousBottom < pageExtent * 0.7) {
+    return Boolean(
+      hasFullPageTrailingVisual &&
+        nextTop <= pageExtent * 0.2 &&
+        next.pageIndex === previous.pageIndex + 1,
+    );
   }
   const nextPageLayout = positionedLayout.filter(
     (block) => block.pageIndex === next.pageIndex,
@@ -1265,6 +1290,26 @@ function isLikelySamePageVisualBridge(
   return narrowerWidth > 0 && overlap / narrowerWidth >= 0.5;
 }
 
+function isLikelySamePageColumnContinuation(
+  previous: NormalizedBlock,
+  next: NormalizedBlock,
+): boolean {
+  if (!hasFiniteBBox(previous) || !hasFiniteBBox(next)) return false;
+  const pageExtent = pageExtentFor([previous, next]);
+  if (!pageExtent) return false;
+  const [previousLeft, , previousRight, previousBottom] = previous.bbox;
+  const [nextLeft, nextTop] = next.bbox;
+  if (
+    previousBottom < pageExtent * 0.7 ||
+    nextTop > pageExtent * 0.2 ||
+    nextLeft <= previousLeft ||
+    nextLeft <= previousRight
+  ) {
+    return false;
+  }
+  return nextLeft - previousRight <= pageExtent * 0.08;
+}
+
 function hasFiniteBBox(block: NormalizedBlock): boolean {
   return (
     block.bbox.length >= 4 &&
@@ -1281,8 +1326,8 @@ function pageExtentFor(blocks: NormalizedBlock[]): number | null {
 }
 
 function cleanBlock(value: string): string {
-  return normalizeInlineFormulaBoundaries(
-    normalizeHTMLScripts(stripImageReferences(String(value || ""))),
+  return normalizeHTMLScripts(
+    normalizeInlineFormulaBoundaries(stripImageReferences(String(value || ""))),
   )
     .replace(/\r\n?/g, "\n")
     .replace(/[ \t]+$/gm, "")
@@ -1295,9 +1340,18 @@ function normalizeHTMLScripts(value: string): string {
   return value.replace(
     /<(sub|sup)\b[^>]*>([\s\S]*?)<\/\1\s*>/giu,
     (_match, rawTag: string, content: string) => {
+      const normalized = content.trim();
+      if (!normalized || /^[\p{P}\p{S}\s]+$/u.test(normalized)) return "";
+      if (isBracketedNumericCitation(normalized)) return normalized;
       const operator = rawTag.toLowerCase() === "sub" ? "_" : "^";
-      return `$${operator}{${content}}$`;
+      return `$${operator}{${normalized}}$`;
     },
+  );
+}
+
+function isBracketedNumericCitation(value: string): boolean {
+  return /^(?:\[[\d\s,;:，；：.\-–—]+\]|［[\d\s,;:，；：.\-–—]+］|【[\d\s,;:，；：.\-–—]+】)$/u.test(
+    value,
   );
 }
 
@@ -1387,7 +1441,12 @@ function isEscapedAt(value: string, index: number): boolean {
 }
 
 function cleanDocument(value: string): string {
-  return cleanBlock(value).replace(/\n{3,}/g, "\n\n");
+  return String(value || "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+$/gm, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function stripImageReferences(value: string): string {

@@ -205,7 +205,11 @@ assert.match(rich, /T is temperature\./);
 assert.match(rich, /<td rowspan="2">A<\/td>/);
 assert.doesNotMatch(rich, /onclick|script|bad\(\)|Journal 42/);
 assert.doesNotMatch(rich, /Corresponding author/);
-assert.match(rich, /The uncertainty is one standard deviation\./);
+assert.doesNotMatch(
+  rich,
+  /The uncertainty is one standard deviation\./,
+  "page footnotes are never part of the canonical Markdown body",
+);
 assert.match(
   rich,
   /Downloaded by the institutional subscriber\./,
@@ -213,9 +217,15 @@ assert.match(
 );
 assert.doesNotMatch(rich, /(?:^|\n)7(?:\n|$)/);
 
-const legacyPublicationMetadataFootnote = assembleStructuredDocument(
+const legacyPageFootnotes = assembleStructuredDocument(
   selectStructuredSource({
     "content_list.json": JSON.stringify([
+      {
+        type: "text",
+        text: "正文内容。",
+        page_idx: 0,
+        bbox: [80, 100, 376, 130],
+      },
       {
         type: "page_footnote",
         text: "收稿日期: 2009-06-17; 修订日期: 2009-12-14",
@@ -232,14 +242,14 @@ const legacyPublicationMetadataFootnote = assembleStructuredDocument(
   }),
 ).markdown;
 assert.doesNotMatch(
-  legacyPublicationMetadataFootnote,
+  legacyPageFootnotes,
   /收稿日期|修订日期|2009-06-17|2009-12-14/,
-  "Chinese submission and revision metadata is page furniture, not document body text",
+  "publication metadata page footnotes are not document body text",
 );
-assert.match(
-  legacyPublicationMetadataFootnote,
+assert.doesNotMatch(
+  legacyPageFootnotes,
   /测量误差为一个标准差。/,
-  "scientific page footnotes remain in the assembled document",
+  "scientific page footnotes are also excluded by the explicit page-footnote policy",
 );
 
 const legacy = assembleStructuredDocument(
@@ -314,7 +324,7 @@ const repairedInlineFormulaBoundaries = assembleStructuredDocument(
 ).markdown;
 assert.equal(
   repairedInlineFormulaBoundaries,
-  "The $N _ { V }$ is measured as 10 $^\\circ$ C, while ($x$), and 温度 $T$ 为 stable.",
+  "The $N _ { V }$ is measured as 10 $^\\circ$ C, while ($x$), and 温度$T$为 stable.",
 );
 
 const repairedLegacyFormulaBoundaries = assembleStructuredDocument(
@@ -338,14 +348,14 @@ const htmlScriptToFormula = assembleStructuredDocument(
       type: "text",
       page_idx: 0,
       bbox: [10, 10, 90, 30],
-      text: "The <sub>γ</sub> phase <sup>［3］</sup> ends <sub>。</sub>",
+      text: "相<sub>γ</sub>区，引用<sup>［3］</sup>。温度<sub>。</sub>。The <sub>β</sub> phase;The<sub>δ</sub>phase.",
     }]),
   }),
 ).markdown;
 assert.equal(
   htmlScriptToFormula,
-  "The $_{γ}$ phase $^{［3］}$ ends $_{。}$",
-  "HTML subscript and superscript wrappers become inline formulas without consuming surrounding spaces",
+  "相$_{γ}$区，引用［3］。温度。The $_{β}$ phase;The$_{δ}$phase.",
+  "HTML scripts keep citations, discard punctuation, and do not add outer spacing",
 );
 assert.doesNotMatch(htmlScriptToFormula, /<\/?(?:sup|sub)>/i);
 
@@ -554,6 +564,54 @@ assert.match(
   "a mixed layout run may continue onto the adjacent page before the body resumes",
 );
 
+const iuzpmr24XrdColumnContinuation = assembleStructuredDocument(
+  selectStructuredSource({
+    "content_list.json": JSON.stringify([
+      {
+        type: "text",
+        page_idx: 3,
+        bbox: [55, 764, 487, 936],
+        text: "The X-ray diffraction analysis (XRD, D8 ADVANCE) was obtained in the",
+      },
+      {
+        type: "text",
+        page_idx: 3,
+        bbox: [509, 66, 843, 80],
+        text: "2θ range from 10◦ to 90◦ with a scan speed of $5 ^ { \\circ } \\mathrm { { m i n } } ^ { - 1 }$",
+      },
+    ]),
+  }),
+).markdown;
+assert.match(
+  iuzpmr24XrdColumnContinuation,
+  /was obtained in the 2θ range from 10◦ to 90◦/,
+  "a dependency at the bottom of the left column joins a numeric continuation at the top of the right column",
+);
+
+const ambiguousNumericParagraph = assembleStructuredDocument(
+  selectStructuredSource({
+    "content_list.json": JSON.stringify([
+      {
+        type: "text",
+        page_idx: 0,
+        bbox: [55, 300, 487, 400],
+        text: "The sample contains the",
+      },
+      {
+        type: "text",
+        page_idx: 0,
+        bbox: [509, 500, 843, 540],
+        text: "2 phases were evaluated independently.",
+      },
+    ]),
+  }),
+).markdown;
+assert.doesNotMatch(
+  ambiguousNumericParagraph,
+  /contains the 2 phases/,
+  "numeric paragraphs are not merged without clear column-wrap geometry",
+);
+
 const iuzpmr24DeepPageFigureContinuation = assembleStructuredDocument(
   selectStructuredSource({
     "content_list.json": JSON.stringify([
@@ -606,6 +664,86 @@ assert.match(
   iuzpmr24DeepPageFigureContinuation,
   /At the same time, they tended to aggregate at the shrinkage holes\.[\s\S]*Fig\. 3\./,
   "a page-top figure group may occupy more than half the page before its interrupted sentence resumes",
+);
+
+const iuzpmr24Fig9Continuation = assembleStructuredDocument(
+  selectStructuredSource({
+    "content_list.json": JSON.stringify([
+      {
+        type: "text",
+        page_idx: 8,
+        bbox: [55, 131, 487, 303],
+        text: "The tensile fracture is rarely originated from",
+      },
+      {
+        type: "text",
+        page_idx: 8,
+        bbox: [507, 66, 939, 305],
+        text: "",
+      },
+      {
+        type: "image",
+        page_idx: 8,
+        bbox: [73, 322, 922, 900],
+        image_caption: ["Fig. 9. Fracture surface morphologies."],
+        content: "",
+      },
+      {
+        type: "header",
+        page_idx: 8,
+        bbox: [58, 42, 126, 54],
+        text: "B. Zhao et al.",
+      },
+      {
+        type: "page_number",
+        page_idx: 8,
+        bbox: [494, 950, 505, 960],
+        text: "9",
+      },
+      {
+        type: "text",
+        page_idx: 9,
+        bbox: [58, 65, 220, 79],
+        text: "these IMCs and shrinkage.",
+      },
+    ]),
+  }),
+).markdown;
+assert.match(
+  iuzpmr24Fig9Continuation,
+  /The tensile fracture is rarely originated from these IMCs and shrinkage\.[\s\S]*Fig\. 9\./,
+  "a figure that fills the remainder of a page may bridge into a next-page continuation",
+);
+
+const distantPreviousPageFigure = assembleStructuredDocument(
+  selectStructuredSource({
+    "content_list.json": JSON.stringify([
+      {
+        type: "text",
+        page_idx: 0,
+        bbox: [55, 131, 487, 303],
+        text: "The response originates from",
+      },
+      {
+        type: "image",
+        page_idx: 0,
+        bbox: [73, 500, 922, 900],
+        image_caption: ["Fig. 9. Distant figure."],
+        content: "",
+      },
+      {
+        type: "text",
+        page_idx: 1,
+        bbox: [58, 65, 220, 79],
+        text: "these independent observations.",
+      },
+    ]),
+  }),
+).markdown;
+assert.doesNotMatch(
+  distantPreviousPageFigure,
+  /originates from these independent observations/,
+  "a large gap before the previous-page figure remains too ambiguous to bridge",
 );
 
 const tooDeepPageFigureContinuation = assembleStructuredDocument(
