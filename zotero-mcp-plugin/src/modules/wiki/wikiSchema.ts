@@ -8,7 +8,7 @@ import {
 } from "./wikiConceptTerms";
 import { rowColumn } from "./wikiRow";
 
-export const WIKI_SCHEMA_VERSION = 7;
+export const WIKI_SCHEMA_VERSION = 8;
 
 /**
  * Add a column an older database does not have yet.
@@ -25,7 +25,7 @@ async function addColumnIfMissing(
   table: string,
   column: string,
   definition: string,
-): Promise<void> {
+): Promise<boolean> {
   const rows = await db.queryAsync(`PRAGMA table_info(${table})`);
   const present = rows.some((row: any) => {
     try {
@@ -34,10 +34,11 @@ async function addColumnIfMissing(
       return false;
     }
   });
-  if (present) return;
+  if (present) return false;
   await db.queryAsync(
     `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`,
   );
+  return true;
 }
 
 export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
@@ -310,9 +311,47 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
       chunk_index INTEGER NOT NULL,
       chunk_id INTEGER NOT NULL,
       delivered_at INTEGER NOT NULL,
+      integrated_at INTEGER,
       PRIMARY KEY (session_id, chunk_index)
     )
   `);
+  // Schema 8. Integration is an identity-bearing set, not a prefix count.
+  // Upgrading databases only have the old count, so preserve exactly the old
+  // interpretation for their existing rows; all new deliveries start NULL.
+  const addedIntegratedAt = await addColumnIfMissing(
+    db,
+    "wiki_reading_chunks",
+    "integrated_at",
+    "INTEGER",
+  );
+  if (addedIntegratedAt) {
+    const sessions = await db.queryAsync(
+      `SELECT session_id, integrated_chunks FROM wiki_reading_sessions
+       WHERE integrated_chunks > 0`,
+    );
+    for (const session of sessions) {
+      const sessionId = Number(rowColumn(session, "session_id", "sessionId"));
+      const integratedChunks = Number(
+        rowColumn(session, "integrated_chunks", "integratedChunks") ?? 0,
+      );
+      const rows = await db.queryAsync(
+        `SELECT chunk_index, delivered_at FROM wiki_reading_chunks
+         WHERE session_id = ? ORDER BY chunk_index LIMIT ?`,
+        [sessionId, integratedChunks],
+      );
+      for (const row of rows) {
+        await db.queryAsync(
+          `UPDATE wiki_reading_chunks SET integrated_at = ?
+           WHERE session_id = ? AND chunk_index = ?`,
+          [
+            Number(rowColumn(row, "delivered_at", "deliveredAt")),
+            sessionId,
+            Number(rowColumn(row, "chunk_index", "chunkIndex")),
+          ],
+        );
+      }
+    }
+  }
   // Schema 7. Which chunks owe the Wiki something, and how each one was
   // settled.
   //

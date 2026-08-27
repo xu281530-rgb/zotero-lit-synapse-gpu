@@ -49,7 +49,11 @@ declare const PathUtils: any;
 declare let Zotero: any;
 declare let ztoolkit: ZToolkit;
 
-import { citedChunkIds, splitNoteBlocks } from "./wikiSynthesisAudit";
+import {
+  citedChunkIds,
+  splitNoteBlocks,
+  splitSentences,
+} from "./wikiSynthesisAudit";
 
 export const WIKI_READING_NOTE_SCHEMA = 1;
 
@@ -349,25 +353,139 @@ export function appendMacroSummary(body: string, summary: string): string {
   return `${previous}\n\n---\n\n${WIKI_MACRO_SUMMARY_HEADING}\n\n${content}`;
 }
 
+const COVERAGE_STOPWORDS = new Set(
+  ("a an the and or but of in on at to for from by with without as is are was " +
+    "were be been being that this these those it its their there here which " +
+    "who when while than then so such also not no can could may might will " +
+    "would should must have has had do does did using used use one two both " +
+    "each other same more most less very much many few some any all into over " +
+    "under between within about through during paper study experiment result " +
+    "results finding findings chunk chunks")
+    .split(/\s+/u),
+);
+
+const COVERAGE_CHUNK_REFERENCE =
+  /(?:chunks?|块|段)\s*#?\s*\d+|第\s*\d+\s*(?:块|段)/giu;
+
+interface WikiFindingCoverageUnit {
+  chunks: number[];
+  numbers: Set<string>;
+  lexical: Set<string>;
+}
+
+function coverageStem(word: string): string {
+  if (word.length > 5 && word.endsWith("ies")) return `${word.slice(0, -3)}y`;
+  if (word.length > 6 && word.endsWith("ing")) return word.slice(0, -3);
+  if (word.length > 5 && word.endsWith("ed")) return word.slice(0, -2);
+  if (word.length > 5 && word.endsWith("es")) return word.slice(0, -2);
+  if (word.length > 4 && word.endsWith("s")) return word.slice(0, -1);
+  return word;
+}
+
+function findingCoverageAnchors(text: string): {
+  numbers: Set<string>;
+  lexical: Set<string>;
+} {
+  const clean = String(text ?? "")
+    .replace(COVERAGE_CHUNK_REFERENCE, " ")
+    .normalize("NFKC")
+    .toLowerCase();
+  const numbers = new Set(clean.match(/[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?/giu) ?? []);
+  const lexical = new Set<string>();
+  for (const match of clean.matchAll(/[a-z][a-z0-9-]{2,}/gu)) {
+    const stem = coverageStem(match[0]);
+    if (!COVERAGE_STOPWORDS.has(match[0]) && !COVERAGE_STOPWORDS.has(stem)) {
+      lexical.add(`latin:${stem}`);
+    }
+  }
+  for (const match of clean.matchAll(/\p{Script=Han}+/gu)) {
+    const run = match[0];
+    for (let index = 0; index + 2 <= run.length; index += 1) {
+      lexical.add(`han:${run.slice(index, index + 2)}`);
+    }
+  }
+  return { numbers, lexical };
+}
+
+function findingCoverageUnits(
+  content: string,
+): WikiFindingCoverageUnit[] {
+  const units: WikiFindingCoverageUnit[] = [];
+  for (const block of splitNoteBlocks(content).filter((entry) => entry.prose)) {
+    const blockChunks = citedChunkIds(block.text);
+    for (const sentence of splitSentences(block.text)) {
+      const chunks = citedChunkIds(sentence);
+      const sourceChunks = chunks.length ? chunks : blockChunks;
+      if (!sourceChunks.length) continue;
+      const anchors = findingCoverageAnchors(sentence);
+      if (!anchors.numbers.size && !anchors.lexical.size) continue;
+      units.push({
+        chunks: sourceChunks,
+        ...anchors,
+      });
+    }
+  }
+  return units;
+}
+
+function findingAnchorsCovered(
+  finding: WikiFindingCoverageUnit,
+  candidate: WikiFindingCoverageUnit,
+): boolean {
+  if (finding.chunks.some((chunkId) => !candidate.chunks.includes(chunkId))) {
+    return false;
+  }
+  if ([...finding.numbers].some((number) => !candidate.numbers.has(number))) {
+    return false;
+  }
+  const requiredLexical = Math.min(2, finding.lexical.size);
+  let sharedLexical = 0;
+  for (const anchor of finding.lexical) {
+    if (candidate.lexical.has(anchor)) sharedLexical += 1;
+    if (sharedLexical >= requiredLexical) break;
+  }
+  return sharedLexical >= requiredLexical;
+}
+
+function combinedSummaryCoverage(
+  finding: WikiFindingCoverageUnit,
+  summaryUnits: readonly WikiFindingCoverageUnit[],
+): WikiFindingCoverageUnit {
+  const relevant = summaryUnits.filter((unit) =>
+    unit.chunks.some((chunkId) => finding.chunks.includes(chunkId)),
+  );
+  return {
+    chunks: [...new Set(relevant.flatMap((unit) => unit.chunks))],
+    numbers: new Set(relevant.flatMap((unit) => [...unit.numbers])),
+    lexical: new Set(relevant.flatMap((unit) => [...unit.lexical])),
+  };
+}
+
 /**
  * Every substantive record must remain traceable from the macro summary.
  *
- * Citation coverage is deliberately mechanical: semantic similarity would
- * accept increase/decrease paraphrases as nearly identical. A no-new-content
- * record carries no finding and is therefore exempt.
+ * Each bullet or sentence needs both its source chunks and deterministic
+ * content anchors. Citation-only coverage would let two independent findings
+ * from one chunk collapse into one. Semantic similarity is deliberately not
+ * used because increase/decrease paraphrases can be almost identical.
  */
 export function assertMacroSummaryCoversRecords(
   body: string,
   summary: string,
 ): void {
   const parsed = parseAppendOnlyReadingNote(body);
-  const summaryChunks = new Set(citedChunkIds(String(summary ?? "")));
+  const summaryUnits = findingCoverageUnits(String(summary ?? ""));
   const uncovered = parsed.records.filter(
     (record) => {
       if (record.noNewContent) return false;
-      const findingChunks = citedChunkIds(record.content);
-      const required = findingChunks.length ? findingChunks : record.chunkIds;
-      return required.some((chunkId) => !summaryChunks.has(chunkId));
+      const findings = findingCoverageUnits(record.content);
+      return findings.some(
+        (finding) =>
+          !findingAnchorsCovered(
+            finding,
+            combinedSummaryCoverage(finding, summaryUnits),
+          ),
+      );
     },
   );
   if (!uncovered.length) return;

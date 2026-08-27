@@ -55,8 +55,11 @@ const { getVectorStore } = await import(
 const { getEmbeddingService } = await import(
   "../src/modules/semantic/embeddingService.ts"
 );
-const { parseReadingNote, formatCoverageMap } = await import(
+const { parseReadingNote, parseAppendOnlyReadingNote, formatCoverageMap } = await import(
   "../src/modules/wiki/wikiReadingNote.ts"
+);
+const { auditSynthesis } = await import(
+  "../src/modules/wiki/wikiSynthesisAudit.ts"
 );
 
 // --- Fixtures -------------------------------------------------------------
@@ -192,15 +195,45 @@ function chunkId(key, index) {
   return indexedChunks.get(key)[index].chunkId;
 }
 
+function synthesisAuditFor(key, body) {
+  const chunks = indexedChunks.get(key);
+  const auditChunks = chunks.flatMap((chunk, index) => [
+    { chunkId: index, text: chunk.text },
+    { chunkId: chunk.chunkId, text: chunk.text },
+  ]);
+  return auditSynthesis(body, { chunks: auditChunks }).map((flag) => ({
+    sentence: flag.sentence,
+    support: flag.citedChunks.map((address) => ({
+      chunkId: address,
+      quote:
+        (chunks[address] ?? chunks.find((chunk) => chunk.chunkId === address))
+          .text,
+    })),
+  }));
+}
+
 /** One turn of question-driven reading: read these chunks, rewrite the note. */
 function readByQuestion(key, indexes, facts, extra = {}) {
+  const body = note(facts);
   return service.updateReadingNote({
     libraryID: 1,
     itemKey: key,
     readChunkIds: indexes.map((i) => chunkId(key, i)),
     domain: "physical metallurgy / directional solidification",
     expertRole: "solidification processing specialist",
-    markdown: note(facts),
+    markdown: body,
+    synthesisAudit: synthesisAuditFor(key, body),
+    ...extra,
+  });
+}
+
+function updateLegacyNote(key, facts, extra = {}) {
+  const body = note(facts);
+  return service.updateReadingNote({
+    libraryID: 1,
+    itemKey: key,
+    markdown: body,
+    synthesisAudit: synthesisAuditFor(key, body),
     ...extra,
   });
 }
@@ -575,6 +608,22 @@ block("each new reading record is audited against this turn's chunks", async () 
     (error) =>
       error.name === "WikiSynthesisAuditRequired" &&
       /absolute-language/u.test(error.message),
+  );
+  await assert.rejects(
+    () =>
+      service.updateReadingNote({
+        libraryID: 1,
+        itemKey: "AUDITPAP",
+        readChunkIds: [chunkId("AUDITPAP", 0)],
+        domain: "physical metallurgy",
+        expertRole: "solidification specialist",
+        markdown:
+          "The method completely eliminates every melt-pool depth error (chunk 0).",
+      }),
+    (error) =>
+      error.name === "WikiSynthesisAuditRequired" &&
+      /absolute-language/u.test(error.message),
+    "the deprecated markdown alias must pass through the same audit",
   );
 
   const sessions = await store.readingSessions();
@@ -1291,18 +1340,14 @@ block("the full-text slot still admits one paper, and says so usefully", async (
   );
   assert.equal(page.pagination.readChunkRanges, "0-4,7-8,15,30-31,42,50,70-71");
   assert.match(page.pagination.unreadChunkRanges, /^5-6,9-14,16-29/u);
-  await service.updateReadingNote({
-    libraryID: 1,
-    itemKey: "PAPERONE",
-    markdown: note([
+  await updateLegacyNote("PAPERONE", [
       "The imposed gradient cycles between 8 and 14 K/mm along the traverse (chunk 7, chunk 8).",
       "The linear stretch persists at least to station 15 (chunk 15).",
       "At station 42 the response has flattened noticeably (chunk 42).",
       "By station 70 the depth is essentially constant, and 71 confirms it (chunk 70, chunk 71).",
       "Stations 30, 31 and 50 sit on the plateau (chunk 30, chunk 31, chunk 50).",
       "The opening full-text batch establishes the rig geometry and initial traverse response (chunk 0, chunk 1, chunk 2, chunk 3, chunk 4).",
-    ]),
-  });
+    ]);
 });
 
 // =========================================================================
@@ -1600,18 +1645,14 @@ block("paging over holes converges rather than stalling", async () => {
   let guard = 0;
   while (page.pagination.hasMore) {
     assert.ok((guard += 1) < 40, "paging must terminate");
-    await service.updateReadingNote({
-      libraryID: 1,
-      itemKey: "PAPERONE",
-      markdown: note([
+    await updateLegacyNote("PAPERONE", [
         "The imposed gradient cycles between 8 and 14 K/mm along the traverse (chunk 7, chunk 8).",
         "The linear stretch persists at least to station 15 (chunk 15).",
         "At station 42 the response has flattened noticeably (chunk 42).",
         "By station 70 the depth is essentially constant, and 71 confirms it (chunk 70, chunk 71).",
         "Stations 30, 31 and 50 sit on the plateau (chunk 30, chunk 31, chunk 50).",
         `Reading the traverse through confirms one continuous series across all ${LONG} stations.`,
-      ]),
-    });
+      ]);
     page = await service.buildFromPaper({
       libraryID: 1,
       userRequested: true,
@@ -1690,6 +1731,33 @@ block("paging walks the unread chunks, wherever the holes are", async () => {
     "and that one page completes the paper",
   );
   assert.equal(page.pagination.hasMore, false);
+
+  await assert.rejects(
+    () =>
+      service.updateReadingNote({
+        libraryID: 1,
+        itemKey: "HOLEPAPR",
+        readingRecord:
+          "- Chunk 3 discusses melt-pool depth at its station (chunk 3).",
+      }),
+    /cannot resolve|not been delivered/iu,
+    "a QA chunk already integrated into the note is not a source for the new full-text record",
+  );
+
+  await service.updateReadingNote({
+    libraryID: 1,
+    itemKey: "HOLEPAPR",
+    readingRecord:
+      "- The earlier holes report melt-pool depth under imposed gradients (chunk 0).",
+  });
+  const records = parseAppendOnlyReadingNote(
+    parseReadingNote(await noteOnDisk("HOLEPAPR")).body,
+  ).records;
+  assert.deepEqual(
+    records.at(-1).chunkIds,
+    [0, 2, 4, 5],
+    "the record names exactly the chunks delivered since the previous integration",
+  );
 
   // Asking for a skipped chunk by offset still delivers it: this is how an
   // excerpt gets checked against its source before it becomes Evidence.
@@ -1772,10 +1840,7 @@ block("the final review is refused, and not stored, on an unfinished paper", asy
 
   // A checkpoint commit partway through is still allowed; it just carries no
   // review. This is the ability the refusal must not have cost.
-  await service.updateReadingNote({
-    libraryID: 1,
-    itemKey: "PAPERTWO",
-    markdown: note([
+  await updateLegacyNote("PAPERTWO", [
       "The early stations behave as PAPERONE's do (chunk 3, chunk 4).",
       "Station 9 continues the trend (chunk 9).",
       "Station 50 shows the same plateau PAPERONE reaches, and 51 with it (chunk 50, chunk 51).",
@@ -1784,8 +1849,7 @@ block("the final review is refused, and not stored, on an unfinished paper", asy
       "Stations 48, 60 and 61 are all on the plateau (chunk 48, chunk 60, chunk 61).",
       "Stations 70 and 71 repeat the plateau reading at the same values (chunk 70, chunk 71).",
       "The opening pages set out the rig geometry and the traverse stations (chunk 0, chunk 2).",
-    ]),
-  });
+    ]);
   const checkpoint = await service.prepareUpdate({
     libraryID: 1,
     query: "Rig geometry",
@@ -1813,7 +1877,8 @@ block("a note that fails to save records no reading at all", async () => {
   const realWrite = notes.write.bind(notes);
 
   const body = note([
-    "Stations 2 and 3 rise linearly with the imposed gradient (chunk 2, chunk 3).",
+    "Station 2 reports melt-pool depth under its imposed gradient (chunk 2).",
+    "Station 3 reports melt-pool depth under its imposed gradient (chunk 3).",
   ]);
 
   notes.write = async () => {
@@ -1863,7 +1928,8 @@ block("a note that fails to save records no reading at all", async () => {
 
   // And the content really is on disk, not merely reported as saved.
   const raw = await noteOnDisk("PAPERFIV");
-  assert.match(parseReadingNote(raw).body, /chunk 2, chunk 3/u);
+  assert.match(parseReadingNote(raw).body, /chunk 2/u);
+  assert.match(parseReadingNote(raw).body, /chunk 3/u);
   const after = await sessions.openForItem(1, "PAPERFIV");
   assert.equal((await sessions.coverage(after.sessionId)).deliveredChunks, 2);
 });

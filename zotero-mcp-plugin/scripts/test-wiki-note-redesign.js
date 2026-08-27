@@ -97,6 +97,36 @@ test("macro summary is appended and names uncovered records", () => {
   );
 });
 
+test("macro summary covers every finding even when findings share a chunk", () => {
+  const body = appendReadingRecord("", {
+    chunkIds: [42],
+    content: [
+      "- The peak pressure is 50 MPa (chunk 42).",
+      "- The holding temperature is 1180 C (chunk 42).",
+    ].join("\n"),
+  });
+
+  assert.throws(
+    () =>
+      assertMacroSummaryCoversRecords(
+        body,
+        "The experiment reaches a peak pressure of 50 MPa (chunk 42).",
+      ),
+    /第 1 次/u,
+    "sharing a citation must not let one finding stand in for another",
+  );
+
+  assert.doesNotThrow(() =>
+    assertMacroSummaryCoversRecords(
+      body,
+      [
+        "The experiment reaches a peak pressure of 50 MPa (chunk 42).",
+        "Its holding temperature is 1180 C (chunk 42).",
+      ].join("\n"),
+    ),
+  );
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try {

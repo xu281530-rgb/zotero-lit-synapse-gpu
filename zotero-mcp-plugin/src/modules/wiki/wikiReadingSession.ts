@@ -924,6 +924,19 @@ export class WikiReadingSessions {
     );
   }
 
+  /** Chunk indexes delivered or read since their last successful note write. */
+  async pendingIntegrationIndexes(sessionId: number): Promise<number[]> {
+    const rows = await this.db.queryAsync(
+      `SELECT chunk_index FROM wiki_reading_chunks
+       WHERE session_id = ? AND integrated_at IS NULL
+       ORDER BY chunk_index`,
+      [sessionId],
+    );
+    return rows.map((row) =>
+      Number(rowColumn(row, "chunk_index", "chunkIndex")),
+    );
+  }
+
   /** Store the one expert profile for this paper. */
   async setExpert(
     sessionId: number,
@@ -945,23 +958,31 @@ export class WikiReadingSessions {
     );
   }
 
-  /**
-   * Record that the note now accounts for everything delivered.
-   *
-   * The note is rewritten as a whole, so one integration clears the whole
-   * backlog rather than one batch of it; `integratedBatches` is set to the
-   * delivered count instead of being incremented.
-   */
+  /** Record exactly which delivered chunks reached a successful note write. */
   async recordIntegration(
     sessionId: number,
     options: {
       unchanged: boolean;
-      integratedChunks: number;
+      integratedIndexes: readonly number[];
       finalSynthesis: boolean;
     },
   ): Promise<void> {
     const session = await this.get(sessionId);
     const now = Date.now();
+    for (const chunkIndex of new Set(options.integratedIndexes.map(Number))) {
+      await this.db.queryAsync(
+        `UPDATE wiki_reading_chunks SET integrated_at = ?
+         WHERE session_id = ? AND chunk_index = ? AND integrated_at IS NULL`,
+        [now, sessionId, chunkIndex],
+      );
+    }
+    const integratedChunks = Number(
+      (await this.db.valueQueryAsync(
+        `SELECT COUNT(*) FROM wiki_reading_chunks
+         WHERE session_id = ? AND integrated_at IS NOT NULL`,
+        [sessionId],
+      )) ?? 0,
+    );
     await this.db.queryAsync(
       `UPDATE wiki_reading_sessions
        SET integrated_batches = ?, integrated_chunks = ?,
@@ -970,7 +991,7 @@ export class WikiReadingSessions {
        WHERE session_id = ?`,
       [
         session?.deliveredBatches ?? 0,
-        options.integratedChunks,
+        integratedChunks,
         options.unchanged ? 1 : 0,
         now,
         options.finalSynthesis ? now : (session?.finalSynthesisAt ?? null),

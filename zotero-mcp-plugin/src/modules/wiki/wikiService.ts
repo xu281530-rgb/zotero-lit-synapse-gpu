@@ -867,6 +867,22 @@ export class WikiService {
     return out.sort((a, b) => a.chunkId - b.chunkId);
   }
 
+  private assertReadingRecordAudited(
+    record: string,
+    readable: readonly WikiAuditChunk[],
+    currentChunkAddresses: ReadonlySet<number>,
+    explicitRecord: boolean,
+    synthesisAudit: readonly WikiSynthesisAuditEntry[],
+  ): void {
+    assertSynthesisEvidenceClosure(
+      record,
+      explicitRecord
+        ? readable.filter((chunk) => currentChunkAddresses.has(chunk.chunkId))
+        : readable,
+      synthesisAudit,
+    );
+  }
+
   /** Records and Claims aligned by one paper, without query-based recall. */
   private async paperReconciliationSnapshot(
     session: WikiReadingSessionRecord,
@@ -2126,6 +2142,8 @@ export class WikiService {
 
     const previousBody = (await this.readNoteBody(item)) ?? "";
     const deliveredIndexes = await sessions.deliveredIndexes(session.sessionId);
+    const pendingIntegrationIndexes =
+      await sessions.pendingIntegrationIndexes(session.sessionId);
     const readable = await this.readableChunks(
       session.libraryID,
       session.itemKey,
@@ -2173,11 +2191,10 @@ export class WikiService {
         );
       }
       const requestedChunkIds = (options.readChunkIds ?? []).map(Number);
-      const inferredIndexes = deliveredIndexes.slice(session.integratedChunks);
       const recordChunkIds = requestedChunkIds.length
         ? requestedChunkIds
-        : inferredIndexes.length
-          ? inferredIndexes
+        : pendingIntegrationIndexes.length
+          ? pendingIntegrationIndexes
           : citedChunkIds(record).length
             ? citedChunkIds(record)
             : deliveredIndexes.slice(-1);
@@ -2198,14 +2215,13 @@ export class WikiService {
           totalChunks: coverage.totalChunks,
         });
         assertBlockCitations(record);
-        if (options.readingRecord !== undefined) {
-          const recordChunks = new Set(recordChunkIds);
-          assertSynthesisEvidenceClosure(
-            record,
-            readable.filter((chunk) => recordChunks.has(chunk.chunkId)),
-            options.synthesisAudit ?? [],
-          );
-        }
+        this.assertReadingRecordAudited(
+          record,
+          readable,
+          new Set(recordChunkIds),
+          options.readingRecord !== undefined,
+          options.synthesisAudit ?? [],
+        );
       }
       body = appendReadingRecord(previousBody, {
         chunkIds: recordChunkIds,
@@ -2224,7 +2240,7 @@ export class WikiService {
 
     await sessions.recordIntegration(session.sessionId, {
       unchanged,
-      integratedChunks: coverage.deliveredChunks,
+      integratedIndexes: finalSynthesis ? [] : pendingIntegrationIndexes,
       finalSynthesis,
     });
     const refreshed = (await sessions.get(session.sessionId)) ?? session;
@@ -2443,15 +2459,13 @@ export class WikiService {
         totalChunks: documentChunks.length,
       });
       assertBlockCitations(record);
-      if (options.readingRecord !== undefined) {
-        assertSynthesisEvidenceClosure(
-          record,
-          citableChunks.filter((chunk) =>
-            currentAddresses.has(chunk.chunkId),
-          ),
-          options.synthesisAudit ?? [],
-        );
-      }
+      this.assertReadingRecordAudited(
+        record,
+        citableChunks,
+        currentAddresses,
+        options.readingRecord !== undefined,
+        options.synthesisAudit ?? [],
+      );
     }
     const body = appendReadingRecord(previousBody, {
       chunkIds: options.readChunkIds,
@@ -2485,7 +2499,7 @@ export class WikiService {
     const coverage = await sessions.coverage(session.sessionId);
     await sessions.recordIntegration(session.sessionId, {
       unchanged: false,
-      integratedChunks: coverage.deliveredChunks,
+      integratedIndexes: booked.newIndexes,
       finalSynthesis: false,
     });
     const refreshed = (await sessions.get(session.sessionId)) ?? session;
