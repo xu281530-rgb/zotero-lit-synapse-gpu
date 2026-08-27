@@ -412,6 +412,14 @@ function findingCoverageAnchors(text: string): {
   ];
   const numbers = new Set(numberMatches.map((match) => match[0]));
   const lexical = coverageLexicalAnchors(clean);
+  for (const match of numberMatches) {
+    const suffix = clean.slice(
+      (match.index ?? 0) + match[0].length,
+      (match.index ?? 0) + match[0].length + 12,
+    );
+    const unit = /^\s*([a-z%µΩ]+)/u.exec(suffix)?.[1];
+    if (unit) lexical.add(`unit:${unit}`);
+  }
   return { numbers, lexical };
 }
 
