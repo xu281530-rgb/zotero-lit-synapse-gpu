@@ -363,9 +363,12 @@ export function assertMacroSummaryCoversRecords(
   const parsed = parseAppendOnlyReadingNote(body);
   const summaryChunks = new Set(citedChunkIds(String(summary ?? "")));
   const uncovered = parsed.records.filter(
-    (record) =>
-      !record.noNewContent &&
-      record.chunkIds.some((chunkId) => !summaryChunks.has(chunkId)),
+    (record) => {
+      if (record.noNewContent) return false;
+      const findingChunks = citedChunkIds(record.content);
+      const required = findingChunks.length ? findingChunks : record.chunkIds;
+      return required.some((chunkId) => !summaryChunks.has(chunkId));
+    },
   );
   if (!uncovered.length) return;
   throw new Error(

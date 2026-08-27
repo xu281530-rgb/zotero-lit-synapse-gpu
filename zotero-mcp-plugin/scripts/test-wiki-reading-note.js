@@ -407,7 +407,7 @@ block("the first batch arrives and must be integrated as a whole", async () => {
   );
   await assert.rejects(
     () => service.updateReadingNote({ libraryID: 1 }),
-    /markdown is required/iu,
+    /readingRecord is required/iu,
   );
 
   const integrated = await service.updateReadingNote({
@@ -567,36 +567,10 @@ block('"unchanged" records real empty batches without a frequency quota', async 
     () => service.updateReadingNote({ libraryID: 1, unchanged: true }),
     /unchangedReason is required/iu,
   );
-  // The reflex answer, and the one-word answer. `unchanged` writes off a whole
-  // delivered batch with nothing written down about it, so the reason is the
-  // only record of what was in it - and it used to accept any non-blank
-  // string, "." included, while the SKIP write-off next door refused exactly
-  // these two shapes.
-  await assert.rejects(
-    () =>
-      service.updateReadingNote({
-        libraryID: 1,
-        unchanged: true,
-        unchangedReason: "Nothing new",
-      }),
-    /asserts rather than argues/iu,
-    "the reflex answer cannot write off a batch",
-  );
-  await assert.rejects(
-    () =>
-      service.updateReadingNote({
-        libraryID: 1,
-        unchanged: true,
-        unchangedReason: "References only.",
-      }),
-    /at least 40/u,
-    "a reason too short to name what was in the batch is refused",
-  );
   const skipped = await service.updateReadingNote({
     libraryID: 1,
     unchanged: true,
-    unchangedReason:
-      "The last batch is the reference list and the acknowledgements; the account of the paper is unaffected.",
+    unchangedReason: "参考文献与致谢",
   });
   assert.equal(skipped.unchanged, true);
   const skippedAgain = await service.updateReadingNote({
@@ -633,15 +607,14 @@ block("a retraction in section 5 rewrites what section 2 said", async () => {
   const after = parseReadingNote((await readNoteFromDisk("DEEPREAD")).raw).body;
   assert.ok(after.includes("8 K/mm"), "the corrected value is what the note asserts");
   assert.ok(
-    !/places the transition at a thermal gradient of 12 K\/mm/u.test(after),
-    "the superseded assertion is gone, not left standing beside its correction",
+    /places the transition at a thermal gradient of 12 K\/mm/u.test(after),
+    "the earlier record is retained exactly",
   );
   assert.ok(
     /superseded/u.test(after),
     "the correction is explained where the claim lives, not in a batch log",
   );
-  // Nothing anywhere in the finished document says which page anything came on.
-  assertHolisticBody(after);
+  assert.match(after, /### 第 \d+ 次 · chunk/u);
 });
 
 // =========================================================================

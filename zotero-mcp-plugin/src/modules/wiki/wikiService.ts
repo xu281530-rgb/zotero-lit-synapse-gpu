@@ -27,12 +27,16 @@ import {
   WIKI_EXPERT_OPEN_SCOPE_MANDATE,
   WIKI_READING_NOTE_SCHEMA,
   WikiReadingNoteStore,
+  appendMacroSummary,
+  appendReadingRecord,
   assertBlockCitations,
   assertChunkCitations,
   assertChunkCitationsResolvable,
   assertHolisticBody,
+  assertMacroSummaryCoversRecords,
   formatChunkRanges,
   formatCoverageMap,
+  parseAppendOnlyReadingNote,
   parseReadingNote,
   renderReadingNote,
   stripMachineBlock,
@@ -45,6 +49,7 @@ import {
   WIKI_EVIDENCE_MIN_EXCERPT_CHARS,
   WikiSynthesisAuditRequired,
   auditSynthesis,
+  citedChunkIds,
   describeFlaggedSentences,
   verifySynthesisAudit,
   type WikiAuditChunk,
@@ -1800,6 +1805,10 @@ export class WikiService {
   async updateReadingNote(options: {
     libraryID: number;
     itemKey?: string;
+    /** This turn's append-only record. `markdown` is a deprecated alias. */
+    readingRecord?: string;
+    /** The one whole-paper summary appended after all reading records. */
+    macroSummary?: string;
     markdown?: string;
     unchanged?: boolean;
     unchangedReason?: string;
@@ -1820,7 +1829,14 @@ export class WikiService {
     expertRole?: string;
   }): Promise<any> {
     if (Array.isArray(options.readChunkIds) && options.readChunkIds.length) {
-      return this.integrateQuestionReading(options as any);
+      const sessions = await this.store.readingSessions();
+      const named = String(options.itemKey ?? "").trim();
+      const existing = named
+        ? await sessions.openForItem(options.libraryID, named)
+        : await sessions.getOpen(options.libraryID);
+      if (!existing || existing.mode === "qa") {
+        return this.integrateQuestionReading(options as any);
+      }
     }
     const sessions = await this.store.readingSessions();
     const session = await this.requireOpenSession(options.libraryID, options.itemKey);
@@ -1841,14 +1857,11 @@ export class WikiService {
           'submitted as "unchanged". Send the full markdown.',
       );
     }
-    if (finalSynthesis && session.mode === "qa") {
+    if (finalSynthesis && session.expert.provisional) {
       throw new Error(
-        `${session.itemKey} has been read by answering questions, not by a full-text pass, so the ` +
-          "whole-paper synthesis is not available on it. The synthesis is what makes paper_reviewed " +
-          "mean something, and a paper assembled from scattered passages has never been read end to " +
-          "end even when the passages happen to add up to all of it. Open it properly with " +
-          "wiki_build_from_paper — it continues this same note and this same chunk ledger, and only " +
-          "asks for the parts questions never reached — then do the synthesis at the end of that.",
+        `${session.itemKey} still has the provisional expert assembled from question retrieval. Before ` +
+          "the macro summary, call wiki_set_reading_expert with a persona of at least 20 characters and " +
+          "2-8 focus areas chosen again from the paper's metadata and abstract.",
       );
     }
     if (finalSynthesis && !coverage.complete) {
@@ -1863,74 +1876,84 @@ export class WikiService {
     }
 
     const previousBody = (await this.readNoteBody(item)) ?? "";
+    const deliveredIndexes = await sessions.deliveredIndexes(session.sessionId);
+    const readable = await this.readableChunks(
+      session.libraryID,
+      session.itemKey,
+      deliveredIndexes,
+    );
     let body: string;
-    if (unchanged) {
-      if (!previousBody.trim()) {
-        throw new Error(
-          'There is no reading note yet, so there is nothing that can be "unchanged". ' +
-            "Submit the first version of the note as markdown.",
-        );
-      }
-      // The same two checks a SKIP write-off gets, for the same reason and in
-      // the same order. `unchanged` writes off a whole delivered batch without
-      // a line of text being added anywhere, so "the easiest thing to say when
-      // nothing was read" is exactly the answer it has to exclude - and it had
-      // no floor at all: any non-blank string, "." included, closed the batch.
-      const unchangedReason = String(options.unchangedReason ?? "").trim();
-      if (!unchangedReason) {
-        throw new Error(
-          'unchangedReason is required with unchanged: say what was in the batch (references, ' +
-            "acknowledgements, a repeated figure caption) that leaves the account of the paper intact.",
-        );
-      }
-      if (VACUOUS_WRITE_OFF_REASON.test(unchangedReason)) {
-        throw new Error(
-          `The unchanged reason asserts rather than argues: "${unchangedReason}". "Nothing new" is ` +
-            "exactly what a reader who did not read the batch would also say, so it cannot write one " +
-            "off. Name what was actually in those chunks and why the account of the paper is complete " +
-            'without it - for example "the batch is the reference list and the acknowledgements; no ' +
-            'method, result or condition appears in it".',
-        );
-      }
-      if (unchangedReason.length < WIKI_WRITE_OFF_MIN_REASON_CHARS) {
-        throw new Error(
-          `The unchanged reason is ${unchangedReason.length} characters; at least ` +
-            `${WIKI_WRITE_OFF_MIN_REASON_CHARS} are needed. This batch is being recorded as read while ` +
-            "nothing is written down about it, so the reason is the only thing that will ever say what " +
-            "was in it. Name the section and what it contains, and say why the account of the paper is " +
-            "already complete without it. If that is hard to write, the batch probably did change " +
-            "something - send the rewritten note instead.",
-        );
-      }
-      body = previousBody;
-    } else {
-      const submitted = stripMachineBlock(String(options.markdown ?? ""));
-      if (!submitted.trim()) {
-        throw new Error(
-          "markdown is required: send the entire reading note as it now stands, not a diff and not " +
-            'only the new part. Use unchanged: true with unchangedReason if the batch truly changes nothing.',
-        );
-      }
-      if (finalSynthesis) assertHolisticBody(submitted);
-      assertChunkCitations(submitted);
-      const readable = await this.readableChunks(
-        session.libraryID,
-        session.itemKey,
-        await sessions.deliveredIndexes(session.sessionId),
+    if (finalSynthesis) {
+      const summary = stripMachineBlock(
+        String(options.macroSummary ?? options.markdown ?? ""),
       );
-      assertChunkCitationsResolvable(submitted, {
+      if (!summary.trim()) {
+        throw new Error(
+          "macroSummary is required with finalSynthesis. Send only the whole-paper summary; the server appends it after every immutable reading record.",
+        );
+      }
+      assertHolisticBody(summary);
+      assertChunkCitations(summary);
+      assertChunkCitationsResolvable(summary, {
         allowedChunkIds: readable.map((chunk) => chunk.chunkId),
         totalChunks: coverage.totalChunks,
       });
-      assertBlockCitations(submitted);
-      if (finalSynthesis) {
-        assertSynthesisEvidenceClosure(
-          submitted,
-          readable,
-          options.synthesisAudit ?? [],
+      assertBlockCitations(summary);
+      assertMacroSummaryCoversRecords(previousBody, summary);
+      assertSynthesisEvidenceClosure(
+        summary,
+        readable,
+        options.synthesisAudit ?? [],
+      );
+      body = appendMacroSummary(previousBody, summary);
+    } else {
+      const reason = String(options.unchangedReason ?? "").trim();
+      if (unchanged && !reason) {
+        throw new Error(
+          "unchangedReason is required with unchanged: name what was in the chunks that produced no new content.",
         );
       }
-      body = submitted;
+      const record = unchanged
+        ? `- 本次无新内容（${reason}）。`
+        : stripMachineBlock(
+            String(options.readingRecord ?? options.markdown ?? ""),
+          );
+      if (!record.trim()) {
+        throw new Error(
+          "readingRecord is required: send only what this turn established, not the whole note. The server appends and numbers it.",
+        );
+      }
+      const requestedChunkIds = (options.readChunkIds ?? []).map(Number);
+      const inferredIndexes = deliveredIndexes.slice(session.integratedChunks);
+      const recordChunkIds = requestedChunkIds.length
+        ? requestedChunkIds
+        : inferredIndexes.length
+          ? inferredIndexes
+          : citedChunkIds(record).length
+            ? citedChunkIds(record)
+            : deliveredIndexes.slice(-1);
+      const citable = new Set(readable.map((chunk) => chunk.chunkId));
+      const invalid = recordChunkIds.filter((id) => !citable.has(id));
+      if (invalid.length) {
+        throw new Error(
+          `Reading record chunk(s) ${invalid.join(", ")} were not delivered for ${session.itemKey}.`,
+        );
+      }
+      if (!unchanged) {
+        assertChunkCitations(record);
+        assertChunkCitationsResolvable(record, {
+          allowedChunkIds:
+            options.readingRecord !== undefined
+              ? recordChunkIds
+              : readable.map((chunk) => chunk.chunkId),
+          totalChunks: coverage.totalChunks,
+        });
+        assertBlockCitations(record);
+      }
+      body = appendReadingRecord(previousBody, {
+        chunkIds: recordChunkIds,
+        content: record,
+      });
     }
 
     // Body before ledger, for the same reason as the question path above: an
@@ -2003,12 +2026,15 @@ export class WikiService {
   private async integrateQuestionReading(options: {
     libraryID: number;
     itemKey?: string;
+    readingRecord?: string;
     markdown?: string;
     readChunkIds: number[];
     domain?: string;
     expertRole?: string;
+    synthesisAudit?: WikiSynthesisAuditEntry[];
     finalSynthesis?: boolean;
     unchanged?: boolean;
+    unchangedReason?: string;
   }): Promise<any> {
     const itemKey = String(options.itemKey ?? "").trim();
     if (!itemKey) {
@@ -2024,15 +2050,6 @@ export class WikiService {
           "wiki_build_from_paper — which continues this same note.",
       );
     }
-    if (options.unchanged === true) {
-      throw new Error(
-        'unchanged cannot be combined with readChunkIds: chunks you actually read and used to answer a ' +
-          "question, by definition, changed what the note should say. Send the rewritten note. If the " +
-          "passages turned out to say nothing you did not already have, pass no readChunkIds at all — " +
-          "reading is what you USE, not what retrieval returned.",
-      );
-    }
-
     const item = await this.requirePaperItem(options.libraryID, itemKey);
     const vectorStore = getVectorStore();
     await vectorStore.initialize();
@@ -2116,15 +2133,23 @@ export class WikiService {
     }
 
     const previousBody = (await this.readNoteBody(item)) ?? "";
-    const submitted = stripMachineBlock(String(options.markdown ?? ""));
-    if (!submitted.trim()) {
+    const unchanged = options.unchanged === true;
+    const reason = String(options.unchangedReason ?? "").trim();
+    if (unchanged && !reason) {
       throw new Error(
-        "markdown is required: send the ENTIRE reading note for this paper as it now stands, with what " +
-          "you just read merged into it — not a diff, not only the new part, and not only what answered " +
-          "this question. Call wiki_get_reading_note first if you do not have the current note.",
+        "unchangedReason is required with unchanged: name what was in the chunks that produced no new content.",
       );
     }
-    assertChunkCitations(submitted);
+    const record = unchanged
+      ? `- 本次无新内容（${reason}）。`
+      : stripMachineBlock(
+          String(options.readingRecord ?? options.markdown ?? ""),
+        );
+    if (!record.trim()) {
+      throw new Error(
+        "readingRecord is required: send only what this turn established, not the whole note. The server appends and numbers it.",
+      );
+    }
     // The chunks this note may cite are what the ledger already holds PLUS the
     // ones this call is booking. They are booked after the note passes, so
     // reading the ledger alone would refuse the very citations the caller is
@@ -2141,11 +2166,28 @@ export class WikiService {
           .map((entry) => entry.index),
       ],
     );
-    assertChunkCitationsResolvable(submitted, {
-      allowedChunkIds: citableChunks.map((chunk) => chunk.chunkId),
-      totalChunks: documentChunks.length,
+    if (!unchanged) {
+      assertChunkCitations(record);
+      const currentAddresses = new Set<number>();
+      documentChunks.forEach((chunk, index) => {
+        if (options.readChunkIds.includes(Number(chunk.chunkId))) {
+          currentAddresses.add(index);
+          currentAddresses.add(Number(chunk.chunkId));
+        }
+      });
+      assertChunkCitationsResolvable(record, {
+        allowedChunkIds:
+          options.readingRecord !== undefined
+            ? currentAddresses
+            : citableChunks.map((chunk) => chunk.chunkId),
+        totalChunks: documentChunks.length,
+      });
+      assertBlockCitations(record);
+    }
+    const body = appendReadingRecord(previousBody, {
+      chunkIds: options.readChunkIds,
+      content: record,
     });
-    assertBlockCitations(submitted);
 
     // THE ORDER HERE IS THE POINT, and it used to be the other way round.
     //
@@ -2163,7 +2205,7 @@ export class WikiService {
     // ledger does not credit, so the chunk is offered again and the model
     // rewrites a note that already covers it. That is wasted work. Ledger
     // first OVER-counts, which is silent, permanent data loss.
-    const written = await this.writeNote(item, session, submitted, "reading");
+    const written = await this.writeNote(item, session, body, "reading");
 
     // Durable. Only now is the reading real.
     const booked = await sessions.recordReadChunkIds(
@@ -2183,7 +2225,7 @@ export class WikiService {
     // deliberately best-effort: the body is safe and the ledger is right, and
     // the block is derived from the ledger on every save, so a failure here
     // costs a stale header until the next write rather than anything real.
-    await this.refreshNoteHeader(item, refreshed, submitted, "reading");
+    await this.refreshNoteHeader(item, refreshed, body, "reading");
 
     // The debt is booked by `recordReadChunkIds` itself now - every newly read
     // chunk is written with owes_wiki set - so there is no separate counter to

@@ -1503,6 +1503,8 @@ Nothing in this server returns a whole document in one response. Every reading t
           result = await getWikiService().updateReadingNote({
             libraryID: args?.libraryID ?? Zotero.Libraries.userLibraryID,
             itemKey: args?.itemKey,
+            readingRecord: args?.readingRecord,
+            macroSummary: args?.macroSummary,
             markdown: args?.markdown,
             unchanged: args?.unchanged === true,
             unchangedReason: args?.unchangedReason,

@@ -83,6 +83,7 @@ const indexedChunks = new Map([
   ["PAPRTHRE", chunksFor("PAPRTHRE", SHORT, 3000)],
   ["ABSTONLY", chunksFor("ABSTONLY", 2, 4000)],
   ["PAPERFIV", chunksFor("PAPERFIV", TINY, 5000)],
+  ["HOLEPAPR", chunksFor("HOLEPAPR", SHORT, 6000)],
 ]);
 
 for (const key of indexedChunks.keys()) {
@@ -595,7 +596,8 @@ block("reading every chunk by question still is not paper_reviewed", async () =>
   assert.equal(all.reading.coveragePercent, 100);
   assert.equal(all.readDepthCeiling, "section_read");
 
-  // The synthesis that whole-paper depth requires is refused on this path.
+  // Complete QA coverage is eligible for a macro summary, but the provisional
+  // retrieval persona must first be reset from the abstract.
   await assert.rejects(
     () =>
       service.updateReadingNote({
@@ -604,8 +606,8 @@ block("reading every chunk by question still is not paper_reviewed", async () =>
         finalSynthesis: true,
         markdown: note(["Everything agrees (chunk 0)."]),
       }),
-    /not by a full-text pass/u,
-    "complete coverage by question is still not a reading of the paper",
+    /provisional expert.*metadata and abstract/iu,
+    "complete coverage by question still needs a deliberate final expert",
   );
 
   // And a commit asking for paper_reviewed is clamped and told why.
@@ -1425,7 +1427,7 @@ block("paging walks the unread chunks, wherever the holes are", async () => {
   // 0, 2, 4 and 5 here would be the failure the citation rule catches: a
   // reading that has seen two chunks of six cannot have taken anything from
   // the other four, and a number that resolves to nothing is worse than none.
-  await readByQuestion("PAPRTHRE", [1, 3], [
+  await readByQuestion("HOLEPAPR", [1, 3], [
     "Stations 1 and 3 report the same depth to within the stated uncertainty (chunk 1, chunk 3).",
     "What the two stations have in common is the single gradient condition they were measured under (chunk 1).",
     "Whether the remaining stations agree is not established by this reading (chunk 3).",
@@ -1433,17 +1435,17 @@ block("paging walks the unread chunks, wherever the holes are", async () => {
   await writeUp({
     title: "Short paper agreement",
     claimText: "Stations 1 and 3 agree in the short communication.",
-    evidence: [evidenceFrom("PAPRTHRE", 1)],
+    evidence: [evidenceFrom("HOLEPAPR", 1)],
   });
 
   await service.buildFromPaper({
     libraryID: 1,
     userRequested: true,
-    itemKey: "PAPRTHRE",
+    itemKey: "HOLEPAPR",
   });
   await service.setReadingExpert({
     libraryID: 1,
-    itemKey: "PAPRTHRE",
+    itemKey: "HOLEPAPR",
     persona:
       "A solidification metallurgist reading this short communication end to end for its uncertainty budget.",
     focus: ["the uncertainty budget", "the gradient range covered"],
@@ -1452,7 +1454,7 @@ block("paging walks the unread chunks, wherever the holes are", async () => {
   const page = await service.buildFromPaper({
     libraryID: 1,
     userRequested: true,
-    itemKey: "PAPRTHRE",
+    itemKey: "HOLEPAPR",
     limit: 6,
   });
   assert.deepEqual(
@@ -1474,7 +1476,7 @@ block("paging walks the unread chunks, wherever the holes are", async () => {
   const reread = await service.buildFromPaper({
     libraryID: 1,
     userRequested: true,
-    itemKey: "PAPRTHRE",
+    itemKey: "HOLEPAPR",
     offset: 3,
     limit: 1,
   });
@@ -1488,7 +1490,7 @@ block("paging walks the unread chunks, wherever the holes are", async () => {
   // Release the slot for the block below.
   await service.finishReading({
     libraryID: 1,
-    itemKey: "PAPRTHRE",
+    itemKey: "HOLEPAPR",
     outcome: "skipped",
   });
 });
