@@ -537,6 +537,8 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'THE DOCUMENT ROWS ARE DELIBERATELY THIN: itemKey, title, creators, year, publication title, DOI, item type. No abstracts, no notes, no annotations, no attachment text, no chunks. This is a directory listing, so it must stay cheap enough to walk. When a document looks worth pursuing, take its itemKey to get_item_details, get_item_abstract or search_fulltext.',
       '',
+      'ONE MORE FIELD, AND ONLY WHEN IT MATTERS: alsoIn. A row carries it when the document is ALSO filed in collections other than this one, and it lists those other collections (collectionKey, name, path) — never the folder you are currently in. Its absence means the document is filed here and nowhere else. That is the field to read before reorganising anything: move_items_to_collection takes an item OUT of every collection it names, so a row with alsoIn is exactly the case where moving it loses a filing somebody meant to keep.',
+      '',
       'PAGING applies to the documents at the current level (subfolders are always returned in full, since a level has few of them). itemPagination carries total, offset, limit, hasMore and nextOffset. A large folder is several pages.',
       '',
       'THIS IS NAVIGATION, NOT SEARCH. If the user is looking for literature ON A TOPIC, use hybrid_search — optionally scoped with collectionKeys, which is what get_collections is for. Browse when the question is about the SHAPE of the library: what is in this folder, how is this project organised, which folders exist.',

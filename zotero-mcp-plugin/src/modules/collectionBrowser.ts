@@ -45,11 +45,12 @@ export interface BrowsedItem {
   publicationTitle?: string;
   DOI?: string;
   /**
-   * Every collection this document is filed in, INCLUDING the one being
-   * browsed. Present only when the document is filed somewhere other than
-   * here as well, because that is the whole signal: a row that carries this
-   * field is cross-filed, and a reorganisation has to decide what to do about
-   * it. Omitting it for the common case keeps a directory listing cheap.
+   * The OTHER collections this document is filed in — the one being browsed
+   * is left out, which is what the name says and what the adapter does.
+   * Present only when there is at least one, because that is the whole
+   * signal: a row that carries this field is cross-filed, and a
+   * reorganisation has to decide what to do about it. Omitting it for the
+   * common case keeps a directory listing cheap.
    */
   alsoIn?: Array<{ collectionKey: string; name: string; path: string }>;
 }
