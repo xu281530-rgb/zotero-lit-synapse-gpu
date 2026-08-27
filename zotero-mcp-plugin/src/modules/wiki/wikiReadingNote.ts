@@ -185,6 +185,196 @@ export function formatChunkRanges(indexes: readonly number[]): string {
   return parts.join(",");
 }
 
+export const WIKI_READING_RECORDS_HEADING = "## 阅读记录";
+export const WIKI_MACRO_SUMMARY_HEADING = "## 宏观总结";
+
+export interface WikiReadingRecord {
+  number: number;
+  chunkIds: number[];
+  content: string;
+  noNewContent: boolean;
+}
+
+export interface WikiAppendOnlyReadingNote {
+  legacyBody: string;
+  records: WikiReadingRecord[];
+  macroSummary: string | null;
+  appendOnly: boolean;
+}
+
+const READING_RECORD_HEADING =
+  /^###\s+第\s*(\d+)\s*次\s*·\s*chunk\s+([^\r\n]+)\s*$/gimu;
+const NO_NEW_CONTENT =
+  /(?:本次|此次|这一批|本批).*无新(?:内容|信息|发现)|no new (?:content|information|findings?)/iu;
+
+function parseChunkRanges(value: string): number[] {
+  const ids: number[] = [];
+  for (const rawPart of value.split(",")) {
+    const part = rawPart.trim();
+    const range = /^(\d+)\s*-\s*(\d+)$/u.exec(part);
+    if (range) {
+      const start = Number(range[1]);
+      const end = Number(range[2]);
+      if (end < start || end - start > 100_000) continue;
+      for (let id = start; id <= end; id += 1) ids.push(id);
+      continue;
+    }
+    if (/^\d+$/u.test(part)) ids.push(Number(part));
+  }
+  return [...new Set(ids)].sort((a, b) => a - b);
+}
+
+function sectionStart(body: string, heading: string): number {
+  const pattern = new RegExp(
+    `^${heading.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}\\s*$`,
+    "mu",
+  );
+  const match = pattern.exec(body);
+  return match?.index ?? -1;
+}
+
+/** Parse the server-owned append-only sections while leaving legacy prose alone. */
+export function parseAppendOnlyReadingNote(
+  body: string,
+): WikiAppendOnlyReadingNote {
+  const text = String(body ?? "").trim();
+  const recordsStart = sectionStart(text, WIKI_READING_RECORDS_HEADING);
+  if (recordsStart === -1) {
+    return {
+      legacyBody: text,
+      records: [],
+      macroSummary: null,
+      appendOnly: false,
+    };
+  }
+
+  const legacyPrefix = text.slice(0, recordsStart).trimEnd();
+  const legacyBody = legacyPrefix.replace(/\n\s*-{3,}\s*$/u, "").trimEnd();
+  const afterRecordsHeading =
+    recordsStart + WIKI_READING_RECORDS_HEADING.length;
+  const summaryRelative = sectionStart(
+    text.slice(afterRecordsHeading),
+    WIKI_MACRO_SUMMARY_HEADING,
+  );
+  const summaryStart =
+    summaryRelative === -1 ? -1 : afterRecordsHeading + summaryRelative;
+  const recordsText = text.slice(
+    afterRecordsHeading,
+    summaryStart === -1 ? text.length : summaryStart,
+  );
+  const matches = [...recordsText.matchAll(READING_RECORD_HEADING)];
+  const records = matches.map((match, index) => {
+    const contentStart = (match.index ?? 0) + match[0].length;
+    const contentEnd =
+      index + 1 < matches.length
+        ? (matches[index + 1].index ?? recordsText.length)
+        : recordsText.length;
+    const content = recordsText
+      .slice(contentStart, contentEnd)
+      .replace(/\n\s*-{3,}\s*$/u, "")
+      .trim();
+    return {
+      number: Number(match[1]),
+      chunkIds: parseChunkRanges(match[2]),
+      content,
+      noNewContent: NO_NEW_CONTENT.test(content),
+    };
+  });
+  const macroSummary =
+    summaryStart === -1
+      ? null
+      : text.slice(summaryStart + WIKI_MACRO_SUMMARY_HEADING.length).trim();
+  return { legacyBody, records, macroSummary, appendOnly: true };
+}
+
+function assertAppendPayload(content: string, kind: string): string {
+  const clean = String(content ?? "").trim();
+  if (!clean) throw new Error(`${kind} is required and cannot be empty.`);
+  if (
+    sectionStart(clean, WIKI_READING_RECORDS_HEADING) !== -1 ||
+    sectionStart(clean, WIKI_MACRO_SUMMARY_HEADING) !== -1 ||
+    /^###\s+第\s*\d+\s*次\s*·/mu.test(clean)
+  ) {
+    throw new Error(
+      `${kind} contains a server-owned reading-note heading. Send only this turn's content; ` +
+        "the server numbers records and writes the section structure.",
+    );
+  }
+  return clean;
+}
+
+/** Append one immutable reading record, preserving every earlier byte of body text. */
+export function appendReadingRecord(
+  body: string,
+  input: { chunkIds: readonly number[]; content: string },
+): string {
+  const previous = String(body ?? "").trim();
+  const parsed = parseAppendOnlyReadingNote(previous);
+  if (parsed.macroSummary !== null) {
+    throw new Error(
+      "This reading note already has a macro summary, so no reading record can be inserted after it.",
+    );
+  }
+  const chunkIds = [...new Set(input.chunkIds.map(Number))]
+    .filter((id) => Number.isInteger(id) && id >= 0)
+    .sort((a, b) => a - b);
+  if (!chunkIds.length) {
+    throw new Error(
+      "A reading record must name the chunk ids read in this turn, including a no-new-content record.",
+    );
+  }
+  const content = assertAppendPayload(input.content, "readingRecord");
+  const entry = [
+    `### 第 ${parsed.records.length + 1} 次 · chunk ${formatChunkRanges(chunkIds)}`,
+    content,
+  ].join("\n");
+  if (parsed.appendOnly) return `${previous}\n\n${entry}`;
+  if (!previous) return `${WIKI_READING_RECORDS_HEADING}\n\n${entry}`;
+  return `${previous}\n\n---\n\n${WIKI_READING_RECORDS_HEADING}\n\n${entry}`;
+}
+
+/** Append the one macro summary after all immutable reading records. */
+export function appendMacroSummary(body: string, summary: string): string {
+  const previous = String(body ?? "").trim();
+  const parsed = parseAppendOnlyReadingNote(previous);
+  if (!parsed.appendOnly || !parsed.records.length) {
+    throw new Error(
+      "A macro summary requires at least one append-only reading record.",
+    );
+  }
+  if (parsed.macroSummary !== null) {
+    throw new Error("This reading note already has a macro summary.");
+  }
+  const content = assertAppendPayload(summary, "macroSummary");
+  return `${previous}\n\n---\n\n${WIKI_MACRO_SUMMARY_HEADING}\n\n${content}`;
+}
+
+/**
+ * Every substantive record must remain traceable from the macro summary.
+ *
+ * Citation coverage is deliberately mechanical: semantic similarity would
+ * accept increase/decrease paraphrases as nearly identical. A no-new-content
+ * record carries no finding and is therefore exempt.
+ */
+export function assertMacroSummaryCoversRecords(
+  body: string,
+  summary: string,
+): void {
+  const parsed = parseAppendOnlyReadingNote(body);
+  const summaryChunks = new Set(citedChunkIds(String(summary ?? "")));
+  const uncovered = parsed.records.filter(
+    (record) =>
+      !record.noNewContent &&
+      record.chunkIds.some((chunkId) => !summaryChunks.has(chunkId)),
+  );
+  if (!uncovered.length) return;
+  throw new Error(
+    "The macro summary does not account for reading record(s) " +
+      uncovered.map((record) => `第 ${record.number} 次`).join(", ") +
+      ". Preserve their findings in the summary and cite the chunks that carry them; length is not a coverage test.",
+  );
+}
+
 /**
  * Widest coverage bar drawn one-cell-per-chunk.
  *

@@ -79,6 +79,7 @@
     "test:wiki-build-loop": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-build-loop.js",
     "test:wiki-synthesis-audit": "node --experimental-strip-types scripts/test-wiki-synthesis-audit.js",
     "test:wiki-reading-note": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-reading-note.js",
+    "test:wiki-note-redesign": "node --experimental-strip-types scripts/test-wiki-note-redesign.js",
     "test:wiki-qa-reading": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-qa-reading.js",
     "test:wiki-evidence-quality": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-evidence-quality.js",
     "test:zotero9-runtime-compat": "node scripts/test-zotero9-runtime-compat.js",
