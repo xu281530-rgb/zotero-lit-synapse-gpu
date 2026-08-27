@@ -615,6 +615,18 @@ block("complete question reading can append a macro summary after expert reset",
       "A solidification metallurgist reassessing the complete short paper from its abstract before synthesis.",
     focus: ["the imposed-gradient conditions", "the station-to-station comparison"],
   });
+  await assert.rejects(
+    () =>
+      service.updateReadingNote({
+        libraryID: 1,
+        itemKey: "QASUMMRY",
+        finalSynthesis: true,
+        macroSummary:
+          "The paper reports melt-pool depth under an imposed gradient at the first station (chunk 0). This deliberately long discussion repeats that first finding without accounting for the second reading record.",
+      }),
+    /第 2 次/u,
+    "record coverage, not summary length, is the completion test",
+  );
   const summarised = await service.updateReadingNote({
     libraryID: 1,
     itemKey: "QASUMMRY",
