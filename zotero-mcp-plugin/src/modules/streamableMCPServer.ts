@@ -3295,25 +3295,41 @@ Nothing in this server returns a whole document in one response. Every reading t
     }
   }
 
+  // The five collection-mutation wrappers below go through
+  // `unwrapHandlerResult` for the same reason the read wrappers do: their
+  // handlers answer "collection not found" with HTTP 404 and a body of
+  // `{ error }`, and returning that body verbatim turned a refusal into a
+  // SUCCESSFUL tool result whose text happened to mention an error. A client,
+  // an auto-retry loop or a workflow engine then carried on as though the
+  // collection existed. Successful paths (200/201) are untouched.
   private async callCreateCollection(args: any): Promise<any> {
     const response = await handleCreateCollection({
       libraryID: args.libraryID,
       name: args.name,
       parentCollection: args.parentCollection,
     });
-    return response.body ? JSON.parse(response.body) : response;
+    return this.unwrapHandlerResult(
+      response,
+      response.body ? JSON.parse(response.body) : response,
+    );
   }
 
   private async callUpdateCollection(args: any): Promise<any> {
     const { collectionKey, ...body } = args;
     const response = await handleUpdateCollection({ 1: collectionKey }, body);
-    return response.body ? JSON.parse(response.body) : response;
+    return this.unwrapHandlerResult(
+      response,
+      response.body ? JSON.parse(response.body) : response,
+    );
   }
 
   private async callDeleteCollection(args: any): Promise<any> {
     const { collectionKey, ...body } = args;
     const response = await handleDeleteCollection({ 1: collectionKey }, body);
-    return response.body ? JSON.parse(response.body) : response;
+    return this.unwrapHandlerResult(
+      response,
+      response.body ? JSON.parse(response.body) : response,
+    );
   }
 
   /**
@@ -3404,7 +3420,10 @@ Nothing in this server returns a whole document in one response. Every reading t
       { 1: collectionKey },
       { itemKeys, libraryID },
     );
-    return response.body ? JSON.parse(response.body) : response;
+    return this.unwrapHandlerResult(
+      response,
+      response.body ? JSON.parse(response.body) : response,
+    );
   }
 
   private async callRemoveItemsFromCollection(args: any): Promise<any> {
@@ -3413,7 +3432,10 @@ Nothing in this server returns a whole document in one response. Every reading t
       { 1: collectionKey },
       { itemKeys, libraryID },
     );
-    return response.body ? JSON.parse(response.body) : response;
+    return this.unwrapHandlerResult(
+      response,
+      response.body ? JSON.parse(response.body) : response,
+    );
   }
 
   private async callMergeItems(args: any): Promise<any> {
