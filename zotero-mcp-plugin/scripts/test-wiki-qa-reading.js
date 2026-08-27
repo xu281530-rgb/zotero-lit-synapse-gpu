@@ -85,6 +85,7 @@ const indexedChunks = new Map([
   ["PAPERFIV", chunksFor("PAPERFIV", TINY, 5000)],
   ["HOLEPAPR", chunksFor("HOLEPAPR", SHORT, 6000)],
   ["AUDITPAP", chunksFor("AUDITPAP", 2, 7000)],
+  ["QASUMMRY", chunksFor("QASUMMRY", 2, 8000)],
 ]);
 
 for (const key of indexedChunks.keys()) {
@@ -578,6 +579,55 @@ block("each new reading record is audited against this turn's chunks", async () 
   await service.finishReading({
     libraryID: 1,
     itemKey: "AUDITPAP",
+    outcome: "skipped",
+  });
+});
+
+block("complete question reading can append a macro summary after expert reset", async () => {
+  await service.updateReadingNote({
+    libraryID: 1,
+    itemKey: "QASUMMRY",
+    readChunkIds: [chunkId("QASUMMRY", 0)],
+    domain: "physical metallurgy",
+    expertRole: "solidification specialist",
+    readingRecord:
+      "The paper reports melt-pool depth under an imposed gradient at the first station (chunk 0).",
+  });
+  await writeUp({
+    title: "QA summary station one",
+    claimText: "The first station has a reported melt-pool depth.",
+    evidence: [evidenceFrom("QASUMMRY", 0)],
+  });
+  await service.updateReadingNote({
+    libraryID: 1,
+    itemKey: "QASUMMRY",
+    readChunkIds: [chunkId("QASUMMRY", 1)],
+    domain: "physical metallurgy",
+    expertRole: "solidification specialist",
+    readingRecord:
+      "The paper also reports melt-pool depth under an imposed gradient at the second station (chunk 1).",
+  });
+
+  await service.setReadingExpert({
+    libraryID: 1,
+    itemKey: "QASUMMRY",
+    persona:
+      "A solidification metallurgist reassessing the complete short paper from its abstract before synthesis.",
+    focus: ["the imposed-gradient conditions", "the station-to-station comparison"],
+  });
+  const summarised = await service.updateReadingNote({
+    libraryID: 1,
+    itemKey: "QASUMMRY",
+    finalSynthesis: true,
+    macroSummary:
+      "The paper reports melt-pool depth under an imposed gradient at the first station (chunk 0). It also reports the measurement under an imposed gradient at the second station (chunk 1).",
+  });
+
+  assert.equal(summarised.mode, "qa");
+  assert.equal(summarised.finalSynthesis, true);
+  await service.finishReading({
+    libraryID: 1,
+    itemKey: "QASUMMRY",
     outcome: "skipped",
   });
 });

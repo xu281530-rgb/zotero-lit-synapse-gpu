@@ -1984,6 +1984,7 @@ export class WikiService {
     return {
       itemKey: session.itemKey,
       integrated: true,
+      mode: refreshed.mode,
       unchanged,
       finalSynthesis,
       readingNote: written,
