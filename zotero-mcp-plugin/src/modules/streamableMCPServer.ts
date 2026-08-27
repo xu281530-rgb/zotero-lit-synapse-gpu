@@ -373,7 +373,14 @@ function isMutationConfirmationRequired(): boolean {
   }
 }
 
-/** 为确认框生成一句人类可读的操作摘要，尽量不泄漏大段内容。 */
+/**
+ * 为确认框生成一句人类可读的操作摘要，尽量不泄漏大段内容。
+ *
+ * 摘要里必须出现真实的破坏范围，而不只是工具名和键。`delete_collection`
+ * 带上 deleteItems=true 时不只是删掉一个分类文件夹，还会把里面的条目一并
+ * 送进回收站；摘要以前完全不提这件事，用户看到的确认框和一个“只删文件夹”
+ * 的确认框长得一模一样。
+ */
 function describeMutation(toolName: string, args: any): string {
   const parts: string[] = [];
   if (args?.action) parts.push(`action: ${String(args.action)}`);
@@ -388,6 +395,13 @@ function describeMutation(toolName: string, args: any): string {
   if (Array.isArray(args?.itemKeys))
     parts.push(`items: ${args.itemKeys.length}`);
   if (Array.isArray(args?.tags)) parts.push(`tags: ${args.tags.length}`);
+  if (toolName === 'delete_collection') {
+    parts.push(
+      args?.deleteItems === true
+        ? 'ALSO SENDS EVERY ITEM IN THIS COLLECTION TO THE TRASH (deleteItems: true)'
+        : 'items stay in the library (deleteItems: false)',
+    );
+  }
   return parts.length > 0 ? parts.join(', ') : 'no additional parameters';
 }
 
