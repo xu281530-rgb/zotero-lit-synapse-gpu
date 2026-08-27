@@ -23,6 +23,7 @@ import { SmartAnnotationExtractor } from './smartAnnotationExtractor';
 import {
   filterToolCatalog,
   REMOVED_TOOL_REPLACEMENTS,
+  WIKI_TOOL_NAMES,
   type ToolDefinition,
 } from './toolCatalog';
 import {
@@ -928,6 +929,18 @@ Nothing in this server returns a whole document in one response. Every reading t
     const { name, arguments: args } = request.params;
 
     try {
+      // 统一的 Wiki 开关闸门。
+      //
+      // `wiki.enabled=false` 过去只从 tools/list 里把 Wiki 工具隐藏掉，调用
+      // 分派层没有再检查一次；只有 wiki_record_concepts 和 wiki_commit 自己
+      // 显式检查。一个缓存了旧工具清单的客户端因此仍能直接调用
+      // wiki_build_from_paper / wiki_set_reading_expert /
+      // wiki_update_reading_note，而后两个会真的在 Zotero 条目下创建或改写
+      // Markdown 阅读笔记附件。隐藏名字不是权限。
+      if (WIKI_TOOL_NAMES.has(name)) {
+        assertWikiEnabled();
+      }
+
       // 统一的写入闸门：任何会改动 Zotero 数据的工具都先过这里。
       // 每个 case 内原有的 write.enabled 检查保留，作为二次校验。
       if (MUTATING_TOOL_NAMES.has(name)) {
