@@ -220,6 +220,30 @@ export const MUTATING_TOOL_NAMES = new Set<string>([
 ]);
 
 /**
+ * Write handlers that return a structured receipt even when execution fails.
+ *
+ * Keeping the receipt is useful -- it can explain whether a transaction wrote
+ * nothing and whether a retry is safe -- but it still has to be marked as an
+ * MCP tool error. Without `isError`, clients see a completed call and may run
+ * the next mutation even though this one returned `success:false`.
+ */
+const STRUCTURED_WRITE_TOOL_NAMES = new Set<string>([
+  'write_note',
+  'write_tag',
+  'write_metadata',
+  'write_item',
+]);
+
+function isFailedStructuredWrite(toolName: string, result: any): boolean {
+  return (
+    STRUCTURED_WRITE_TOOL_NAMES.has(toolName) &&
+    result !== null &&
+    typeof result === 'object' &&
+    result.success === false
+  );
+}
+
+/**
  * A call that inspects a mutation instead of performing one.
  *
  * `move_items_to_collection` with `dryRun` runs the same preflight and returns
@@ -523,6 +547,79 @@ function assertTagArray(tags: unknown): asserts tags is string[] {
         `Every entry of tags must be a non-empty string. Received: ${JSON.stringify(tags)}`,
       );
     }
+  }
+}
+
+/** Validate the complete write_metadata payload before confirmation or save. */
+function assertWriteMetadataArgs(args: any): void {
+  if (typeof args?.itemKey !== 'string' || !args.itemKey.trim()) {
+    throw new Error('itemKey is required and must be a non-empty string');
+  }
+
+  const hasFields = Object.prototype.hasOwnProperty.call(args, 'fields');
+  const hasCreators = Object.prototype.hasOwnProperty.call(args, 'creators');
+  if (!hasFields && !hasCreators) {
+    throw new Error('At least one of fields or creators is required');
+  }
+
+  let fieldCount = 0;
+  if (hasFields) {
+    if (
+      args.fields === null ||
+      typeof args.fields !== 'object' ||
+      Array.isArray(args.fields)
+    ) {
+      throw new Error('fields must be an object whose values are strings');
+    }
+    const entries = Object.entries(args.fields);
+    fieldCount = entries.length;
+    for (const [fieldName, value] of entries) {
+      if (typeof value !== 'string') {
+        throw new Error(
+          `fields.${fieldName} must be a string. Received ${typeof value}: ${JSON.stringify(value)}`,
+        );
+      }
+    }
+  }
+
+  if (hasCreators) {
+    if (!Array.isArray(args.creators)) {
+      throw new Error('creators must be an array of creator objects');
+    }
+    args.creators.forEach((creator: any, index: number) => {
+      if (
+        creator === null ||
+        typeof creator !== 'object' ||
+        Array.isArray(creator)
+      ) {
+        throw new Error(`creators[${index}] must be an object`);
+      }
+      if (
+        typeof creator.creatorType !== 'string' ||
+        !creator.creatorType.trim()
+      ) {
+        throw new Error(
+          `creators[${index}].creatorType is required and must be a non-empty string`,
+        );
+      }
+      for (const nameField of ['firstName', 'lastName', 'name']) {
+        if (
+          creator[nameField] !== undefined &&
+          typeof creator[nameField] !== 'string'
+        ) {
+          throw new Error(
+            `creators[${index}].${nameField} must be a string when provided`,
+          );
+        }
+      }
+    });
+  }
+
+  // An empty creators array is meaningful: it clears the current creator list.
+  if (fieldCount === 0 && !hasCreators) {
+    throw new Error(
+      'fields must contain at least one field when creators is not provided',
+    );
   }
 }
 
@@ -986,6 +1083,13 @@ Nothing in this server returns a whole document in one response. Every reading t
       // Markdown 阅读笔记附件。隐藏名字不是权限。
       if (WIKI_TOOL_NAMES.has(name)) {
         assertWikiEnabled();
+      }
+
+      // Reject malformed metadata before asking the user to approve a write.
+      // The schema guides clients but is not a security boundary: callers can
+      // still send arbitrary JSON to tools/call.
+      if (name === 'write_metadata') {
+        assertWriteMetadataArgs(args);
       }
 
       // 统一的写入闸门：任何会改动 Zotero 数据的工具都先过这里。
@@ -1588,12 +1692,6 @@ Nothing in this server returns a whole document in one response. Every reading t
               'Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.',
             );
           }
-          if (!args?.itemKey) {
-            throw new Error('itemKey is required');
-          }
-          if (!args?.fields && !args?.creators) {
-            throw new Error('At least one of fields or creators is required');
-          }
           result = await this.callWriteMetadata(args);
           break;
         }
@@ -1645,6 +1743,7 @@ Nothing in this server returns a whole document in one response. Every reading t
                 : JSON.stringify(result, null, 2),
           },
         ],
+        ...(isFailedStructuredWrite(name, result) ? { isError: true } : {}),
       });
     } catch (error) {
       ztoolkit.log(`[StreamableMCP] Tool call error for ${name}: ${error}`);
@@ -3624,7 +3723,7 @@ Nothing in this server returns a whole document in one response. Every reading t
       return response.body;
     }
     const result = response.body ? JSON.parse(response.body) : response;
-    return result;
+    return this.unwrapHandlerResult(response, result);
   }
 
   // ============ Single-branch retrieval (semantic_search, keyword_search) ==

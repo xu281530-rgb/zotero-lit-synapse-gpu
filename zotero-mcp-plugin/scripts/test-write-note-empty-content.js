@@ -140,18 +140,25 @@ const { StreamableMCPServer } = await import(moduleUrl);
 
 const server = new StreamableMCPServer();
 
-async function writeNote(args) {
+async function callTool(name, args) {
   const response = await server.handleMCPRequest(
     JSON.stringify({
       jsonrpc: "2.0",
       id: 1,
       method: "tools/call",
-      params: { name: "write_note", arguments: args },
+      params: { name, arguments: args },
     }),
   );
   const body = JSON.parse(response.body);
   if (body.error) return { error: body.error.message };
-  return { result: JSON.parse(body.result.content[0].text) };
+  return {
+    result: JSON.parse(body.result.content[0].text),
+    isError: body.result.isError === true,
+  };
+}
+
+function writeNote(args) {
+  return callTool("write_note", args);
 }
 
 function reset() {
@@ -245,21 +252,40 @@ await test("a non-string content is refused before anything is written", async (
 });
 
 await test("create refuses empty content", async () => {
-  const { result } = await writeNote({ action: "create", content: "" });
+  const { result, error, isError } = await writeNote({
+    action: "create",
+    content: "",
+  });
+  assert.equal(error, undefined);
+  assert.equal(isError, true, "a rejected write must be an MCP tool error");
   assert.equal(result.success, false);
   assert.match(result.error, /nothing to create/);
   assert.equal(saved.length, 0, "no empty note may be left in the library");
 });
 
 await test("append refuses empty content", async () => {
-  const { result } = await writeNote({
+  const { result, error, isError } = await writeNote({
     action: "append",
     noteKey: "NOTE0001",
     content: "",
   });
+  assert.equal(error, undefined);
+  assert.equal(isError, true, "a rejected write must be an MCP tool error");
   assert.equal(result.success, false);
   assert.match(result.error, /nothing to append/);
   assert.equal(saved.length, 0);
+});
+
+await test("a missing abstract is a real tool failure", async () => {
+  const { result, error } = await callTool("get_item_abstract", {
+    itemKey: "MISSING1",
+  });
+  assert.equal(
+    result,
+    undefined,
+    "an HTTP 404 must not be wrapped as a successful tool result",
+  );
+  assert.match(error, /Item with key MISSING1 not found/);
 });
 
 await test("the confirmation dialog says an update will CLEAR the note", async () => {
