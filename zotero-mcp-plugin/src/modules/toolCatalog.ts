@@ -1164,6 +1164,10 @@ export function buildToolCatalog(): ToolDefinition[] {
       type: 'object',
       properties: {
         libraryID: { type: 'number' },
+        itemKey: {
+          type: 'string',
+          description: 'Paper whose completed reading is being reconciled. Required for a question-driven macro summary because several QA papers may be open at once.'
+        },
         query: { type: 'string' },
         limit: { type: 'integer', minimum: 1, maximum: 50 },
         proposedPageTitles: {
@@ -1195,9 +1199,36 @@ export function buildToolCatalog(): ToolDefinition[] {
             relations: {
               type: 'string',
               description: 'Which links between Concepts and Claims should now be drawn, and which drawn earlier no longer hold?'
+            },
+            claimVerdicts: {
+              type: 'array',
+              description: 'One verdict for EVERY Claim in wikiReconciliation.claims. Claims are recalled by Evidence source itemKey, not by query similarity, so none may be omitted.',
+              items: {
+                type: 'object',
+                properties: {
+                  claimId: { type: 'integer', minimum: 1 },
+                  verdict: {
+                    type: 'string',
+                    enum: ['confirmed', 'qualified', 'overstated', 'contradicted', 'unsupported']
+                  },
+                  basis: {
+                    type: 'string',
+                    description: 'Why the complete paper leads to this verdict. At least 20 characters.'
+                  },
+                  previousClaimText: {
+                    type: 'string',
+                    description: 'Required for overstated: copy the current Claim text exactly so the old wording is retained in the review audit.'
+                  },
+                  replacementClaimText: {
+                    type: 'string',
+                    description: 'Required for overstated: the bounded wording to apply with UPDATE_CLAIM.'
+                  }
+                },
+                required: ['claimId', 'verdict', 'basis']
+              }
             }
           },
-          required: ['pages', 'claims', 'evidence', 'concepts', 'relations']
+          required: ['pages', 'claims', 'evidence', 'concepts', 'relations', 'claimVerdicts']
         }
       },
       required: ['query']

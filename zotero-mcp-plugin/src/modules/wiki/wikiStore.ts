@@ -21,6 +21,7 @@ import {
   type WikiEvidenceRecord,
   type WikiPageDeletion,
   type WikiPageRecord,
+  type WikiSourceClaimRecord,
 } from "./wikiTypes";
 
 declare let Zotero: any;
@@ -1096,6 +1097,37 @@ export class WikiStore {
       version: Number(row.version),
       evidence: evidenceRows.map((item) => this.mapEvidence(item)),
     };
+  }
+
+  /** Every Claim whose Evidence cites one paper, independent of query text. */
+  async listClaimsByEvidenceSource(
+    libraryID: number,
+    itemKey: string,
+  ): Promise<WikiSourceClaimRecord[]> {
+    await this.initialize();
+    const rows = await this.db.queryAsync(
+      `SELECT DISTINCT c.claim_id, p.canonical_title
+       FROM wiki_evidence e
+       JOIN wiki_claims c ON c.claim_id = e.claim_id
+       JOIN wiki_pages p ON p.page_id = c.page_id
+       WHERE e.library_id = ? AND e.item_key = ? AND p.library_id = ?
+       ORDER BY c.claim_id`,
+      [libraryID, itemKey, libraryID],
+    );
+    const claims: WikiSourceClaimRecord[] = [];
+    for (const row of rows) {
+      const claim = await this.getClaim(
+        Number(rowValue(row, "claim_id", "claimId")),
+      );
+      if (!claim) continue;
+      claims.push({
+        ...claim,
+        pageTitle: String(
+          rowValue(row, "canonical_title", "canonicalTitle") ?? "",
+        ),
+      });
+    }
+    return claims;
   }
 
   async getPage(pageId: number): Promise<WikiPageRecord | null> {

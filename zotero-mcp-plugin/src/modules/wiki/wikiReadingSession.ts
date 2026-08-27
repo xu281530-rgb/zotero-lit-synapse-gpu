@@ -232,6 +232,22 @@ export interface WikiWholeWikiReview {
   evidence: string;
   concepts: string;
   relations: string;
+  claimVerdicts: WikiClaimReviewVerdict[];
+}
+
+export type WikiClaimReviewVerdictName =
+  | "confirmed"
+  | "qualified"
+  | "overstated"
+  | "contradicted"
+  | "unsupported";
+
+export interface WikiClaimReviewVerdict {
+  claimId: number;
+  verdict: WikiClaimReviewVerdictName;
+  basis: string;
+  previousClaimText?: string;
+  replacementClaimText?: string;
 }
 
 export const WIKI_REVIEW_AXES = [
@@ -251,10 +267,13 @@ function parseWikiReview(raw: unknown): WikiWholeWikiReview | null {
   try {
     const parsed = JSON.parse(text);
     if (!parsed || typeof parsed !== "object") return null;
-    const review: Record<string, string> = {};
+    const review: Record<string, unknown> = {};
     for (const axis of WIKI_REVIEW_AXES) {
       review[axis] = String((parsed as Record<string, unknown>)[axis] ?? "");
     }
+    review.claimVerdicts = Array.isArray(parsed.claimVerdicts)
+      ? parsed.claimVerdicts
+      : [];
     return review as unknown as WikiWholeWikiReview;
   } catch {
     return null;

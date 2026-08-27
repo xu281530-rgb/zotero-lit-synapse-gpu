@@ -242,11 +242,30 @@ async function settleRest(key, what = "the depth-versus-station series") {
  * the others. Blocks that are ABOUT the settlement pass their own actions.
  */
 async function writeUp(options) {
+  const reviewItemKey = options.wikiReview
+    ? (options.itemKey ?? options.evidence?.[0]?.itemKey)
+    : undefined;
+  const wikiReview = options.wikiReview
+    ? {
+        ...options.wikiReview,
+        claimVerdicts: reviewItemKey
+          ? (await store.listClaimsByEvidenceSource(1, reviewItemKey)).map(
+              (claim) => ({
+                claimId: claim.claimId,
+                verdict: "confirmed",
+                basis:
+                  "The complete paper supports this Claim at the wording and scope currently stored.",
+              }),
+            )
+          : [],
+      }
+    : undefined;
   const prepared = await service.prepareUpdate({
     libraryID: 1,
+    ...(reviewItemKey ? { itemKey: reviewItemKey } : {}),
     query: options.title,
     proposedPageTitles: [options.title],
-    ...(options.wikiReview ? { wikiReview: options.wikiReview } : {}),
+    ...(wikiReview ? { wikiReview } : {}),
   });
   // By default, write off whatever the cited papers still owe. That is what a
   // caller does in practice - the Claim carries the chunk that mattered and a
@@ -593,7 +612,7 @@ block("complete question reading can append a macro summary after expert reset",
     readingRecord:
       "The paper reports melt-pool depth under an imposed gradient at the first station (chunk 0).",
   });
-  await writeUp({
+  const firstWrite = await writeUp({
     title: "QA summary station one",
     claimText: "The first station has a reported melt-pool depth.",
     evidence: [evidenceFrom("QASUMMRY", 0)],
@@ -606,6 +625,11 @@ block("complete question reading can append a macro summary after expert reset",
     expertRole: "solidification specialist",
     readingRecord:
       "The paper also reports melt-pool depth under an imposed gradient at the second station (chunk 1).",
+  });
+  const secondWrite = await writeUp({
+    title: "QA summary station two",
+    claimText: "The second station has a reported melt-pool depth.",
+    evidence: [evidenceFrom("QASUMMRY", 1)],
   });
 
   await service.setReadingExpert({
@@ -637,6 +661,57 @@ block("complete question reading can append a macro summary after expert reset",
 
   assert.equal(summarised.mode, "qa");
   assert.equal(summarised.finalSynthesis, true);
+  assert.equal(summarised.wikiReconciliation.readingRecords.length, 2);
+  assert.deepEqual(
+    summarised.wikiReconciliation.claims.map((claim) => claim.claimId).sort(),
+    [firstWrite.result.refs.c, secondWrite.result.refs.c].sort(),
+    "Claims are recalled by this paper's Evidence even when Page titles and query terms differ",
+  );
+
+  await service.recordConcepts({
+    libraryID: 1,
+    itemKey: "QASUMMRY",
+    final: true,
+    concepts: [],
+    noConceptsReason: "The short paper introduces no terminology beyond existing library concepts.",
+    confirmWrite: async () => {},
+  });
+  const firstClaim = await store.getClaim(firstWrite.result.refs.c);
+  const secondClaim = await store.getClaim(secondWrite.result.refs.c);
+  const replacement =
+    "The first station has a reported melt-pool depth under the paper's imposed-gradient condition.";
+  const prepared = await service.prepareUpdate({
+    libraryID: 1,
+    itemKey: "QASUMMRY",
+    query: "a deliberately unrelated query",
+    wikiReview: {
+      pages: "Both existing station Pages remain separate and need no title changes.",
+      claims: "The first Claim is overstated and the second is factually contradicted.",
+      evidence: "Both decisions are grounded in the passages from their respective stations.",
+      concepts: "No concept needs adding, correcting, merging or removing for this paper.",
+      relations: "No stored relation is added or withdrawn by the completed short paper.",
+      claimVerdicts: [
+        {
+          claimId: firstClaim.claimId,
+          verdict: "overstated",
+          basis:
+            "The stored wording omits the imposed-gradient condition attached to the reported measurement.",
+          previousClaimText: firstClaim.claimText,
+          replacementClaimText: replacement,
+        },
+        {
+          claimId: secondClaim.claimId,
+          verdict: "contradicted",
+          basis:
+            "The completed reading conflicts with the stored factual interpretation and requires human review.",
+        },
+      ],
+    },
+  });
+  assert.deepEqual(
+    prepared.wikiReconciliation.requiredClaimActions.map((row) => row.action),
+    ["UPDATE_CLAIM", "MARK_CONFLICT"],
+  );
   await service.finishReading({
     libraryID: 1,
     itemKey: "QASUMMRY",
@@ -1866,8 +1941,10 @@ block("a QA debt carried into a full-text read still has to be settled", async (
   });
 
   // Everything else done, one question-era chunk still owing.
+  const paperFiveClaims = await store.listClaimsByEvidenceSource(1, "PAPERFIV");
   const prepared = await service.prepareUpdate({
     libraryID: 1,
+    itemKey: "PAPERFIV",
     query: "Whole traverse",
     proposedPageTitles: ["Whole traverse"],
     wikiReview: {
@@ -1876,6 +1953,12 @@ block("a QA debt carried into a full-text read still has to be settled", async (
       evidence: "The claim is thin; the completed read attaches a second excerpt at full depth.",
       concepts: "No terminology beyond what the concept library already holds anywhere.",
       relations: "No relation between stored concepts is added or withdrawn by this paper.",
+      claimVerdicts: paperFiveClaims.map((claim) => ({
+        claimId: claim.claimId,
+        verdict: "confirmed",
+        basis:
+          "The complete paper supports this Claim at the wording and scope currently stored.",
+      })),
     },
   });
   const blocked = await service.commit({

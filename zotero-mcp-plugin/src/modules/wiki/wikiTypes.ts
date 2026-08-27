@@ -215,6 +215,10 @@ export interface WikiClaimRecord {
   evidence: WikiEvidenceRecord[];
 }
 
+export interface WikiSourceClaimRecord extends WikiClaimRecord {
+  pageTitle: string;
+}
+
 export interface WikiPageRecord {
   pageId: number;
   libraryID: number;

@@ -1163,13 +1163,21 @@ assert.equal(
   "and one page is full delivery",
 );
 
+await bodyAwareService.updateReadingNote({
+  libraryID: 1,
+  itemKey: "BODY1",
+  readChunkIds: [0],
+  readingRecord:
+    "The results section reports cooling behaviour under the stated conditions (chunk 0).",
+});
+
 // Delivery is not understanding: whole-paper depth also needs the pass over
 // the whole reading note, which is a call the server watched happen.
 await bodyAwareService.updateReadingNote({
   libraryID: 1,
   itemKey: "BODY1",
   finalSynthesis: true,
-  markdown: [
+  macroSummary: [
     "# Confirmed body evidence",
     "",
     "## What the paper establishes",

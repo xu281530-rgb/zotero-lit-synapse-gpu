@@ -364,6 +364,7 @@ export class WikiService {
 
   async prepareUpdate(options: {
     libraryID: number;
+    itemKey?: string;
     query: string;
     limit?: number;
     proposedPageTitles?: string[];
@@ -374,8 +375,12 @@ export class WikiService {
     wikiReview?: Partial<WikiWholeWikiReview>;
   }): Promise<any> {
     this.prunePrepareTokens();
-    await this.recordWikiReviewIfOffered(options.libraryID, options.wikiReview);
-    await this.assertReadyToWriteUp(options.libraryID);
+    await this.recordWikiReviewIfOffered(
+      options.libraryID,
+      options.wikiReview,
+      options.itemKey,
+    );
+    await this.assertReadyToWriteUp(options.libraryID, options.itemKey);
     const exactCandidates = await this.store.prepareUpdate(options);
     const semanticCandidates = await this.search({
       ...options,
@@ -430,8 +435,59 @@ export class WikiService {
     // between prepare and commit still shows the paper as unfinished rather
     // than as never started.
     const sessions = await this.store.readingSessions();
-    const openSession = await sessions.getOpen(options.libraryID);
+    const openSession = options.itemKey
+      ? await sessions.openForItem(options.libraryID, options.itemKey)
+      : await sessions.getOpen(options.libraryID);
     if (openSession) await sessions.markPrepared(openSession.sessionId);
+    let wikiReconciliation: any = null;
+    if (openSession && openSession.finalSynthesisAt !== null) {
+      const paper = await this.requirePaperItem(
+        openSession.libraryID,
+        openSession.itemKey,
+      );
+      const body = (await this.readNoteBody(paper)) ?? "";
+      wikiReconciliation = await this.paperReconciliationSnapshot(
+        openSession,
+        body,
+      );
+      const claimsById = new Map(
+        wikiReconciliation.claims.map((claim: any) => [claim.claimId, claim]),
+      );
+      const verdicts = openSession.wikiReview?.claimVerdicts ?? [];
+      wikiReconciliation.requiredClaimActions = verdicts.reduce(
+        (actions: any[], entry) => {
+          const claim: any = claimsById.get(entry.claimId);
+          if (!claim) return actions;
+          if (entry.verdict === "overstated") {
+            actions.push({
+              action: "UPDATE_CLAIM",
+              claimId: entry.claimId,
+              expectedVersion: claim.version,
+              claimText: entry.replacementClaimText,
+              previousClaimText: entry.previousClaimText,
+              basis: entry.basis,
+            });
+          }
+          if (entry.verdict === "contradicted") {
+            actions.push({
+              action: "MARK_CONFLICT",
+              claimId: entry.claimId,
+              resultingEpistemicStatus: "disputed",
+              basis: entry.basis,
+            });
+          }
+          return actions;
+        },
+        [],
+      );
+      wikiReconciliation.humanReviewQueue = verdicts
+        .filter((entry) => entry.verdict === "contradicted")
+        .map((entry) => ({
+          claimId: entry.claimId,
+          reason: entry.basis,
+          statusAfterCommit: "disputed",
+        }));
+    }
     // Every paper whose note has run ahead of the Wiki, so the write-up can be
     // planned over all of them at once. A round of questions typically leaves
     // three, and writing up one and forgetting the others is the failure this
@@ -455,6 +511,7 @@ export class WikiService {
       pagePreparations,
       prepareToken,
       prepareTokenExpiresInSeconds: 600,
+      ...(wikiReconciliation ? { wikiReconciliation } : {}),
       ...(openSession
         ? {
             readingSession: {
@@ -504,9 +561,15 @@ export class WikiService {
    * also the only chance to notice that the conclusion contradicts something
    * accepted on page 4.
    */
-  private async assertReadyToWriteUp(libraryID: number): Promise<void> {
+  private async assertReadyToWriteUp(
+    libraryID: number,
+    itemKey?: string,
+  ): Promise<void> {
     const sessions = await this.store.readingSessions();
-    const open = await sessions.getOpen(libraryID);
+    const requestedKey = String(itemKey ?? "").trim();
+    const open = requestedKey
+      ? await sessions.openForItem(libraryID, requestedKey)
+      : await sessions.getOpen(libraryID);
     if (!open || !open.expert) return;
     const coverage = await sessions.coverage(open.sessionId);
     if (!coverage.complete) return;
@@ -576,10 +639,14 @@ export class WikiService {
   private async recordWikiReviewIfOffered(
     libraryID: number,
     review: Partial<WikiWholeWikiReview> | undefined,
+    itemKey?: string,
   ): Promise<void> {
     if (!review || typeof review !== "object") return;
     const sessions = await this.store.readingSessions();
-    const open = await sessions.getOpen(libraryID);
+    const requestedKey = String(itemKey ?? "").trim();
+    const open = requestedKey
+      ? await sessions.openForItem(libraryID, requestedKey)
+      : await sessions.getOpen(libraryID);
     // Nowhere to record it, so nothing to record. The review belongs to a
     // full-text read; a question-driven update has no such pass and is not
     // gated on one. Ignoring the argument rather than refusing the call keeps
@@ -627,7 +694,7 @@ export class WikiService {
     }
 
     const missing: string[] = [];
-    const complete: Record<string, string> = {};
+    const complete: Record<string, unknown> = {};
     for (const axis of WIKI_REVIEW_AXES) {
       const text = String(
         (review as Record<string, unknown>)[axis] ?? "",
@@ -648,6 +715,75 @@ export class WikiService {
           "having looked.",
       );
     }
+    const sourceClaims = await this.store.listClaimsByEvidenceSource(
+      open.libraryID,
+      open.itemKey,
+    );
+    const rawVerdicts = Array.isArray((review as any).claimVerdicts)
+      ? (review as any).claimVerdicts
+      : [];
+    const claimById = new Map(sourceClaims.map((claim) => [claim.claimId, claim]));
+    const verdictById = new Map<number, any>();
+    const allowedVerdicts = new Set([
+      "confirmed",
+      "qualified",
+      "overstated",
+      "contradicted",
+      "unsupported",
+    ]);
+    for (const raw of rawVerdicts) {
+      const claimId = Number(raw?.claimId);
+      const claim = claimById.get(claimId);
+      if (!claim) {
+        throw new Error(
+          `claimVerdicts contains Claim ${claimId}, which is not backed by Evidence from ${open.itemKey}. Review exactly the Claims in the paper-based reconciliation snapshot.`,
+        );
+      }
+      if (verdictById.has(claimId)) {
+        throw new Error(`claimVerdicts contains Claim ${claimId} more than once.`);
+      }
+      const verdict = String(raw?.verdict ?? "").trim();
+      const basis = String(raw?.basis ?? "").trim();
+      if (!allowedVerdicts.has(verdict)) {
+        throw new Error(
+          `Claim ${claimId} has invalid verdict "${verdict}". Use confirmed, qualified, overstated, contradicted or unsupported.`,
+        );
+      }
+      if (basis.length < WIKI_REVIEW_MIN_AXIS_CHARS) {
+        throw new Error(
+          `Claim ${claimId} needs a concrete basis of at least ${WIKI_REVIEW_MIN_AXIS_CHARS} characters for verdict ${verdict}.`,
+        );
+      }
+      const normalized: Record<string, unknown> = { claimId, verdict, basis };
+      if (verdict === "overstated") {
+        const previousClaimText = String(raw?.previousClaimText ?? "").trim();
+        const replacementClaimText = String(
+          raw?.replacementClaimText ?? "",
+        ).trim();
+        if (previousClaimText !== claim.claimText) {
+          throw new Error(
+            `Claim ${claimId} is marked overstated, but previousClaimText does not match version ${claim.version}. Copy the current text exactly so the revision audit cannot drift.`,
+          );
+        }
+        if (!replacementClaimText || replacementClaimText === claim.claimText) {
+          throw new Error(
+            `Claim ${claimId} is marked overstated and needs a different replacementClaimText for UPDATE_CLAIM.`,
+          );
+        }
+        normalized.previousClaimText = previousClaimText;
+        normalized.replacementClaimText = replacementClaimText;
+      }
+      verdictById.set(claimId, normalized);
+    }
+    const unreviewed = sourceClaims.filter(
+      (claim) => !verdictById.has(claim.claimId),
+    );
+    if (unreviewed.length) {
+      throw new Error(
+        `claimVerdicts must judge every Claim backed by ${open.itemKey}. Missing Claim(s): ${unreviewed.map((claim) => claim.claimId).join(", ")}.`,
+      );
+    }
+    complete.claimVerdicts = [...verdictById.values()];
     await sessions.recordWikiReview(
       open.sessionId,
       complete as unknown as WikiWholeWikiReview,
@@ -725,6 +861,54 @@ export class WikiService {
       }
     }
     return out.sort((a, b) => a.chunkId - b.chunkId);
+  }
+
+  /** Records and Claims aligned by one paper, without query-based recall. */
+  private async paperReconciliationSnapshot(
+    session: WikiReadingSessionRecord,
+    body: string,
+  ): Promise<any> {
+    const parsed = parseAppendOnlyReadingNote(body);
+    const claims = await this.store.listClaimsByEvidenceSource(
+      session.libraryID,
+      session.itemKey,
+    );
+    return {
+      itemKey: session.itemKey,
+      readingRecords: parsed.records.map((record) => ({
+        recordNumber: record.number,
+        chunkIds: record.chunkIds,
+        noNewContent: record.noNewContent,
+        content: record.content,
+      })),
+      claims: claims.map((claim) => ({
+        claimId: claim.claimId,
+        pageId: claim.pageId,
+        pageTitle: claim.pageTitle,
+        claimText: claim.claimText,
+        epistemicStatus: claim.epistemicStatus,
+        coverageLevel: claim.coverageLevel,
+        version: claim.version,
+        evidence: claim.evidence.filter(
+          (entry) =>
+            entry.libraryID === session.libraryID &&
+            entry.itemKey === session.itemKey,
+        ),
+      })),
+      requiredVerdicts: [
+        "confirmed",
+        "qualified",
+        "overstated",
+        "contradicted",
+        "unsupported",
+      ],
+      actionPolicy: {
+        overstated:
+          "Use UPDATE_CLAIM with expectedVersion, and preserve previousClaimText, replacementClaimText and basis in wikiReview.claimVerdicts.",
+        contradicted:
+          "Use MARK_CONFLICT with contradicting Evidence; the Claim becomes disputed for human review.",
+      },
+    };
   }
 
   private async hydrateEvidence(
@@ -1980,6 +2164,9 @@ export class WikiService {
     });
     const refreshed = (await sessions.get(session.sessionId)) ?? session;
     await this.refreshNoteHeader(item, refreshed, body, status);
+    const wikiReconciliation = finalSynthesis
+      ? await this.paperReconciliationSnapshot(refreshed, body)
+      : null;
 
     return {
       itemKey: session.itemKey,
@@ -1996,18 +2183,17 @@ export class WikiService {
         coverageComplete: coverage.complete,
         integrationDebt: integrationDebt(refreshed),
       },
+      ...(wikiReconciliation ? { wikiReconciliation } : {}),
       nextStep: finalSynthesis
-        ? "The whole-paper synthesis is recorded. Now call wiki_record_concepts once with final true " +
+        ? "The macro summary is recorded. The response lists every reading record beside every Wiki Claim whose Evidence cites this paper. Now call wiki_record_concepts once with final true " +
           "(use an empty concepts list plus noConceptsReason when appropriate). Then call " +
-          "wiki_prepare_update with a five-axis Wiki Review covering pages, claims, evidence, concepts " +
-          "and relations, followed by wiki_commit. Every Claim still needs Evidence quoted from the paper's own chunks - the " +
+          "wiki_prepare_update with a five-axis Wiki Review and one claimVerdict for every listed Claim, followed by wiki_commit. Use UPDATE_CLAIM for overstated wording and MARK_CONFLICT for factual contradictions. Every Claim still needs Evidence quoted from the paper's own chunks - the " +
           "note is your understanding, not a source - so re-read the chunks a claim rests on with " +
           "wiki_build_from_paper (offset) and take the excerpt from there. Re-reading a chunk you have " +
           "already been given costs nothing against the integration gate."
         : coverage.complete
           ? "Every chunk has been delivered. Do the whole-paper pass now: call wiki_update_reading_note " +
-            "once more with finalSynthesis true and the note rewritten as a single coherent reading of " +
-            "the complete paper. Claims cannot be recorded at paper_reviewed depth until that is done. " +
+            "once more with finalSynthesis true and macroSummary. Existing reading records stay unchanged. Claims cannot be recorded at paper_reviewed depth until that is done. " +
             GATE_HINT
           : `Keep reading: ${coverage.remainingChunks} chunk(s) left, resume at chunk index ` +
             `${coverage.firstMissingIndex ?? coverage.deliveredChunks}.`,
@@ -2943,7 +3129,10 @@ export class WikiService {
     confirmWrite?: (conceptCount: number) => Promise<void>;
   }): Promise<any> {
     const sessions = await this.store.readingSessions();
-    const open = await sessions.getOpen(options.libraryID);
+    const requestedKey = String(options.itemKey ?? "").trim();
+    const open = requestedKey
+      ? await sessions.openForItem(options.libraryID, requestedKey)
+      : await sessions.getOpen(options.libraryID);
     if (options.itemKey && open && options.itemKey.trim() !== open.itemKey) {
       throw new Error(
         `The open paper is ${open.itemKey}, not ${options.itemKey.trim()}.`,

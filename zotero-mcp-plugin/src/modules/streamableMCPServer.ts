@@ -1378,6 +1378,7 @@ Nothing in this server returns a whole document in one response. Every reading t
           const libraryID = args.libraryID ?? Zotero.Libraries.userLibraryID;
           result = await getWikiService().prepareUpdate({
             libraryID,
+            itemKey: args.itemKey,
             query: args.query,
             limit: args.limit,
             proposedPageTitles: this.coerceStringArray(args.proposedPageTitles),
