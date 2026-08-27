@@ -828,6 +828,12 @@ Claim 只能建立在阅读总结已经涵盖的内容之上。该附件也被�
 写入默认关闭。关闭时这 11 个工具在 `tools/list` 与 `/capabilities` 中都不出现——
 服务器绝不声明一个自己会拒绝执行的能力。
 
+还有两个 Wiki 工具会跟着一起消失，它们不在本节里，但值得单独说明：
+`wiki_set_reading_expert` 与 `wiki_update_reading_note` 会在 Zotero 条目下真的
+创建并改写 Markdown 阅读总结附件，属于 Zotero 写操作，因此受同一道写入闸门管辖。
+也就是说，关闭写入会连带停掉 Wiki 阅读总结，`tools/list` 里少掉的是 13 个工具，
+不是 11 个。
+
 #### 分类增删改
 
 - `create_collection` —— `name`（必需）、`parentCollection`、`libraryID`

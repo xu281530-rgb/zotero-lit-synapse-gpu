@@ -799,6 +799,13 @@ All eleven are hidden from `tools/list` and from `/capabilities` when write
 operations are disabled, which is the default — the server never advertises a
 capability it would refuse.
 
+Two Wiki tools go with them, and they are worth knowing about because they are
+not in this section: `wiki_set_reading_expert` and `wiki_update_reading_note`
+create and rewrite the paper's reading note as a real Markdown attachment on
+the Zotero item, so they are Zotero writes and are gated as such. Turning write
+operations off therefore also stops Wiki reading notes — thirteen tools
+disappear from `tools/list`, not eleven.
+
 #### Collection mutation
 
 - `create_collection` — `name` (required), `parentCollection`, `libraryID`
