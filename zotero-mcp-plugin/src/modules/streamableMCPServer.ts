@@ -5159,8 +5159,17 @@ Nothing in this server returns a whole document in one response. Every reading t
             `[StreamableMCP] Created item ${item.key} (type: ${itemType})`,
           );
 
-          // Re-parent attachments if provided
+          // Re-parent attachments if provided.
+          //
+          // A key that names nothing, or names something that is not an
+          // attachment, used to be written to the log and skipped — and the
+          // response then said "Item created, 2 attachment(s) attached" while
+          // silently having dropped the third. The caller had no way to see
+          // it: the log is not part of the answer. Skipped keys are now
+          // reported with the reason, so the caller can fix them and call
+          // write_item(action: "reparent") for the remainder.
           const reparentedAttachments: string[] = [];
+          const skippedAttachments: Array<{ key: string; reason: string }> = [];
           if (attachmentKeys && Array.isArray(attachmentKeys)) {
             for (const attKey of attachmentKeys) {
               const attachment = await Zotero.Items.getByLibraryAndKeyAsync(
@@ -5172,6 +5181,10 @@ Nothing in this server returns a whole document in one response. Every reading t
                   `[StreamableMCP] Attachment not found in library ${libraryID}: ${attKey}`,
                   'warn',
                 );
+                skippedAttachments.push({
+                  key: attKey,
+                  reason: `not found in library ${libraryID}`,
+                });
                 continue;
               }
               if (!attachment.isAttachment()) {
@@ -5179,6 +5192,10 @@ Nothing in this server returns a whole document in one response. Every reading t
                   `[StreamableMCP] Item ${attKey} is not an attachment (type: ${attachment.itemType}), skipping`,
                   'warn',
                 );
+                skippedAttachments.push({
+                  key: attKey,
+                  reason: `not an attachment (itemType: ${attachment.itemType})`,
+                });
                 continue;
               }
               attachment.parentKey = item.key;
@@ -5200,11 +5217,12 @@ Nothing in this server returns a whole document in one response. Every reading t
               creatorsCount: creators?.length || 0,
               tagsCount: tags?.length || 0,
               reparentedAttachments,
+              ...(skippedAttachments.length > 0 ? { skippedAttachments } : {}),
               dateCreated: item.dateAdded,
             },
             metadata: {
               extractedAt: new Date().toISOString(),
-              message: `Item created (key: ${item.key}, type: ${itemType})${reparentedAttachments.length > 0 ? `, ${reparentedAttachments.length} attachment(s) attached` : ''}`,
+              message: `Item created (key: ${item.key}, type: ${itemType})${reparentedAttachments.length > 0 ? `, ${reparentedAttachments.length} attachment(s) attached` : ''}${skippedAttachments.length > 0 ? `, ${skippedAttachments.length} attachmentKey(s) SKIPPED: ${skippedAttachments.map((entry) => `${entry.key} (${entry.reason})`).join('; ')}` : ''}`,
             },
           };
         }
