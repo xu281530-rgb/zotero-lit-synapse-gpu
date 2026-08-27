@@ -859,9 +859,21 @@ Update metadata fields on items (title, abstract, date, DOI, creators, etc.).
 
 #### `write_item`
 
-Create new items or reparent existing attachments.
+Create new items, reparent existing attachments, or import a local file as an
+attachment.
 
-- `action` (required: create/reparent), `itemType`, `fields`, `creators`, `tags`, `attachmentKeys`, `parentKey`
+- `action` (required: create/reparent/import), `itemType`, `fields`, `creators`, `tags`, `attachmentKeys`, `parentKey`
+- import only: `filePath` (absolute path to the file), `parentItemKey` (the item to attach it to), `title` (defaults to the file name)
+
+`create` runs in a single transaction covering the new item and every
+`attachmentKeys` re-parenting, so a failure writes nothing and retrying cannot
+leave a duplicate item behind. Keys that name nothing, or name something that
+is not an attachment, do not abort the creation — they come back in
+`skippedAttachments` with the reason.
+
+`import` additionally requires the **Allow File Import** preference and fails
+without it; it is the path for "convert a PDF to Markdown, then attach the
+`.md` to the item".
 
 ---
 

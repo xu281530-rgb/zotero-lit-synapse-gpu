@@ -131,6 +131,12 @@ test("the catalog's own parameter names appear in at least one README", () => {
     "keyword_search",
     "get_document_chunks",
     "get_attachment_text",
+    // write_item's `import` action and its three parameters were shipped and
+    // never documented: both READMEs described the tool as create/reparent
+    // only. These two names exist nowhere else in the catalog, so they are a
+    // real check rather than a word that happens to appear in a code sample.
+    "filePath",
+    "parentItemKey",
   ]) {
     assert.ok(
       english.includes(marker),

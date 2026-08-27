@@ -898,17 +898,27 @@ Claim 只能建立在阅读总结已经涵盖的内容之上。该附件也被�
 
 #### `write_item`
 
-创建新的文献条目或重新关联附件。
+创建新的文献条目、重新关联附件，或把本机文件导入为附件。
 
-| 参数             | 类型     | 描述                                                      |
-| ---------------- | -------- | --------------------------------------------------------- |
-| `action`         | string   | **必需**：create（创建条目）/reparent（移动附件）         |
-| `itemType`       | string   | 条目类型（journalArticle/book/conferencePaper/thesis 等） |
-| `fields`         | object   | 元数据字段                                                |
-| `creators`       | array    | 作者列表                                                  |
-| `tags`           | string[] | 标签                                                      |
-| `attachmentKeys` | string[] | 要关联的独立附件 Key 列表                                 |
-| `parentKey`      | string   | reparent 操作的目标父条目 Key                             |
+| 参数             | 类型     | 描述                                                                 |
+| ---------------- | -------- | -------------------------------------------------------------------- |
+| `action`         | string   | **必需**：create（创建条目）/reparent（移动附件）/import（导入文件） |
+| `itemType`       | string   | 条目类型（journalArticle/book/conferencePaper/thesis 等）            |
+| `fields`         | object   | 元数据字段                                                           |
+| `creators`       | array    | 作者列表                                                             |
+| `tags`           | string[] | 标签                                                                 |
+| `attachmentKeys` | string[] | 要关联的独立附件 Key 列表                                            |
+| `parentKey`      | string   | reparent 操作的目标父条目 Key                                        |
+| `filePath`       | string   | import 专用：要导入文件的绝对路径                                    |
+| `parentItemKey`  | string   | import 专用：把文件挂到哪个条目下                                    |
+| `title`          | string   | import 专用：附件显示名，默认取文件名                                |
+
+`create` 的条目创建与全部 `attachmentKeys` 归属变更在同一个事务里完成，因此失败
+时一个字节都不会写入，重试也不会留下重复条目。找不到、或不是附件的 key 不会中止
+创建，它们会带着原因出现在返回的 `skippedAttachments` 里。
+
+`import` 还需要**允许文件导入**这项偏好处于开启状态，否则直接失败；它就是
+「把 PDF 转成 Markdown 再挂回条目」这条路要用的动作。
 
 ---
 
