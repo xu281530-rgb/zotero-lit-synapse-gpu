@@ -625,6 +625,44 @@ test("verification is never relaxed, and the message says so", () => {
   assert.ok(/verbatim by design and is not relaxed/.test(message), message);
 });
 
+test("Chinese splits into sentences, so two facts are not read as one", () => {
+  // Chinese puts no space after a full stop, and the whitespace rule was
+  // applied to the full-width marks too - so a whole paragraph came back as
+  // ONE sentence citing every chunk in it, and was refused as a fusion of
+  // chunks the note had never fused.
+  const body =
+    "该方法完全消除了缺失楔形伪影（chunk 12）。样品制备仍然困难（chunk 13）。";
+  const sentences = splitSentences(body);
+  assert.equal(sentences.length, 2, JSON.stringify(sentences));
+
+  const chunks = [
+    { chunkId: 12, text: "该方法可能有助于减弱缺失楔形伪影。" },
+    { chunkId: 13, text: "针状样品制备较为困难。" },
+  ];
+  const flagged = auditSynthesis(body, { chunks });
+  assert.equal(flagged.length, 1, JSON.stringify(flagged));
+  assert.deepEqual(flagged[0].citedChunks, [12], "one sentence, one chunk");
+  assert.ok(
+    flagged[0].reasons.includes("absolute-language"),
+    "完全消除 is still caught",
+  );
+  assert.ok(
+    !flagged[0].reasons.includes("multi-chunk-fusion"),
+    "nothing was fused; the splitter just could not see the boundary",
+  );
+});
+
+test("a closing bracket after a full-width stop stays with its sentence", () => {
+  assert.deepEqual(splitSentences("第一句。”第二句。"), ["第一句。”", "第二句。"]);
+});
+
+test("an English decimal point is still not a sentence boundary", () => {
+  assert.deepEqual(
+    splitSentences("The alloy is Ni-19.5 at.% Mo. It was homogenised."),
+    ["The alloy is Ni-19.5 at.% Mo.", "It was homogenised."],
+  );
+});
+
 test("a truncated flag list does not excuse the sentences it left out", () => {
   // More flagged sentences than one refusal can carry. The tail used to read
   // "... and N more sentence(s) in the same shape.", which invites a model to

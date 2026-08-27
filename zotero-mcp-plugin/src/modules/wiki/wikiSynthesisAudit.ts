@@ -403,6 +403,12 @@ function unmask(text: string, spans: string[]): string {
 const ABBREVIATION =
   /\b(?:e\.g|i\.e|cf|vs|approx|ca|Fig|Figs|Eq|Eqs|Ref|Refs|et\s+al|Dr|Prof|No|St|Inc|Ltd|at|wt|vol|mol)\.$/iu;
 
+/** Full-width terminators, which end a sentence with nothing after them. */
+const CJK_TERMINATORS = "。？！";
+
+/** Closing marks that belong to the sentence they follow, not the next one. */
+const TRAILING_CLOSERS = "”’」』）】》〉";
+
 /**
  * Split a block into sentences.
  *
@@ -410,6 +416,22 @@ const ABBREVIATION =
  * changes which text is quoted back in an error message, whereas an aggressive
  * split would cut "Ni-19.5 at.% Mo" in half and ask the model to justify a
  * fragment.
+ *
+ * THE WHITESPACE RULE IS FOR ASCII ONLY, and applying it to `。？！` meant
+ * Chinese never split at all: Chinese does not put a space after a full stop,
+ * so an entire paragraph came back as one "sentence". That was not a cosmetic
+ * difference. Two independent Chinese sentences citing two different chunks
+ * were read as ONE sentence citing both, flagged as `multi-chunk-fusion` -
+ * "you fused two chunks into a relationship neither states" - which the note
+ * had not done, and whose stated remedy, "split the sentence", was already
+ * satisfied. Satisfying that gate then meant quoting every chunk a whole
+ * paragraph cited, and echoing the paragraph back verbatim as the `sentence`.
+ * A note written in Chinese met a harder gate than the same note in English,
+ * for a reason that had nothing to do with what it said.
+ *
+ * The full-width marks need no whitespace rule: they are not decimal points
+ * and they do not end abbreviations, so they are unambiguous wherever they
+ * appear.
  */
 export function splitSentences(block: string): string[] {
   const { masked, spans } = maskSpans(String(block ?? ""));
@@ -419,12 +441,23 @@ export function splitSentences(block: string): string[] {
     const character = masked[index];
     current += character;
     if (!".?!。？！".includes(character)) continue;
-    const next = masked.slice(index + 1);
-    if (!/^\s|^$/u.test(next)) continue;
-    const trimmed = current.trimEnd();
-    if (ABBREVIATION.test(trimmed)) continue;
-    // A decimal point, or a numbered list marker, inside the text.
-    if (/\d\.$/u.test(trimmed) && /^\s*\d/u.test(next)) continue;
+    if (CJK_TERMINATORS.includes(character)) {
+      // A closing quote or bracket after the stop closes THIS sentence.
+      while (
+        index + 1 < masked.length &&
+        TRAILING_CLOSERS.includes(masked[index + 1])
+      ) {
+        index += 1;
+        current += masked[index];
+      }
+    } else {
+      const next = masked.slice(index + 1);
+      if (!/^\s|^$/u.test(next)) continue;
+      const trimmed = current.trimEnd();
+      if (ABBREVIATION.test(trimmed)) continue;
+      // A decimal point, or a numbered list marker, inside the text.
+      if (/\d\.$/u.test(trimmed) && /^\s*\d/u.test(next)) continue;
+    }
     const sentence = current.trim();
     if (sentence) out.push(unmask(sentence, spans));
     current = "";
