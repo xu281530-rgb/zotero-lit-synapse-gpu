@@ -1949,6 +1949,14 @@ export class WikiService {
           totalChunks: coverage.totalChunks,
         });
         assertBlockCitations(record);
+        if (options.readingRecord !== undefined) {
+          const recordChunks = new Set(recordChunkIds);
+          assertSynthesisEvidenceClosure(
+            record,
+            readable.filter((chunk) => recordChunks.has(chunk.chunkId)),
+            options.synthesisAudit ?? [],
+          );
+        }
       }
       body = appendReadingRecord(previousBody, {
         chunkIds: recordChunkIds,
@@ -2183,6 +2191,15 @@ export class WikiService {
         totalChunks: documentChunks.length,
       });
       assertBlockCitations(record);
+      if (options.readingRecord !== undefined) {
+        assertSynthesisEvidenceClosure(
+          record,
+          citableChunks.filter((chunk) =>
+            currentAddresses.has(chunk.chunkId),
+          ),
+          options.synthesisAudit ?? [],
+        );
+      }
     }
     const body = appendReadingRecord(previousBody, {
       chunkIds: options.readChunkIds,

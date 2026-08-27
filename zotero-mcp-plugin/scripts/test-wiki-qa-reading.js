@@ -84,6 +84,7 @@ const indexedChunks = new Map([
   ["ABSTONLY", chunksFor("ABSTONLY", 2, 4000)],
   ["PAPERFIV", chunksFor("PAPERFIV", TINY, 5000)],
   ["HOLEPAPR", chunksFor("HOLEPAPR", SHORT, 6000)],
+  ["AUDITPAP", chunksFor("AUDITPAP", 2, 7000)],
 ]);
 
 for (const key of indexedChunks.keys()) {
@@ -537,6 +538,48 @@ block("a note without chunk citations cannot be saved at all", async () => {
     /cites no chunk/u,
     "a fact with no chunk number is a fact that can never become Evidence",
   );
+});
+
+block("each new reading record is audited against this turn's chunks", async () => {
+  await assert.rejects(
+    () =>
+      service.updateReadingNote({
+        libraryID: 1,
+        itemKey: "AUDITPAP",
+        readChunkIds: [chunkId("AUDITPAP", 0)],
+        domain: "physical metallurgy",
+        expertRole: "solidification specialist",
+        readingRecord:
+          "The method completely eliminates every melt-pool depth error (chunk 0).",
+      }),
+    (error) =>
+      error.name === "WikiSynthesisAuditRequired" &&
+      /absolute-language/u.test(error.message),
+  );
+
+  const sessions = await store.readingSessions();
+  const rejected = await sessions.openForItem(1, "AUDITPAP");
+  assert.equal(
+    (await sessions.coverage(rejected.sessionId)).deliveredChunks,
+    0,
+    "a rejected record books no reading",
+  );
+
+  const accepted = await service.updateReadingNote({
+    libraryID: 1,
+    itemKey: "AUDITPAP",
+    readChunkIds: [chunkId("AUDITPAP", 0)],
+    domain: "physical metallurgy",
+    expertRole: "solidification specialist",
+    readingRecord:
+      "The paper reports melt-pool depth under an imposed gradient at the first station (chunk 0).",
+  });
+  assert.deepEqual(accepted.reading.newChunks, [0]);
+  await service.finishReading({
+    libraryID: 1,
+    itemKey: "AUDITPAP",
+    outcome: "skipped",
+  });
 });
 
 // =========================================================================
