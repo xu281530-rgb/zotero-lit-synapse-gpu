@@ -1882,10 +1882,35 @@ export class WikiService {
             "does not change the account is itself part of understanding the paper.",
         );
       }
-      if (!String(options.unchangedReason ?? "").trim()) {
+      // The same two checks a SKIP write-off gets, for the same reason and in
+      // the same order. `unchanged` writes off a whole delivered batch without
+      // a line of text being added anywhere, so "the easiest thing to say when
+      // nothing was read" is exactly the answer it has to exclude - and it had
+      // no floor at all: any non-blank string, "." included, closed the batch.
+      const unchangedReason = String(options.unchangedReason ?? "").trim();
+      if (!unchangedReason) {
         throw new Error(
           'unchangedReason is required with unchanged: say what was in the batch (references, ' +
             "acknowledgements, a repeated figure caption) that leaves the account of the paper intact.",
+        );
+      }
+      if (VACUOUS_WRITE_OFF_REASON.test(unchangedReason)) {
+        throw new Error(
+          `The unchanged reason asserts rather than argues: "${unchangedReason}". "Nothing new" is ` +
+            "exactly what a reader who did not read the batch would also say, so it cannot write one " +
+            "off. Name what was actually in those chunks and why the account of the paper is complete " +
+            'without it - for example "the batch is the reference list and the acknowledgements; no ' +
+            'method, result or condition appears in it".',
+        );
+      }
+      if (unchangedReason.length < WIKI_WRITE_OFF_MIN_REASON_CHARS) {
+        throw new Error(
+          `The unchanged reason is ${unchangedReason.length} characters; at least ` +
+            `${WIKI_WRITE_OFF_MIN_REASON_CHARS} are needed. This batch is being recorded as read while ` +
+            "nothing is written down about it, so the reason is the only thing that will ever say what " +
+            "was in it. Name the section and what it contains, and say why the account of the paper is " +
+            "already complete without it. If that is hard to write, the batch probably did change " +
+            "something - send the rewritten note instead.",
         );
       }
       body = previousBody;

@@ -575,6 +575,31 @@ block('"unchanged" is real slack but cannot become the habit', async () => {
     () => service.updateReadingNote({ libraryID: 1, unchanged: true }),
     /unchangedReason is required/iu,
   );
+  // The reflex answer, and the one-word answer. `unchanged` writes off a whole
+  // delivered batch with nothing written down about it, so the reason is the
+  // only record of what was in it - and it used to accept any non-blank
+  // string, "." included, while the SKIP write-off next door refused exactly
+  // these two shapes.
+  await assert.rejects(
+    () =>
+      service.updateReadingNote({
+        libraryID: 1,
+        unchanged: true,
+        unchangedReason: "Nothing new",
+      }),
+    /asserts rather than argues/iu,
+    "the reflex answer cannot write off a batch",
+  );
+  await assert.rejects(
+    () =>
+      service.updateReadingNote({
+        libraryID: 1,
+        unchanged: true,
+        unchangedReason: "References only.",
+      }),
+    /at least 40/u,
+    "a reason too short to name what was in the batch is refused",
+  );
   const skipped = await service.updateReadingNote({
     libraryID: 1,
     unchanged: true,

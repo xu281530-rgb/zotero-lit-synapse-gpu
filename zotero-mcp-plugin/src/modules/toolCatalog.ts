@@ -1646,7 +1646,7 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'NO FIXED TEMPLATE. Structure it as this paper deserves, but keep what a reader would need to reproduce the work: research question, materials and objects, the full method chain, models/equations and their parameters, experimental conditions, key results, mechanisms, variable relationships, validation, contribution, scope and limits. Do not compress the method chain into a summary sentence.',
       '',
-      'unchanged: true (with unchangedReason) records that a batch — references, acknowledgements, a repeated caption — leaves the account intact. It cannot be used twice in a row and cannot be used for the final synthesis.',
+      'unchanged: true (with unchangedReason) records that a batch — references, acknowledgements, a repeated caption — leaves the account intact. It cannot be used twice in a row and cannot be used for the final synthesis. unchangedReason is held to the same standard as a wiki_commit SKIP reason, and for the same reason: it writes off a delivered batch with nothing written down about it, so it must name what was in those chunks and why the paper\'s account is complete without them. "Nothing new", and anything under 40 characters, is refused.',
       '',
       'CITE PER BLOCK, NOT PER DOCUMENT. Every paragraph and every bullet that states a fact, a parameter, a result, a mechanism or a conclusion names the chunk it came from. One citation somewhere in the note no longer satisfies this. The number also has to resolve: a chunk this paper actually has, and one this reading has actually been given. Cite the number the page reported — chunkIndex and chunkId are both accepted.',
       '',
@@ -1678,7 +1678,7 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         unchangedReason: {
           type: 'string',
-          description: 'What was in the batch that changes nothing.'
+          description: 'What was in the batch that changes nothing. It has to ARGUE, not assert: name the section and what it contains, and say why the account of the paper is already complete without it. "Nothing new" and its equivalents are refused, as is anything under 40 characters — this batch is being recorded as read while nothing is written down about it, so this sentence is the only thing that will ever say what was in it. If that is hard to write, the batch probably did change something: send the rewritten note instead.'
         },
         finalSynthesis: {
           type: 'boolean',
