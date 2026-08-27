@@ -5153,22 +5153,19 @@ Nothing in this server returns a whole document in one response. Every reading t
             }
           }
 
-          await item.saveTx();
-
-          ztoolkit.log(
-            `[StreamableMCP] Created item ${item.key} (type: ${itemType})`,
-          );
-
-          // Re-parent attachments if provided.
+          // --- PREFLIGHT: resolve every attachment key before anything is
+          // written. Read-only, and deliberately outside the transaction: a
+          // lookup that has to hit the database from inside one would be
+          // deciding what to write while already half-writing it.
           //
           // A key that names nothing, or names something that is not an
-          // attachment, used to be written to the log and skipped — and the
-          // response then said "Item created, 2 attachment(s) attached" while
-          // silently having dropped the third. The caller had no way to see
-          // it: the log is not part of the answer. Skipped keys are now
-          // reported with the reason, so the caller can fix them and call
-          // write_item(action: "reparent") for the remainder.
-          const reparentedAttachments: string[] = [];
+          // attachment, is reported rather than fatal — it costs the caller
+          // one `write_item(action: "reparent")` to fix, and aborting the
+          // whole creation over it would throw away metadata that is
+          // perfectly good. What it must never do is vanish: the response
+          // used to say "Item created, 2 attachment(s) attached" for a call
+          // that passed three, and the log is not part of the answer.
+          const reparentTargets: Array<{ key: string; attachment: any }> = [];
           const skippedAttachments: Array<{ key: string; reason: string }> = [];
           if (attachmentKeys && Array.isArray(attachmentKeys)) {
             for (const attKey of attachmentKeys) {
@@ -5198,14 +5195,38 @@ Nothing in this server returns a whole document in one response. Every reading t
                 });
                 continue;
               }
-              attachment.parentKey = item.key;
-              await attachment.saveTx();
-              reparentedAttachments.push(attKey);
-              ztoolkit.log(
-                `[StreamableMCP] Re-parented attachment ${attKey} under ${item.key}`,
-              );
+              reparentTargets.push({ key: attKey, attachment });
             }
           }
+
+          // --- COMMIT: the new item and every re-parenting in ONE
+          // transaction.
+          //
+          // This used to be `item.saveTx()` followed by one `saveTx()` per
+          // attachment, so "failed" did not mean "nothing happened". An
+          // attachment that failed to save left the new item standing, and
+          // several attachments meant some were moved and some were not — a
+          // state the response never described. The caller or the model then
+          // retried the same create and got a SECOND copy of the item, which
+          // is how a fix for a failure became a duplicate record.
+          //
+          // With one transaction a failure rolls the item back too, so
+          // retrying is safe and cannot duplicate anything.
+          await Zotero.DB.executeTransaction(async () => {
+            await item.save();
+            for (const target of reparentTargets) {
+              target.attachment.parentKey = item.key;
+              await target.attachment.save();
+            }
+          });
+
+          const reparentedAttachments = reparentTargets.map(
+            (target) => target.key,
+          );
+
+          ztoolkit.log(
+            `[StreamableMCP] Created item ${item.key} (type: ${itemType}) with ${reparentedAttachments.length} re-parented attachment(s)${skippedAttachments.length > 0 ? `, ${skippedAttachments.length} skipped` : ''}`,
+          );
 
           return {
             action: 'create',
@@ -5388,8 +5409,19 @@ Nothing in this server returns a whole document in one response. Every reading t
     } catch (error) {
       ztoolkit.log(`[StreamableMCP] Write item error: ${error}`, 'error');
       return {
+        action,
         success: false,
         error: String(error),
+        // Only `create` can promise this, and it can promise it absolutely:
+        // the item and every re-parenting share one transaction. Saying so is
+        // what makes a retry safe — the previous behaviour left the new item
+        // behind on failure, so retrying produced a duplicate.
+        ...(action === 'create'
+          ? {
+              applied: false,
+              note: 'The item and its attachment re-parenting run in a single transaction, so this failure wrote nothing at all. No item was created; it is safe to fix the arguments and call again.',
+            }
+          : {}),
       };
     }
   }

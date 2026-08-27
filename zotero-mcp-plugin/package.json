@@ -119,6 +119,7 @@
     "test:deep-dive": "node --experimental-strip-types scripts/test-deep-dive.js",
     "test:semantic-autoupdate": "node scripts/test-semantic-autoupdate.js",
     "test:mineru-prefs": "node scripts/test-mineru-pref-persistence.js",
+    "test:write-item-atomicity": "node scripts/test-write-item-atomicity.js",
     "update-deps": "npm update --save"
   },
   "dependencies": {
