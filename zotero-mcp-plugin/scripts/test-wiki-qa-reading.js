@@ -712,6 +712,46 @@ block("complete question reading can append a macro summary after expert reset",
     prepared.wikiReconciliation.requiredClaimActions.map((row) => row.action),
     ["UPDATE_CLAIM", "MARK_CONFLICT"],
   );
+  await assert.rejects(
+    () =>
+      service.commit({
+        libraryID: 1,
+        userInitiated: true,
+        prepareToken: prepared.prepareToken,
+        actions: [],
+      }),
+    /UPDATE_CLAIM.*MARK_CONFLICT/s,
+    "reviewed reconciliation actions cannot be omitted from commit",
+  );
+  await service.commit({
+    libraryID: 1,
+    userInitiated: true,
+    prepareToken: prepared.prepareToken,
+    actions: [
+      {
+        action: "UPDATE_CLAIM",
+        claimId: firstClaim.claimId,
+        expectedVersion: firstClaim.version,
+        claimText: replacement,
+        evidence: [evidenceFrom("QASUMMRY", 0)],
+      },
+      {
+        action: "MARK_CONFLICT",
+        claimId: secondClaim.claimId,
+        evidence: [
+          {
+            ...evidenceFrom("QASUMMRY", 1),
+            evidenceRole: "CONTRADICTS",
+          },
+        ],
+      },
+    ],
+  });
+  assert.equal((await store.getClaim(firstClaim.claimId)).claimText, replacement);
+  assert.equal(
+    (await store.getClaim(secondClaim.claimId)).epistemicStatus,
+    "disputed",
+  );
   await service.finishReading({
     libraryID: 1,
     itemKey: "QASUMMRY",

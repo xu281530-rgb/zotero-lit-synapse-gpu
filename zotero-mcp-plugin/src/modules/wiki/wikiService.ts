@@ -341,6 +341,8 @@ export class WikiService {
       libraryID: number;
       expiresAt: number;
       preparedPageTitles: Set<string>;
+      /** Reading whose paper-based reconciliation this prepare call reviewed. */
+      reconciliationSessionId?: number;
       /** A commit holding this token is running; a second one must not start. */
       inFlight?: boolean;
     }
@@ -501,6 +503,9 @@ export class WikiService {
       libraryID: options.libraryID,
       expiresAt: Date.now() + 10 * 60 * 1000,
       preparedPageTitles: new Set(proposedPageTitles.map(normalizeWikiName)),
+      ...(openSession && openSession.wikiReviewAt !== null
+        ? { reconciliationSessionId: openSession.sessionId }
+        : {}),
     });
     return {
       ...exactCandidates,
@@ -1307,6 +1312,72 @@ export class WikiService {
     return { actions: hydrated, warnings };
   }
 
+  /** Enforce the action policy recorded by the completed paper review. */
+  private async assertRequiredReconciliationActions(
+    input: WikiCommitInput,
+  ): Promise<void> {
+    const sessions = await this.store.readingSessions();
+    const prepared = input.prepareToken
+      ? this.prepareTokens.get(input.prepareToken)
+      : undefined;
+    let session = prepared?.reconciliationSessionId
+      ? await sessions.get(prepared.reconciliationSessionId)
+      : input.readingSessionId
+        ? await sessions.get(input.readingSessionId)
+        : null;
+
+    if (!session) {
+      const reviewed = (await sessions.listOpen(input.libraryID)).filter(
+        (candidate) =>
+          candidate.state === "prepared" && candidate.wikiReviewAt !== null,
+      );
+      if (reviewed.length > 1) {
+        throw new Error(
+          "Several reviewed papers are prepared in this library. Pass the prepareToken returned by the paper's wiki_prepare_update call so reconciliation actions are checked against the correct paper.",
+        );
+      }
+      session = reviewed[0] ?? null;
+    }
+    if (!session?.wikiReview) return;
+
+    const missing: string[] = [];
+    for (const verdict of session.wikiReview.claimVerdicts ?? []) {
+      if (verdict.verdict === "overstated") {
+        const replacement = String(verdict.replacementClaimText ?? "").trim();
+        const matched = input.actions.some(
+          (action) =>
+            action.action === "UPDATE_CLAIM" &&
+            Number(action.claimId) === verdict.claimId &&
+            String(action.claimText ?? "").trim() === replacement &&
+            Boolean(action.evidence?.length),
+        );
+        if (!matched) {
+          missing.push(
+            `UPDATE_CLAIM for Claim ${verdict.claimId} using the reviewed replacementClaimText and supporting Evidence`,
+          );
+        }
+      }
+      if (verdict.verdict === "contradicted") {
+        const matched = input.actions.some(
+          (action) =>
+            action.action === "MARK_CONFLICT" &&
+            Number(action.claimId) === verdict.claimId &&
+            Boolean(action.evidence?.length),
+        );
+        if (!matched) {
+          missing.push(
+            `MARK_CONFLICT for Claim ${verdict.claimId} with the contradicting Evidence`,
+          );
+        }
+      }
+    }
+    if (missing.length) {
+      throw new Error(
+        `The completed review of ${session.itemKey} requires these reconciliation actions before the commit can proceed: ${missing.join("; ")}.`,
+      );
+    }
+  }
+
   async commit(
     input: WikiCommitInput,
     options: WikiNoteStatusWriteOptions = {},
@@ -1369,6 +1440,7 @@ export class WikiService {
     let result: WikiCommitResult;
     let writeOffs: WikiWikiWriteOff[];
     try {
+      await this.assertRequiredReconciliationActions(input);
       // Both before the transaction: a write-off whose reason does not argue,
       // or whose chunks owe nothing, must fail the commit rather than let the
       // Claims land while the debt it was meant to settle quietly survives.
