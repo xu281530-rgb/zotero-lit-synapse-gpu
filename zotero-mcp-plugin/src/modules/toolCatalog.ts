@@ -680,7 +680,7 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'MOVE MEANS MOVE. After this call each item is filed in exactly one place: toCollectionKey. If the user wants a document to stay in several folders — a paper that genuinely belongs to both a project and a reading list — do NOT use this tool for it; use add_items_to_collection, which leaves existing filings alone.',
       '',
-      'ALL OR NOTHING. Every key is checked before anything is written: items that do not exist, items in the trash, and child notes or attachments (which cannot be filed in a collection at all) abort the whole batch. Nothing is written, the response names the offending keys, and you fix or drop them and call again. The write itself runs in one transaction, so a failure mid-way leaves the library untouched rather than half-reorganised.',
+      'ALL OR NOTHING. Every key is checked before anything is written: items that do not exist, items in the trash, and child notes or attachments (which cannot be filed in a collection at all) abort the whole batch. Nothing is written, and the call comes back as a tool ERROR — not as a result you have to inspect — whose message names every offending key and why it was refused. Fix or drop them and call again. The write itself runs in one transaction, so a failure mid-way leaves the library untouched rather than half-reorganised.',
       '',
       'ALWAYS DRY RUN FIRST on a batch you have not shown the user. dryRun: true runs the identical preflight and returns the identical plan — which items, which filings each one loses — without writing anything and without prompting the user. Show them that plan, get their agreement, then repeat the call without dryRun.',
       '',
@@ -704,7 +704,7 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         dryRun: {
           type: 'boolean',
-          description: 'When true, validate and return the plan without writing anything and without prompting the user. Use it to show the user what a batch would do before doing it.'
+          description: 'When true, validate and return the plan without writing anything and without prompting the user. Use it to show the user what a batch would do before doing it. A dry run whose preflight fails fails the same way the real call would - as a tool error naming the offending keys - because there is no plan to show.'
         },
       },
       required: ['toCollectionKey', 'itemKeys'],
@@ -720,9 +720,9 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'CHOOSING THE SURVIVOR. Omit masterItemKey and the most complete record wins — DOI, abstract and venue weigh most, then creators and attachments, with ties broken by how widely the record is filed and then by which was added first, so the same batch always plans the same way. The plan states which record won and on what grounds. Pass masterItemKey to override it for a group.',
       '',
-      'ALL OR NOTHING AT THE PREFLIGHT. Missing items, trashed items, child notes or attachments, a group of fewer than two distinct items, a group mixing item types (Zotero cannot merge those), a master that is not in its own group, or one key appearing in two groups — any of these rejects the WHOLE batch with nothing written.',
+      'ALL OR NOTHING AT THE PREFLIGHT. Missing items, trashed items, child notes or attachments, a group of fewer than two distinct items, a group mixing item types (Zotero cannot merge those), a master that is not in its own group, or one key appearing in two groups — any of these rejects the WHOLE batch with nothing written. That comes back as a tool ERROR, not as a result you have to inspect, and its message names the group and the reason for every problem it found.',
       '',
-      'PARTIAL APPLICATION IS POSSIBLE AFTER PREFLIGHT, unlike move_items_to_collection. Each group is merged atomically on its own, so a failure part-way through leaves earlier groups fully merged; the response then reports applied: "partial" and names them. Re-request the remainder.',
+      'PARTIAL APPLICATION IS POSSIBLE AFTER PREFLIGHT, unlike move_items_to_collection. Each group is merged atomically on its own, so a failure part-way through leaves earlier groups fully merged. That is NOT an error — real work was done and the receipt is the answer: the response reports applied: "partial", lists mergedGroups, and names the group it stopped at. Re-request the remainder.',
       '',
       'ALWAYS DRY RUN FIRST. dryRun: true runs the identical preflight and returns the identical plan — survivor, reason, what each losing record contributes — writing nothing and raising no confirmation prompt. Merging is the one operation here that is genuinely hard to undo: show the user the plan and get agreement before running it for real.',
     ].join('\n'),
@@ -754,7 +754,7 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         dryRun: {
           type: 'boolean',
-          description: 'When true, validate and return the plan without merging anything and without prompting the user.'
+          description: 'When true, validate and return the plan without merging anything and without prompting the user. A dry run whose preflight fails fails the same way the real call would - as a tool error naming the problems - because there is no plan to show.'
         },
       },
       required: ['groups'],

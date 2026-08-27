@@ -3452,6 +3452,39 @@ Nothing in this server returns a whole document in one response. Every reading t
     );
   }
 
+  /**
+   * A rejected preflight is a FAILED tool call, and it still has to say why.
+   *
+   * These two tools answer a rejected batch with HTTP 422 and a body that
+   * names every offending key. Returning that body verbatim made the call a
+   * SUCCESSFUL MCP result that happened to contain the word "rejected": a
+   * model usually read it, but a client, an auto-retry loop or a workflow
+   * engine did not, and moved on as though the library had been reorganised.
+   *
+   * Throwing is the fix, but throwing a bare sentence would trade one failure
+   * for another - the useful half of a rejected preflight IS the list of keys,
+   * and the tool descriptions promise it. So the lists are folded into the
+   * error message, the same way CollectionBrowserError folds its ambiguous
+   * path candidates in.
+   *
+   * 207 is deliberately NOT an error: merge_items applies each group
+   * atomically, so a partial batch has really merged the groups it names and
+   * the receipt is the answer. Only 4xx/5xx, where nothing was written, throw.
+   */
+  private assertBatchPreflightPassed(
+    response: any,
+    result: any,
+    toolName: string,
+    detail: string[],
+  ): void {
+    const status = typeof response?.status === 'number' ? response.status : 200;
+    if (status < 400) return;
+    const headline =
+      (result && typeof result === 'object' && result.error) ||
+      `${toolName} failed with HTTP ${status}`;
+    throw new Error([headline, ...detail.filter(Boolean)].join(' '));
+  }
+
   private async callMergeItems(args: any): Promise<any> {
     const { groups, libraryID, dryRun } = args;
     const response = await handleMergeItems({
@@ -3462,7 +3495,21 @@ Nothing in this server returns a whole document in one response. Every reading t
       libraryID,
       dryRun: dryRun === true,
     });
-    return response.body ? JSON.parse(response.body) : response;
+    const result = response.body ? JSON.parse(response.body) : response;
+    this.assertBatchPreflightPassed(response, result, 'merge_items', [
+      Array.isArray(result?.problems) && result.problems.length > 0
+        ? `Problems: ${result.problems
+            .map(
+              (problem: any) =>
+                `group ${Number(problem?.groupIndex ?? 0) + 1}${problem?.itemKey ? ` / ${problem.itemKey}` : ''}: ${problem?.reason ?? 'rejected'}`,
+            )
+            .join('; ')}.`
+        : '',
+      typeof result?.wouldHaveMerged === 'number'
+        ? `${result.wouldHaveMerged} group(s) would have merged; none did.`
+        : '',
+    ]);
+    return result;
   }
 
   private async callMoveItemsToCollection(args: any): Promise<any> {
@@ -3471,7 +3518,29 @@ Nothing in this server returns a whole document in one response. Every reading t
       { 1: toCollectionKey },
       { itemKeys, libraryID, dryRun: dryRun === true },
     );
-    return response.body ? JSON.parse(response.body) : response;
+    const result = response.body ? JSON.parse(response.body) : response;
+    this.assertBatchPreflightPassed(
+      response,
+      result,
+      'move_items_to_collection',
+      [
+        Array.isArray(result?.notFound) && result.notFound.length > 0
+          ? `No such item: ${result.notFound.join(', ')}.`
+          : '',
+        Array.isArray(result?.notFilable) && result.notFilable.length > 0
+          ? `Cannot be filed in a collection: ${result.notFilable
+              .map(
+                (entry: any) =>
+                  `${entry?.itemKey} (${entry?.reason ?? 'not filable'})`,
+              )
+              .join('; ')}.`
+          : '',
+        typeof result?.wouldHaveMoved === 'number'
+          ? `${result.wouldHaveMoved} of the keys you passed were movable; none moved.`
+          : '',
+      ],
+    );
+    return result;
   }
 
   /**
