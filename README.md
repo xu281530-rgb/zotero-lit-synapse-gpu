@@ -838,6 +838,13 @@ Create or modify Zotero notes. Supports Markdown auto-conversion to HTML.
 
 - `action` (required: create/update/append), `parentKey`, `noteKey`, `content` (required), `tags`
 
+`content` is required and must be a string; omitting it and passing an empty
+string are different things. An empty string means ERASE and is accepted only
+by `update`, where it clears the note and the response reports `cleared: true`
+with the number of characters erased (the note item itself stays — delete it in
+Zotero if it should be gone). `create` and `append` refuse empty content,
+because there it can only mean the content generation came back empty.
+
 #### `write_tag`
 
 Add, remove, or replace tags on items.

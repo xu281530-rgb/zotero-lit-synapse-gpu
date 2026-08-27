@@ -1766,7 +1766,7 @@ export function buildToolCatalog(): ToolDefinition[] {
   {
     name: 'write_note',
     category: 'write',
-    description: 'Create or modify Zotero notes. Supports child notes (attached to items), standalone notes, updating, or appending. Markdown is auto-converted to HTML. Confirm with user before writing.',
+    description: 'Create or modify Zotero notes. Supports child notes (attached to items), standalone notes, updating, or appending. Markdown is auto-converted to HTML. Confirm with user before writing. EMPTY CONTENT IS AN ERASE, and only action "update" accepts it: passing "" there clears the note (the note itself remains — delete it in Zotero if it should be gone), and the response reports cleared: true with how many characters were erased. create and append refuse empty content, because there it can only mean your content generation came back empty.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1789,7 +1789,7 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         content: {
           type: 'string',
-          description: 'Note content in HTML or Markdown format. Markdown is auto-converted to HTML for Zotero storage.'
+          description: 'Note content in HTML or Markdown format. Markdown is auto-converted to HTML for Zotero storage. Required, and a string: omitting it is an error, and so is passing a number. An EMPTY string is a value rather than an omission and means "erase" — accepted only by action "update", refused by create and append. Whitespace-only counts as empty.'
         },
         tags: {
           type: 'array',

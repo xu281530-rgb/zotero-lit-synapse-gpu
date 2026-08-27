@@ -402,6 +402,16 @@ function describeMutation(toolName: string, args: any): string {
         : 'items stay in the library (deleteItems: false)',
     );
   }
+  // An update whose content is empty is an ERASE, and the prompt for it used
+  // to be indistinguishable from the prompt for a rewrite.
+  if (
+    toolName === 'write_note' &&
+    args?.action === 'update' &&
+    typeof args?.content === 'string' &&
+    args.content.trim().length === 0
+  ) {
+    parts.push("CLEARS THE NOTE — its current content is erased");
+  }
   return parts.length > 0 ? parts.join(', ') : 'no additional parameters';
 }
 
@@ -1530,8 +1540,17 @@ Nothing in this server returns a whole document in one response. Every reading t
               'Write operations are currently disabled. Please go to Zotero → Tools → Add-ons → Zotero MCP Plugin → Preferences, and enable "Write Operations" to use this feature.',
             );
           }
-          if (!args?.action || !args?.content) {
-            throw new Error('action and content are required');
+          if (!args?.action) {
+            throw new Error('action is required');
+          }
+          // `!args.content` conflated "you did not pass content" with "you
+          // passed an empty note", and the second one is a real request: it is
+          // the only way to say "empty this note". Missing is missing; empty
+          // is a value, and which actions accept it is callWriteNote's rule.
+          if (typeof args.content !== 'string') {
+            throw new Error(
+              `content is required and must be a string. Received ${args.content === undefined ? 'nothing' : typeof args.content}. To ERASE a note's content, pass an empty string with action "update" — that is a deliberate clear, and it is not the same as leaving the parameter out.`,
+            );
           }
           result = await this.callWriteNote(args);
           break;
@@ -4783,6 +4802,21 @@ Nothing in this server returns a whole document in one response. Every reading t
 
   /**
    * Handle write_note tool calls: create, update, append notes
+   *
+   * EMPTY CONTENT MEANS ONE THING, AND ONLY FOR ONE ACTION. Emptying a note is
+   * a real thing a user asks for, and it used to be impossible to express: the
+   * dispatch tested `!args.content`, so `""` came back as "action and content
+   * are required" — the message for a parameter that was never sent. The tool
+   * schema never said content had to be non-empty, so the refusal looked like
+   * a bug rather than a rule.
+   *
+   * It is now a value rather than an omission, but only `update` accepts it,
+   * because only there does it mean something. Empty content on `create` would
+   * leave an empty note in the library and on `append` would change nothing at
+   * all; in both cases the only realistic way to arrive there is a caller
+   * whose content generation came back empty, and failing loudly is the
+   * useful answer. Whitespace-only counts as empty, because that is what
+   * markdownToNoteHtml already reduces it to.
    */
   private async callWriteNote(args: any): Promise<any> {
     const {
@@ -4796,9 +4830,16 @@ Nothing in this server returns a whole document in one response. Every reading t
 
     try {
       const htmlContent = this.markdownToNoteHtml(content);
+      const isEmptyContent =
+        typeof content !== 'string' || content.trim().length === 0;
 
       switch (action) {
         case 'create': {
+          if (isEmptyContent) {
+            throw new Error(
+              'content is empty, so there is nothing to create. An empty string is only meaningful with action "update", where it erases an existing note. If your content generation returned nothing, that is the problem to fix.',
+            );
+          }
           const note = new Zotero.Item('note');
           note.libraryID = libraryID;
 
@@ -4872,6 +4913,11 @@ Nothing in this server returns a whole document in one response. Every reading t
             throw new Error(`Item ${noteKey} is not a note`);
           }
 
+          // What was there before, so the receipt can say what an erase
+          // actually erased. A caller that cleared a note by mistake needs to
+          // learn it from the answer, not from the note later looking empty.
+          const previousLength = (existingNote.getNote() || '').length;
+
           existingNote.setNote(htmlContent);
 
           if (tags && Array.isArray(tags)) {
@@ -4882,7 +4928,9 @@ Nothing in this server returns a whole document in one response. Every reading t
 
           await existingNote.saveTx();
 
-          ztoolkit.log(`[StreamableMCP] Updated note ${noteKey}`);
+          ztoolkit.log(
+            `[StreamableMCP] ${isEmptyContent ? 'Cleared' : 'Updated'} note ${noteKey} (was ${previousLength} chars)`,
+          );
 
           return {
             action: 'update',
@@ -4891,12 +4939,17 @@ Nothing in this server returns a whole document in one response. Every reading t
               noteKey,
               contentPreview: content.substring(0, 200),
               contentLength: content.length,
+              ...(isEmptyContent
+                ? { cleared: true, previousContentLength: previousLength }
+                : {}),
               tags: existingNote.getTags().map((t: any) => t.tag),
               dateModified: existingNote.dateModified,
             },
             metadata: {
               extractedAt: new Date().toISOString(),
-              message: `Note ${noteKey} updated successfully`,
+              message: isEmptyContent
+                ? `Note ${noteKey} CLEARED: ${previousLength} characters of content were erased. The note itself still exists; delete it in Zotero if it should be gone entirely.`
+                : `Note ${noteKey} updated successfully`,
             },
           };
         }
@@ -4904,6 +4957,11 @@ Nothing in this server returns a whole document in one response. Every reading t
         case 'append': {
           if (!noteKey) {
             throw new Error('noteKey is required for append action');
+          }
+          if (isEmptyContent) {
+            throw new Error(
+              'content is empty, so there is nothing to append and the note would be saved unchanged. An empty string is only meaningful with action "update", where it erases the note.',
+            );
           }
 
           const existingNote = await Zotero.Items.getByLibraryAndKeyAsync(

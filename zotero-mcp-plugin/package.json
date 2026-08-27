@@ -121,6 +121,7 @@
     "test:mineru-prefs": "node scripts/test-mineru-pref-persistence.js",
     "test:write-item-atomicity": "node scripts/test-write-item-atomicity.js",
     "test:batch-preflight-errors": "node scripts/test-batch-preflight-errors.js",
+    "test:write-note-empty-content": "node scripts/test-write-note-empty-content.js",
     "update-deps": "npm update --save"
   },
   "dependencies": {
