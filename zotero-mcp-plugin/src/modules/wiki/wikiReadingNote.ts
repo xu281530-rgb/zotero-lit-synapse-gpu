@@ -370,7 +370,6 @@ const COVERAGE_CHUNK_REFERENCE =
 interface WikiFindingCoverageUnit {
   chunks: number[];
   numbers: Set<string>;
-  numberContexts: Map<string, Set<string>>;
   lexical: Set<string>;
 }
 
@@ -402,7 +401,6 @@ function coverageLexicalAnchors(clean: string): Set<string> {
 
 function findingCoverageAnchors(text: string): {
   numbers: Set<string>;
-  numberContexts: Map<string, Set<string>>;
   lexical: Set<string>;
 } {
   const clean = String(text ?? "")
@@ -413,20 +411,8 @@ function findingCoverageAnchors(text: string): {
     ...clean.matchAll(/[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?/giu),
   ];
   const numbers = new Set(numberMatches.map((match) => match[0]));
-  const numberContexts = new Map<string, Set<string>>();
-  for (const match of numberMatches) {
-    const start = Math.max(0, (match.index ?? 0) - 36);
-    const end = Math.min(
-      clean.length,
-      (match.index ?? 0) + match[0].length + 36,
-    );
-    const context = coverageLexicalAnchors(clean.slice(start, end));
-    const existing = numberContexts.get(match[0]) ?? new Set<string>();
-    for (const anchor of context) existing.add(anchor);
-    numberContexts.set(match[0], existing);
-  }
   const lexical = coverageLexicalAnchors(clean);
-  return { numbers, numberContexts, lexical };
+  return { numbers, lexical };
 }
 
 function findingCoverageUnits(
@@ -459,14 +445,18 @@ function findingAnchorsCovered(
     return false;
   }
   for (const number of finding.numbers) {
-    const context = finding.numberContexts.get(number) ?? new Set<string>();
     const preserved = summaryUnits.some((unit) => {
       if (!unit.numbers.has(number)) return false;
       if (!unit.chunks.some((chunkId) => finding.chunks.includes(chunkId))) {
         return false;
       }
-      if (!context.size) return true;
-      return [...context].some((anchor) => unit.lexical.has(anchor));
+      const required = Math.min(2, finding.lexical.size);
+      let shared = 0;
+      for (const anchor of finding.lexical) {
+        if (unit.lexical.has(anchor)) shared += 1;
+        if (shared >= required) return true;
+      }
+      return shared >= required;
     });
     if (!preserved) return false;
   }
@@ -489,7 +479,6 @@ function combinedSummaryCoverage(
   return {
     chunks: [...new Set(relevant.flatMap((unit) => unit.chunks))],
     numbers: new Set(relevant.flatMap((unit) => [...unit.numbers])),
-    numberContexts: new Map(),
     lexical: new Set(relevant.flatMap((unit) => [...unit.lexical])),
   };
 }

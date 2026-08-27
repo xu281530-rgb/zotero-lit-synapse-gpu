@@ -127,6 +127,25 @@ test("macro summary covers every finding even when findings share a chunk", () =
     /第 1 次/u,
     "numbers cannot be reassigned to a different finding from the same chunk",
   );
+  const repeatedValueBody = appendReadingRecord("", {
+    chunkIds: [43],
+    content: [
+      "- The pressure is 50 MPa (chunk 43).",
+      "- The temperature is also 50 C (chunk 43).",
+    ].join("\n"),
+  });
+  assert.throws(
+    () =>
+      assertMacroSummaryCoversRecords(
+        repeatedValueBody,
+        [
+          "The pressure is 50 C (chunk 43).",
+          "The temperature is also 50 MPa (chunk 43).",
+        ].join("\n"),
+      ),
+    /第 1 次/u,
+    "repeated numeric values still need to stay with their original units",
+  );
 
   assert.doesNotThrow(() =>
     assertMacroSummaryCoversRecords(
