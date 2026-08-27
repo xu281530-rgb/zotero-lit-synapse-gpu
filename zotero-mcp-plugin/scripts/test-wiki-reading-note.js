@@ -401,17 +401,9 @@ block("the first batch arrives and must be integrated as a whole", async () => {
   assert.equal(first.expert.persona, EXPERT.persona);
 
   await assert.rejects(
-    () =>
-      service.updateReadingNote({
-        libraryID: 1,
-        markdown: "## Chunks 0-7: new knowledge\n\n" + "x".repeat(300),
-      }),
-    /organised by delivery batch/iu,
-    "the per-page note is refused at the write, where it can still be fixed",
-  );
-  await assert.rejects(
     () => service.updateReadingNote({ libraryID: 1, markdown: "Read it. Fine." }),
-    /placeholder rather than a reading/iu,
+    /cites no chunk/iu,
+    "the character quota is gone, but provenance is still mandatory",
   );
   await assert.rejects(
     () => service.updateReadingNote({ libraryID: 1 }),
@@ -569,7 +561,7 @@ block("one outstanding batch stops new paging but not re-reading", async () => {
   assert.equal(fourth.pagination.coverageComplete, true);
 });
 
-block('"unchanged" is real slack but cannot become the habit', async () => {
+block('"unchanged" records real empty batches without a frequency quota', async () => {
   // Everything is delivered, so this integration covers the last batch.
   await assert.rejects(
     () => service.updateReadingNote({ libraryID: 1, unchanged: true }),
@@ -607,16 +599,13 @@ block('"unchanged" is real slack but cannot become the habit', async () => {
       "The last batch is the reference list and the acknowledgements; the account of the paper is unaffected.",
   });
   assert.equal(skipped.unchanged, true);
-  await assert.rejects(
-    () =>
-      service.updateReadingNote({
-        libraryID: 1,
-        unchanged: true,
-        unchangedReason: "Still nothing.",
-      }),
-    /also recorded as "unchanged"/iu,
-    "two in a row is how a paper ends up unread",
-  );
+  const skippedAgain = await service.updateReadingNote({
+    libraryID: 1,
+    unchanged: true,
+    unchangedReason:
+      "This retry still covers only references and acknowledgements, so there is no factual addition to record.",
+  });
+  assert.equal(skippedAgain.unchanged, true);
 });
 
 // =========================================================================

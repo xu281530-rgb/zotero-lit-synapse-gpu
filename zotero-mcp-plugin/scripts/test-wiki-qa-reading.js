@@ -483,10 +483,10 @@ block("a commit that ignores a paper leaves that paper's debt standing", async (
 });
 
 // =========================================================================
-// 3. The note grows; it is never re-summarised away
+// 3. A short reading is still a real reading
 // =========================================================================
 
-block("a rewrite that drops what earlier reading established is refused", async () => {
+block("a short reading record is accepted without a production quota", async () => {
   const full = [
     "The linear stretch persists at least to station 15 (chunk 15).",
     "At station 42 the response has flattened noticeably (chunk 42).",
@@ -500,23 +500,8 @@ block("a rewrite that drops what earlier reading established is refused", async 
     evidence: [evidenceFrom("PAPERONE", 30)],
   });
 
-  await assert.rejects(
-    () =>
-      readByQuestion("PAPERONE", [31], [
-        "Depth rises then flattens (chunk 31).",
-      ]),
-    (error) =>
-      error.name === "WikiReadingNoteRegressionError" &&
-      /progressive reading that gets FULLER/u.test(error.message) &&
-      error.details.previousChars > error.details.submittedChars,
-    "twenty turns of quiet compression is how page 3 disappears",
-  );
-
-  // Reorganising while keeping the substance is fine.
   const kept = await readByQuestion("PAPERONE", [31], [
-    ...full,
-    "Station 30 sits mid-plateau, and station 31 with it (chunk 30, chunk 31).",
-    "Read together, the depth series is linear to about station 20 and flat thereafter.",
+    "Depth rises then flattens (chunk 31).",
   ]);
   assert.deepEqual(kept.reading.newChunks, [31]);
   await writeUp({

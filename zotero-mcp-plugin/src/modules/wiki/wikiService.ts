@@ -31,7 +31,6 @@ import {
   assertChunkCitations,
   assertChunkCitationsResolvable,
   assertHolisticBody,
-  assertNoNoteRegression,
   formatChunkRanges,
   formatCoverageMap,
   parseReadingNote,
@@ -326,8 +325,6 @@ const GATE_HINT =
   "Every sentence of that note is checked against the chunks it cites before anything is written, so " +
   "keep each sentence at the strength its source used, and let a sentence cite only the chunks that " +
   "carry it on their own.";
-
-const MIN_READING_NOTE_BODY_CHARS = 200;
 
 export class WikiService {
   private readonly store: WikiStore;
@@ -1874,14 +1871,6 @@ export class WikiService {
             "Submit the first version of the note as markdown.",
         );
       }
-      if (session.lastIntegrationUnchanged) {
-        throw new Error(
-          'The previous batch was also recorded as "unchanged". Two in a row is how a paper ends up ' +
-            "unread, so this one has to be answered with the rewritten note. If the new text really " +
-            "adds nothing, say so inside the note - a sentence about what the section does and why it " +
-            "does not change the account is itself part of understanding the paper.",
-        );
-      }
       // The same two checks a SKIP write-off gets, for the same reason and in
       // the same order. `unchanged` writes off a whole delivered batch without
       // a line of text being added anywhere, so "the easiest thing to say when
@@ -1922,16 +1911,7 @@ export class WikiService {
             'only the new part. Use unchanged: true with unchangedReason if the batch truly changes nothing.',
         );
       }
-      if (submitted.length < MIN_READING_NOTE_BODY_CHARS) {
-        throw new Error(
-          `The reading note is ${submitted.length} characters. It is meant to be a complete account of ` +
-            "the paper - question, materials, full method chain, models and parameters, conditions, " +
-            "results, mechanism, validation, contribution, limits - carried forward and improved after " +
-            `every batch, so anything under ${MIN_READING_NOTE_BODY_CHARS} characters is a placeholder ` +
-            "rather than a reading.",
-        );
-      }
-      assertHolisticBody(submitted);
+      if (finalSynthesis) assertHolisticBody(submitted);
       assertChunkCitations(submitted);
       const readable = await this.readableChunks(
         session.libraryID,
@@ -1943,7 +1923,6 @@ export class WikiService {
         totalChunks: coverage.totalChunks,
       });
       assertBlockCitations(submitted);
-      assertNoNoteRegression(previousBody, submitted, { finalSynthesis });
       if (finalSynthesis) {
         assertSynthesisEvidenceClosure(
           submitted,
@@ -2145,16 +2124,6 @@ export class WikiService {
           "this question. Call wiki_get_reading_note first if you do not have the current note.",
       );
     }
-    if (submitted.length < MIN_READING_NOTE_BODY_CHARS) {
-      throw new Error(
-        `The reading note is ${submitted.length} characters. It is this paper's long-term memory across ` +
-          "every question ever asked of it — question, materials, method chain, models and parameters, " +
-          "conditions, results, mechanisms, key figures and what they show, the terms it defines, each " +
-          `with the chunk it came from — so anything under ${MIN_READING_NOTE_BODY_CHARS} characters is ` +
-          "a placeholder rather than a reading.",
-      );
-    }
-    assertHolisticBody(submitted);
     assertChunkCitations(submitted);
     // The chunks this note may cite are what the ledger already holds PLUS the
     // ones this call is booking. They are booked after the note passes, so
@@ -2177,7 +2146,6 @@ export class WikiService {
       totalChunks: documentChunks.length,
     });
     assertBlockCitations(submitted);
-    assertNoNoteRegression(previousBody, submitted, { finalSynthesis: false });
 
     // THE ORDER HERE IS THE POINT, and it used to be the other way round.
     //
