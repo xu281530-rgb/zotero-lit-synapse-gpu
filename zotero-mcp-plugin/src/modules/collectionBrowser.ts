@@ -343,7 +343,14 @@ export async function browseCollection(
     metadata: {
       extractedAt: new Date().toISOString(),
       itemsAreDirectChildrenOnly: true,
-      nextStep: buildNextStep(location, subcollections, total, hasMore, end),
+      nextStep: buildNextStep(
+        location,
+        subcollections,
+        total,
+        hasMore,
+        offset,
+        end,
+      ),
     },
   };
 }
@@ -353,6 +360,7 @@ function buildNextStep(
   subcollections: BrowsedCollection[],
   totalItems: number,
   hasMore: boolean,
+  offset: number,
   end: number,
 ): string {
   const where =
@@ -371,8 +379,13 @@ function buildNextStep(
   }
 
   if (hasMore) {
+    // The window starts at `offset`, not at 1. Hard-coding 1 here made every
+    // page after the first claim it had shown everything from the top of the
+    // folder - "Documents 1-100 of 300" for the page that actually held
+    // 51-100 - which contradicts itemPagination.range on the same response
+    // and reads as though 1-50 were included twice.
     parts.push(
-      `Documents 1-${end} of ${totalItems} are shown; pass offset=${end} for the next page.`,
+      `Documents ${offset + 1}-${end} of ${totalItems} are shown; pass offset=${end} for the next page.`,
     );
   }
 
