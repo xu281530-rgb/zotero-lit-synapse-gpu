@@ -480,6 +480,29 @@ function assertWikiEnabled(): void {
 }
 
 /**
+ * `write_tag` 的 tags 参数必须是字符串数组，且在任何改动发生前就验完。
+ *
+ * 目录声明的是 array of string，但入口只判断了真值。传成字符串时
+ * `for (const tag of tags)` 会逐字符迭代，于是 action "set" 会先删光旧标签，
+ * 再写入一串单字符标签 —— 破坏已经发生，工具却返回成功。所以这里在调用
+ * 处理器之前就拒绝，而不是留给 Zotero 去发现。
+ */
+function assertTagArray(tags: unknown): asserts tags is string[] {
+  if (!Array.isArray(tags)) {
+    throw new Error(
+      `tags must be an ARRAY of strings, e.g. ["方法", "待验证"]. Received ${typeof tags}: ${JSON.stringify(tags)}. A bare string is iterated character by character, which with action "set" would replace every existing tag with one tag per character.`,
+    );
+  }
+  for (const tag of tags) {
+    if (typeof tag !== 'string' || !tag.trim()) {
+      throw new Error(
+        `Every entry of tags must be a non-empty string. Received: ${JSON.stringify(tags)}`,
+      );
+    }
+  }
+}
+
+/**
  * The same consent gate as a Wiki commit, for a concept-library write.
  *
  * Recording concepts writes to the same independent Wiki database, so it
@@ -1513,6 +1536,11 @@ Nothing in this server returns a whole document in one response. Every reading t
           if (!args?.action || !args?.itemKey || !args?.tags) {
             throw new Error('action, itemKey, and tags are required');
           }
+          // `tags` 必须真的是字符串数组。JavaScript 会把字符串当成可迭代的
+          // 字符序列，所以 tags: "AI" 配上 action "set" 的实际效果是：先删掉
+          // 条目上全部旧标签，再加上 "A" 和 "I" 两个单字符标签，最后照样返回
+          // success:true。一次格式不对的调用就能清空一个条目的标签。
+          assertTagArray(args.tags);
           result = await this.callWriteTag(args);
           break;
         }
