@@ -467,6 +467,35 @@ export function splitSentences(block: string): string[] {
   return out;
 }
 
+/**
+ * Below this a fragment carries too little to be worth proving.
+ *
+ * The floor exists so that "See figure 3." and a section's opening clause are
+ * not dragged through the gate. It has to be stated per script, because the
+ * SAME claim is a different number of characters in each: "Completely
+ * eliminates the artifact (chunk 12)." is 45 characters and was audited, while
+ * "完全消除伪影（chunk 12）。" is 17 and was not - so the one drift this module
+ * names first, an absolute standing where the source hedged, was caught in
+ * English and waved through in Chinese. A bilingual library reading and
+ * writing in both languages got two different gates.
+ *
+ * Han characters carry roughly two English characters' worth of content each,
+ * which is where the second figure comes from. Anything with Han in it is
+ * measured against the lower one; that is deliberately generous to mixed
+ * sentences, since a mixed sentence is usually Chinese prose with a technical
+ * term or a chunk citation embedded in it.
+ */
+const MIN_AUDITED_SENTENCE_CHARS = 24;
+const MIN_AUDITED_SENTENCE_CHARS_CJK = 10;
+const HAN = /\p{Script=Han}/u;
+
+function isTooShortToAudit(sentence: string): boolean {
+  const floor = HAN.test(sentence)
+    ? MIN_AUDITED_SENTENCE_CHARS_CJK
+    : MIN_AUDITED_SENTENCE_CHARS;
+  return sentence.length < floor;
+}
+
 function contentWords(text: string): Set<string> {
   const words = normalizeWikiText(text)
     .toLowerCase()
@@ -599,7 +628,7 @@ export function auditSynthesis(
     const blockChunks = citedChunkIds(block.text);
     for (const rawSentence of splitSentences(block.text)) {
       const sentence = normalizeWikiText(rawSentence);
-      if (sentence.length < 24) continue;
+      if (isTooShortToAudit(sentence)) continue;
       // A sentence inherits its block's citations when it carries none of its
       // own: a bullet ending "(chunk 46, chunk 47)" is citing every clause in
       // it, and treating the earlier clauses as uncited would both miss the

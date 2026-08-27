@@ -652,6 +652,32 @@ test("Chinese splits into sentences, so two facts are not read as one", () => {
   );
 });
 
+test("a short Chinese absolute is audited, exactly as its English twin is", () => {
+  // The same claim, in two languages, against the same hedged source. The
+  // floor used to be one character count for both, so English reached it and
+  // Chinese - which says the same thing in a third of the characters - did
+  // not: the drift this module names first was caught in one language and
+  // waved through in the other.
+  const chunks = [
+    { chunkId: 12, text: "该方法可能有助于减弱缺失楔形伪影。" },
+  ];
+  const zh = auditSynthesis("完全消除伪影（chunk 12）。", { chunks });
+  assert.equal(zh.length, 1, JSON.stringify(zh));
+  assert.ok(zh[0].reasons.includes("absolute-language"), JSON.stringify(zh));
+
+  const english = auditSynthesis(
+    "Completely eliminates the artifact (chunk 12).",
+    { chunks: [{ chunkId: 12, text: "The method may help to weaken it." }] },
+  );
+  assert.equal(english.length, 1, JSON.stringify(english));
+});
+
+test("a genuinely trivial fragment is still not audited, in either script", () => {
+  const chunks = [{ chunkId: 1, text: "irrelevant" }];
+  assert.equal(auditSynthesis("见图3。", { chunks }).length, 0);
+  assert.equal(auditSynthesis("See figure 3.", { chunks }).length, 0);
+});
+
 test("a closing bracket after a full-width stop stays with its sentence", () => {
   assert.deepEqual(splitSentences("第一句。”第二句。"), ["第一句。”", "第二句。"]);
 });
