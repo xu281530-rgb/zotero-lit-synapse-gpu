@@ -926,7 +926,7 @@ export function buildToolCatalog(): ToolDefinition[] {
         itemKeys: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Restrict the search to these specific documents. This is the coarse-filter-then-fine-search path: run keyword_search first, take the itemKeys it returned, and pass them here so the semantic pass only scores that shortlist. Combined with collectionKeys, the two scopes intersect.'
+          description: 'Restrict the lexical scan to these specific documents — the shortlist you already hold, from an earlier search or from browsing. Applied BEFORE scoring, so it removes work rather than filtering results afterwards. This is not the coarse-filter path: that one runs keyword_search first and passes ITS itemKeys to semantic_search. Combined with collectionKeys, the two scopes intersect.'
         },
         topK: {
           type: 'number',
