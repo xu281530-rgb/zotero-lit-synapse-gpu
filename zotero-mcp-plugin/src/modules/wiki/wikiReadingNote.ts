@@ -278,8 +278,29 @@ export function assertChunkCitations(body: string): void {
  * paragraph or a bullet that states a finding. Set low enough that a single
  * substantive sentence is caught, high enough that a section's opening clause
  * is not.
+ *
+ * Stated per script, because "a single substantive sentence" is a different
+ * number of characters in each. A Chinese sentence states a finding in twenty
+ * or thirty characters, so one count for both scripts meant a Chinese
+ * paragraph of three or four such sentences - a real chunk of the paper's
+ * argument - stayed under the English threshold and could carry no chunk
+ * number at all. The blocks that generalise across a paper are exactly the
+ * ones this rule exists to keep tethered, and in a bilingual library they were
+ * tethered in one language only.
  */
 export const WIKI_NOTE_UNCITED_BLOCK_CHARS = 120;
+
+/** The same threshold for a block containing Han characters. */
+export const WIKI_NOTE_UNCITED_BLOCK_CHARS_CJK = 50;
+
+const HAN_CHARACTER = /\p{Script=Han}/u;
+
+/** How long an uncited block of THIS text may be before it is refused. */
+export function uncitedBlockLimit(text: string): number {
+  return HAN_CHARACTER.test(text)
+    ? WIKI_NOTE_UNCITED_BLOCK_CHARS_CJK
+    : WIKI_NOTE_UNCITED_BLOCK_CHARS;
+}
 
 /**
  * Every chunk number in the note has to be one this paper actually has, and
@@ -349,7 +370,7 @@ export function assertChunkCitationsResolvable(
 export function assertBlockCitations(body: string): void {
   const uncited = splitNoteBlocks(String(body ?? ""))
     .filter((block) => block.prose)
-    .filter((block) => block.text.length >= WIKI_NOTE_UNCITED_BLOCK_CHARS)
+    .filter((block) => block.text.length >= uncitedBlockLimit(block.text))
     .filter((block) => citedChunkIds(block.text).length === 0);
   if (!uncited.length) return;
   const shown = uncited

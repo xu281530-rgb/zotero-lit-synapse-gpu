@@ -541,6 +541,28 @@ test("a substantive paragraph with no citation is refused and quoted back", () =
   );
 });
 
+test("a substantive CHINESE paragraph with no citation is refused too", () => {
+  // 79 characters, three findings, no chunk number - and comfortably under the
+  // 120 the English threshold asks for, because Chinese states a finding in a
+  // third of the characters. This is the shape that used to pass.
+  const note = [
+    "# 论文",
+    "",
+    "重构结果给出了两种变体的空间占位关系，并确认其界面在整个体积内沿同一晶体学方向相交。该结论在三个样品上重复出现。",
+    "",
+  ].join("\n");
+  assert.throws(
+    () => assertBlockCitations(note),
+    (error) => /without naming a chunk/.test(error.message),
+  );
+});
+
+test("a short Chinese connective line is still left alone", () => {
+  assertBlockCitations(
+    ["# 论文", "", "两个问题制约着它：", "", "- 第一个（chunk 3）", ""].join("\n"),
+  );
+});
+
 test("a short connective line without a citation is left alone", () => {
   assertBlockCitations("# Paper\n\nTwo issues constrain this:\n\n- the first one (chunk 3)\n");
 });
