@@ -766,6 +766,22 @@ export interface WikiSynthesisAuditEntry {
  */
 export const WIKI_SYNTHESIS_MIN_QUOTE_CHARS = 40;
 
+/**
+ * Shortest Evidence excerpt that can identify a passage.
+ *
+ * Lives beside {@link WIKI_SYNTHESIS_MIN_QUOTE_CHARS} because the two are one
+ * decision read at two strengths, and because this module is a leaf that
+ * `toolCatalog` can import: the number in the tool contract and the number the
+ * server enforces have to be the same number, not two that agree today.
+ *
+ * Enforced by `WikiService.hydrateEvidence`. Lower than the synthesis floor on
+ * purpose: that gate proves a sentence already judged to reach past its source,
+ * so it asks for a passage, while this one only has to exclude things that are
+ * not passages at all - a term, a heading, a number on its own - and must leave
+ * room for a definition or a parameter quoted with its clause.
+ */
+export const WIKI_EVIDENCE_MIN_EXCERPT_CHARS = 24;
+
 export interface WikiSynthesisAuditProblem {
   sentence: string;
   problem: string;

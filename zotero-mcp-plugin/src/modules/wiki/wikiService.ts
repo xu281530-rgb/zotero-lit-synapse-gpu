@@ -43,6 +43,7 @@ import {
 } from "./wikiReadingNote";
 import {
   WIKI_SYNTHESIS_MIN_QUOTE_CHARS,
+  WIKI_EVIDENCE_MIN_EXCERPT_CHARS,
   WikiSynthesisAuditRequired,
   auditSynthesis,
   describeFlaggedSentences,
@@ -127,6 +128,10 @@ interface WikiNoteStatusWriteOptions {
  * actually said and what the Wiki already holds instead.
  */
 export const WIKI_WRITE_OFF_MIN_REASON_CHARS = 40;
+
+/** The Evidence excerpt floor this service enforces; defined in the leaf so
+ * `toolCatalog` can state the same number without importing the wiki stack. */
+export { WIKI_EVIDENCE_MIN_EXCERPT_CHARS };
 
 /**
  * Reasons that assert rather than argue.
@@ -762,13 +767,64 @@ export class WikiService {
     }
     const excerpt = normalizeWikiText(String(entry.excerpt ?? ""));
     if (!excerpt) throw new Error("Evidence excerpt is required");
-    let chunk = chunks.find(
-      (candidate) => candidate.chunkId === Number(entry.chunkIdSnapshot),
-    );
-    if (!chunk || !normalizeWikiText(chunk.text).includes(excerpt)) {
-      chunk = chunks.find((candidate) =>
+    if (excerpt.length < WIKI_EVIDENCE_MIN_EXCERPT_CHARS) {
+      throw new Error(
+        `Evidence excerpt is ${excerpt.length} characters: "${excerpt}"${context ? ` (${context})` : ""}. ` +
+          `At least ${WIKI_EVIDENCE_MIN_EXCERPT_CHARS} are needed, because a quotation this short is a ` +
+          "TERM rather than a passage: it proves the paper mentions those words, which is not what the " +
+          "Claim asserts, and it matches so many chunks that the passage it came from can no longer be " +
+          "identified. Quote the clause or sentence the Claim actually rests on - the definition with " +
+          "its definiendum, the measurement with the conditions it was taken under - copied verbatim " +
+          "from the chunk. If no sentence in the paper carries the Claim, the Claim is reaching past " +
+          "the paper and belongs at a weaker strength or not at all.",
+      );
+    }
+    // WHERE THE PASSAGE REALLY IS, and who gets told when the caller was wrong.
+    //
+    // The named chunk wins whenever it actually carries the excerpt. Otherwise
+    // the document is searched - but the result of that search used to be
+    // applied SILENTLY, which made `wikiEvidenceDiagnostics`' own "the excerpt
+    // is real; the chunkIdSnapshot is wrong. Resubmit it with chunkIdSnapshot
+    // N" message unreachable: by the time the diagnostic ran, the fallback had
+    // already succeeded and nobody was ever told. A single match is now
+    // accepted with a warning naming both numbers, and an AMBIGUOUS one is
+    // refused, because picking the first of several chunks is a guess about
+    // provenance dressed up as a fact.
+    const named = Number.isFinite(Number(entry.chunkIdSnapshot))
+      ? chunks.find(
+          (candidate) => candidate.chunkId === Number(entry.chunkIdSnapshot),
+        )
+      : undefined;
+    let chunk =
+      named && normalizeWikiText(named.text).includes(excerpt)
+        ? named
+        : undefined;
+    if (!chunk) {
+      const carrying = chunks.filter((candidate) =>
         normalizeWikiText(candidate.text).includes(excerpt),
       );
+      if (carrying.length > 1) {
+        throw new Error(
+          `Evidence excerpt appears in ${carrying.length} chunks of ${itemKey} (${carrying
+            .map((candidate) => candidate.chunkId)
+            .join(", ")})${context ? ` (${context})` : ""}, and ` +
+            (named
+              ? `chunk ${named.chunkId}, the one you named, is not among them. `
+              : "no usable chunkIdSnapshot was supplied. ") +
+            "Which passage this Claim rests on therefore cannot be determined, and choosing the first " +
+            "match would be a guess recorded as a fact. Name the chunk you actually read it in, or " +
+            "quote a longer stretch that occurs in only one of them.",
+        );
+      }
+      chunk = carrying[0];
+      if (chunk && named) {
+        warnings.push(
+          `Evidence for ${itemKey} was submitted as chunk ${named.chunkId}, but that chunk does not ` +
+            `contain the excerpt; it is in chunk ${chunk.chunkId}, which is what was recorded` +
+            `${context ? ` (${context})` : ""}. Cite the chunk you read the passage in - the number is ` +
+            "the trail back to the source, and a later reader follows it.",
+        );
+      }
     }
     if (!chunk) {
       throw new Error(

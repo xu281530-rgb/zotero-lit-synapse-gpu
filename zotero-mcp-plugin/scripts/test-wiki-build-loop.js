@@ -317,7 +317,7 @@ async function commitClaim(options) {
           {
             libraryID: 1,
             itemKey: options.itemKey,
-            excerpt: `${options.itemKey} passage 0`,
+            excerpt: `${options.itemKey} passage 0: directional solidification`,
             evidenceRole: "SUPPORTS",
             readDepth: options.readDepth ?? "chunk_local",
           },
@@ -580,7 +580,7 @@ async function commitClaim(options) {
           {
             libraryID: 1,
             itemKey: "LONGPAPR",
-            excerpt: "LONGPAPR passage 1",
+            excerpt: "LONGPAPR passage 1: directional solidification",
             evidenceRole: "SUPPORTS",
             readDepth: "chunk_local",
           },
@@ -708,7 +708,7 @@ for (const outcome of ["skipped", "failed"]) {
           {
             libraryID: 1,
             itemKey: "LONGPAPR",
-            excerpt: "LONGPAPR passage 0",
+            excerpt: "LONGPAPR passage 0: directional solidification",
             evidenceRole: "SUPPORTS",
             readDepth: "paper_reviewed",
           },
@@ -751,7 +751,7 @@ for (const outcome of ["skipped", "failed"]) {
           {
             libraryID: 1,
             itemKey: "LONGPAPR",
-            excerpt: "LONGPAPR passage 0",
+            excerpt: "LONGPAPR passage 0: directional solidification",
             evidenceRole: "SUPPORTS",
             readDepth: "paper_reviewed",
           },
@@ -770,7 +770,7 @@ for (const outcome of ["skipped", "failed"]) {
           {
             libraryID: 1,
             itemKey: "LONGPAPR",
-            excerpt: "LONGPAPR passage 40",
+            excerpt: "LONGPAPR passage 40: directional solidification",
             evidenceRole: "SUPPORTS",
             readDepth: "paper_reviewed",
           },
@@ -844,7 +844,7 @@ for (const outcome of ["skipped", "failed"]) {
           {
             libraryID: 1,
             itemKey: "LONGPAPR",
-            excerpt: "LONGPAPR passage 0",
+            excerpt: "LONGPAPR passage 0: directional solidification",
             evidenceRole: "SUPPORTS",
             readDepth: "paper_reviewed",
           },
@@ -886,7 +886,7 @@ for (const outcome of ["skipped", "failed"]) {
               {
                 libraryID: 1,
                 itemKey: "LONGPAPR",
-                excerpt: "LONGPAPR passage 0",
+                excerpt: "LONGPAPR passage 0: directional solidification",
                 evidenceRole: "SUPPORTS",
                 readDepth: "chunk_local",
               },
@@ -1043,7 +1043,7 @@ for (const outcome of ["skipped", "failed"]) {
           {
             libraryID: 1,
             itemKey: "SHORTPPR",
-            excerpt: "SHORTPPR passage 0",
+            excerpt: "SHORTPPR passage 0: directional solidification",
             evidenceRole: "SUPPORTS",
             readDepth: "chunk_local",
           },
@@ -1082,7 +1082,7 @@ for (const outcome of ["skipped", "failed"]) {
           {
             libraryID: 1,
             itemKey: "SHORTPPR",
-            excerpt: "SHORTPPR passage 0",
+            excerpt: "SHORTPPR passage 0: directional solidification",
             evidenceRole: "SUPPORTS",
             readDepth: "paper_reviewed",
           },
@@ -1135,7 +1135,7 @@ for (const outcome of ["skipped", "failed"]) {
         {
           libraryID: 1,
           itemKey: "PAPERB01",
-          excerpt: "PAPERB01 passage 0",
+          excerpt: "PAPERB01 passage 0: directional solidification",
           evidenceRole: "SUPPORTS",
           readDepth: "chunk_local",
         },
@@ -1437,7 +1437,7 @@ for (const outcome of ["skipped", "failed"]) {
           {
             libraryID: 1,
             itemKey: "PAPERB01",
-            excerpt: "PAPERB01 passage 0",
+            excerpt: "PAPERB01 passage 0: directional solidification",
             evidenceRole: "SUPPORTS",
             readDepth: "chunk_local",
           },

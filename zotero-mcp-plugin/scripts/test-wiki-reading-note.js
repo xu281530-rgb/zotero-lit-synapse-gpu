@@ -1119,7 +1119,10 @@ block("delivery without the whole-paper pass is still only section_read", async 
           {
             libraryID: 1,
             itemKey: "SHORTONE",
-            excerpt: "brief note on hot-press dwell time",
+            // Names its chunk and quotes enough of it to identify one: the
+            // bare phrase occurs in all six chunks of this fixture.
+            chunkIdSnapshot: 7000,
+            excerpt: "SHORTONE passage 0: brief note on hot-press dwell time.",
             evidenceRole: "SUPPORTS",
             readDepth: "paper_reviewed",
           },

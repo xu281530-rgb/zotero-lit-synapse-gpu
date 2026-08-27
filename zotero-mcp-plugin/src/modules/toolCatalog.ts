@@ -12,6 +12,9 @@ import {
   MAX_DOCUMENT_CHUNKS_PER_PAGE,
 } from "./documentChunks";
 import { MAX_SEARCH_INDEX_BUILD_ITEMS } from "./semantic/searchIndexBuilder";
+// The leaf again, never ./wiki: the barrel pulls in the whole Wiki service.
+// The number here and the number the server enforces must be ONE number.
+import { WIKI_EVIDENCE_MIN_EXCERPT_CHARS } from "./wiki/wikiSynthesisAudit";
 
 /**
  * The one and only description of what this server can do.
@@ -1293,7 +1296,7 @@ export function buildToolCatalog(): ToolDefinition[] {
               evidence: {
                 type: 'array',
                 minItems: 1,
-                description: 'The exact chunks actually used for this Claim in this turn, quoted from the paper itself. Every chunk cited here must already be recorded as READ — delivered by wiki_build_from_paper, or named in a wiki_update_reading_note readChunkIds call — because a Claim may only rest on something the paper\'s reading note already accounts for. An excerpt from an unread chunk is refused by name. Never quote a reading note as Evidence: the note is your memory of the paper, the chunk is the paper. Do not claim paper_reviewed unless every ordered document chunk was actually read in a full-text pass.',
+                description: `The exact chunks actually used for this Claim in this turn, quoted from the paper itself. An excerpt must be a PASSAGE, not a term: at least ${WIKI_EVIDENCE_MIN_EXCERPT_CHARS} characters, and long enough to occur in only one chunk of the paper. A bare term proves the paper mentions those words, which is never what the Claim asserts, and a phrase repeated across chunks cannot say which passage the Claim rests on — both are refused. Quote the clause the Claim actually stands on, with the conditions or the definiendum attached. Every chunk cited here must already be recorded as READ — delivered by wiki_build_from_paper, or named in a wiki_update_reading_note readChunkIds call — because a Claim may only rest on something the paper's reading note already accounts for. An excerpt from an unread chunk is refused by name. Never quote a reading note as Evidence: the note is your memory of the paper, the chunk is the paper. Do not claim paper_reviewed unless every ordered document chunk was actually read in a full-text pass.`,
                 items: {
                   type: 'object',
                   properties: {
