@@ -272,7 +272,7 @@ function assertSynthesisEvidenceClosure(
   const shown = problems.slice(0, 25);
   throw new WikiSynthesisAuditRequired(
     `The synthesis audit does not close: ${problems.length} problem(s), so nothing was written. Fix ` +
-      "these and resubmit the whole note with finalSynthesis true. Remember that rewriting a " +
+      "these and resubmit macroSummary with finalSynthesis true. Remember that rewriting a " +
       "sentence to the paper's own strength removes the need to justify it at all.\n\n" +
       shown
         .map(
@@ -580,9 +580,9 @@ export class WikiService {
     if (!coverage.complete) return;
     if (open.finalSynthesisAt === null) {
       throw new Error(
-        `Every chunk of ${open.itemKey} has been delivered, but its reading note has not been rewritten ` +
-          "as one account of the complete paper. Do that pass first: call wiki_update_reading_note with " +
-          "finalSynthesis true and the whole note, reconciling anything the later sections corrected, " +
+        `Every chunk of ${open.itemKey} has been delivered, but its macro summary has not been appended. ` +
+          "Do that pass first: call wiki_update_reading_note with finalSynthesis true and macroSummary; " +
+          "the summary must account for every substantive reading record, " +
           "then come back to wiki_prepare_update. (Committing PART of a paper you are still reading is " +
           "always allowed - this only applies once the whole paper has been delivered.)",
       );
@@ -653,8 +653,8 @@ export class WikiService {
       ? await sessions.openForItem(libraryID, requestedKey)
       : await sessions.getOpen(libraryID);
     // Nowhere to record it, so nothing to record. The review belongs to a
-    // full-text read; a question-driven update has no such pass and is not
-    // gated on one. Ignoring the argument rather than refusing the call keeps
+    // completed reading; an unfinished question-driven update has no such pass
+    // and is not gated on one. Ignoring the argument rather than refusing the call keeps
     // an over-eager caller from turning a harmless extra field into a failed
     // write-up - the gate that actually needs the review asks for it by name.
     if (!open) return;
@@ -666,7 +666,7 @@ export class WikiService {
     // pass it exists to force was skippable by doing it before there was
     // anything to review. Both conditions are required, and they are the same
     // depth rule uses, plus the independent whole-paper terminology pass:
-    // every chunk delivered, the note rewritten as one account of the paper,
+    // every chunk delivered, the macro summary appended after all records,
     // and its final concepts recorded. Refused rather than ignored, because a
     // caller that sent a review and got silence would reasonably believe the
     // pass was done.
@@ -681,9 +681,8 @@ export class WikiService {
           "ready for it: " +
           (coverage.complete
             ? open.finalSynthesisAt === null
-              ? "every chunk has been delivered, but the reading note has not been rewritten as one account " +
-                "of the complete paper"
-              : "the reading note has been rewritten as one account of the complete paper, but its " +
+              ? "every chunk has been delivered, but the macro summary has not been appended"
+              : "the macro summary has been appended after all reading records, but the paper's " +
                 "concepts have not been reviewed as a whole with wiki_record_concepts final true"
             : `${coverage.deliveredChunks} of ${coverage.totalChunks} chunks have been delivered` +
               (coverage.firstMissingIndex === null
@@ -1096,7 +1095,7 @@ export class WikiService {
         "genuinely in the paper — what is missing is a reading of it. Retrieval returning a passage is " +
         "not reading it, so passages have to be declared: after answering from them, call " +
         `wiki_update_reading_note with itemKey "${itemKey}", readChunkIds including ${chunkId}, and the ` +
-        "whole reading note rewritten to account for what they say. Then commit this Claim. " +
+        "readingRecord describing only what they say. The server appends it; then commit this Claim. " +
         (coverage.sessionId === null
           ? "Nothing has been read from this paper yet."
           : `So far ${coverage.deliveredChunks} of ${coverage.totalChunks} chunks are recorded as read.`) +
@@ -1757,8 +1756,8 @@ export class WikiService {
       const blockers: string[] = [];
       if (open.finalSynthesisAt === null) {
         blockers.push(
-          "the reading note has not been rewritten as one account of the complete paper — call " +
-            "wiki_update_reading_note with finalSynthesis true",
+          "the macro summary has not been appended after the reading records — call " +
+            "wiki_update_reading_note with finalSynthesis true and macroSummary",
         );
       }
       if (open.conceptsRecordedAt === null) {
@@ -2021,24 +2020,18 @@ export class WikiService {
       nextStep:
         "The reading note now exists on the Zotero item and will survive a restart, a dropped " +
         "connection and a context compaction. Read the body with wiki_build_from_paper, and after " +
-        "each batch call wiki_update_reading_note with the WHOLE note rewritten to account for the " +
-        "new text - not with an appended section for it.",
+        "each batch call wiki_update_reading_note with one readingRecord for only that batch. The " +
+        "server audits, numbers and appends it without changing earlier records.",
     };
   }
 
   /**
-   * Replace the reading note with the model's current understanding.
+   * Append one immutable record, or the final macro summary, to the note.
    *
-   * The whole document every time. That is the point rather than an
-   * inconvenience: an append-only note is a transcript of the delivery order,
-   * and the order chunks arrive in has nothing to do with how a paper's
-   * argument is organised. Rewriting lets section 5 correct the sentence
-   * written for section 2 instead of contradicting it three headings later.
-   *
-   * `unchanged` is the honest escape hatch for a batch that genuinely adds
-   * nothing - front matter, a reference list, a repeated figure caption - and
-   * it may not be used twice running, so "nothing new" cannot quietly become
-   * the way the whole paper gets read.
+   * New information never rewrites an earlier record. If section 5 corrects
+   * what section 2 appeared to establish, it appends a correction naming that
+   * record so both the original reading and its correction remain auditable.
+   * `unchanged` appends an explicit no-new-content record and may repeat.
    */
   /**
    * Fold what has just been read into the paper's one Markdown note.
@@ -2109,8 +2102,8 @@ export class WikiService {
 
     if (finalSynthesis && unchanged) {
       throw new Error(
-        "The final synthesis is a rewrite of the whole paper's account in one pass, so it cannot be " +
-          'submitted as "unchanged". Send the full markdown.',
+        "The final synthesis appends the paper's macro summary, so it cannot be submitted as " +
+          '"unchanged". Send macroSummary.',
       );
     }
     if (finalSynthesis && session.expert.provisional) {
@@ -2312,9 +2305,9 @@ export class WikiService {
     }
     if (options.finalSynthesis === true) {
       throw new Error(
-        "finalSynthesis is the whole-paper pass and belongs to a full-text read, never to a question. " +
-          "Answer the question, record what you read here, and leave the synthesis to " +
-          "wiki_build_from_paper — which continues this same note.",
+        "Do not combine finalSynthesis with new readChunkIds. First append this turn's readingRecord; " +
+          "once coverage is complete, reset the provisional expert and make a separate call with " +
+          "finalSynthesis true and macroSummary.",
       );
     }
     const item = await this.requirePaperItem(options.libraryID, itemKey);
@@ -2906,15 +2899,15 @@ export class WikiService {
       const resume = coverage.firstMissingIndex ?? coverage.deliveredChunks;
       return (
         `Resume reading at chunk index ${resume} of ${coverage.totalChunks}: call wiki_build_from_paper ` +
-        `with itemKey "${session.itemKey}" and offset ${resume}. Rewrite the whole note after each batch ` +
+        `with itemKey "${session.itemKey}" and offset ${resume}. Append one readingRecord after each batch ` +
         "with wiki_update_reading_note."
       );
     }
     if (session.finalSynthesisAt === null) {
       return (
         "Every chunk has been delivered but the whole-paper synthesis has not been done. Call " +
-        "wiki_update_reading_note with finalSynthesis true and the note rewritten as one coherent " +
-        "reading of the complete paper. Then review its terminology with wiki_record_concepts final true."
+        "wiki_update_reading_note with finalSynthesis true and macroSummary. It must account for every " +
+        "substantive reading record. Then review its terminology with wiki_record_concepts final true."
       );
     }
     if (session.conceptsRecordedAt === null) {
@@ -3869,12 +3862,12 @@ export class WikiService {
           "delivered without being folded into its reading " +
           `note, and at most ${WIKI_MAX_OUTSTANDING_BATCHES} may be outstanding. Chunks are a way to ` +
           "transport the text, not a way to organise what it says: call wiki_update_reading_note with " +
-          "the WHOLE note rewritten to account for everything delivered so far - adding, merging, " +
-          "moving, and correcting earlier passages that the newer text has overtaken - and reading " +
+          "one readingRecord for the chunks just delivered. The server appends it without changing " +
+          "earlier records, and reading " +
           "resumes at chunk index " +
           `${(await sessions.coverage(session.sessionId)).firstMissingIndex ?? deliveredBefore.size}. ` +
           "If a batch genuinely changed nothing, send unchanged: true with unchangedReason instead; " +
-          "that cannot be used twice in a row.",
+          "consecutive no-new-content records are allowed.",
         {
           itemKey,
           integrationDebt: debt,
@@ -4025,23 +4018,22 @@ export class WikiService {
         ...(includeNote ? { markdown: noteBody } : {}),
       },
       integrationInstruction:
-        "Rewrite the whole reading note now, as this paper's expert, from the note above plus the " +
-        "chunks just delivered. Not an appended section: revise the single continuous account of the " +
-        "paper - merge the new material into whichever part of it belongs to, and where this text " +
-        "corrects or sharpens something written earlier, rewrite that passage rather than leaving " +
-        "both versions standing. Then send it with wiki_update_reading_note." +
+        "Write one readingRecord now, as this paper's expert, containing only what the chunks just " +
+        "delivered establish. Cite their chunk ids in every factual block. The server audits, numbers " +
+        "and appends it without changing earlier records; if this text corrects an earlier entry, " +
+        "append a correction naming that record. Send it with wiki_update_reading_note." +
         (integrationDebt(current) >= WIKI_MAX_OUTSTANDING_BATCHES
           ? ` ${integrationDebt(current)} batch(es) are outstanding; fold them into the note before requesting another page.`
           : ""),
       coverageInstruction: coverage.complete
         ? "Every chunk of this paper has been delivered. That is delivery, not understanding: " +
-          "paper_reviewed also requires the whole-paper pass, so call wiki_update_reading_note with " +
-          "finalSynthesis true once the note reads as one coherent account of the complete paper. " +
+          "paper_reviewed also requires a full-text reading plus its macro summary, so call " +
+          "wiki_update_reading_note with finalSynthesis true and macroSummary. " +
           GATE_HINT
         : `${coverage.deliveredChunks} of ${coverage.totalChunks} chunks delivered. wiki_commit will store evidence from this paper as section_read at best until the whole paper has been delivered; keep paging with pagination.nextCursor, or submit chunk_local / section_read / partial / incomplete now.`,
       nextStep: hasMore
         ? `You have read chunks ${range} of ${chunks.length}. Update the reading note, then continue with cursor set to pagination.nextCursor and nothing else changed. Continue until the whole paper is delivered; if you abandon the read instead, close it with wiki_finish_reading and outcome "skipped".`
-        : `That is the whole paper: ${chunks.length} chunk(s). Fold this last batch in, then follow the fixed completion chain: wiki_update_reading_note with finalSynthesis true; wiki_record_concepts with final true (or an empty list plus noConceptsReason); wiki_prepare_update with the five-axis Wiki Review covering pages, claims, evidence, concepts and relations; then wiki_commit. Quote Claim Evidence from these chunks rather than from the note. If you decide not to write it up, close it with wiki_finish_reading and outcome "skipped".`,
+        : `That is the whole paper: ${chunks.length} chunk(s). Append a readingRecord for this last batch, then follow the fixed completion chain: wiki_update_reading_note with finalSynthesis true and macroSummary; wiki_record_concepts with final true (or an empty list plus noConceptsReason); wiki_prepare_update with the five-axis Wiki Review and one claimVerdict per source-backed Claim; then wiki_commit. Quote Claim Evidence from these chunks rather than from the note. If you decide not to write it up, close it with wiki_finish_reading and outcome "skipped".`,
       existingWikiCandidates: existing,
     };
   }

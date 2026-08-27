@@ -62,15 +62,14 @@ import type { WikiReadingExpert } from "./wikiReadingNote";
  * note before the next batch is refused.
  *
  * Zero would mean a model that judged one page to contain nothing new still
- * had to resubmit the whole note to move on, which buys nothing and costs a
- * full document every page. Unbounded is the old behaviour: page to the end,
+ * had to submit before moving on, which removes useful paging slack. Unbounded
+ * is the old behaviour: page to the end,
  * then write one summary from whatever survived in context - the thing this
  * whole mechanism exists to stop.
  *
  * One outstanding batch is the slack. Once a batch is waiting, the reader must
- * fold it into the note before asking for more. Any integration clears the
- * backlog because the note is rewritten as a whole and therefore covers
- * everything delivered so far.
+ * append its record before asking for more. Any integration clears the backlog
+ * because the record explicitly names the chunks it accounts for.
  */
 export const WIKI_MAX_OUTSTANDING_BATCHES = 1;
 

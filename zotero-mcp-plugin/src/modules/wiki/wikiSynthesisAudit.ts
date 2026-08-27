@@ -998,7 +998,7 @@ export function describeFlaggedSentences(
       `... and ${flagged.length - shown.length} more sentence(s) in the same shapes, not listed here ` +
         "because one refusal cannot carry them all. They are NOT excused: every one of them still has " +
         "to be proved or rewritten, and the ones you leave standing are named individually when you " +
-        "resubmit. Go through the whole note for these shapes rather than only the sentences above - " +
+        "resubmit. Go through the entire submitted record or macro summary for these shapes rather than only the sentences above - " +
         "rewriting at the paper's own strength costs nothing and clears them without a quotation.",
     );
   }

@@ -656,9 +656,9 @@ export function assertHolisticBody(body: string): void {
   }
   if (!offending.length) return;
   throw new WikiReadingNoteShapeError(
-    "The reading note is organised by delivery batch, not by the paper. " +
+    "The macro summary is organised by delivery batch, not by the paper. " +
       "Chunks are how the text is transported; they are not a way to organise " +
-      "knowledge. Rewrite these section headings so the document reads as one " +
+      "knowledge. Rewrite these section headings so the macro summary reads as one " +
       "continuous account of the paper - research question, materials, method " +
       "chain, model and parameters, conditions, results, mechanism, validation, " +
       "contribution, limits - with the new material merged into whichever " +

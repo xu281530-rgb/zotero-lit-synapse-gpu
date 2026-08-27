@@ -145,34 +145,21 @@ let service = new WikiService(store);
 
 const count = (sql, ...p) => Number(sqlite.prepare(sql).get(...p).n);
 
-/**
- * A reading note that satisfies the shape rules, for tests whose subject is
- * something else.
- *
- * These blocks are about paging, sessions, commits and idempotency; what the
- * note SAYS is tested in test-wiki-reading-note.js. It still has to be a real
- * note rather than a stub, because the server refuses a placeholder.
- */
-const NOTE = [
-  "# Directional solidification of columnar arrays",
-  "",
-  "## Research question",
-  "Whether an imposed thermal gradient fixes the width of the columnar band, and under what conditions the band collapses to equiaxed grains (chunk 0).",
-  "",
-  "## Method and conditions",
-  "Solidification runs at a series of imposed gradients, with the band width measured at fixed stations along the rig (chunk 1).",
-  "",
-  "## Results and mechanism",
-  // Written at the strength the chunk actually carries. An earlier version
-  // said the band narrowed "monotonically with increasing gradient", which
-  // the passage never states - and the whole-paper pass refuses a sentence
-  // that reaches, so this fixture would never have reached the loop it is
-  // here to exercise.
-  "Directional solidification narrows the columnar band at the gradient this station reports (chunk 2).",
-  "",
-  "## Scope and limits",
-  "One alloy, one rig geometry; the transition threshold is reported but not independently verified here.",
-].join("\n");
+/** One cautious fixture record tied to the page that was actually delivered. */
+function recordForPage(page) {
+  const chunkIndex = page.chunks[0].chunkIndex;
+  return `Directional solidification is discussed for the station represented in this passage (chunk ${chunkIndex}).`;
+}
+
+function summaryForPaper(itemKey) {
+  return indexedChunks
+    .get(itemKey)
+    .map(
+      (_chunk, chunkIndex) =>
+        `Directional solidification is discussed for the station represented in this passage (chunk ${chunkIndex}).`,
+    )
+    .join("\n\n");
+}
 
 /** Give the open paper the one expert it needs before body text will flow. */
 async function grantExpert(itemKey) {
@@ -188,6 +175,19 @@ async function grantExpert(itemKey) {
   });
 }
 
+/** Keep independent blocks independent when they reuse the same paper key. */
+async function resetClosedFixtureNote(itemKey) {
+  const sessions = await store.readingSessions();
+  if (await sessions.openForItem(1, itemKey)) return;
+  const paper = await fake.Zotero.Items.getByLibraryAndKeyAsync(1, itemKey);
+  for (let index = paper._attachmentIds.length - 1; index >= 0; index -= 1) {
+    const attachment = fake.Zotero.Items.get(paper._attachmentIds[index]);
+    if (String(attachment?.getField?.("title") ?? "").startsWith("Wiki Reading Note")) {
+      paper._attachmentIds.splice(index, 1);
+    }
+  }
+}
+
 /**
  * Deliver one page and fold it into the reading note, the way a reader does.
  *
@@ -196,6 +196,7 @@ async function grantExpert(itemKey) {
  * lands in the expert phase and is retried once the expert exists.
  */
 async function read(args) {
+  if (args.itemKey) await resetClosedFixtureNote(args.itemKey);
   const page = await service.buildFromPaper({
     libraryID: 1,
     userRequested: true,
@@ -208,7 +209,7 @@ async function read(args) {
   await service.updateReadingNote({
     libraryID: 1,
     itemKey: page.target.itemKey,
-    markdown: NOTE,
+    readingRecord: recordForPage(page),
   });
   return page;
 }
@@ -226,7 +227,7 @@ async function readToEnd(itemKey, limit = 20) {
     libraryID: 1,
     itemKey,
     finalSynthesis: true,
-    markdown: NOTE,
+    macroSummary: summaryForPaper(itemKey),
   });
   // 2.4.3: a fully delivered paper also owes one deliberate pass over the
   // terminology it established before its claims may be written up. Most
@@ -245,9 +246,10 @@ async function readToEnd(itemKey, limit = 20) {
   // a paper to the end therefore means doing the review too.
   await service.prepareUpdate({
     libraryID: 1,
+    itemKey,
     query: itemKey,
     proposedPageTitles: [itemKey],
-    wikiReview: WIKI_REVIEW,
+    wikiReview: await reviewFor(itemKey),
   });
   return pages;
 }
@@ -266,6 +268,19 @@ const WIKI_REVIEW = {
   relations: "No relation to draw or withdraw: this paper links no two concepts already stored.",
 };
 
+async function reviewFor(itemKey) {
+  const claims = await store.listClaimsByEvidenceSource(1, itemKey);
+  return {
+    ...WIKI_REVIEW,
+    claimVerdicts: claims.map((claim) => ({
+      claimId: claim.claimId,
+      verdict: "confirmed",
+      basis:
+        "The completed fixture paper supports this Claim at its currently stored wording and scope.",
+    })),
+  };
+}
+
 /**
  * Prepare, sending the whole-Wiki review only when the paper is ready for it.
  *
@@ -276,10 +291,11 @@ const WIKI_REVIEW = {
  * name. Driving it off the refusal rather than off a flag means these blocks
  * also prove the two messages are distinguishable.
  */
-async function prepareFor(title) {
+async function prepareFor(title, itemKey) {
   try {
     return await service.prepareUpdate({
       libraryID: 1,
+      itemKey,
       query: title,
       proposedPageTitles: [title],
     });
@@ -289,15 +305,16 @@ async function prepareFor(title) {
     }
     return service.prepareUpdate({
       libraryID: 1,
+      itemKey,
       query: title,
       proposedPageTitles: [title],
-      wikiReview: WIKI_REVIEW,
+      wikiReview: await reviewFor(itemKey),
     });
   }
 }
 
 async function commitClaim(options) {
-  const prepared = await prepareFor(options.title);
+  const prepared = await prepareFor(options.title, options.itemKey);
   return service.commit({
     libraryID: 1,
     userInitiated: true,

@@ -629,7 +629,7 @@ block("the write-up waits for the whole-paper pass", async () => {
         query: "columnar array",
         proposedPageTitles: ["Columnar array forming"],
       }),
-    /has not been rewritten as one account of the complete paper/iu,
+    /macro summary has not been appended/iu,
     "every chunk delivered is the moment the final pass is owed, not the moment claims start",
   );
 

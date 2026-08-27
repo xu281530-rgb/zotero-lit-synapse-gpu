@@ -170,6 +170,19 @@ test("the new tools are present with the shapes their callers depend on", () => 
   }
 });
 
+test("reading-note updates advertise append-only inputs", () => {
+  const tool = buildToolCatalog().find(
+    (candidate) => candidate.name === "wiki_update_reading_note",
+  );
+  const properties = tool.inputSchema.properties;
+  assert.equal(properties.readingRecord.type, "string");
+  assert.equal(properties.macroSummary.type, "string");
+  assert.equal(properties.markdown.deprecated, true);
+  assert.match(tool.description, /record is audited immediately/iu);
+  assert.match(tool.description, /appends? .*record/isu);
+  assert.doesNotMatch(tool.description, /rewrite the whole|whole note rewritten/iu);
+});
+
 test("get_item_details advertises no content-bearing parameter", () => {
   const tool = buildToolCatalog().find((t) => t.name === "get_item_details");
   const properties = Object.keys(tool.inputSchema.properties);
