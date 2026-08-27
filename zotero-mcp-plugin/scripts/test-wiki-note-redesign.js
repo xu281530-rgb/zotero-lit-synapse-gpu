@@ -115,6 +115,18 @@ test("macro summary covers every finding even when findings share a chunk", () =
     /第 1 次/u,
     "sharing a citation must not let one finding stand in for another",
   );
+  assert.throws(
+    () =>
+      assertMacroSummaryCoversRecords(
+        body,
+        [
+          "The holding temperature is 50 C (chunk 42).",
+          "The peak pressure is 1180 MPa (chunk 42).",
+        ].join("\n"),
+      ),
+    /第 1 次/u,
+    "numbers cannot be reassigned to a different finding from the same chunk",
+  );
 
   assert.doesNotThrow(() =>
     assertMacroSummaryCoversRecords(

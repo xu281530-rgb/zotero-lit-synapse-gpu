@@ -370,6 +370,7 @@ const COVERAGE_CHUNK_REFERENCE =
 interface WikiFindingCoverageUnit {
   chunks: number[];
   numbers: Set<string>;
+  numberContexts: Map<string, Set<string>>;
   lexical: Set<string>;
 }
 
@@ -382,15 +383,7 @@ function coverageStem(word: string): string {
   return word;
 }
 
-function findingCoverageAnchors(text: string): {
-  numbers: Set<string>;
-  lexical: Set<string>;
-} {
-  const clean = String(text ?? "")
-    .replace(COVERAGE_CHUNK_REFERENCE, " ")
-    .normalize("NFKC")
-    .toLowerCase();
-  const numbers = new Set(clean.match(/[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?/giu) ?? []);
+function coverageLexicalAnchors(clean: string): Set<string> {
   const lexical = new Set<string>();
   for (const match of clean.matchAll(/[a-z][a-z0-9-]{2,}/gu)) {
     const stem = coverageStem(match[0]);
@@ -404,7 +397,36 @@ function findingCoverageAnchors(text: string): {
       lexical.add(`han:${run.slice(index, index + 2)}`);
     }
   }
-  return { numbers, lexical };
+  return lexical;
+}
+
+function findingCoverageAnchors(text: string): {
+  numbers: Set<string>;
+  numberContexts: Map<string, Set<string>>;
+  lexical: Set<string>;
+} {
+  const clean = String(text ?? "")
+    .replace(COVERAGE_CHUNK_REFERENCE, " ")
+    .normalize("NFKC")
+    .toLowerCase();
+  const numberMatches = [
+    ...clean.matchAll(/[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?/giu),
+  ];
+  const numbers = new Set(numberMatches.map((match) => match[0]));
+  const numberContexts = new Map<string, Set<string>>();
+  for (const match of numberMatches) {
+    const start = Math.max(0, (match.index ?? 0) - 36);
+    const end = Math.min(
+      clean.length,
+      (match.index ?? 0) + match[0].length + 36,
+    );
+    const context = coverageLexicalAnchors(clean.slice(start, end));
+    const existing = numberContexts.get(match[0]) ?? new Set<string>();
+    for (const anchor of context) existing.add(anchor);
+    numberContexts.set(match[0], existing);
+  }
+  const lexical = coverageLexicalAnchors(clean);
+  return { numbers, numberContexts, lexical };
 }
 
 function findingCoverageUnits(
@@ -431,12 +453,22 @@ function findingCoverageUnits(
 function findingAnchorsCovered(
   finding: WikiFindingCoverageUnit,
   candidate: WikiFindingCoverageUnit,
+  summaryUnits: readonly WikiFindingCoverageUnit[],
 ): boolean {
   if (finding.chunks.some((chunkId) => !candidate.chunks.includes(chunkId))) {
     return false;
   }
-  if ([...finding.numbers].some((number) => !candidate.numbers.has(number))) {
-    return false;
+  for (const number of finding.numbers) {
+    const context = finding.numberContexts.get(number) ?? new Set<string>();
+    const preserved = summaryUnits.some((unit) => {
+      if (!unit.numbers.has(number)) return false;
+      if (!unit.chunks.some((chunkId) => finding.chunks.includes(chunkId))) {
+        return false;
+      }
+      if (!context.size) return true;
+      return [...context].some((anchor) => unit.lexical.has(anchor));
+    });
+    if (!preserved) return false;
   }
   const requiredLexical = Math.min(2, finding.lexical.size);
   let sharedLexical = 0;
@@ -457,6 +489,7 @@ function combinedSummaryCoverage(
   return {
     chunks: [...new Set(relevant.flatMap((unit) => unit.chunks))],
     numbers: new Set(relevant.flatMap((unit) => [...unit.numbers])),
+    numberContexts: new Map(),
     lexical: new Set(relevant.flatMap((unit) => [...unit.lexical])),
   };
 }
@@ -484,6 +517,7 @@ export function assertMacroSummaryCoversRecords(
           !findingAnchorsCovered(
             finding,
             combinedSummaryCoverage(finding, summaryUnits),
+            summaryUnits,
           ),
       );
     },
