@@ -352,7 +352,7 @@ export function buildToolCatalog(): ToolDefinition[] {
     description: [
       'BIBLIOGRAPHIC METADATA for one item. This is the citation tool: everything you need to cite a paper correctly and to see how it sits in the library.',
       '',
-      'RETURNS: title, creators (with roles), date and year, item type, publication title, volume, issue, pages, DOI, URL, language, tags, abstract/note availability, and one row per attachment — key, filename, content type, size, and whether its text can be read.',
+      'RETURNS: title, creators (with roles), date and year, item type, publication title, volume, issue, pages, DOI, URL, language, tags, abstract/note availability, one row per attachment — key, filename, content type, size, and whether its text can be read — and collections: every folder this document is filed in, with key, name and full path. That last one is filing, not content, and it is the only way to see that a paper sits in five folders at once (or in none) without listing every collection in the library and inverting it.',
       '',
       'DOES NOT RETURN CONTENT, by design. No abstract text, no note bodies, no annotation text, no PDF text, no chunks. Every one of those has a tool that returns it on purpose and pages it properly: get_item_abstract for the abstract, get_annotations for your notes and highlights, get_attachment_text for an attachment, get_document_chunks for the indexed body. Returning them here made a metadata lookup silently ship a whole paper, so it no longer does. What you get instead is availability: hasAbstract and abstractChars tell you what get_item_abstract would return without returning it.',
       '',
