@@ -904,7 +904,18 @@ export class WikiSynthesisAuditRequired extends Error {
   }
 }
 
-/** Render the flagged sentences as a refusal a model can act on. */
+/**
+ * Render the flagged sentences as a refusal a model can act on.
+ *
+ * The list is capped, because a note with a hundred flagged sentences would
+ * otherwise produce a refusal nobody can read. What the cap must not do is
+ * ask for something it did not show: every flagged sentence has to be answered
+ * or rewritten, and the tail used to be dismissed as "N more in the same
+ * shape" - which reads as "and some others you need not worry about", while
+ * `verifySynthesisAudit` goes on to demand all of them. The trailing line now
+ * says what is actually true: the same two options apply to the rest, and they
+ * are named by the next submission.
+ */
 export function describeFlaggedSentences(
   flagged: readonly WikiFlaggedSentence[],
   limit = 40,
@@ -922,7 +933,11 @@ export function describeFlaggedSentences(
   });
   if (flagged.length > shown.length) {
     lines.push(
-      `... and ${flagged.length - shown.length} more sentence(s) in the same shape.`,
+      `... and ${flagged.length - shown.length} more sentence(s) in the same shapes, not listed here ` +
+        "because one refusal cannot carry them all. They are NOT excused: every one of them still has " +
+        "to be proved or rewritten, and the ones you leave standing are named individually when you " +
+        "resubmit. Go through the whole note for these shapes rather than only the sentences above - " +
+        "rewriting at the paper's own strength costs nothing and clears them without a quotation.",
     );
   }
   return lines.join("\n");

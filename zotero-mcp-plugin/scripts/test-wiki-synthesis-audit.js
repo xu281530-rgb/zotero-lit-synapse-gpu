@@ -42,6 +42,7 @@ const {
   splitNoteBlocks,
   enumerationDepth,
   techniqueTokens,
+  describeFlaggedSentences,
   WIKI_SYNTHESIS_MIN_QUOTE_CHARS,
 } = await import("../src/modules/wiki/wikiSynthesisAudit.ts");
 
@@ -622,6 +623,27 @@ test("verification is never relaxed, and the message says so", () => {
     chunks: CHUNKS,
   });
   assert.ok(/verbatim by design and is not relaxed/.test(message), message);
+});
+
+test("a truncated flag list does not excuse the sentences it left out", () => {
+  // More flagged sentences than one refusal can carry. The tail used to read
+  // "... and N more sentence(s) in the same shape.", which invites a model to
+  // answer the listed ones and resubmit - and verifySynthesisAudit then
+  // demands every one of the others, including the ones it was never shown.
+  const flagged = Array.from({ length: 50 }, (_, i) => ({
+    sentence: `Sentence number ${i} eliminates the artifact entirely.`,
+    citedChunks: [i],
+    reasons: ["absolute-language"],
+    details: ['states "eliminates"'],
+  }));
+  const message = describeFlaggedSentences(flagged);
+  assert.ok(/\.\.\. and 10 more sentence/u.test(message), message);
+  assert.ok(/NOT excused/u.test(message), message);
+  assert.ok(/named individually when you resubmit/u.test(message), message);
+  assert.ok(
+    !/more sentence\(s\) in the same shape\./u.test(message),
+    "the dismissive wording must be gone",
+  );
 });
 
 test("the prefix search finds the exact divergence offset", () => {
