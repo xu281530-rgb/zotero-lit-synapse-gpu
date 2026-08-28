@@ -231,6 +231,7 @@ export class AnnotationService {
     version: string;
     endpoint: string;
     results: AnnotationContent[];
+    warnings?: string[];
   }> {
     const startTime = Date.now();
     ztoolkit.log(
@@ -240,6 +241,7 @@ export class AnnotationService {
     try {
       const libraryID = params.libraryID ?? Zotero.Libraries.userLibraryID;
       const allAnnotations: AnnotationContent[] = [];
+      const warnings: string[] = [];
 
       // 获取笔记
       if (
@@ -290,14 +292,19 @@ export class AnnotationService {
             // Fallback to old method
             const allItems = await Zotero.Items.getAll(libraryID);
             const itemLimit = 100;
-            let processedCount = 0;
-            for (const item of allItems) {
-              if (processedCount >= itemLimit) break;
-              if (item.isRegularItem() && !item.isNote() && !item.isAttachment()) {
+            const regularItems = allItems.filter(
+              (item) =>
+                item.isRegularItem() && !item.isNote() && !item.isAttachment(),
+            );
+            if (regularItems.length > itemLimit) {
+              warnings.push(
+                `Direct annotation lookup failed, so only the first ${itemLimit} of ${regularItems.length} regular items were scanned. Results are incomplete; narrow the search to itemKeys or retry after checking Zotero's search service.`,
+              );
+            }
+            for (const item of regularItems.slice(0, itemLimit)) {
                 try {
                   const pdfAnnotations = await this.getPDFAnnotations(item.key, libraryID);
                   allAnnotations.push(...pdfAnnotations);
-                  processedCount++;
                 } catch (e) {
                   // 忽略单个文献的错误
                 }
@@ -348,6 +355,7 @@ export class AnnotationService {
         version: "2.0",
         endpoint: "annotations/search",
         results: paginatedResults,
+        ...(warnings.length > 0 ? { warnings } : {}),
       };
     } catch (error) {
       ztoolkit.log(

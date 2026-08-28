@@ -529,10 +529,6 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
       },
       required: ['collectionKey'],
-      anyOf: [
-        { required: ['name'] },
-        { required: ['parentCollection'] },
-      ],
     },
   },
   {
@@ -618,6 +614,10 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
       },
       required: ['collectionKey'],
+      anyOf: [
+        { required: ['name'] },
+        { required: ['parentCollection'] },
+      ],
     },
   },
   {
