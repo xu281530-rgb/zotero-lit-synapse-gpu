@@ -5,7 +5,7 @@ _This README is also available in: [:gb: English](./README.md) | :cn: 简体中�
 [![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-2.6.0-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-2.6.1-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -470,11 +470,14 @@ cursor 过期会明确报错，而不是悄悄重新搜一遍。
 #### `search_collections`
 
 按名称查找分类，用于「用户提到某个文件夹名、你需要它的 `collectionKey`」。
-返回的是身份与路径，不是内容。参数：`q`、`limit`、`libraryID`。
+返回的是身份与路径，不是内容。参数：`q`（必需）、`limit`、`offset`、`libraryID`；
+用响应中的 `pagination.nextOffset` 继续翻页。
 
 #### `get_libraries`
 
-列出当前 Zotero 客户端里的所有文献库。参数：`limit`、`offset`。
+列出当前 Zotero 客户端里的所有文献库。响应为
+`{ results, pagination, metadata }`，`pagination` 含 `total`、`hasMore` 和
+`nextOffset`。参数：`limit`、`offset`。
 
 #### `search_libraries`
 
@@ -534,6 +537,9 @@ Zotero 里手写的笔记。**笔记正文从这里读**——`get_item_details`
 `attachmentKey` 调用一次即可。条目下只有一个可出文本的附件时会自动选中
 （`selectedAutomatically: true`）；有两个时**绝不猜**——读错附件返回的文本看起来
 完全正常，却属于另一篇文档。
+
+独立 PDF 或其他未归档附件不需要父条目：直接把附件 key 作为 `itemKey`。本地文件
+可访问时，附件清单还会返回 `sizeBytes`。
 
 **明确文本来源**。每次响应都在 `textSource.method` 里说明文本是哪条路径产出的，
 并附一句 `description` 说明可以据此主张什么：`doc2x`（保留出版结构，最好）、
@@ -837,7 +843,8 @@ Claim 只能建立在阅读总结已经涵盖的内容之上。该附件也被�
 #### 分类增删改
 
 - `create_collection` —— `name`（必需）、`parentCollection`、`libraryID`
-- `update_collection` —— `collectionKey`（必需）、`name`、`parentCollection`
+- `update_collection` —— `collectionKey`（必需），并且 `name`、`parentCollection`
+  至少提供一个
 - `delete_collection` —— `collectionKey`（必需）、`deleteItems`
 - `add_items_to_collection` —— `collectionKey`、`itemKeys`（均必需）
 - `remove_items_from_collection` —— `collectionKey`、`itemKeys`（均必需）
@@ -855,6 +862,11 @@ Claim 只能建立在阅读总结已经涵盖的内容之上。该附件也被�
 事务里完成，中途失败也不会留下整理到一半的库。`dryRun` 跑的是同一套体检、返回
 同一份计划——哪些条目移动、每个条目会失去哪些归属——但不写入，也不弹确认框，
 因此可以放心用它把整理方案先摆给用户看，确认后再真正执行。
+
+`add_items_to_collection` 和 `remove_items_from_collection` 如果所有 key 都不存在，
+会作为工具调用失败；有效和无效 key 混合时返回 `success: false`、`partial: true`，
+并分别列出完成项和缺失项。附件迁移确认框会列出目标父条目和全部子 key；合并确认框
+会先做预检，再逐组列出保留条目以及将被 Zotero 移入回收站的重复条目。
 
 #### 条目与笔记写入
 

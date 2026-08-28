@@ -5,7 +5,7 @@ _This README is also available in: [:cn: 简体中文](./README-zh.md) | :gb: En
 [![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-2.6.0-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-2.6.1-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -308,8 +308,8 @@ the notes you typed into Zotero — when you do not yet know which document hold
 them. Everything it returns is the user's reading, not the literature: quote it
 verbatim and attribute it to the user.
 
-At least one of `q`, `colors` or `tags` is required; an unfiltered sweep of every
-mark in the library is not a question. Every mark matching the filters is scored
+At least one non-empty `q`, `colors` or `tags` value is required; blank strings
+and empty arrays are rejected instead of triggering an unfiltered sweep. Every mark matching the filters is scored
 and ranked _before_ one page is served — the previous implementation ranked an
 arbitrary first 100 candidates, so in a library with more matches than that the
 best one was routinely outside the window it ranked.
@@ -372,11 +372,14 @@ cannot match a single document's passages.
 
 Find collections whose name matches a query, when the user refers to a folder by
 name and you need its `collectionKey`. Returns identity and path, not contents.
-Params: `q`, `limit`, `libraryID`.
+Params: `q` (required), `limit`, `offset`, `libraryID`. Continue with the
+response's `pagination.nextOffset`.
 
 #### `get_libraries`
 
-List every Zotero library available in this client. Params: `limit`, `offset`.
+List every Zotero library available in this client. The response is
+`{ results, pagination, metadata }`, with `total`, `hasMore` and `nextOffset` in
+`pagination`. Params: `limit`, `offset`.
 
 #### `search_libraries`
 
@@ -445,6 +448,9 @@ and no text; call again with the `attachmentKey` you want. An item with exactly
 one text-bearing attachment is selected automatically (`selectedAutomatically:
 true`); an item with two is never guessed between, because reading the wrong one
 returns text that looks entirely valid and belongs to a different document.
+For a standalone PDF or other unfiled attachment, pass that attachment's key as
+`itemKey`; no parent item is required. Attachment rows include `sizeBytes` when
+the local file is available.
 
 **Where the text came from.** Every response names its source in
 `textSource.method`, with a `description` saying what may be relied on:
@@ -809,7 +815,8 @@ disappear from `tools/list`, not eleven.
 #### Collection mutation
 
 - `create_collection` — `name` (required), `parentCollection`, `libraryID`
-- `update_collection` — `collectionKey` (required), `name`, `parentCollection`
+- `update_collection` — `collectionKey` (required), plus at least one of `name`
+  or `parentCollection`
 - `delete_collection` — `collectionKey` (required), `deleteItems`
 - `add_items_to_collection` — `collectionKey`, `itemKeys` (both required)
 - `remove_items_from_collection` — `collectionKey`, `itemKeys` (both required)
@@ -829,6 +836,13 @@ executes the same preflight and returns the same plan — which items move, whic
 filings each one loses — without writing and without raising the confirmation
 prompt, which is what makes it safe to show a user a proposed reorganisation
 before performing it.
+
+For `add_items_to_collection` and `remove_items_from_collection`, an all-missing
+batch is a failed tool call. A mixed batch returns `success: false` and
+`partial: true`, with the completed and missing keys listed separately. The
+confirmation dialog for reparenting lists the target and every child key; merge
+confirmation preflights the groups and names each survivor and every duplicate
+that Zotero will move to the trash.
 
 #### Item and note mutation
 
