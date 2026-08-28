@@ -95,6 +95,7 @@ export async function handleGetLibraries(
       libraryType: library.libraryType,
     }));
 
+    const hasMore = offset + libraries.length < total;
     return {
       status: 200,
       statusText: "OK",
@@ -102,7 +103,17 @@ export async function handleGetLibraries(
         "Content-Type": "application/json; charset=utf-8",
         "X-Total-Count": total.toString(),
       },
-      body: JSON.stringify(libraries),
+      body: JSON.stringify({
+        results: libraries,
+        pagination: {
+          total,
+          limit,
+          offset,
+          hasMore,
+          ...(hasMore ? { nextOffset: offset + libraries.length } : {}),
+        },
+        metadata: { extractedAt: new Date().toISOString() },
+      }),
     };
   } catch (e) {
     const error = e instanceof Error ? e : new Error(String(e));
@@ -151,6 +162,7 @@ export async function handleSearchLibraries(
       libraryType: library.libraryType,
     }));
 
+    const hasMore = offset + libraries.length < total;
     return {
       status: 200,
       statusText: "OK",
@@ -158,7 +170,17 @@ export async function handleSearchLibraries(
         "Content-Type": "application/json; charset=utf-8",
         "X-Total-Count": total.toString(),
       },
-      body: JSON.stringify(libraries),
+      body: JSON.stringify({
+        results: libraries,
+        pagination: {
+          total,
+          limit,
+          offset,
+          hasMore,
+          ...(hasMore ? { nextOffset: offset + libraries.length } : {}),
+        },
+        metadata: { extractedAt: new Date().toISOString() },
+      }),
     };
   } catch (e) {
     const error = e instanceof Error ? e : new Error(String(e));
@@ -1108,6 +1130,17 @@ export async function handleUpdateCollection(
       };
     }
 
+    if (body.name === undefined && body.parentCollection === undefined) {
+      return {
+        status: 400,
+        statusText: "Bad Request",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({
+          error: "Provide name or parentCollection to update the collection",
+        }),
+      };
+    }
+
     const libraryID = body.libraryID ?? Zotero.Libraries.userLibraryID;
     const collection = await Zotero.Collections.getByLibraryAndKeyAsync(
       libraryID,
@@ -1342,12 +1375,32 @@ export async function handleAddItemsToCollection(
       `[ApiHandlers] Added ${added.length} items to collection ${collectionKey}`,
     );
 
+    const completedCount = added.length + alreadyInCollection.length;
+    if (notFound.length > 0 && completedCount === 0) {
+      return {
+        status: 422,
+        statusText: "Unprocessable Entity",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({
+          error: `No items were added because none of these keys exist in library ${libraryID}: ${notFound.join(", ")}`,
+          success: false,
+          partial: false,
+          collectionKey,
+          added,
+          notFound,
+          alreadyInCollection,
+        }),
+      };
+    }
+
+    const partial = notFound.length > 0;
     return {
-      status: 200,
-      statusText: "OK",
+      status: partial ? 207 : 200,
+      statusText: partial ? "Multi-Status" : "OK",
       headers: { "Content-Type": "application/json; charset=utf-8" },
       body: JSON.stringify({
-        success: true,
+        success: !partial,
+        partial,
         collectionKey,
         added,
         notFound,
@@ -1440,12 +1493,32 @@ export async function handleRemoveItemsFromCollection(
       `[ApiHandlers] Removed ${removed.length} items from collection ${collectionKey}`,
     );
 
+    const completedCount = removed.length + notInCollection.length;
+    if (notFound.length > 0 && completedCount === 0) {
+      return {
+        status: 422,
+        statusText: "Unprocessable Entity",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({
+          error: `No items were removed because none of these keys exist in library ${libraryID}: ${notFound.join(", ")}`,
+          success: false,
+          partial: false,
+          collectionKey,
+          removed,
+          notFound,
+          notInCollection,
+        }),
+      };
+    }
+
+    const partial = notFound.length > 0;
     return {
-      status: 200,
-      statusText: "OK",
+      status: partial ? 207 : 200,
+      statusText: partial ? "Multi-Status" : "OK",
       headers: { "Content-Type": "application/json; charset=utf-8" },
       body: JSON.stringify({
-        success: true,
+        success: !partial,
+        partial,
         collectionKey,
         removed,
         notFound,

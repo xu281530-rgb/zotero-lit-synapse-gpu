@@ -221,13 +221,14 @@ export function buildToolCatalog(): ToolDefinition[] {
           description: 'Zotero library ID used by both keyword and semantic retrieval'
         },
       },
-      required: ['query']
+      required: [],
+      anyOf: [{ required: ['query'] }, { required: ['cursor'] }],
     }
   },
   {
     name: 'get_libraries',
     category: 'retrieval',
-    description: 'List all Zotero libraries available in the current client. Returns minimal library metadata for each library as a paginated array.',
+    description: 'List all Zotero libraries available in the current client. Returns { results, pagination, metadata }; pagination includes total, hasMore and nextOffset so callers can reliably continue.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -509,7 +510,9 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         q: { type: 'string', description: 'Collection name search query' },
         limit: { type: 'number', description: 'Maximum results to return' },
+        offset: { type: 'number', description: 'Pagination offset. Continue from pagination.nextOffset.' },
       },
+      required: ['q'],
     },
   },
   {
@@ -526,6 +529,10 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
       },
       required: ['collectionKey'],
+      anyOf: [
+        { required: ['name'] },
+        { required: ['parentCollection'] },
+      ],
     },
   },
   {

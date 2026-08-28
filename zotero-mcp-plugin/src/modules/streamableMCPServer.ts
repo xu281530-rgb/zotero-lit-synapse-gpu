@@ -19,7 +19,10 @@ import {
 import { describeNonDocumentKey, type ItemKeyKind } from './itemKeyKind';
 import { DEFAULT_FIELD_PARAMETERS } from './keyword/bm25f';
 import { UnifiedContentExtractor } from './unifiedContentExtractor';
-import { SmartAnnotationExtractor } from './smartAnnotationExtractor';
+import {
+  hasEffectiveAnnotationSearchFilter,
+  SmartAnnotationExtractor,
+} from './smartAnnotationExtractor';
 import {
   filterToolCatalog,
   REMOVED_TOOL_REPLACEMENTS,
@@ -418,6 +421,34 @@ function describeMutation(toolName: string, args: any): string {
   if (args?.name) parts.push(`name: ${String(args.name)}`);
   if (Array.isArray(args?.itemKeys))
     parts.push(`items: ${args.itemKeys.length}`);
+  if (toolName === 'write_item' && args?.action === 'reparent') {
+    const childKeys = Array.isArray(args?.attachmentKeys)
+      ? args.attachmentKeys.map(String)
+      : [];
+    parts.push(
+      `${childKeys.length} attachments or notes: ${childKeys.join(', ') || '(none)'}`,
+    );
+    parts.push(`new parent: ${String(args?.parentKey || args?.parentItemKey)}`);
+  }
+  if (toolName === 'write_item' && args?.action === 'import') {
+    parts.push(
+      `file will be attached under: ${String(args?.parentItemKey || args?.parentKey)}`,
+    );
+  }
+  if (toolName === 'merge_items') {
+    const plannedGroups = args?.confirmationPlan?.groups;
+    if (Array.isArray(plannedGroups)) {
+      parts.push(`${plannedGroups.length} duplicate group(s)`);
+      plannedGroups.forEach((group: any, index: number) => {
+        const trashed = Array.isArray(group?.merging)
+          ? group.merging.map((row: any) => String(row?.itemKey)).join(', ')
+          : '';
+        parts.push(
+          `group ${index + 1}: keep ${String(group?.masterItemKey)}; trash ${trashed || '(none)'}`,
+        );
+      });
+    }
+  }
   if (Array.isArray(args?.tags)) parts.push(`tags: ${args.tags.length}`);
   if (toolName === 'delete_collection') {
     parts.push(
@@ -1092,12 +1123,30 @@ Nothing in this server returns a whole document in one response. Every reading t
         assertWriteMetadataArgs(args);
       }
 
+      if (
+        name === 'update_collection' &&
+        args?.name === undefined &&
+        args?.parentCollection === undefined
+      ) {
+        throw new Error(
+          'Provide name or parentCollection to update the collection.',
+        );
+      }
+
       // 统一的写入闸门：任何会改动 Zotero 数据的工具都先过这里。
       // 每个 case 内原有的 write.enabled 检查保留，作为二次校验。
       if (MUTATING_TOOL_NAMES.has(name)) {
         assertWriteEnabled(name);
         if (!isMutationPreview(name, args)) {
-          await assertMutationConfirmed(name, args);
+          let confirmationArgs = args;
+          if (name === 'merge_items') {
+            const confirmationPlan = await this.callMergeItems({
+              ...args,
+              dryRun: true,
+            });
+            confirmationArgs = { ...args, confirmationPlan };
+          }
+          await assertMutationConfirmed(name, confirmationArgs);
         }
       }
 
@@ -1140,9 +1189,9 @@ Nothing in this server returns a whole document in one response. Every reading t
 
         case 'search_annotations':
           // q is optional when colors or tags filters are provided
-          if (!args?.q && !args?.colors && !args?.tags) {
+          if (!hasEffectiveAnnotationSearchFilter(args ?? {})) {
             throw new Error(
-              'Either q (query), colors, or tags filter is required',
+              'A non-empty q, colors, or tags filter is required; blank strings and empty arrays would scan the entire annotation library.',
             );
           }
           result = await this.callSearchAnnotations(args);
@@ -1768,7 +1817,7 @@ Nothing in this server returns a whole document in one response. Every reading t
 
     const response = await handleGetLibraries(queryParams);
     const result = response.body ? JSON.parse(response.body) : response;
-    return result;
+    return this.unwrapHandlerResult(response, result);
   }
 
   private async callSearchLibraries(args: any): Promise<any> {
@@ -1780,7 +1829,7 @@ Nothing in this server returns a whole document in one response. Every reading t
     }
     const response = await handleSearchLibraries(searchParams);
     const result = response.body ? JSON.parse(response.body) : response;
-    return result;
+    return this.unwrapHandlerResult(response, result);
   }
 
   private async callSearchLibrary(args: any): Promise<any> {
@@ -2843,11 +2892,10 @@ Nothing in this server returns a whole document in one response. Every reading t
     queryParams.append('fields', STANDARD_ITEM_DETAIL_FIELDS.join(','));
 
     const response = await handleGetItem({ 1: itemKey }, queryParams);
-    const result = response.body ? JSON.parse(response.body) : response;
-
-    if (!result || typeof result !== 'object' || result.error) {
-      return result;
-    }
+    const result = this.unwrapHandlerResult(
+      response,
+      response.body ? JSON.parse(response.body) : response,
+    );
 
     // The unified five-value status, not the per-attachment extension guess.
     // `hasFulltext` claimed full text for any file whose name ended in .pdf,
@@ -2900,30 +2948,40 @@ Nothing in this server returns a whole document in one response. Every reading t
         `Item ${args.itemKey} not found in library ${libraryID}.`,
       );
     }
-    if (item.isAttachment?.()) {
-      throw new Error(
-        `${args.itemKey} is itself an attachment. Pass the parent item as itemKey and this key as attachmentKey.`,
-      );
-    }
-
     const { isGeneratedMarkdownAttachment } = await import('./pdfTextSource');
     const summaries: AttachmentSummary[] = [];
-    for (const attachmentID of item.getAttachments?.(false) ?? []) {
+    const attachments = item.isAttachment?.()
+      ? [item]
+      : (item.getAttachments?.(false) ?? [])
+          .map((attachmentID: number) => Zotero.Items.get(attachmentID))
+          .filter(Boolean);
+    for (const attachment of attachments) {
       try {
-        const attachment = Zotero.Items.get(attachmentID);
         if (!attachment?.isAttachment?.()) continue;
+        let sizeBytes: number | undefined;
+        try {
+          const filePath =
+            (await attachment.getFilePathAsync?.()) ||
+            attachment.getFilePath?.();
+          if (filePath) {
+            const stat = await IOUtils.stat(filePath);
+            if (Number.isFinite(stat?.size)) sizeBytes = stat.size;
+          }
+        } catch {
+          sizeBytes = undefined;
+        }
         summaries.push({
           attachmentKey: attachment.key,
           title: String(attachment.getField?.('title') || '') || undefined,
           filename: attachment.attachmentFilename || undefined,
           contentType: attachment.attachmentContentType || undefined,
-          sizeBytes: undefined,
+          sizeBytes,
           hasExtractableText: this.attachmentCanYieldText(attachment),
           isGeneratedMarkdown: isGeneratedMarkdownAttachment(attachment),
         });
       } catch (error) {
         ztoolkit.log(
-          `[StreamableMCP] Could not inspect attachment ${attachmentID}: ${error}`,
+          `[StreamableMCP] Could not inspect attachment ${attachment?.key || '(unknown)'}: ${error}`,
           'warn',
         );
       }
@@ -5548,10 +5606,13 @@ Nothing in this server returns a whole document in one response. Every reading t
           }
 
           const successCount = results.filter((r) => r.success).length;
+          const partial =
+            successCount > 0 && successCount < attachmentKeys.length;
 
           return {
             action: 'reparent',
-            success: successCount > 0,
+            success: successCount === attachmentKeys.length,
+            partial,
             data: {
               parentKey,
               results,

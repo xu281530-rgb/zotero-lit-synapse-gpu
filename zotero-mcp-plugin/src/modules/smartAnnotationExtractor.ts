@@ -50,6 +50,26 @@ export function resolveAnnotationItemKeys(params: {
   return Array.from(new Set(keys));
 }
 
+/** True only when a search parameter has a non-empty filtering value. */
+export function hasEffectiveAnnotationSearchFilter(params: {
+  q?: unknown;
+  colors?: unknown;
+  tags?: unknown;
+}): boolean {
+  if (typeof params.q === 'string' && params.q.trim().length > 0) return true;
+  for (const values of [params.colors, params.tags]) {
+    if (
+      Array.isArray(values) &&
+      values.some(
+        (value) => typeof value === 'string' && value.trim().length > 0,
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export interface SmartAnnotationOptions {
   libraryID?: number;
   types?: string[];
@@ -109,6 +129,8 @@ export interface SmartAnnotationResponse {
     sourceItemKeys?: string[];
     /** Set when the candidate set hit the safety limit before ranking. */
     warning?: string;
+    /** Every source that could not be read or was truncated. */
+    warnings?: string[];
     pagination?: {
       total: number;          // 总结果数
       offset: number;         // 当前偏移量
@@ -221,6 +243,7 @@ export class SmartAnnotationExtractor {
       };
 
       let annotations: any[] = [];
+      const warnings: string[] = [];
 
       // Route to different retrieval methods
       if (params.annotationId) {
@@ -233,7 +256,9 @@ export class SmartAnnotationExtractor {
           // hierarchy by AnnotationService, which is the authority. Stamping
           // the requested key over it here would paper over a mismatch rather
           // than surface it.
-          annotations.push(...(await this.getByItem(key, options)));
+          const retrieved = await this.getByItem(key, options);
+          annotations.push(...retrieved.annotations);
+          warnings.push(...retrieved.warnings);
         }
       } else {
         throw new Error('Must provide itemKeys, itemKey, annotationId, or annotationIds');
@@ -286,6 +311,7 @@ export class SmartAnnotationExtractor {
         metadata: {
           extractedAt: new Date().toISOString(),
           sourceItemKeys: itemKeys,
+          ...(warnings.length > 0 ? { warnings } : {}),
           processingTime,
           pagination: {
             total: totalCount,
@@ -365,6 +391,7 @@ export class SmartAnnotationExtractor {
         itemKeys.length > 0 ? itemKeys : [undefined];
       const annotations: any[] = [];
       let truncated = false;
+      const warnings = new Set<string>();
 
       for (const scopeItemKey of scopes) {
         const batchSize = 100;
@@ -384,6 +411,9 @@ export class SmartAnnotationExtractor {
           // there is no requested key to fall back on.
           const batch = batchResult.results || [];
           annotations.push(...batch);
+          for (const warning of batchResult.warnings ?? []) {
+            warnings.add(String(warning));
+          }
 
           more = batchResult.pagination?.hasMore || false;
           currentOffset += batchSize;
@@ -394,6 +424,9 @@ export class SmartAnnotationExtractor {
           if (currentOffset > 10000) {
             ztoolkit.log(`[SmartAnnotationExtractor] Reached safety limit of 10000 annotations`);
             truncated = true;
+            warnings.add(
+              'The candidate set hit the 10000-annotation safety limit, so this ranking may not have seen every matching mark. Narrow the search with itemKeys, colors or tags.',
+            );
             break;
           }
         }
@@ -472,6 +505,7 @@ export class SmartAnnotationExtractor {
         metadata: {
           extractedAt: new Date().toISOString(),
           sourceItemKeys: itemKeys,
+          ...(warnings.size > 0 ? { warnings: Array.from(warnings) } : {}),
           ...(truncated
             ? {
                 warning:
@@ -518,8 +552,12 @@ export class SmartAnnotationExtractor {
   /**
    * Get annotations by item (PDF annotations + notes)
    */
-  private async getByItem(itemKey: string, options: SmartAnnotationOptions): Promise<any[]> {
+  private async getByItem(
+    itemKey: string,
+    options: SmartAnnotationOptions,
+  ): Promise<{ annotations: any[]; warnings: string[] }> {
     const annotations: any[] = [];
+    const warnings: string[] = [];
 
     // Get notes if requested
     if (options.types!.includes('note')) {
@@ -528,6 +566,7 @@ export class SmartAnnotationExtractor {
         annotations.push(...notes);
       } catch (error) {
         ztoolkit.log(`[SmartAnnotationExtractor] Error getting notes for ${itemKey}: ${error}`, 'warn');
+        warnings.push(`Notes for ${itemKey} could not be read: ${error}`);
       }
     }
 
@@ -541,10 +580,11 @@ export class SmartAnnotationExtractor {
         annotations.push(...filteredPdfAnnotations);
       } catch (error) {
         ztoolkit.log(`[SmartAnnotationExtractor] Error getting PDF annotations for ${itemKey}: ${error}`, 'warn');
+        warnings.push(`PDF annotations for ${itemKey} could not be read: ${error}`);
       }
     }
 
-    return annotations;
+    return { annotations, warnings };
   }
 
   /** Format one already-paged response without shortening any mark. */
