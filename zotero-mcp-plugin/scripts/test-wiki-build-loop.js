@@ -405,6 +405,36 @@ async function prepareFor(title, itemKey) {
   }
 }
 
+/**
+ * Answer for every chunk this reading was handed but did not quote.
+ *
+ * A full-text page owes the Wiki per chunk now, so a commit that quotes one
+ * passage and says nothing about the other hundred and eighty leaves the paper
+ * open. One SKIP with one reason is how a run of routine passages is settled
+ * honestly; this is the shape a real write-up takes, so the fixtures use it
+ * rather than pretending the debt is not there.
+ */
+async function writeOffRest(itemKey, quotedChunkIds = []) {
+  const sessions = await store.readingSessions();
+  const open = await sessions.openForItem(1, itemKey);
+  if (!open) return [];
+  const owed = await sessions.pendingWikiChunks(open.sessionId);
+  const quoted = new Set(quotedChunkIds.map(Number));
+  const chunkIds = owed
+    .map((chunk) => chunk.chunkId)
+    .filter((chunkId) => !quoted.has(chunkId));
+  if (!chunkIds.length) return [];
+  return [
+    {
+      action: "SKIP",
+      itemKey,
+      chunkIds,
+      reason:
+        "These passages are the successive station readings of one traverse: they repeat the same measurement at the next station without stating a condition, a threshold or a mechanism of their own, so what they establish is already held by the Claim quoted above.",
+    },
+  ];
+}
+
 async function commitClaim(options) {
   const prepared = await prepareFor(options.title, options.itemKey);
   return service.commit({
@@ -412,6 +442,9 @@ async function commitClaim(options) {
     userInitiated: true,
     prepareToken: prepared.prepareToken,
     actions: [
+      ...(options.settleRest === false
+        ? []
+        : await writeOffRest(options.itemKey)),
       { action: "CREATE_PAGE", ref: "p", canonicalTitle: options.title },
       {
         action: "ADD_CLAIM",
@@ -847,6 +880,9 @@ for (const outcome of ["skipped", "failed"]) {
     libraryID: 1,
     userInitiated: true,
     actions: [
+      // The paper is fully delivered now, so this is the commit that ends it -
+      // which it can only do once every delivered chunk has been answered for.
+      ...(await writeOffRest("LONGPAPR")),
       {
         action: "ADD_CLAIM",
         ref: "a2",

@@ -151,7 +151,7 @@ check("REAL FAILURE 1: the composition table written as a list of elements", () 
         [{ chunkId: 19, text: CHUNK_19 }],
         "阅读记录",
       ),
-    "丢掉了本批 chunk 里的实测数值",
+    "个实测数值",
     "chunk 19",
     "8.56",
   );
@@ -182,6 +182,48 @@ check("the T6 schedule must survive its LaTeX", () => {
     "**做了什么**\n压力 0.1–125 MPa；固溶 350 °C/4 h + 465 °C/10 h + 500 °C/2 h，70 °C 水淬（chunk 18）。",
     [{ chunkId: 18, text: CHUNK_18 }],
     "阅读记录",
+  );
+});
+
+/**
+ * The miss that survived a batch-level ratio, in the words the paper used.
+ *
+ * Four temperatures and one solidification range: the record kept the four
+ * and dropped the range, which is 80% of this chunk on its own and one value
+ * among the forty its ten-chunk page carried. Both readings said yes. The
+ * range is the reason the alloy is hard to cast at all.
+ */
+check("REAL FAILURE: one value dropped from a chunk full of them", () => {
+  const chunk17 = String.raw`The intermediate alloys were added to the crucible preheated to $7 4 0 ^ { \circ } \mathrm { C } . $. After melting, pure Mg was pressed in and held at $7 2 0 ^ { \circ } \mathrm { C }$, degassed with argon for 30 min, and the melt was held at $7 0 0 ^ { \circ } \mathrm { C } . $ In particular, due to the relatively wide solidification range of the alloy (about 190 K range), it is prone to thermal cracking.`;
+  const asWritten =
+    "**做了什么**\n熔炼时坩埚预热 740 °C，720 °C 压入纯 Mg，通氩气除气 30 min，700 °C 保温（chunk 17）。";
+  const error = refuses(
+    () => assertValuesLanded(asWritten, [{ chunkId: 17, text: chunk17 }], "阅读记录"),
+    "chunk 17",
+    "190",
+  );
+  assert.ok(
+    !/740|720|700|30 min/.test(error.message.split("未落地的数值")[1] ?? ""),
+    "只报真正漏掉的那一个",
+  );
+  assertValuesLanded(
+    `${asWritten}\n该合金结晶温度区间约 190 K，因此铸造时易热裂（chunk 17）。`,
+    [{ chunkId: 17, text: chunk17 }],
+    "阅读记录",
+  );
+});
+
+check("REAL FAILURE: a literature comparison written as a characterisation", () => {
+  const chunk39 = String.raw`The Al-Zn-Mg-Cu-Cr/TiB2+TiC alloys (1#) by Li et al. (2022b) had the $\sigma _ { \mathrm { U T S } }$ of 510 MPa and $\varepsilon$ of 3.7%; the Al-12Zn-3Mg-2.5Cu-0.07Ti alloy (4#) by Pourkia et al. (2010) had the $\sigma$ of 380 MPa and $\varepsilon$ of 1.4%.`;
+  refuses(
+    () =>
+      assertValuesLanded(
+        "**测到了什么**\n传统金属型铸造合金抗拉强度普遍低于 500 MPa（chunk 39）。",
+        [{ chunkId: 39, text: chunk39 }],
+        "阅读记录",
+      ),
+    "510",
+    "380",
   );
 });
 

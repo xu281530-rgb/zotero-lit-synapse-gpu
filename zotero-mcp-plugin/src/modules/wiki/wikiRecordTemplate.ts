@@ -42,11 +42,34 @@
 
 import { normalizeWikiText } from "./wikiCanonicalizer";
 
-/** How much of a batch's measured values a record has to carry. */
-export const WIKI_VALUE_LANDING_RATIO = 0.8;
-
-/** Below this many measurements in a batch, the ratio is not applied. */
-export const WIKI_VALUE_LANDING_FLOOR = 3;
+/**
+ * Every measured value a chunk carries has to reach the record. All of them,
+ * chunk by chunk.
+ *
+ * This began as 80% of the values in the whole BATCH, and the averaging is
+ * what let the interesting number through. A methods chunk stating four
+ * temperatures and one solidification range - "about 190 K range", the fact
+ * that makes the alloy hard to cast at all - was recorded with the four
+ * temperatures and without the range: 4 of 5 on its own, and one miss among
+ * the forty values of its ten-chunk page. The check saw 97% and said yes.
+ *
+ * Measured on the paper that exposed it, the extractor found 71 values across
+ * the whole text and produced ZERO false positives: every value it named was
+ * a real measurement, and every one the note had dropped was a real loss -
+ * the 190 K range, and the whole of the literature comparison in Fig. 8c
+ * (510 MPa / 3.7%, 380 MPa / 1.4%, 565 MPa), which the note had written as
+ * "conventional castings are generally below 500 MPa".
+ *
+ * That census is why demanding all of them is safe here, where the synthesis
+ * audit deliberately demands less. Answering a false positive costs one
+ * number typed into the record; answering a flagged sentence costs a verbatim
+ * quotation and a round trip. A strict rule is only cruel when satisfying it
+ * is expensive. The tolerance that used to live in the ratio lives in the
+ * extractor instead: it counts a number only when a unit stands beside it, a
+ * Markdown table column holds it, or a flattened table names its unit in
+ * parentheses first - so equation coefficients, figure numbers, citation
+ * years and "two-step aging" are never asked for.
+ */
 
 /** Verbatim overlap above which a macro summary is a paste of the records. */
 export const WIKI_MACRO_PASTE_RATIO = 0.6;
@@ -86,7 +109,12 @@ export const WIKI_RECORD_SECTIONS: readonly WikiTemplateSection[] = [
   },
   {
     label: "存疑与未交代",
-    hint: "本批说得不清楚、看起来矛盾、或明显被推迟到后文的东西。没有时写「无」。",
+    hint:
+      "本批说得不清楚、看起来矛盾、或明显被推迟到后文的东西。三种情形必须写进来：" +
+      "①同一个量在论文里出现两个不同的数（例如方法一节写「约 190 K」而模拟给出 194 K）——" +
+      "两个都记下来，注明各自出处，不要替论文挑一个；" +
+      "②表格里某个值的量级明显反常（例如液态扩散系数比同表其他元素大三四个数量级）——" +
+      "照抄原值，并在这里注明可疑；③论文说「将在后文讨论」的东西。没有时写「无」。",
   },
 ];
 
@@ -452,11 +480,9 @@ export function missingMeasurements(
 /**
  * Refuse a record that read the numbers and did not write them down.
  *
- * The ratio rather than a flat "all of them" is what keeps this satisfiable:
- * an OCR artefact that looks like a measurement, or a coefficient inside a
- * derivation, should not be able to block a reading that is otherwise
- * complete. The floor keeps a batch carrying one or two numbers out of the
- * check entirely, where a ratio would be noise.
+ * Judged CHUNK BY CHUNK, and every value is required. See the comment on the
+ * constants above for why a proportion was the wrong shape and why "all of
+ * them" is affordable here.
  *
  * @throws WikiRecordTemplateError listing the values by chunk, so the fix is
  *   transcription rather than guesswork.
@@ -467,13 +493,13 @@ export function assertValuesLanded(
   what: string,
 ): void {
   const { missing, total, landed } = missingMeasurements(written, chunks);
-  if (total < WIKI_VALUE_LANDING_FLOOR) return;
-  if (landed / total >= WIKI_VALUE_LANDING_RATIO) return;
+  if (!missing.length) return;
   const shown = missing.slice(0, 12);
+  const absent = total - landed;
   throw new WikiRecordTemplateError(
-    `${what}丢掉了本批 chunk 里的实测数值，未写入。本批可识别的测量值 ${total} 个，` +
-      `落地 ${landed} 个（${Math.round((landed / total) * 100)}%），` +
-      `要求不低于 ${Math.round(WIKI_VALUE_LANDING_RATIO * 100)}%。\n\n` +
+    `${what}丢掉了 ${absent} 个实测数值，未写入。本批可识别的测量值共 ${total} 个，` +
+      `落地 ${landed} 个。每个 chunk 里的值都要落地，不按批次算平均——` +
+      "一个 chunk 里最要紧的那个数，往往正好是被平均掉的那个。\n\n" +
       "未落地的数值，按 chunk 列出：\n" +
       shown
         .map((entry) => `  chunk ${entry.chunkId}: ${entry.values.join(", ")}`)
@@ -483,7 +509,10 @@ export function assertValuesLanded(
         : "") +
       "\n\n把它们写进「**测到了什么**」或「**做了什么**」，每个值带上单位和它的测量条件——" +
       "写「21.6 kW 下锭温 1750 ± 7.4 K，处于单相 β 区」，不要写「在给定功率下发生 β 相变」。" +
-      "成分表、工艺参数表、性能表整表转写，不要改写成描述。\n" +
+      "成分表、工艺参数表、性能表整表转写，不要改写成描述；" +
+      "与文献对比的那一组数据也是数据，不要写成「普遍低于 500 MPa」。\n" +
+      "只有单位紧挨着的数字、表格列里的数字才会被要求，公式系数、图号、年份都不算，" +
+      "所以清单上的每一个都确实是论文测出来的量。\n" +
       "带条件写还有一个好处：夸大审计拦的是「丢了条件的数字」，条件齐全的数值根本不会被标记。",
   );
 }
@@ -505,8 +534,7 @@ export function assertUnchangedCarriesNothingNew(
   reason: string,
 ): void {
   const { missing, total, landed } = missingMeasurements(previousBody, chunks);
-  if (total < WIKI_VALUE_LANDING_FLOOR) return;
-  if (landed / total >= WIKI_VALUE_LANDING_RATIO) return;
+  if (!missing.length) return;
   const shown = missing.slice(0, 12);
   throw new WikiRecordTemplateError(
     `这一批被标为「本次无新内容」（${reason}），但它带着 ${total} 个测量值，` +

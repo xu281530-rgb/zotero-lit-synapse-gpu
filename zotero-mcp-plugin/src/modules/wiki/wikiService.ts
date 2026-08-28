@@ -1353,8 +1353,9 @@ export class WikiService {
       if (notOwed.length) {
         throw new Error(
           `SKIP writes off ${itemKey} chunk(s) ${notOwed.join(", ")}, which do not owe the Wiki ` +
-            "anything: they were either never read by a question, already settled, or delivered by a " +
-            "full-text read, which settles nothing chunk by chunk. " +
+            "anything: they were never delivered to this reading, or they have already been settled. " +
+            "Note that a chunk is named here by its chunkId, the id the index gave it - not by its " +
+            "position in the paper, which is what a citation in the note uses. " +
             (owed.size
               ? `Outstanding for this paper: ${[...owed].join(", ")}.`
               : "This paper owes nothing at all."),
@@ -1882,9 +1883,11 @@ export class WikiService {
       }
       if (outstanding.length) {
         blockers.push(
-          `chunk(s) ${outstanding.map((chunk) => chunk.chunkId).join(", ")} were read while answering ` +
-            "questions and have still not reached the Wiki — settle each one, with Evidence quoting it " +
-            "or a SKIP action naming it and saying what already covers it",
+          `${outstanding.length} chunk(s) of this paper have been read and have still not reached the ` +
+            `Wiki: ${outstanding.map((chunk) => chunk.chunkId).join(", ")}. Settle each one, with ` +
+            "Evidence quoting it or a SKIP action naming it and saying what already covers it. One " +
+            "SKIP may name many chunks at once, so a section of derivation or a bibliography is a " +
+            "single action with one reason",
         );
       }
 

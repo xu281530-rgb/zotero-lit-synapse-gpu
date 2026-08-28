@@ -462,8 +462,15 @@ block("the first batch arrives and must be integrated as a whole", async () => {
     () =>
       service.updateReadingNote({
         libraryID: 1,
+        // The batch carries chunk 2 and its 12 K/mm, which now has to land
+        // before anything else is looked at; this block is about the sentence
+        // that reaches past its source, so the rest of the batch is answered
+        // properly and only the overstatement is left to catch.
         markdown: noteBody(
-          ["The process completely eliminates every transition error (chunk 2)."],
+          [
+            "Section 2.1 places the columnar-to-equiaxed transition at a thermal gradient of 12 K/mm (chunk 2).",
+            "The process completely eliminates every transition error (chunk 2).",
+          ],
           [0, 1, 3, 4, 5, 6, 7],
         ),
       }),
@@ -638,7 +645,23 @@ block("one outstanding batch stops new paging but not re-reading", async () => {
 });
 
 block('"unchanged" records real empty batches without a frequency quota', async () => {
-  // Everything is delivered, so this integration covers the last batch.
+  // The outstanding batch is 24-31, and chunk 26 is where the paper retracts
+  // its own threshold - a batch carrying 8 K/mm is not a batch with nothing in
+  // it, and saying otherwise is refused now. Record it honestly first; what
+  // this block is actually about is whether NO-CONTENT records may repeat.
+  const retraction =
+    "After correction the transition occurs at 8 K/mm, and the 12 K/mm threshold reported earlier was an artefact of thermocouple lag (chunk 26).";
+  await service.updateReadingNote({
+    libraryID: 1,
+    markdown: noteBody([retraction], [24, 25, 27, 28, 29, 30, 31]),
+    synthesisAudit: [
+      {
+        sentence: retraction,
+        support: [{ chunkId: 26, quote: indexedChunks.get("DEEPREAD")[26].text }],
+      },
+    ],
+  });
+
   await assert.rejects(
     () => service.updateReadingNote({ libraryID: 1, unchanged: true }),
     /unchangedReason is required/iu,
@@ -1111,6 +1134,20 @@ block("an excerpt quoted from the chunk is accepted at whole-paper depth", async
               readDepth: "paper_reviewed",
             },
           ],
+        },
+        // A full-text page now owes the Wiki per chunk, exactly as a question
+        // does, so the chunks this Claim does not quote have to be answered
+        // for rather than left silent. One SKIP names them all with one
+        // reason, which is what a run of station readings honestly deserves.
+        {
+          action: "SKIP",
+          itemKey: "DEEPREAD",
+          chunkIds: indexedChunks
+            .get("DEEPREAD")
+            .map((chunk) => chunk.chunkId)
+            .filter((chunkId) => chunkId !== indexedChunks.get("DEEPREAD")[26].chunkId),
+          reason:
+            "These passages are the numbered station readings and the front matter of the paper: they repeat the same measurement at successive stations without stating a threshold, a condition or a mechanism of their own, so the Wiki already holds what they establish through the transition Claim quoted from chunk 26.",
         },
       ],
     },

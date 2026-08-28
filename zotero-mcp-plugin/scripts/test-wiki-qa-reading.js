@@ -259,6 +259,20 @@ function readByQuestion(key, indexes, facts, extra = {}) {
  * sees a single-chunk sentence, so accounting for a page does not cost a
  * multi-chunk-fusion justification.
  */
+/**
+ * The pending-Wiki rows for ONE paper.
+ *
+ * Since a full-text page owes the Wiki per chunk, a paper this suite left open
+ * mid-read shows up in every later commit's `stillPending`. That is correct
+ * and is its own block's business; a block asking about PAPERTWO's
+ * question-driven debt should not have to restate PAPERONE's reading state.
+ */
+function pendingFor(result, itemKey) {
+  return (result.questionReading?.stillPending ?? []).filter(
+    (row) => row.itemKey === itemKey,
+  );
+}
+
 function coversPage(page) {
   const indexes = page.chunks.map((row) => row.chunkIndex);
   if (!indexes.length) return [];
@@ -1434,6 +1448,31 @@ block("the full-text slot still admits one paper, and says so usefully", async (
       "Stations 30, 31 and 50 sit on the plateau (chunk 30, chunk 31, chunk 50).",
       "The opening full-text batch establishes the rig geometry and initial traverse response (chunk 0, chunk 1, chunk 2, chunk 3, chunk 4).",
     ]);
+
+  // That page owes the Wiki per chunk, the same as a question's passages do.
+  // Settle it here so the blocks below are testing their own subject rather
+  // than this one's leftovers - and so the debt this suite is about stays
+  // legible.
+  const openedPrepare = await service.prepareUpdate({
+    libraryID: 1,
+    query: "Opening traverse",
+    proposedPageTitles: ["Opening traverse"],
+  });
+  await service.commit({
+    libraryID: 1,
+    userInitiated: true,
+    prepareToken: openedPrepare.prepareToken,
+    actions: [
+      {
+        action: "SKIP",
+        itemKey: "PAPERONE",
+        chunkIds: [0, 1, 2, 3, 4].map((index) => chunkId("PAPERONE", index)),
+        reason: writeOffReason(
+          "the opening stations of the traverse, which repeat the rig description already held",
+        ),
+      },
+    ],
+  });
 });
 
 // =========================================================================
@@ -1503,7 +1542,7 @@ block("one Claim settles the chunk it quotes, and only that chunk", async () => 
     { itemKey: "PAPERTWO", chunkIds: [chunkId("PAPERTWO", 35)] },
   ]);
   assert.deepEqual(result.questionReading.clearedPapers, []);
-  assert.deepEqual(result.questionReading.stillPending, [
+  assert.deepEqual(pendingFor(result, "PAPERTWO"), [
     {
       itemKey: "PAPERTWO",
       pendingChunkIds: [10, 11, 48, 60].map((i) => chunkId("PAPERTWO", i)),
@@ -2123,9 +2162,12 @@ block("a QA debt carried into a full-text read still has to be settled", async (
   const session = await sessions.openForItem(1, "PAPERFIV");
   assert.equal(session.mode, "fulltext");
   const owed = await sessions.pendingWikiChunks(session.sessionId);
-  assert.deepEqual(
-    owed.map((chunk) => chunk.chunkId),
-    [chunkId("PAPERFIV", 3)],
+  // The full-text pages this session has since been handed owe the Wiki too,
+  // so the question-era chunk is no longer the ONLY debt - what matters here
+  // is that it survived the promotion rather than being dropped with the mode
+  // change, which is what it used to do.
+  assert.ok(
+    owed.map((chunk) => chunk.chunkId).includes(chunkId("PAPERFIV", 3)),
     "the question-era debt is carried into the full-text read, not dropped",
   );
 
@@ -2184,10 +2226,13 @@ block("a QA debt carried into a full-text read still has to be settled", async (
     "a paper still owing the Wiki is not finished, however completely it was read",
   );
   assert.equal(blocked.readingSession.released, false);
-  assert.deepEqual(blocked.readingSession.outstandingQuestionChunkIds, [
-    chunkId("PAPERFIV", 3),
-  ]);
-  assert.match(blocked.readingSession.note, /chunk\(s\) 5003/u);
+  assert.ok(
+    blocked.readingSession.outstandingQuestionChunkIds.includes(
+      chunkId("PAPERFIV", 3),
+    ),
+    "the chunk a question read and never wrote up is named among what is owed",
+  );
+  assert.match(blocked.readingSession.note, /5003/u);
 
   // The Claim itself is committed and permanent; only the closure was refused.
   assert.equal(blocked.committed, true);
@@ -2209,10 +2254,16 @@ block("a QA debt carried into a full-text read still has to be settled", async (
       {
         action: "SKIP",
         itemKey: "PAPERFIV",
-        chunkIds: [chunkId("PAPERFIV", 3)],
+        // Every delivered chunk owes now, not only the one a question read
+        // and left behind, so closing the paper means answering for all of
+        // them - which is the whole point of the change and is what a real
+        // write-up does with one SKIP and one reason.
+        chunkIds: (await sessions.pendingWikiChunks(session.sessionId)).map(
+          (chunk) => chunk.chunkId,
+        ),
         reason:
-          "Station 3 restates the same linear rise the Whole traverse claim already carries, at the " +
-          "same values, and adds no condition, parameter or mechanism beyond it.",
+          "These stations restate the same linear rise the Whole traverse claim already carries, at the " +
+          "same values, and add no condition, parameter or mechanism beyond it.",
       },
     ],
   });
@@ -2254,8 +2305,10 @@ block("the three whole-paper passes are checked where committed is written", asy
   assert.equal(fresh.wikiReviewAt, null);
   assert.equal(
     (await sessions.pendingWikiChunks(fresh.sessionId)).length,
-    0,
-    "and a full-text read incurs no per-chunk debt of its own",
+    TINY,
+    "and a full-text read now owes the Wiki per chunk, exactly as a question does — " +
+      "a paper read end to end used to produce four Claims resting on four chunks " +
+      "with nothing anywhere asking about the rest",
   );
 
   const bypass = await service.commit({

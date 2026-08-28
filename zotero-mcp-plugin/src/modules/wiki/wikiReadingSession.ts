@@ -655,9 +655,23 @@ export class WikiReadingSessions {
     ).length;
     const now = Date.now();
     for (const chunk of chunks) {
+      // A chunk delivered by a full-text page owes the Wiki exactly as one
+      // read while answering a question does. It did not, for a long time,
+      // and the gap was invisible from every side: a 186-chunk paper produced
+      // four Claims resting on four chunks, every counter said the paper had
+      // been read completely, and nothing anywhere asked what became of the
+      // other hundred and eighty. The reading note now records all of them;
+      // this is what makes the WIKI account for them too - each one settled
+      // by an Evidence excerpt quoting it, or by a SKIP naming it and saying
+      // what already covers it.
+      //
+      // Only a NEW row owes. The conflict path leaves owes_wiki and settled_at
+      // untouched, so re-reading a chunk to check a quotation stays free and a
+      // chunk already settled is not charged again.
       await this.db.queryAsync(
-        `INSERT INTO wiki_reading_chunks (session_id, chunk_index, chunk_id, delivered_at)
-         VALUES (?, ?, ?, ?)
+        `INSERT INTO wiki_reading_chunks
+           (session_id, chunk_index, chunk_id, delivered_at, owes_wiki)
+         VALUES (?, ?, ?, ?, 1)
          ON CONFLICT(session_id, chunk_index) DO UPDATE SET
            chunk_id = excluded.chunk_id,
            delivered_at = excluded.delivered_at`,
@@ -814,7 +828,7 @@ export class WikiReadingSessions {
    * and is accepted on the condition that it is argued rather than asserted.
    *
    * Only chunks that actually owe something are touched, so settling a chunk
-   * twice, or settling one a full-text read delivered, is a no-op rather than
+   * twice, or naming one this session never delivered, is a no-op rather than
    * an error.
    */
   async settleWikiChunks(
