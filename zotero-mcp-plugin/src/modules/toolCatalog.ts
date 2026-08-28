@@ -279,7 +279,7 @@ export function buildToolCatalog(): ToolDefinition[] {
   {
     name: 'search_libraries',
     category: 'retrieval',
-    description: 'Find a Zotero library by name, when the user names a group library and you need its libraryID for the other tools. Returns [{libraryID, name, libraryType}]. Call get_libraries instead when you want to see everything available.',
+    description: 'Find a Zotero library by name, when the user names a group library and you need its libraryID for the other tools. Returns { results, pagination, metadata }; pagination includes total, hasMore and nextOffset. Call get_libraries instead when you want to see everything available.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -442,6 +442,8 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'CHOOSING THE ATTACHMENT. Call with itemKey alone and you get the item\'s attachment list — key, filename, content type, size, whether text can be extracted — and no text. Then call again with the attachmentKey you want. When the item has exactly one text-bearing attachment it is selected automatically and its text is returned on the first call, with selectedAutomatically: true saying so.',
       '',
+      'STANDALONE ATTACHMENTS. A PDF or other attachment with no parent item is still readable: pass that standalone attachment key directly as itemKey. No parent document needs to be created, and attachmentKey may be omitted because the item is the attachment being selected.',
+      '',
       'WHERE THE TEXT CAME FROM. Every response names its source in textSource.method, because the same PDF yields materially different text depending on which path produced it. Best structure first: doc2x (Doc2X Markdown), mineru_cache (a MinerU/Doc2X Markdown that already existed — no parsing), mineru_attachment (a Markdown file an earlier MinerU parse left on the item), mineru (parsed by MinerU during this call), markdown_attachment (a Markdown or text file attached to the item directly), zotero_fulltext_cache (Zotero\'s own extracted text index — flat, no layout), pdf_processor (the bundled PDF worker, used when no Markdown path produced text — also flat), html_parsing, text_reading. When no text could be produced, method says why: pdf_processor_timeout, mineru_disabled, mineru_on_demand_disabled, mineru_failed, mineru_error, no_text. Never present zotero_fulltext_cache or pdf_processor output as though it preserved tables or headings.',
       '',
       'PAGING. Text is returned in character windows, never all at once. The response carries totalChars, offset, returnedChars, hasMore and nextOffset; pass nextOffset back as offset to continue. Windows are cut at a paragraph or sentence boundary where one is nearby, so a window does not end mid-word. Read on only while the text is still answering the question.',
@@ -453,7 +455,7 @@ export function buildToolCatalog(): ToolDefinition[] {
       properties: {
         itemKey: {
           type: 'string',
-          description: 'The Zotero item whose attachment you want to read. Required.'
+          description: 'The Zotero document whose attachment you want to read, or the standalone attachment key itself when the file has no parent item. Required.'
         },
         attachmentKey: {
           type: 'string',
