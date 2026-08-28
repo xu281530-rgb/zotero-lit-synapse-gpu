@@ -20,6 +20,7 @@ globalThis.ztoolkit = { log: () => {} };
 globalThis.Zotero = {};
 
 const {
+  hasEffectiveAnnotationSearchFilter,
   MAX_ANNOTATIONS_PER_PAGE,
   resolveAnnotationItemKeys,
   resolveAnnotationPageSize,
@@ -180,6 +181,52 @@ test("blank and non-string keys are dropped rather than searched for", () => {
   assert.deepEqual(resolveAnnotationItemKeys({}), []);
   assert.deepEqual(resolveAnnotationItemKeys({ itemKeys: "A" }), []);
   assert.deepEqual(resolveAnnotationItemKeys({ itemKey: "  D  " }), ["D"]);
+});
+
+test("annotation search requires a filter that actually narrows the library", () => {
+  for (const params of [
+    {},
+    { q: " " },
+    { colors: [] },
+    { colors: ["  "] },
+    { tags: [] },
+    { tags: [null, ""] },
+  ]) {
+    assert.equal(hasEffectiveAnnotationSearchFilter(params), false);
+  }
+  for (const params of [
+    { q: "phase transformation" },
+    { colors: ["yellow"] },
+    { tags: ["reviewed"] },
+  ]) {
+    assert.equal(hasEffectiveAnnotationSearchFilter(params), true);
+  }
+});
+
+test("get_annotations warns when either notes or PDF marks could not be read", async () => {
+  const extractor = extractorWith({
+    getAllNotes: async () => {
+      throw new Error("notes database unavailable");
+    },
+    getPDFAnnotations: async () => [
+      { ...longMark(0), type: "highlight", content: "visible highlight" },
+    ],
+  });
+  const result = await extractor.getAnnotations({ itemKey: "DOC" });
+  assert.equal(result.data.length, 1);
+  assert.ok(result.metadata.warnings.some((warning) => /notes/iu.test(warning)));
+});
+
+test("search_annotations forwards fallback truncation warnings", async () => {
+  const extractor = extractorWith({
+    searchAnnotations: async () => ({
+      results: [longMark(0)],
+      pagination: { hasMore: false },
+      warnings: ["Only the first 100 regular items were scanned."],
+    }),
+  });
+  const result = await extractor.searchAnnotations("needle");
+  assert.ok(result.metadata.warnings.some((warning) => /first 100/iu.test(warning)));
 });
 
 let failed = 0;

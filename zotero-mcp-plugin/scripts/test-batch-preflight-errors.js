@@ -28,11 +28,13 @@ const PREFS = {
 
 let items = new Map();
 let collections = new Map();
+let libraries = [];
 /** Master keys whose Zotero.Items.merge() must throw, for the 207 case. */
 let failingMerges = new Set();
 let mergeCalls = [];
 let addedTo = [];
 let removedFrom = [];
+let confirmationPrompts = [];
 
 class FakeCollection {
   constructor(key, name, parentKey = false) {
@@ -50,6 +52,10 @@ class FakeCollection {
   async removeItems(ids) {
     removedFrom.push({ collection: this.key, ids });
   }
+
+  hasItem(item) {
+    return item.collectionKeys.includes(this.key);
+  }
 }
 
 class FakeItem {
@@ -62,6 +68,13 @@ class FakeItem {
     this.dateAdded = options.dateAdded ?? "2026-01-01 00:00:00";
     this.fields = options.fields ?? { title: `Paper ${key}` };
     this.collectionKeys = options.collections ?? [];
+    this.attachment = options.attachment ?? false;
+    this.note = options.note ?? false;
+    this.attachmentContentType = options.contentType ?? "";
+    this.attachmentFilename = options.filename ?? "";
+    this.filePath = options.filePath ?? "";
+    this.childAttachmentIDs = options.childAttachmentIDs ?? [];
+    this.parentKey = options.parentKey ?? false;
   }
 
   getField(name) {
@@ -73,7 +86,7 @@ class FakeItem {
   }
 
   getAttachments() {
-    return [];
+    return this.childAttachmentIDs;
   }
 
   getCollections() {
@@ -81,11 +94,11 @@ class FakeItem {
   }
 
   isAttachment() {
-    return false;
+    return this.attachment;
   }
 
   isNote() {
-    return false;
+    return this.note;
   }
 
   isAnnotation() {
@@ -93,7 +106,23 @@ class FakeItem {
   }
 
   isRegularItem() {
-    return true;
+    return !this.attachment && !this.note;
+  }
+
+  getDisplayTitle() {
+    return this.getField("title") || this.attachmentFilename;
+  }
+
+  async getFilePathAsync() {
+    return this.filePath;
+  }
+
+  getFilePath() {
+    return this.filePath;
+  }
+
+  async saveTx() {
+    return this.id;
   }
 }
 
@@ -105,7 +134,10 @@ globalThis.Zotero = {
     registerObserver: () => Symbol("observer"),
     unregisterObserver: () => {},
   },
-  Libraries: { userLibraryID: 1 },
+  Libraries: {
+    userLibraryID: 1,
+    getAll: () => libraries,
+  },
   Items: {
     getByLibraryAndKeyAsync: async (_libraryID, key) => items.get(key) ?? false,
     get: (ids) =>
@@ -141,7 +173,15 @@ globalThis.Cc = {};
 globalThis.Ci = {};
 globalThis.Services = {
   uuid: { generateUUID: () => "{00000000-0000-0000-0000-000000000000}" },
-  prompt: { confirm: () => true },
+  prompt: {
+    confirm: (_win, _title, message) => {
+      confirmationPrompts.push(message);
+      return true;
+    },
+  },
+};
+globalThis.IOUtils = {
+  stat: async (filePath) => ({ size: filePath === "C:\\standalone.png" ? 4096 : 0 }),
 };
 
 const bundled = await build({
@@ -171,7 +211,10 @@ async function callTool(name, args) {
   );
   const body = JSON.parse(response.body);
   if (body.error) return { error: body.error.message };
-  return { result: JSON.parse(body.result.content[0].text) };
+  return {
+    result: JSON.parse(body.result.content[0].text),
+    isError: body.result.isError === true,
+  };
 }
 
 function reset() {
@@ -181,6 +224,12 @@ function reset() {
   mergeCalls = [];
   addedTo = [];
   removedFrom = [];
+  confirmationPrompts = [];
+  PREFS["extensions.zotero.zotero-mcp-plugin.write.confirmBeforeMutation"] = false;
+  libraries = [
+    { libraryID: 1, name: "Personal", libraryType: "user" },
+    { libraryID: 2, name: "Research Group", libraryType: "group" },
+  ];
   collections.set("TARGET01", new FakeCollection("TARGET01", "Solidification"));
   collections.set("SOURCE01", new FakeCollection("SOURCE01", "Inbox"));
 }
@@ -334,6 +383,157 @@ await test(
     assert.equal(mergeCalls.length, 1);
   },
 );
+
+// ------------------------------------------------------- audited writes ----
+
+await test("merge confirmation names every survivor and trashed duplicate", async () => {
+  PREFS["extensions.zotero.zotero-mcp-plugin.write.confirmBeforeMutation"] = true;
+  globalThis.Zotero.getMainWindow = () => ({});
+  items.set("KEEP0001", new FakeItem("KEEP0001", { fields: { title: "A", DOI: "10.1/a" } }));
+  items.set("DROP0001", new FakeItem("DROP0001", { fields: { title: "A" } }));
+
+  const { error } = await callTool("merge_items", {
+    groups: [{ itemKeys: ["KEEP0001", "DROP0001"], masterItemKey: "KEEP0001" }],
+  });
+
+  assert.equal(error, undefined);
+  assert.equal(confirmationPrompts.length, 1);
+  assert.match(confirmationPrompts[0], /1 duplicate group/iu);
+  assert.match(confirmationPrompts[0], /keep KEEP0001/iu);
+  assert.match(confirmationPrompts[0], /trash DROP0001/iu);
+});
+
+await test("reparent confirmation names the target, count, and every child", async () => {
+  PREFS["extensions.zotero.zotero-mcp-plugin.write.confirmBeforeMutation"] = true;
+  globalThis.Zotero.getMainWindow = () => ({});
+  items.set("PARENT01", new FakeItem("PARENT01"));
+  items.set("ATTACH01", new FakeItem("ATTACH01", { attachment: true }));
+  items.set("ATTACH02", new FakeItem("ATTACH02", { attachment: true }));
+
+  const { error } = await callTool("write_item", {
+    action: "reparent",
+    parentKey: "PARENT01",
+    attachmentKeys: ["ATTACH01", "ATTACH02"],
+  });
+
+  assert.equal(error, undefined);
+  assert.match(confirmationPrompts[0], /2 attachments or notes/iu);
+  assert.match(confirmationPrompts[0], /ATTACH01, ATTACH02/u);
+  assert.match(confirmationPrompts[0], /PARENT01/u);
+});
+
+await test("all-missing collection additions fail the tool call", async () => {
+  const { result, error } = await callTool("add_items_to_collection", {
+    collectionKey: "TARGET01",
+    itemKeys: ["MISSING1"],
+  });
+  assert.equal(result, undefined);
+  assert.match(error, /MISSING1/u);
+  assert.equal(addedTo.length, 0);
+});
+
+await test("mixed collection additions are explicitly partial", async () => {
+  items.set("ITEM0001", new FakeItem("ITEM0001"));
+  const { result, error } = await callTool("add_items_to_collection", {
+    collectionKey: "TARGET01",
+    itemKeys: ["ITEM0001", "MISSING1"],
+  });
+  assert.equal(error, undefined);
+  assert.equal(result.success, false);
+  assert.equal(result.partial, true);
+  assert.deepEqual(result.added, ["ITEM0001"]);
+  assert.deepEqual(result.notFound, ["MISSING1"]);
+});
+
+await test("all-missing collection removals fail the tool call", async () => {
+  const { result, error } = await callTool("remove_items_from_collection", {
+    collectionKey: "TARGET01",
+    itemKeys: ["MISSING1"],
+  });
+  assert.equal(result, undefined);
+  assert.match(error, /MISSING1/u);
+  assert.equal(removedFrom.length, 0);
+});
+
+await test("mixed reparenting is explicitly partial", async () => {
+  items.set("PARENT01", new FakeItem("PARENT01"));
+  items.set("ATTACH01", new FakeItem("ATTACH01", { attachment: true }));
+  const { result, error, isError } = await callTool("write_item", {
+    action: "reparent",
+    parentKey: "PARENT01",
+    attachmentKeys: ["ATTACH01", "MISSING1"],
+  });
+  assert.equal(error, undefined);
+  assert.equal(isError, true);
+  assert.equal(result.success, false);
+  assert.equal(result.partial, true);
+  assert.equal(result.data.successCount, 1);
+});
+
+// ---------------------------------------------------------- read contracts --
+
+await test("a missing item detail is a failed MCP tool call", async () => {
+  const { result, error } = await callTool("get_item_details", {
+    itemKey: "MISSING1",
+  });
+  assert.equal(result, undefined);
+  assert.match(error, /MISSING1/u);
+});
+
+await test("library pages carry totals and continuation metadata", async () => {
+  const { result, error } = await callTool("get_libraries", {
+    limit: 1,
+    offset: 0,
+  });
+  assert.equal(error, undefined);
+  assert.equal(result.results.length, 1);
+  assert.deepEqual(result.pagination, {
+    total: 2,
+    limit: 1,
+    offset: 0,
+    hasMore: true,
+    nextOffset: 1,
+  });
+});
+
+await test("standalone attachments can be inspected and report file size", async () => {
+  items.set(
+    "STAND001",
+    new FakeItem("STAND001", {
+      attachment: true,
+      contentType: "image/png",
+      filename: "standalone.png",
+      filePath: "C:\\standalone.png",
+      fields: { title: "Standalone scan" },
+    }),
+  );
+  const { result, error } = await callTool("get_attachment_text", {
+    itemKey: "STAND001",
+  });
+  assert.equal(error, undefined);
+  assert.equal(result.itemKey, "STAND001");
+  assert.equal(result.attachments[0].attachmentKey, "STAND001");
+  assert.equal(result.attachments[0].sizeBytes, 4096);
+});
+
+await test("empty collection updates fail before asking for confirmation", async () => {
+  PREFS["extensions.zotero.zotero-mcp-plugin.write.confirmBeforeMutation"] = true;
+  globalThis.Zotero.getMainWindow = () => ({});
+  const { result, error } = await callTool("update_collection", {
+    collectionKey: "TARGET01",
+  });
+  assert.equal(result, undefined);
+  assert.match(error, /name|parentCollection/iu);
+  assert.equal(confirmationPrompts.length, 0);
+});
+
+await test("blank annotation filters cannot trigger a library-wide scan", async () => {
+  for (const args of [{ q: " " }, { colors: [] }, { tags: [] }]) {
+    const { result, error } = await callTool("search_annotations", args);
+    assert.equal(result, undefined);
+    assert.match(error, /non-empty|filter/iu);
+  }
+});
 
 console.log(`\n${passed}/${passed + failed} passed`);
 if (failed > 0) process.exit(1);

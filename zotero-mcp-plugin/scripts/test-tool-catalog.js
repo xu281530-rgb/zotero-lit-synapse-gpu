@@ -222,6 +222,31 @@ test("annotation tools expose full-text paging without content controls", () => 
   }
 });
 
+test("cursor and collection schemas match their runtime paging contracts", () => {
+  const byName = new Map(buildToolCatalog().map((tool) => [tool.name, tool]));
+
+  const hybrid = byName.get("hybrid_search").inputSchema;
+  assert.ok(
+    !(hybrid.required ?? []).includes("query"),
+    "cursor-only hybrid_search continuation must not require query",
+  );
+  assert.deepEqual(hybrid.anyOf, [
+    { required: ["query"] },
+    { required: ["cursor"] },
+  ]);
+
+  const collections = byName.get("search_collections").inputSchema;
+  assert.ok("offset" in collections.properties);
+  assert.ok(collections.required.includes("q"));
+
+  const update = byName.get("update_collection").inputSchema;
+  assert.deepEqual(update.required, ["collectionKey"]);
+  assert.deepEqual(update.anyOf, [
+    { required: ["name"] },
+    { required: ["parentCollection"] },
+  ]);
+});
+
 test("fixed-default tools no longer expose content modes", () => {
   for (const name of ["search_library", "get_collections"]) {
     const tool = buildToolCatalog().find((t) => t.name === name);
