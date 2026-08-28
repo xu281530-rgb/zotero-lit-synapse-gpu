@@ -26,6 +26,9 @@ const {
   resolveAnnotationPageSize,
   SmartAnnotationExtractor,
 } = await import("../src/modules/smartAnnotationExtractor.ts");
+const { AnnotationService } = await import(
+  "../src/modules/annotationService.ts"
+);
 
 const tests = [];
 function test(name, fn) {
@@ -227,6 +230,34 @@ test("search_annotations forwards fallback truncation warnings", async () => {
   });
   const result = await extractor.searchAnnotations("needle");
   assert.ok(result.metadata.warnings.some((warning) => /first 100/iu.test(warning)));
+});
+
+test("annotation-service fallback declares its 100-document scan limit", async () => {
+  globalThis.Zotero.Libraries = { userLibraryID: 1 };
+  globalThis.Zotero.Search = class {
+    addCondition() {}
+    async search() {
+      throw new Error("search index unavailable");
+    }
+  };
+  globalThis.Zotero.Items = {
+    getAll: async () =>
+      Array.from({ length: 101 }, (_, index) => ({
+        key: `DOC${index}`,
+        isRegularItem: () => true,
+        isNote: () => false,
+        isAttachment: () => false,
+      })),
+  };
+
+  const service = new AnnotationService();
+  service.getPDFAnnotations = async () => [];
+  const result = await service.searchAnnotations({
+    q: "needle",
+    type: ["highlight"],
+  });
+
+  assert.ok(result.warnings.some((warning) => /first 100 of 101/iu.test(warning)));
 });
 
 let failed = 0;
