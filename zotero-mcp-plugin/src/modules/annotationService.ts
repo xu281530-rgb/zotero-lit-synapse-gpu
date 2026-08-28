@@ -302,12 +302,14 @@ export class AnnotationService {
               );
             }
             for (const item of regularItems.slice(0, itemLimit)) {
-                try {
-                  const pdfAnnotations = await this.getPDFAnnotations(item.key, libraryID);
-                  allAnnotations.push(...pdfAnnotations);
-                } catch (e) {
-                  // 忽略单个文献的错误
-                }
+              try {
+                const pdfAnnotations = await this.getPDFAnnotations(
+                  item.key,
+                  libraryID,
+                );
+                allAnnotations.push(...pdfAnnotations);
+              } catch {
+                // A single unreadable document must not abort the fallback.
               }
             }
           }
