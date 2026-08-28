@@ -550,6 +550,45 @@ function bindWikiSettings(doc: Document) {
       clearButton.disabled = false;
     }
   });
+
+  const clearReadingNotesButton = doc.querySelector(
+    "#clear-wiki-reading-notes-button",
+  ) as HTMLButtonElement | null;
+  clearReadingNotesButton?.addEventListener("click", async () => {
+    const message =
+      getString("pref-wiki-reading-notes-clear-confirm" as any) ||
+      "This permanently deletes all AI-generated Wiki Reading Note Markdown attachments. Wiki data is not deleted. Continue?";
+    if (!addon.data.prefs!.window.confirm(message)) return;
+    clearReadingNotesButton.disabled = true;
+    try {
+      const { WikiReadingNoteStore } = await import("./wiki/wikiReadingNote");
+      const { removed, failed } =
+        await new WikiReadingNoteStore().clearAllAttachments();
+      if (failed > 0) {
+        addon.data.prefs!.window.alert(
+          getString("pref-wiki-reading-notes-clear-partial" as any, {
+            args: { count: removed, failed },
+          }),
+        );
+      } else if (removed === 0) {
+        addon.data.prefs!.window.alert(
+          getString("pref-wiki-reading-notes-clear-none" as any),
+        );
+      } else {
+        addon.data.prefs!.window.alert(
+          getString("pref-wiki-reading-notes-cleared" as any, {
+            args: { count: removed },
+          }),
+        );
+      }
+    } catch (error) {
+      addon.data.prefs!.window.alert(
+        `${getString("pref-wiki-reading-notes-clear-error" as any) || "Failed to delete AI reading notes"}: ${error}`,
+      );
+    } finally {
+      clearReadingNotesButton.disabled = false;
+    }
+  });
   void refreshWikiDataStatistics(doc);
   void refreshDataCompatibilityLockUI(doc);
 }

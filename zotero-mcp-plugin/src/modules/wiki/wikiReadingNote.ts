@@ -954,6 +954,19 @@ export function isWikiReadingNoteAttachment(attachment: any): boolean {
   }
 }
 
+/** Cheap structural gate before reading a possible deletion target. */
+function isWikiReadingNoteDeletionCandidate(attachment: any): boolean {
+  try {
+    if (!attachment?.isAttachment?.() || !attachment.parentItemID) return false;
+    return (
+      String(attachment.attachmentContentType ?? "").toLowerCase() ===
+      "text/markdown"
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function readingNoteAttachmentTitle(itemKey: string): string {
   return `${WIKI_READING_NOTE_TITLE_PREFIX} (${itemKey}).md`;
 }
@@ -970,6 +983,60 @@ export function readingNoteFileName(itemKey: string): string {
  * in.
  */
 export class WikiReadingNoteStore {
+  /** Permanently delete every server-owned reading-note attachment. */
+  async clearAllAttachments(): Promise<{
+    removed: number;
+    failed: number;
+  }> {
+    let removed = 0;
+    let failed = 0;
+    const libraries: any[] = Zotero.Libraries.getAll?.() || [
+      { libraryID: Zotero.Libraries.userLibraryID },
+    ];
+
+    for (const library of libraries) {
+      const libraryID = library?.libraryID ?? library?.id;
+      if (libraryID === undefined || libraryID === null) continue;
+      let entries: any[];
+      try {
+        entries = (await Zotero.Items.getAll(libraryID)) || [];
+      } catch (error) {
+        failed += 1;
+        ztoolkit?.log?.(
+          `[WikiReadingNote] could not enumerate library ${libraryID}: ${error}`,
+          "warn",
+        );
+        continue;
+      }
+
+      for (const entry of entries) {
+        let attachment = entry;
+        try {
+          if (typeof entry === "number") {
+            attachment = await Zotero.Items.getAsync(entry);
+          }
+          if (!isWikiReadingNoteDeletionCandidate(attachment)) continue;
+          const markdown = await this.read(attachment);
+          if (markdown === null) {
+            failed += 1;
+            continue;
+          }
+          if (!markdown?.includes(BLOCK_OPEN)) continue;
+          await attachment.eraseTx();
+          removed += 1;
+        } catch (error) {
+          failed += 1;
+          ztoolkit?.log?.(
+            `[WikiReadingNote] failed to delete ${attachment?.key}: ${error}`,
+            "warn",
+          );
+        }
+      }
+    }
+
+    return { removed, failed };
+  }
+
   /** The note attachment on this item, by identity rather than by key. */
   async findAttachment(item: any): Promise<any | null> {
     const ids: number[] = item?.getAttachments?.() ?? [];

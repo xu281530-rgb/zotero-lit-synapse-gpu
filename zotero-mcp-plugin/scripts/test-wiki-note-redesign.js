@@ -10,6 +10,7 @@ const {
   appendReadingRecord,
   assertMacroSummaryCoversRecords,
   parseAppendOnlyReadingNote,
+  WikiReadingNoteStore,
 } = await import("../src/modules/wiki/wikiReadingNote.ts");
 
 const tests = [];
@@ -156,6 +157,116 @@ test("macro summary covers every finding even when findings share a chunk", () =
       ].join("\n"),
     ),
   );
+});
+
+test("all AI reading notes can be deleted across Zotero libraries", async () => {
+  const erased = [];
+  const contents = new Map();
+  const unreadablePaths = new Set();
+  const attachment = ({
+    key,
+    title,
+    filename,
+    parentItemID = 10,
+    contentType = "text/markdown",
+    content = "# User-authored note",
+    unreadable = false,
+  }) => {
+    const filePath = `test://${key}.md`;
+    contents.set(filePath, content);
+    if (unreadable) unreadablePaths.add(filePath);
+    return {
+      key,
+      parentItemID,
+      attachmentContentType: contentType,
+      isAttachment: () => true,
+      getField: (field) => (field === "title" ? title : ""),
+      attachmentFilename: filename,
+      getFilePathAsync: async () => filePath,
+      eraseTx: async () => erased.push(key),
+    };
+  };
+  const titleMatched = attachment({
+    key: "TITLE1",
+    title: "Wiki Reading Note (PAPER1).md",
+    filename: "renamed.md",
+    content:
+      "<!-- ZOTERO-MCP-WIKI-READING-NOTE: machine-maintained, do not edit -->\nAI note",
+  });
+  const filenameMatched = attachment({
+    key: "FILE2",
+    title: "Renamed by user",
+    filename: "also-renamed.md",
+    content:
+      "<!-- ZOTERO-MCP-WIKI-READING-NOTE: machine-maintained, do not edit -->\nAI note",
+  });
+  const ordinaryMarkdown = attachment({
+    key: "USER3",
+    title: "My notes.md",
+    filename: "my-notes.md",
+  });
+  const similarlyNamedMarkdown = attachment({
+    key: "USER4",
+    title: "Wiki Reading Note - personal.md",
+    filename: "personal-reading-note.md",
+  });
+  const standaloneLookalike = attachment({
+    key: "USER5",
+    title: "Wiki Reading Note (PAPER5).md",
+    filename: "zotero-mcp-reading-note-PAPER5.md",
+    parentItemID: 0,
+  });
+  const pdfLookalike = attachment({
+    key: "USER6",
+    title: "Wiki Reading Note (PAPER6).md",
+    filename: "zotero-mcp-reading-note-PAPER6.md",
+    contentType: "application/pdf",
+  });
+  const exactNameCollision = attachment({
+    key: "USER7",
+    title: "Wiki Reading Note (PAPER7).md",
+    filename: "zotero-mcp-reading-note-PAPER7.md",
+  });
+  const unreadableGeneratedNote = attachment({
+    key: "BROKEN8",
+    title: "Wiki Reading Note (PAPER8).md",
+    filename: "zotero-mcp-reading-note-PAPER8.md",
+    unreadable: true,
+  });
+
+  globalThis.Zotero = {
+    Libraries: {
+      getAll: () => [{ libraryID: 1 }, { id: 2 }],
+      userLibraryID: 1,
+    },
+    Items: {
+      getAll: async (libraryID) =>
+        libraryID === 1
+          ? [
+              titleMatched,
+              ordinaryMarkdown,
+              similarlyNamedMarkdown,
+              standaloneLookalike,
+              pdfLookalike,
+              exactNameCollision,
+              unreadableGeneratedNote,
+            ]
+          : [202],
+      getAsync: async (id) => (id === 202 ? filenameMatched : null),
+    },
+  };
+  globalThis.IOUtils = {
+    readUTF8: async (filePath) => {
+      if (unreadablePaths.has(filePath)) throw new Error("unreadable");
+      return contents.get(filePath);
+    },
+  };
+  globalThis.ztoolkit = { log: () => undefined };
+
+  const result = await new WikiReadingNoteStore().clearAllAttachments();
+
+  assert.deepEqual(result, { removed: 2, failed: 1 });
+  assert.deepEqual(erased, ["TITLE1", "FILE2"]);
 });
 
 let failed = 0;

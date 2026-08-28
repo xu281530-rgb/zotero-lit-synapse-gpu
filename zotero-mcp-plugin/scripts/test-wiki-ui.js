@@ -676,6 +676,7 @@ for (const setting of [
 
 for (const id of [
   "clear-wiki-data-button",
+  "clear-wiki-reading-notes-button",
   "wiki-data-statistics",
   "hybrid-chunk-lock-message",
   "embedding-identity-lock-message",
@@ -688,6 +689,7 @@ const preferenceScript = fs.readFileSync(
   "utf8",
 );
 assert.match(preferenceScript, /clearAll\(\)/u);
+assert.match(preferenceScript, /clearAllAttachments\(\)/u);
 assert.match(preferenceScript, /chunkLocked/u);
 assert.match(preferenceScript, /embeddingIdentityLocked/u);
 assert.doesNotMatch(
