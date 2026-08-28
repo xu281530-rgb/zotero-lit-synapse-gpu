@@ -247,6 +247,21 @@ test("cursor and collection schemas match their runtime paging contracts", () =>
   ]);
 });
 
+test("tool descriptions expose the repaired read contracts", () => {
+  const byName = new Map(buildToolCatalog().map((tool) => [tool.name, tool]));
+
+  const libraries = byName.get("search_libraries");
+  assert.match(libraries.description, /results.*pagination.*nextOffset/isu);
+  assert.doesNotMatch(libraries.description, /Returns \[\{/u);
+
+  const attachment = byName.get("get_attachment_text");
+  assert.match(attachment.description, /standalone attachment/iu);
+  assert.match(
+    attachment.inputSchema.properties.itemKey.description,
+    /standalone attachment/iu,
+  );
+});
+
 test("fixed-default tools no longer expose content modes", () => {
   for (const name of ["search_library", "get_collections"]) {
     const tool = buildToolCatalog().find((t) => t.name === name);
