@@ -78,6 +78,7 @@
     "test:wiki-panel-render": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-panel-render.js",
     "test:wiki-build-loop": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-build-loop.js",
     "test:wiki-synthesis-audit": "node --experimental-strip-types scripts/test-wiki-synthesis-audit.js",
+    "test:wiki-record-template": "node --experimental-strip-types scripts/test-wiki-record-template.js",
     "test:wiki-reading-note": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-reading-note.js",
     "test:wiki-note-redesign": "node --experimental-strip-types scripts/test-wiki-note-redesign.js",
     "test:wiki-qa-reading": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-qa-reading.js",

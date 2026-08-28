@@ -924,6 +924,27 @@ export class WikiReadingSessions {
     );
   }
 
+  /**
+   * How many note writes this session has already had accepted.
+   *
+   * `recordIntegration` stamps one timestamp across the chunks it settles, so
+   * the number of DISTINCT stamps is the number of records the note should be
+   * holding for this session. It is a lower bound on purpose: a call that
+   * settles nothing new - a re-read, a second record over chunks already
+   * integrated - stamps nothing and is not counted, and two calls inside the
+   * same millisecond collapse into one. Both errors point the same way, so a
+   * note is never accused of losing a record it never had.
+   */
+  async integrationCount(sessionId: number): Promise<number> {
+    return Number(
+      (await this.db.valueQueryAsync(
+        `SELECT COUNT(DISTINCT integrated_at) FROM wiki_reading_chunks
+         WHERE session_id = ? AND integrated_at IS NOT NULL`,
+        [sessionId],
+      )) ?? 0,
+    );
+  }
+
   /** Chunk indexes delivered or read since their last successful note write. */
   async pendingIntegrationIndexes(sessionId: number): Promise<number[]> {
     const rows = await this.db.queryAsync(

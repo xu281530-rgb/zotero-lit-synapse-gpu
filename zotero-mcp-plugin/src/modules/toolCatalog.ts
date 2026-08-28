@@ -1157,6 +1157,8 @@ export function buildToolCatalog(): ToolDefinition[] {
   },
   {
     name: 'wiki_prepare_update',
+    // NOTE: the response carries wikiSkeleton - every Page title, every
+    // Concept and every relation the library already holds. See below.
     category: 'wiki',
     description: [
       'Search existing Wiki Page, Concept/Alias, Claim keyword and Claim embedding candidates before proposing a controlled Wiki update. This tool never writes. CREATE_PAGE requires the short-lived prepareToken returned here.',
@@ -1167,7 +1169,11 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'AFTER A FULL-TEXT READ, this call asks for one more thing before it will start the write-up: wikiReview, a pass over the WHOLE Wiki with the finished paper in hand. It is refused once and asked for by name, so you will be told when it is needed rather than having to guess.',
       '',
-      'wikiReview is accepted ONLY once every chunk has been delivered, the whole-paper synthesis is recorded, AND wiki_record_concepts final true has completed. Sent earlier it is refused and nothing is stored — the order is finalSynthesis, terminology final, then the five-axis Wiki review. Committing what you have read so far is still allowed while a paper is unfinished; just leave wikiReview out of those calls.'
+      'wikiReview is accepted ONLY once every chunk has been delivered, the whole-paper synthesis is recorded, AND wiki_record_concepts final true has completed. Sent earlier it is refused and nothing is stored — the order is finalSynthesis, terminology final, then the five-axis Wiki review. Committing what you have read so far is still allowed while a paper is unfinished; just leave wikiReview out of those calls.',
+      '',
+      'THE RESPONSE CARRIES wikiSkeleton: every Page title, every Concept with its type and one-line description, and every relation already asserted, written as "挤压铸造 --suppresses--> 非平衡共晶相". READ IT BEFORE YOU WRITE. The rest of this response is query-driven recall, which answers "has this been said before" and cannot answer "how does this paper sit against the thirty already in here" - you do not know what to search for until you can see what is there. Thirty-one papers written up without it produced zero relations between them: not one was refused, none was ever offered.',
+      '',
+      'SO, WITH THE SKELETON IN VIEW: does this paper extend a Page that exists rather than deserving a parallel one? Do its Concepts already exist under another name, and should they become aliases instead of new entities? And what does it let you assert BETWEEN concepts — that one process suppresses a phenomenon another paper described, that one theory incorporates another\'s mechanism? Propose those relations in the commit. "本篇与现有条目无关联，因为…" is a real answer and sometimes the right one; silence is not.'
     ].join('\n'),
     inputSchema: {
       type: 'object',
@@ -1592,7 +1598,9 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'IT CONTINUES WHATEVER QUESTIONS ALREADY READ. If the user has been asking about this paper, part of it is already read and it already has a reading note. This does not start over: the same session, chunk ledger and append-only records carry forward, and paging walks the chunks NOBODY HAS READ rather than the paper front to back. A page can therefore be discontinuous — 41-44 then 46-60, with 45 left out because a question already read it. Read pagination.deliveredChunkIndexes, not the range, when you attribute an excerpt to a chunk; pagination.skippedAlreadyReadChunkIndexes names what was left out, and its content is already captured in an immutable reading record. To see a skipped chunk again, ask for it by offset. carriedOverFromQuestionAnswering says how much was inherited. The one thing still asked for is a deliberate expert profile: the reader a question assembled on the fly is provisional, and a whole-paper macro summary deserves a considered one.',
       '',
-      'INTEGRATION GATE. After each page, call wiki_update_reading_note with ONE readingRecord describing only what that page established. The server numbers it, attaches the page chunk ids, audits it immediately against those chunks, and appends it without changing earlier records. If later text corrects an earlier record, say "Correction to record N" in a new record; never edit the old one. A page with no new content still gets a record using unchanged: true and unchangedReason, with no limit on consecutive empty records. At most one delivered batch may be outstanding. Re-reading a chunk already delivered is free and never counts against the gate.',
+      'INTEGRATION GATE. After each page, call wiki_update_reading_note with ONE readingRecord describing only what that page established - distilling its argument, its values and its conclusions, and citing every chunk the page delivered. The server numbers it, attaches the page chunk ids, audits it immediately against those chunks, and appends it without changing earlier records.',
+      '',
+      'THE PAGE SIZE IS YOURS, AND IT IS NOT FREE. Ask for as many chunks as you want to see at once - a wider page is how a connection across a whole section gets noticed, and nothing here prefers small pages. What scales with the page is the OBLIGATION: the record must account for every chunk on it and land every measurement in it, both enforced. A large page buys a wider view and owes a longer record. If later text corrects an earlier record, say "Correction to record N" in a new record; never edit the old one. A page with no new content still gets a record using unchanged: true and unchangedReason, with no limit on consecutive empty records. At most one delivered batch may be outstanding. Re-reading a chunk already delivered is free and never counts against the gate.',
       '',
       'ONE PAPER AT A TIME. Starting a different full-text paper while this one is unfinished is refused. Finish the open one first through the fixed chain: read it out; reset any provisional expert from metadata and abstract; append macroSummary with finalSynthesis true; call wiki_record_concepts with final true; call wiki_prepare_update with the five-axis Wiki Review and one verdict per source-backed Claim; then wiki_commit. Or use wiki_finish_reading with outcome "skipped" to close it without a Wiki write.',
       '',
@@ -1623,7 +1631,7 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         limit: {
           type: 'number',
-          description: `Chunks per page, 1 to ${MAX_DOCUMENT_CHUNKS_PER_PAGE} (default ${DEFAULT_DOCUMENT_CHUNKS_PER_PAGE}).`
+          description: `Chunks per page, 1 to ${MAX_DOCUMENT_CHUNKS_PER_PAGE} (default ${DEFAULT_DOCUMENT_CHUNKS_PER_PAGE}). Your choice, and not a free one: the record for a page must account for every chunk on it and land every measurement in it, so a bigger page buys a wider view and owes a longer record.`
         },
         includeReadingNote: {
           type: 'boolean',
@@ -1672,17 +1680,43 @@ export function buildToolCatalog(): ToolDefinition[] {
     description: [
       'Append to a paper\'s persistent reading note. Each ordinary call adds ONE immutable reading record for this turn; once every chunk is covered, one final call appends the whole-paper macro summary after all records. This is used both while paging with wiki_build_from_paper and after answering from retrieved passages.',
       '',
+      'WHAT A RECORD IS. It DISTILS the argument the delivered chunks carry; it does not COMPRESS them. Summarising is the wrong verb and produces the wrong document: what the record owes is the core reasoning, the key data and the conclusions this turn actually established. A record that reads like an abstract has failed, because the abstract is what the paper already came with. Neither length nor brevity is the target - the test is whether someone holding only this record could reconstruct what these chunks said.',
+      '',
+      'THE RECORD TEMPLATE IS FIXED AND ENFORCED. Write in Chinese, keeping terms, formulae, numbers and units in their original form. Five sections, each a line of its own reading `**标签**`, each non-empty:',
+      '  **一句话** - 通俗、不带术语、让人一眼看懂这批 chunk 在讲什么。这是唯一允许压缩的地方。',
+      '  **做了什么** - 方法、设备、流程、软件。参数落值、带单位、带条件；工艺参数表整表转写。',
+      '  **测到了什么** - 结果与数据，原样保留。本批确无结果数据时写明「本批无结果数据」。',
+      '  **概念与术语** - 准备写进 Wiki 的术语：名称 + 一句定义 + chunk 号。没有写「无」。',
+      '  **存疑与未交代** - 本批说不清楚、看似矛盾、或被推迟到后文的东西。没有写「无」。',
+      'The first section exists so that the urge to be brief has somewhere legitimate to go; without it that urge spends itself on the sections holding the data, which is how a chunk stating "a decrease by 63% from 273 µm to 101 µm at 100 MPa" becomes "grains were refined with increasing pressure".',
+      '',
+      'COVER EVERY DELIVERED CHUNK - THIS IS CHECKED. Open the record by saying how many chunks this turn read, then cite EVERY ONE of them. Not one line per chunk mechanically: a chunk carrying three process parameters and a mechanism deserves several lines, and a thin chunk deserves a clause inside a sentence about its neighbours. Consecutive chunks may share one citation, written "（chunk 44-47）" or "（chunk 44、45、46）". A chunk that genuinely holds nothing is still named with what it held, in words that say so - 「chunk 44-47 是公式推导的中间步骤，无独立数据」 - because a sentence carrying 无独立数据 / 无新内容 / 与前文重复 is read as accounting rather than as a finding, and the macro summary is then not obliged to repeat it. A record that accounts for eight of the twenty chunks it was handed is refused by chunk number.',
+      '',
+      'PAGE SIZE IS YOURS TO CHOOSE, AND IT IS NOT FREE. There is no small-page rule: ask for as many chunks as you want to see at once, because seeing more at once is how connections across a section get noticed. What scales with the page is the OBLIGATION - twenty chunks means twenty chunks to account for and every measurement in all twenty to land. Take a large page and owe a long record; take a small page and owe a short one. Choose the trade deliberately rather than always asking for the maximum.',
+      '',
+      'TRANSCRIBE VALUES, NEVER CHARACTERISE THEM - THIS IS CHECKED. The server extracts every measured value from the batch\'s chunks and refuses a record that landed fewer than 80% of them, listing the missing ones by chunk number. Every number the delivered chunks carry belongs in the record with its unit AND the condition it was measured under: alloy composition in wt%, temperature, pressure, power, heating and withdrawal rates, hold times, grain size, strength, elongation, hardness, volume fractions. A composition table, a process-parameter table or a property table is transcribed in full, not described. Placeholder wording standing in for a value that is present in the source - "selected pressures", "certain temperatures", "various conditions", "across a range of powers" - deletes the only part of the sentence the reader needed. Write "0.1-125 MPa", not "selected pressures"; write "1750 +- 7.4 K at 21.6 kW", not "under the stated power".',
+      '',
+      'CARRYING THE CONDITION IS THE CHEAP PATH, NOT THE EXPENSIVE ONE. The audit does not flag numbers; it flags a number whose conditions were dropped. A value written together with the condition it was measured under is not flagged at all, so a dense, fully conditioned record passes more easily than a vague one. Writing around a value to stay safe is the one strategy that fails both the audit and this note.',
+      '',
       'ORDINARY CALLS: send readingRecord containing only what this turn established. The server appends and numbers it; earlier prose and records are immutable. If new text corrects an old record, append "Correction to record N" with the new chunk citation. Never resubmit existing content.',
       '',
       'AFTER ANSWERING A QUESTION FROM A PAPER, call this once for EVERY paper whose passages you genuinely read and used. Send itemKey, readChunkIds, readingRecord, and the domain and expertRole used by search_fulltext. Three papers read means three calls. Retrieval is not reading: do not list passages merely returned or skimmed past.',
       '',
       'NO-NEW-CONTENT RECORDS: use unchanged: true with unchangedReason to record references, acknowledgements or repeated material. This may be used any number of consecutive times. The server still appends a numbered record with the chunks read and "no new content"; nothing needs to be invented.',
       '',
-      'CITE CHUNKS IN THE RECORD TEXT. Every factual paragraph or bullet names the chunk carrying it, for example "melt-pool depth reaches 1.2 mm under the stated condition (chunk 42)". For a question-driven call, every citation must belong to readChunkIds from this turn. Each newly submitted record is audited immediately against those chunks before it is written.',
+      'CITE CHUNKS IN THE RECORD TEXT. Every factual paragraph or bullet names the chunk carrying it, for example "melt-pool depth reaches 1.2 mm at a 240 mm/min scan speed (chunk 42)". The citation is a pointer, not a substitute for the content: a block that names a chunk and then says only what the chunk was ABOUT - "tensile properties were measured (chunk 181)", "fracture morphologies were investigated (chunk 41)" - has recorded a table of contents, not a reading. Say what the chunk FOUND. For a question-driven call, every citation must belong to readChunkIds from this turn. Each newly submitted record is audited immediately against those chunks before it is written.',
       '',
       'KEEP THE PAPER\'S STRENGTH. Do not turn may into will, difficult into impossible, preliminary into complete, or a conditional number into an unconditional one. A sentence citing several chunks is allowed only when each cited chunk carries the sentence on its own. If the audit flags a sentence, either weaken it to the source\'s wording or provide synthesisAudit with verbatim support from every cited chunk.',
       '',
-      'MACRO SUMMARY: once coverage reaches 100%, call with finalSynthesis: true and macroSummary. The server appends it after all immutable records and refuses it if any substantive reading record is not represented. It is audited sentence by sentence against cited chunks before being written. Both full-text and question-driven readings may do this; a question-driven reading must first replace its provisional expert from metadata and abstract, and still cannot claim paper_reviewed depth.',
+      'MACRO SUMMARY: once coverage reaches 100%, call with finalSynthesis: true and macroSummary. The last page of the paper hands the whole note back to you with every reading record in it - read them together first and work out how they RELATE: which record explains another\'s mechanism, which corrects an earlier judgement, which are the same phenomenon measured under different conditions. That relating is the whole job; a summary that does not do it has nothing to add.',
+      '',
+      'THE MACRO SUMMARY TEMPLATE IS FIXED AND ENFORCED, seven sections, each `## 标签`, each non-empty, in Chinese: **本篇讲了什么**（3-5 句通俗话）; **研究对象与材料**（理解结论所需的对象与材料特征）; **核心方法**（研究设计、关键工艺路线与分析思路）; **主要结果**（核心发现、趋势与比较）; **机理解释**（论文自己的因果链，按它自己的强度）; **结论**（凝练核心结论）; **边界与局限**（适用范围、缺的对照、作者自陈不足）.',
+      '',
+      'IT MUST REACH EVERY RECORD, AND THAT IS CHECKED BY CITATION, NEVER BY WORDING: each substantive reading record needs at least one of its chunks cited somewhere in the summary, so a stretch of the paper somebody read cannot drop out of the whole-paper view. Saying it in completely different words always passes - which is what the next rule asks for, so the two never pull against each other. A record that recorded nothing is not asked for.',
+      '',
+      'IT IS NOT A CONCATENATION OF THE RECORDS - a summary more than 60% verbatim from them is refused. Extract the core content and core methods instead. Do not reproduce full parameter tables or preserve numbers mechanically; keep a value only when it is necessary to express a core finding or distinguish an important condition. The complete details remain in the records directly above it. Re-reading any chunk while you write is free.',
+      '',
+      'CORE SYNTHESIS IS SELECTIVE: values are optional, not a coverage target. Keep one when the core conclusion depends on its magnitude or when an important condition would otherwise be ambiguous; leave supporting measurements and parameter tables in the immutable records. The summary is still audited sentence by sentence against cited chunks before being written. Both full-text and question-driven readings may do this; a question-driven reading must first replace its provisional expert from metadata and abstract, and still cannot claim paper_reviewed depth.',
       '',
       'AFTER THE MACRO SUMMARY, the response places every reading record beside every Wiki Claim whose Evidence cites this paper. Run wiki_record_concepts final true, then wiki_prepare_update with one claimVerdict per listed Claim. An overstated verdict requires UPDATE_CLAIM with the reviewed replacement; a contradiction requires MARK_CONFLICT and becomes disputed for human review.',
       '',
@@ -1698,11 +1732,11 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         readingRecord: {
           type: 'string',
-          description: 'Only what this turn established, with chunk citations in every factual block. The server audits, numbers and appends it; earlier records cannot be changed. Required for an ordinary non-unchanged call.'
+          description: 'Only what this turn established, distilled rather than compressed, with chunk citations in every factual block. State how many chunks this turn read, cite every one of them, and carry each value with its unit and its measured condition; a block that says only what a chunk was about has recorded nothing. Use as many lines as the chunks earn - several for a parameter-dense chunk, a clause for a thin one. The server audits, numbers and appends it; earlier records cannot be changed. Required for an ordinary non-unchanged call.'
         },
         macroSummary: {
           type: 'string',
-          description: 'The one whole-paper summary appended after all reading records. Required with finalSynthesis true and must account for every substantive record.'
+          description: 'The one whole-paper summary appended after all reading records. Required with finalSynthesis true. Distil the paper\'s core content, core methods, principal findings, mechanisms and limits; do not reproduce every record, full parameter tables or numbers that are not essential to the synthesis.'
         },
         markdown: {
           type: 'string',
@@ -1719,7 +1753,7 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         finalSynthesis: {
           type: 'boolean',
-          description: 'Append the macro summary once every chunk is covered. Available for full-text and question-driven reading; a QA session must first reset its provisional expert. The macro summary is audited and must cover every substantive record.'
+          description: 'Append the macro summary once every chunk is covered. Available for full-text and question-driven reading; a QA session must first reset its provisional expert. The macro summary is audited for citation support and must synthesise the paper rather than repeat the reading records.'
         },
         synthesisAudit: {
           type: 'array',

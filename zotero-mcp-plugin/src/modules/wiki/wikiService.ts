@@ -33,7 +33,6 @@ import {
   assertChunkCitations,
   assertChunkCitationsResolvable,
   assertHolisticBody,
-  assertMacroSummaryCoversRecords,
   formatChunkRanges,
   formatCoverageMap,
   parseAppendOnlyReadingNote,
@@ -55,6 +54,17 @@ import {
   type WikiAuditChunk,
   type WikiSynthesisAuditEntry,
 } from "./wikiSynthesisAudit";
+import {
+  WIKI_MACRO_SECTIONS,
+  WIKI_RECORD_SECTIONS,
+  assertBatchChunkCoverage,
+  assertMacroIsNotPaste,
+  assertMacroTouchesEveryRecord,
+  assertRecordLedgerIntact,
+  assertTemplateSections,
+  assertUnchangedCarriesNothingNew,
+  assertValuesLanded,
+} from "./wikiRecordTemplate";
 import { describeEvidenceMismatch } from "./wikiEvidenceDiagnostics";
 import type { WikiEmbeddingWorkUnit } from "./wikiEmbeddingQueue";
 import {
@@ -512,6 +522,7 @@ export class WikiService {
       semanticClaims: semanticCandidates.claims.slice(0, options.limit ?? 10),
       semanticWarnings: semanticCandidates.warnings,
       searched: ["title", "alias", "concept", "claim", "embedding"],
+      wikiSkeleton: await this.wikiSkeleton(options.libraryID),
       preparedPageTitles: proposedPageTitles,
       pagePreparations,
       prepareToken,
@@ -582,7 +593,7 @@ export class WikiService {
       throw new Error(
         `Every chunk of ${open.itemKey} has been delivered, but its macro summary has not been appended. ` +
           "Do that pass first: call wiki_update_reading_note with finalSynthesis true and macroSummary; " +
-          "the summary must account for every substantive reading record, " +
+          "the summary must distil the paper's core content and methods, " +
           "then come back to wiki_prepare_update. (Committing PART of a paper you are still reading is " +
           "always allowed - this only applies once the whole paper has been delivered.)",
       );
@@ -845,6 +856,38 @@ export class WikiService {
    * reached is either a typo or an invention, and both are worth refusing
    * while the reader can still say which it was.
    */
+  /**
+   * The two addresses each of this paper's chunks answers to.
+   *
+   * Position and row id coincide for almost every document, which is exactly
+   * why code that assumes one of them looks correct until the day it meets a
+   * paper whose index was rebuilt with a gap. `readableChunks` already accepts
+   * either when resolving a citation; this is the same equivalence, in the
+   * form the record/summary comparison needs.
+   */
+  private async chunkAddressAliases(
+    libraryID: number,
+    itemKey: string,
+  ): Promise<Map<number, number[]>> {
+    const aliases = new Map<number, number[]>();
+    try {
+      const vectorStore = getVectorStore();
+      await vectorStore.initialize();
+      const chunks = await vectorStore.getChunksForItem(itemKey, libraryID);
+      chunks.forEach((chunk: any, index: number) => {
+        const chunkId = Number(chunk?.chunkId);
+        if (!Number.isInteger(chunkId) || chunkId === index) return;
+        aliases.set(index, [chunkId]);
+        aliases.set(chunkId, [index]);
+      });
+    } catch {
+      // A paper whose index cannot be read has no aliases to offer; the
+      // comparison then falls back to exact addresses, which is what it did
+      // before this existed.
+    }
+    return aliases;
+  }
+
   private async readableChunks(
     libraryID: number,
     itemKey: string,
@@ -881,6 +924,53 @@ export class WikiService {
         : readable,
       synthesisAudit,
     );
+  }
+
+  /**
+   * Everything the Wiki already holds, in one page a model can actually read.
+   *
+   * The recall around it is query-driven: a proposed title and a semantic
+   * search return perhaps ten neighbouring Claims. That is the right tool for
+   * "has this been said before", and the wrong one for "how does this paper
+   * sit against the thirty already in here" - a question no query answers,
+   * because the model does not know what to ask for until it can see what is
+   * there. Thirty-one papers were written up through the query path and
+   * produced ZERO relations between them; not one was refused, and none was
+   * ever offered, because the Wiki was never in view.
+   *
+   * Titles, concept names and predicates only. A library of a hundred Claims
+   * fits in a few thousand characters this way, and the Claims themselves stay
+   * behind `wiki_get_page` for whichever page turns out to matter.
+   */
+  private async wikiSkeleton(libraryID: number): Promise<any> {
+    const [pages, library, relations] = await Promise.all([
+      this.store.listPages(libraryID),
+      this.store.concepts(),
+      this.store.listRelationNames(libraryID),
+    ]);
+    const concepts = await library.list(libraryID);
+    return {
+      note:
+        "这是 Wiki 当前的全貌（只有标题、概念名和关系，不含 Claim 正文）。" +
+        "写入前先看它，判断这篇文献是扩展了哪一页、跟哪些概念相关、" +
+        "能不能和已有概念之间建立关系。要展开某一页用 wiki_get_page。",
+      pageCount: pages.length,
+      pages: pages.map((page: any) => ({
+        title: page.canonicalTitle ?? page.title,
+        claims: page.claims?.length ?? 0,
+      })),
+      conceptCount: concepts.length,
+      concepts: concepts.map((concept: any) => ({
+        name: concept.displayName ?? concept.canonicalName,
+        type: concept.conceptType,
+        description: String(concept.description ?? "").slice(0, 120),
+      })),
+      relationCount: relations.length,
+      relations: relations.map(
+        (relation) =>
+          `${relation.source} --${relation.predicate}--> ${relation.target}`,
+      ),
+    };
   }
 
   /** Records and Claims aligned by one paper, without query-based recall. */
@@ -2149,6 +2239,15 @@ export class WikiService {
       session.itemKey,
       deliveredIndexes,
     );
+    // The note is the only place the reading records exist, so before either
+    // branch touches it, check that it still holds everything this session has
+    // already had accepted. Both branches, because a loss discovered only at
+    // the final synthesis is a loss that is already permanent.
+    const parsedPrevious = parseAppendOnlyReadingNote(previousBody);
+    assertRecordLedgerIntact(
+      parsedPrevious.records.length,
+      await sessions.integrationCount(session.sessionId),
+    );
     let body: string;
     if (finalSynthesis) {
       const summary = stripMachineBlock(
@@ -2166,7 +2265,15 @@ export class WikiService {
         totalChunks: coverage.totalChunks,
       });
       assertBlockCitations(summary);
-      assertMacroSummaryCoversRecords(previousBody, summary);
+      if (session.mode === "fulltext") {
+        assertTemplateSections(summary, WIKI_MACRO_SECTIONS, "宏观总结");
+      }
+      assertMacroIsNotPaste(previousBody, summary);
+      assertMacroTouchesEveryRecord(
+        parsedPrevious.records,
+        summary,
+        await this.chunkAddressAliases(session.libraryID, session.itemKey),
+      );
       assertSynthesisEvidenceClosure(
         summary,
         readable,
@@ -2205,6 +2312,9 @@ export class WikiService {
           `Reading record chunk(s) ${invalid.join(", ")} were not delivered for ${session.itemKey}.`,
         );
       }
+      const batchChunks = readable.filter((chunk) =>
+        recordChunkIds.includes(chunk.chunkId),
+      );
       if (!unchanged) {
         assertChunkCitations(record);
         assertChunkCitationsResolvable(record, {
@@ -2215,6 +2325,18 @@ export class WikiService {
           totalChunks: coverage.totalChunks,
         });
         assertBlockCitations(record);
+        // The five-section template belongs to a full-text pass, where one
+        // record answers for a whole page and the slots are what stop the
+        // data sections being eaten by the summarising one. A question-driven
+        // turn reads two or three passages for a specific purpose; holding it
+        // to seven headings would be ceremony, and the two rules that matter
+        // everywhere - account for what you read, keep the numbers - apply to
+        // it just the same.
+        if (session.mode === "fulltext") {
+          assertTemplateSections(record, WIKI_RECORD_SECTIONS, "阅读记录");
+        }
+        assertBatchChunkCoverage(record, recordChunkIds);
+        assertValuesLanded(record, batchChunks, "阅读记录");
         this.assertReadingRecordAudited(
           record,
           readable,
@@ -2222,6 +2344,8 @@ export class WikiService {
           options.readingRecord !== undefined,
           options.synthesisAudit ?? [],
         );
+      } else {
+        assertUnchangedCarriesNothingNew(previousBody, batchChunks, reason);
       }
       body = appendReadingRecord(previousBody, {
         chunkIds: recordChunkIds,
@@ -2274,7 +2398,22 @@ export class WikiService {
           "already been given costs nothing against the integration gate."
         : coverage.complete
           ? "Every chunk has been delivered. Do the whole-paper pass now: call wiki_update_reading_note " +
-            "once more with finalSynthesis true and macroSummary. Existing reading records stay unchanged. Claims cannot be recorded at paper_reviewed depth until that is done. " +
+            "once more with finalSynthesis true and macroSummary. The last page handed the whole note " +
+            "back to you: read every reading record together FIRST and work out how they relate - which " +
+            "one explains another's mechanism, which corrects an earlier judgement, which are the same " +
+            "phenomenon measured under different conditions. That relating is the job. Re-reading any " +
+            "chunk while you write is free.\n" +
+            "七个小节，每个 `## 标签`，都不能空，用中文提炼核心内容和核心方法：" +
+            "**本篇讲了什么**（3-5 句通俗话）、**研究对象与材料**（理解结论所需的对象与材料特征）、" +
+            "**核心方法**（研究设计、关键工艺路线与分析思路）、**主要结果**（核心发现、趋势与比较）、" +
+            "**机理解释**（论文自己的因果链）、**结论**（凝练论文的核心结论）、" +
+            "**边界与局限**（适用范围、缺的对照、作者自陈不足）。\n" +
+            "Do NOT paste the records end to end - more than 60% verbatim is refused. It adds nothing, " +
+            "since those records sit directly above it in the same file. Do not reproduce full parameter " +
+            "tables or preserve numbers mechanically; include a value only when it is necessary to express " +
+            "a core finding or distinguish an important condition. The complete details remain permanently " +
+            "available in the reading records. " +
+            "Existing reading records stay unchanged. Claims cannot be recorded at paper_reviewed depth until that is done. " +
             GATE_HINT
           : `Keep reading: ${coverage.remainingChunks} chunk(s) left, resume at chunk index ` +
             `${coverage.firstMissingIndex ?? coverage.deliveredChunks}.`,
@@ -2920,8 +3059,9 @@ export class WikiService {
     if (session.finalSynthesisAt === null) {
       return (
         "Every chunk has been delivered but the whole-paper synthesis has not been done. Call " +
-        "wiki_update_reading_note with finalSynthesis true and macroSummary. It must account for every " +
-        "substantive reading record. Then review its terminology with wiki_record_concepts final true."
+        "wiki_update_reading_note with finalSynthesis true and macroSummary. Distil the paper's core " +
+        "content and methods without reproducing the reading records. Then review its terminology with " +
+        "wiki_record_concepts final true."
       );
     }
     if (session.conceptsRecordedAt === null) {
@@ -3942,7 +4082,16 @@ export class WikiService {
 
     // Resuming looks exactly like a call without a cursor, and a resuming
     // model has lost the note, so it comes back with the page by default.
-    const includeNote = options.includeReadingNote ?? !servedFromCursor;
+    // The note comes back on the LAST page whether it was asked for or not.
+    // Paging suppresses it for a reason - a note re-sent with every batch is
+    // the same text twenty times - but the moment coverage closes is the one
+    // moment the whole note is the material rather than the overhead: the
+    // macro summary about to be written has to relate the records to each
+    // other, and a reader that cannot see them relates nothing and pastes
+    // them instead. That is exactly what happened at 98% verbatim overlap.
+    const includeNote =
+      options.includeReadingNote ??
+      (!servedFromCursor || coverage.complete);
     const noteAttachment = await this.notes.findAttachment(item);
     const noteBody = noteAttachment
       ? parseReadingNote((await this.notes.read(noteAttachment)) ?? "").body
@@ -4033,9 +4182,26 @@ export class WikiService {
       },
       integrationInstruction:
         "Write one readingRecord now, as this paper's expert, containing only what the chunks just " +
-        "delivered establish. Cite their chunk ids in every factual block. The server audits, numbers " +
-        "and appends it without changing earlier records; if this text corrects an earlier entry, " +
-        "append a correction naming that record. Send it with wiki_update_reading_note." +
+        "delivered establish. DISTIL them, do not compress them: the record owes their core reasoning, " +
+        "their key data and their conclusions, and someone holding only this record should be able to " +
+        "reconstruct what these chunks said.\n" +
+        "用中文写，术语、化学式、数值和单位保留原文形式。五个小节，每个标题单独一行，都不能空：\n" +
+        "  **一句话** —— 通俗、不带术语、一眼看懂这批在讲什么。这是唯一允许压缩的地方。\n" +
+        "  **做了什么** —— 方法、设备、流程、软件；参数落值、带单位、带条件，参数表整表转写。\n" +
+        "  **测到了什么** —— 结果与数据，原样保留；确无结果数据时写「本批无结果数据」。\n" +
+        "  **概念与术语** —— 名称 + 一句定义 + chunk 号；没有写「无」。\n" +
+        "  **存疑与未交代** —— 本批说不清、看似矛盾、或推迟到后文的；没有写「无」。\n" +
+        "TWO THINGS ARE CHECKED, and both scale with how big a page you asked for. Every chunk on this " +
+        "page has to be accounted for - several lines where it carries parameters or a mechanism, a " +
+        "clause where it carries little, and a chunk holding nothing still named with what it held; " +
+        "consecutive ones may share a citation, written \"（chunk 44-47）\". And at least 80% of the " +
+        "measured values in these chunks have to appear, each with its unit and its condition: " +
+        "\"0.1-125 MPa\" and \"1750 +- 7.4 K at 21.6 kW\", never \"selected pressures\" or \"under the " +
+        "stated power\". A block that names a chunk and then says only what it was ABOUT has recorded a " +
+        "table of contents. Detail is the cheap path: the audit flags a number whose condition was " +
+        "dropped, so a fully conditioned value is not flagged at all. Cite their chunk ids in every factual block. The " +
+        "server audits, numbers and appends it without changing earlier records; if this text corrects " +
+        "an earlier entry, append a correction naming that record. Send it with wiki_update_reading_note." +
         (integrationDebt(current) >= WIKI_MAX_OUTSTANDING_BATCHES
           ? ` ${integrationDebt(current)} batch(es) are outstanding; fold them into the note before requesting another page.`
           : ""),
@@ -4046,7 +4212,7 @@ export class WikiService {
           GATE_HINT
         : `${coverage.deliveredChunks} of ${coverage.totalChunks} chunks delivered. wiki_commit will store evidence from this paper as section_read at best until the whole paper has been delivered; keep paging with pagination.nextCursor, or submit chunk_local / section_read / partial / incomplete now.`,
       nextStep: hasMore
-        ? `You have read chunks ${range} of ${chunks.length}. Update the reading note, then continue with cursor set to pagination.nextCursor and nothing else changed. Continue until the whole paper is delivered; if you abandon the read instead, close it with wiki_finish_reading and outcome "skipped".`
+        ? `You have read chunks ${range} of ${chunks.length}. Record what these chunks established - every one of them, with their values and conditions - then continue with cursor set to pagination.nextCursor and nothing else changed. If this page was mostly methods, tables or results and the record could not hold what it carried, ask for fewer chunks on the next page. Continue until the whole paper is delivered; if you abandon the read instead, close it with wiki_finish_reading and outcome "skipped".`
         : `That is the whole paper: ${chunks.length} chunk(s). Append a readingRecord for this last batch, then follow the fixed completion chain: wiki_update_reading_note with finalSynthesis true and macroSummary; wiki_record_concepts with final true (or an empty list plus noConceptsReason); wiki_prepare_update with the five-axis Wiki Review and one claimVerdict per source-backed Claim; then wiki_commit. Quote Claim Evidence from these chunks rather than from the note. If you decide not to write it up, close it with wiki_finish_reading and outcome "skipped".`,
       existingWikiCandidates: existing,
     };

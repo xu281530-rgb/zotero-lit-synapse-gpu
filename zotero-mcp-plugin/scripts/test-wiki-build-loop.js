@@ -145,20 +145,106 @@ let service = new WikiService(store);
 
 const count = (sql, ...p) => Number(sqlite.prepare(sql).get(...p).n);
 
-/** One cautious fixture record tied to the page that was actually delivered. */
-function recordForPage(page) {
-  const chunkIndex = page.chunks[0].chunkIndex;
-  return `Directional solidification is discussed for the station represented in this passage (chunk ${chunkIndex}).`;
+/**
+ * Wrap a fixture body in the five sections a record now has to arrive in.
+ *
+ * The template is enforced at the write, so a fixture that skips it is
+ * testing a call the server no longer accepts. Everything specific to a test
+ * stays in `body`; the four remaining sections carry the honest answer for a
+ * synthetic chunk, which is that it has no data and no terminology.
+ */
+function templated(body) {
+  return [
+    "**一句话**",
+    "本批讲的是定向凝固。",
+    "",
+    "**做了什么**",
+    body,
+    "",
+    "**测到了什么**",
+    "本批无结果数据。",
+    "",
+    "**概念与术语**",
+    "无。",
+    "",
+    "**存疑与未交代**",
+    "无。",
+  ].join("\n");
 }
 
+/** Every page delivered for an item, across all reads of it. */
+const pagesByItem = new Map();
+
+/**
+ * How a record names the chunks its page delivered.
+ *
+ * Written as a RUN rather than one bracket per chunk, and the difference
+ * matters to two readers at once. Coverage expands `chunk 4-11` into all eight
+ * and is satisfied; the overstatement audit reads one number out of it and
+ * sees a single-chunk sentence, so a span stays cheap while genuinely fusing
+ * eight separately cited chunks into one assertion stays expensive. That
+ * asymmetry is the whole reason grouped citations are allowed.
+ */
+function citationFor(page) {
+  const indexes = page.chunks.map((chunk) => chunk.chunkIndex);
+  const first = indexes[0];
+  const last = indexes[indexes.length - 1];
+  if (indexes.length === 1) return `chunk ${first}`;
+  // A page that walked over already-read chunks is not a run, and writing it
+  // as one would drop the chunks in the holes.
+  return indexes.every((index, step) => index === first + step)
+    ? `chunk ${first}-${last}`
+    : `chunk ${indexes.join("、")}`;
+}
+
+function recordForPage(page) {
+  return templated(
+    `Directional solidification is discussed for the stations represented in these passages (${citationFor(page)}).`,
+  );
+}
+
+/**
+ * A whole-paper synthesis that reaches every record without being pasted.
+ *
+ * Two rules meet here and have to be satisfiable together: the summary must
+ * cite something from every substantive record, and it must not repeat the
+ * records verbatim. Citing each page in the summary's own words does both,
+ * which is the point - coverage is checked by citation, never by wording.
+ */
 function summaryForPaper(itemKey) {
-  return indexedChunks
-    .get(itemKey)
-    .map(
-      (_chunk, chunkIndex) =>
-        `Directional solidification is discussed for the station represented in this passage (chunk ${chunkIndex}).`,
-    )
-    .join("\n\n");
+  const pages = (pagesByItem.get(itemKey) ?? []).filter(
+    (page) => page.chunks.length > 0,
+  );
+  const method = pages.length
+    ? pages
+        .map(
+          (page) =>
+            `论文以定向凝固站位序列作为核心研究方法（${citationFor(page)}）。`,
+        )
+        .join("\n\n")
+    : "夹具未给出方法细节。";
+  return [
+    "## 本篇讲了什么",
+    "这篇论文讨论定向凝固。",
+    "",
+    "## 研究对象与材料",
+    "合成夹具，未给出材料牌号。",
+    "",
+    "## 核心方法",
+    method,
+    "",
+    "## 主要结果",
+    "夹具未给出结果数据。",
+    "",
+    "## 机理解释",
+    "夹具未给出机理。",
+    "",
+    "## 结论",
+    "夹具未给出结论。",
+    "",
+    "## 边界与局限",
+    "作者未讨论。",
+  ].join("\n");
 }
 
 /** Give the open paper the one expert it needs before body text will flow. */
@@ -211,6 +297,12 @@ async function read(args) {
     itemKey: page.target.itemKey,
     readingRecord: recordForPage(page),
   });
+  // Keep every page available to the final synthesis, including pages read
+  // before a later call resumed the paper. The macro summary can then distil
+  // the complete paper without reproducing each record.
+  const key = page.target.itemKey;
+  if (!pagesByItem.has(key)) pagesByItem.set(key, []);
+  pagesByItem.get(key).push(page);
   return page;
 }
 

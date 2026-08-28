@@ -8,7 +8,6 @@ register("./ts-ext-hooks.mjs", import.meta.url);
 const {
   appendMacroSummary,
   appendReadingRecord,
-  assertMacroSummaryCoversRecords,
   parseAppendOnlyReadingNote,
   WikiReadingNoteStore,
 } = await import("../src/modules/wiki/wikiReadingNote.ts");
@@ -69,7 +68,7 @@ test("no-new-content records may repeat without invented prose", () => {
   assert.ok(parsed.records.every((record) => record.noNewContent));
 });
 
-test("macro summary is appended and names uncovered records", () => {
+test("a distilled macro summary is appended after the immutable records", () => {
   let body = appendReadingRecord("", {
     chunkIds: [40],
     content: "- The method is proposed as a possible solution (chunk 40).",
@@ -80,13 +79,8 @@ test("macro summary is appended and names uncovered records", () => {
   });
   const beforeSummary = body;
 
-  assert.throws(
-    () => assertMacroSummaryCoversRecords(body, "The paper proposes a method."),
-    /第 1 次/u,
-  );
-
-  const summary = "The paper proposes a possible solution (chunk 40).";
-  assertMacroSummaryCoversRecords(body, summary);
+  const summary =
+    "The paper's core contribution is a proposed solution to the stated method problem (chunk 40).";
   body = appendMacroSummary(body, summary);
   const parsed = parseAppendOnlyReadingNote(body);
 
@@ -95,67 +89,6 @@ test("macro summary is appended and names uncovered records", () => {
   assert.throws(
     () => appendMacroSummary(body, summary),
     /already has|已有/u,
-  );
-});
-
-test("macro summary covers every finding even when findings share a chunk", () => {
-  const body = appendReadingRecord("", {
-    chunkIds: [42],
-    content: [
-      "- The peak pressure is 50 MPa (chunk 42).",
-      "- The holding temperature is 1180 C (chunk 42).",
-    ].join("\n"),
-  });
-
-  assert.throws(
-    () =>
-      assertMacroSummaryCoversRecords(
-        body,
-        "The experiment reaches a peak pressure of 50 MPa (chunk 42).",
-      ),
-    /第 1 次/u,
-    "sharing a citation must not let one finding stand in for another",
-  );
-  assert.throws(
-    () =>
-      assertMacroSummaryCoversRecords(
-        body,
-        [
-          "The holding temperature is 50 C (chunk 42).",
-          "The peak pressure is 1180 MPa (chunk 42).",
-        ].join("\n"),
-      ),
-    /第 1 次/u,
-    "numbers cannot be reassigned to a different finding from the same chunk",
-  );
-  const repeatedValueBody = appendReadingRecord("", {
-    chunkIds: [43],
-    content: [
-      "- The pressure is 50 MPa (chunk 43).",
-      "- The temperature is also 50 C (chunk 43).",
-    ].join("\n"),
-  });
-  assert.throws(
-    () =>
-      assertMacroSummaryCoversRecords(
-        repeatedValueBody,
-        [
-          "The pressure is 50 C (chunk 43).",
-          "The temperature is also 50 MPa (chunk 43).",
-        ].join("\n"),
-      ),
-    /第 1 次/u,
-    "repeated numeric values still need to stay with their original units",
-  );
-
-  assert.doesNotThrow(() =>
-    assertMacroSummaryCoversRecords(
-      body,
-      [
-        "The experiment reaches a peak pressure of 50 MPa (chunk 42).",
-        "Its holding temperature is 1180 C (chunk 42).",
-      ].join("\n"),
-    ),
   );
 });
 

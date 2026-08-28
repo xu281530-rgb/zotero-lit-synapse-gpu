@@ -70,12 +70,22 @@ const SHORT = 6;
 /** Small enough that one page finishes it, for the close-condition blocks. */
 const TINY = 8;
 
+/**
+ * Chunk text WITHOUT measured values, deliberately.
+ *
+ * This suite is about session mechanics - which slot a paper occupies, whose
+ * chunks a record may cite, when a debt is settled - and every record in it
+ * would otherwise also have to transcribe two measurements per chunk to
+ * satisfy the value-landing rule, which is tested against real paper text in
+ * test-wiki-record-template.js. Stations stay numbered because a bare ordinal
+ * is not a measurement; the millimetres and the gradient are what leave.
+ */
 function chunksFor(key, count, base) {
   return Array.from({ length: count }, (_, i) => ({
     chunkId: base + i,
     text:
-      `${key} passage ${i}: the melt-pool depth at station ${i} is ` +
-      `${(1 + i / 100).toFixed(2)} mm under an imposed gradient of ${8 + (i % 7)} K/mm.`,
+      `${key} passage ${i}: the melt-pool depth at station ${i} is reported ` +
+      `under the imposed gradient described for that station.`,
     language: "en",
   }));
 }
@@ -168,24 +178,36 @@ const service = new WikiService(store);
  * several blocks below check that facts recorded early SURVIVE later rewrites,
  * which only means something if the caller controls what is in the document.
  */
+/**
+ * A record body in the five sections a full-text record has to arrive in.
+ *
+ * Question-driven records are not held to the template, but they may use it,
+ * and having ONE shape here keeps the fixtures honest: a block that reads by
+ * question and later resumes as a full-text pass writes the same way through
+ * both, which is exactly the transition several blocks below exercise.
+ *
+ * The framing lines stay deliberately uncited. This note is written by
+ * questions, so its standing header cannot cite chunk 0 - most turns have
+ * never been given chunk 0, and a citation the reading cannot resolve is
+ * refused. The facts, and their citations, live in 测到了什么.
+ */
 function note(facts) {
   return [
     "# Melt-pool geometry under imposed thermal gradients",
     "",
-    "## Research question",
-    // Short framing lines, and deliberately uncited: this note is written by
-    // questions, so its standing header cannot cite chunk 0 - most turns have
-    // never been given chunk 0, and a citation the reading cannot resolve is
-    // refused. The facts, and their citations, live in the sections below.
+    "**一句话**",
     "How melt-pool depth responds to the imposed thermal gradient, and where that response stops being linear.",
     "",
-    "## Materials and method",
+    "**做了什么**",
     "A nickel-base superalloy on a directional solidification rig, with depth measured at numbered stations.",
     "",
-    "## Findings",
+    "**测到了什么**",
     ...facts,
     "",
-    "## Scope and limits",
+    "**概念与术语**",
+    "无。",
+    "",
+    "**存疑与未交代**",
     "One alloy and one rig geometry; nothing outside the reported gradient range is demonstrated by this work.",
   ].join("\n");
 }
@@ -225,6 +247,24 @@ function readByQuestion(key, indexes, facts, extra = {}) {
     synthesisAudit: synthesisAuditFor(key, body),
     ...extra,
   });
+}
+
+/**
+ * One fact line accounting for every chunk a page delivered.
+ *
+ * A record now has to answer for its whole batch, so a fixture that writes
+ * the same five sentences whatever arrived is testing a call the server no
+ * longer accepts. The list form matters: coverage expands `chunk 5、6、9` into
+ * all three, while the overstatement audit reads one number out of it and
+ * sees a single-chunk sentence, so accounting for a page does not cost a
+ * multi-chunk-fusion justification.
+ */
+function coversPage(page) {
+  const indexes = page.chunks.map((row) => row.chunkIndex);
+  if (!indexes.length) return [];
+  return [
+    `本批其余各站是同一条深度序列上的读数，无独立数据（chunk ${indexes.join("、")}）。`,
+  ];
 }
 
 function updateLegacyNote(key, facts, extra = {}) {
@@ -651,6 +691,58 @@ block("each new reading record is audited against this turn's chunks", async () 
   });
 });
 
+/**
+ * Wrap a fixture body in the five sections a FULL-TEXT record must arrive in.
+ *
+ * Question-driven records are exempt from the template - they answer for two
+ * or three passages, not a page - so only the full-text fixtures below use
+ * this.
+ */
+/** The seven sections a full-text macro summary must arrive in. */
+function macroTemplated(body) {
+  return [
+    "## 本篇讲了什么",
+    "这篇短通讯测量了给定热梯度下的熔池深度。",
+    "",
+    "## 研究对象与材料",
+    "镍基高温合金，定向凝固台架，按编号站位测深。",
+    "",
+    "## 核心方法",
+    "夹具未给出更多方法细节。",
+    "",
+    "## 主要结果",
+    body,
+    "",
+    "## 机理解释",
+    "夹具未给出机理。",
+    "",
+    "## 结论",
+    "夹具未给出结论。",
+    "",
+    "## 边界与局限",
+    "作者未讨论。",
+  ].join(String.fromCharCode(10));
+}
+
+function templated(body) {
+  return [
+    "**一句话**",
+    "本批讲的是熔池深度。",
+    "",
+    "**做了什么**",
+    body,
+    "",
+    "**测到了什么**",
+    "本批无结果数据。",
+    "",
+    "**概念与术语**",
+    "无。",
+    "",
+    "**存疑与未交代**",
+    "无。",
+  ].join(String.fromCharCode(10));
+}
+
 block("complete question reading can append a macro summary after expert reset", async () => {
   await service.updateReadingNote({
     libraryID: 1,
@@ -688,24 +780,14 @@ block("complete question reading can append a macro summary after expert reset",
       "A solidification metallurgist reassessing the complete short paper from its abstract before synthesis.",
     focus: ["the imposed-gradient conditions", "the station-to-station comparison"],
   });
-  await assert.rejects(
-    () =>
-      service.updateReadingNote({
-        libraryID: 1,
-        itemKey: "QASUMMRY",
-        finalSynthesis: true,
-        macroSummary:
-          "The paper reports melt-pool depth under an imposed gradient at the first station (chunk 0). This deliberately long discussion repeats that first finding without accounting for the second reading record.",
-      }),
-    /第 2 次/u,
-    "record coverage, not summary length, is the completion test",
-  );
+  const coreSummary =
+    "The paper's core method compares melt-pool depth across two stations under an imposed gradient (chunk 0, chunk 1).";
   const summarised = await service.updateReadingNote({
     libraryID: 1,
     itemKey: "QASUMMRY",
     finalSynthesis: true,
-    macroSummary:
-      "The paper reports melt-pool depth under an imposed gradient at the first station (chunk 0). It also reports the measurement under an imposed gradient at the second station (chunk 1).",
+    macroSummary: coreSummary,
+    synthesisAudit: synthesisAuditFor("QASUMMRY", coreSummary),
   });
 
   assert.equal(summarised.mode, "qa");
@@ -956,7 +1038,11 @@ block("a full-text read inherits the chunks and the note the questions left", as
     "Every station of this short paper reports the same depth to within the stated uncertainty (chunk 0, chunk 1, chunk 2, chunk 3, chunk 4, chunk 5).";
   const bounded =
     "Read as a whole the paper is a single-condition confirmation, bounded by the one gradient range it covers (chunk 0).";
-  const synthesisNote = () => note([acrossEveryChunk, bounded]);
+  // A full-text macro summary arrives in the seven-section template, so the
+  // two sentences under test sit in it rather than in the free-form note
+  // shape the question path still uses.
+  const synthesisNote = () =>
+    macroTemplated([acrossEveryChunk, bounded].join(String.fromCharCode(10, 10)));
 
   const refused = await service
     .updateReadingNote({
@@ -1652,6 +1738,7 @@ block("paging over holes converges rather than stalling", async () => {
         "By station 70 the depth is essentially constant, and 71 confirms it (chunk 70, chunk 71).",
         "Stations 30, 31 and 50 sit on the plateau (chunk 30, chunk 31, chunk 50).",
         `Reading the traverse through confirms one continuous series across all ${LONG} stations.`,
+        ...coversPage(page),
       ]);
     page = await service.buildFromPaper({
       libraryID: 1,
@@ -1737,8 +1824,9 @@ block("paging walks the unread chunks, wherever the holes are", async () => {
       service.updateReadingNote({
         libraryID: 1,
         itemKey: "HOLEPAPR",
-        readingRecord:
+        readingRecord: templated(
           "- Chunk 3 discusses melt-pool depth at its station (chunk 3).",
+        ),
       }),
     /cannot resolve|not been delivered/iu,
     "a QA chunk already integrated into the note is not a source for the new full-text record",
@@ -1747,8 +1835,9 @@ block("paging walks the unread chunks, wherever the holes are", async () => {
   await service.updateReadingNote({
     libraryID: 1,
     itemKey: "HOLEPAPR",
-    readingRecord:
-      "- The earlier holes report melt-pool depth under imposed gradients (chunk 0).",
+    readingRecord: templated(
+      "- The earlier holes report melt-pool depth under imposed gradients (chunk 0、2、4、5).",
+    ),
   });
   const records = parseAppendOnlyReadingNote(
     parseReadingNote(await noteOnDisk("HOLEPAPR")).body,
@@ -1849,6 +1938,7 @@ block("the final review is refused, and not stored, on an unfinished paper", asy
       "Stations 48, 60 and 61 are all on the plateau (chunk 48, chunk 60, chunk 61).",
       "Stations 70 and 71 repeat the plateau reading at the same values (chunk 70, chunk 71).",
       "The opening pages set out the rig geometry and the traverse stations (chunk 0, chunk 2).",
+      ...coversPage(page),
     ]);
   const checkpoint = await service.prepareUpdate({
     libraryID: 1,
@@ -1974,11 +2064,13 @@ block("a full-text integration that fails to save records nothing either", async
   // Written so the synthesis gate passes: what is under test here is what a
   // DISK failure leaves behind, and a note refused before it is ever written
   // would never reach the failing write at all.
-  const whole = note([
-    "Station 2 reports a melt-pool depth measured under the imposed gradient stated for that station (chunk 2).",
-    "Station 3 reports its depth measured under the gradient stated for that station as well (chunk 3).",
-    "The traverse is covered station by station, with its own stated gradient (chunk 0).",
-  ]);
+  const whole = macroTemplated(
+    [
+      "Station 2 reports a melt-pool depth measured under the imposed gradient stated for that station (chunk 2).",
+      "Station 3 reports its depth measured under the gradient stated for that station as well (chunk 3).",
+      "The traverse is covered station by station, with its own stated gradient (chunk 0).",
+    ].join(String.fromCharCode(10, 10)),
+  );
   notes.write = async () => {
     throw new Error("simulated disk failure");
   };

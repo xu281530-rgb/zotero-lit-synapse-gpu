@@ -217,20 +217,73 @@ const REVIEW = {
     "No relation between stored concepts is drawn or withdrawn by this paper.",
 };
 
-/** A note body long enough to be a reading and shaped like one. */
-function noteBody(sections) {
+/**
+ * One line accounting for the chunks a batch delivered that carried nothing
+ * this fixture is about.
+ *
+ * Written as a LIST so the two readers disagree usefully: coverage expands
+ * `chunk 3、4、5` into all three, while the overstatement audit reads a single
+ * number out of it, so accounting for a page never costs a multi-chunk-fusion
+ * justification.
+ */
+function covering(indexes) {
+  if (!indexes?.length) return [];
+  return [
+    "",
+    `本批其余站位是同一条测量序列上的常规读数，无独立结论（chunk ${indexes.join("、")}）。`,
+  ];
+}
+
+/** A reading record in the five sections the server now requires. */
+function noteBody(sections, covered) {
   return [
     "# Two-stage forming of columnar grain arrays",
     "",
-    "## Research question",
+    "**一句话**",
     "Whether an imposed thermal gradient during directional solidification, followed by rapid hot pressing, can fix a columnar grain array without losing its alignment (chunk 0).",
     "",
-    "## Materials and apparatus",
+    "**做了什么**",
     "A nickel-base superalloy processed on a directional solidification rig instrumented with embedded thermocouples and a pyrometer (chunk 1).",
     "",
+    "**测到了什么**",
+    ...sections,
+    ...covering(covered),
+    "",
+    "**概念与术语**",
+    "无。",
+    "",
+    "**存疑与未交代**",
+    "Findings are established for one alloy and one rig geometry; transfer to other section thicknesses is not demonstrated in this paper (chunk 1).",
+  ].join("\n");
+}
+
+/** The same content in the seven sections a macro summary now requires. */
+function macroBody(sections) {
+  return [
+    "## 本篇讲了什么",
+    "Whether an imposed thermal gradient during directional solidification, followed by rapid hot pressing, can fix a columnar grain array without losing its alignment (chunk 0).",
+    "",
+    "## 研究对象与材料",
+    "A nickel-base superalloy processed on a directional solidification rig instrumented with embedded thermocouples and a pyrometer (chunk 1).",
+    "",
+    "## 核心方法",
+    // The summary must CITE something from every substantive record, and this
+    // fixture's middle batches carry the station measurements. One line
+    // reaching them is what a summary does when it accounts for the whole
+    // traverse rather than only its endpoints - and it costs nothing against
+    // the paste rule, because it is worded as a summary, not copied.
+    "Stations through the middle of the traverse were read as one continuous series (chunk 16).",
+    "",
+    "## 主要结果",
     ...sections,
     "",
-    "## Scope and limits",
+    "## 机理解释",
+    "夹具未给出机理。",
+    "",
+    "## 结论",
+    "夹具未给出结论。",
+    "",
+    "## 边界与局限",
     "Findings are established for one alloy and one rig geometry; transfer to other section thicknesses is not demonstrated in this paper (chunk 1).",
   ].join("\n");
 }
@@ -409,8 +462,10 @@ block("the first batch arrives and must be integrated as a whole", async () => {
     () =>
       service.updateReadingNote({
         libraryID: 1,
-        markdown:
-          "The process completely eliminates every transition error (chunk 2).",
+        markdown: noteBody(
+          ["The process completely eliminates every transition error (chunk 2)."],
+          [0, 1, 3, 4, 5, 6, 7],
+        ),
       }),
     (error) =>
       error.name === "WikiSynthesisAuditRequired" &&
@@ -425,10 +480,13 @@ block("the first batch arrives and must be integrated as a whole", async () => {
   const integrated = await service.updateReadingNote({
     libraryID: 1,
     itemKey: "DEEPREAD",
-    markdown: noteBody([
-      "## Columnar-to-equiaxed transition",
-      "The paper places the transition at a thermal gradient of 12 K/mm for this alloy (chunk 2).",
-    ]),
+    markdown: noteBody(
+      [
+        "## Columnar-to-equiaxed transition",
+        "The paper places the transition at a thermal gradient of 12 K/mm for this alloy (chunk 2).",
+      ],
+      [0, 1, 3, 4, 5, 6, 7],
+    ),
   });
   assert.equal(integrated.integrated, true);
   assert.equal(integrated.readingSession.integrationDebt, 0);
@@ -530,13 +588,16 @@ block("one outstanding batch stops new paging but not re-reading", async () => {
   // Rewriting the whole note clears the one allowed outstanding batch.
   const caughtUp = await service.updateReadingNote({
     libraryID: 1,
-    markdown: noteBody([
-      "## Process chain",
-      "Directional solidification at 4 mm/min under an imposed gradient, then rapid hot pressing at 1180 C and 45 MPa for 90 s (chunk 10).",
-      "",
-      "## Columnar-to-equiaxed transition",
-      "The paper places the transition at a thermal gradient of 12 K/mm for this alloy (chunk 2).",
-    ]),
+    markdown: noteBody(
+      [
+        "## Process chain",
+        "Directional solidification at 4 mm/min under an imposed gradient, then rapid hot pressing at 1180 C and 45 MPa for 90 s (chunk 10).",
+        "",
+        "## Columnar-to-equiaxed transition",
+        "The paper places the transition at a thermal gradient of 12 K/mm for this alloy (chunk 2).",
+      ],
+      [8, 9, 11, 12, 13, 14, 15],
+    ),
   });
   assert.equal(caughtUp.readingSession.integrationDebt, 0);
 
@@ -553,13 +614,16 @@ block("one outstanding batch stops new paging but not re-reading", async () => {
   );
   await service.updateReadingNote({
     libraryID: 1,
-    markdown: noteBody([
-      "## Process chain",
-      "Directional solidification at 4 mm/min under an imposed gradient, then rapid hot pressing at 1180 C and 45 MPa for 90 s (chunk 10).",
-      "",
-      "## Columnar-to-equiaxed transition",
-      "The paper places the transition at a thermal gradient of 12 K/mm for this alloy (chunk 2).",
-    ]),
+    markdown: noteBody(
+      [
+        "## Process chain",
+        "Directional solidification at 4 mm/min under an imposed gradient, then rapid hot pressing at 1180 C and 45 MPa for 90 s (chunk 10).",
+        "",
+        "## Columnar-to-equiaxed transition",
+        "The paper places the transition at a thermal gradient of 12 K/mm for this alloy (chunk 2).",
+      ],
+      [16, 17, 18, 19, 20, 21, 22, 23],
+    ),
   });
 
   const fourth = await service.buildFromPaper({
@@ -714,7 +778,7 @@ block("the write-up waits for the whole-paper pass", async () => {
     "This schedule completely eliminates equiaxed nucleation (chunk 10).";
   const exaggeratedCorrection =
     "The corrected 8 K/mm threshold proves that the 12 K/mm value and thermocouple lag reported in section 2.1 always cause the disagreement with Ref. 14 (chunk 2, chunk 26).";
-  const driftedSummary = noteBody([
+  const driftedSummary = macroBody([
     "## Process chain",
     "Directional solidification at 4 mm/min under an imposed gradient, followed by rapid hot pressing at 1180 C and 45 MPa for 90 s (chunk 10).",
     exaggeratedSchedule,
@@ -781,21 +845,22 @@ block("the write-up waits for the whole-paper pass", async () => {
   assert.ok(forged, "an invented quotation does not close the gate");
   assert.match(forged.message, /character for character/u);
 
-  // The cheap way out, and the right one: write the sentences at the strength
-  // the paper used, and split the fusion into the two facts it was made of.
-  // Nothing then needs quoting at all.
+  // The final pass distils the paper instead of reproducing every value already
+  // preserved in the immutable reading records. It keeps the core method, the
+  // corrected interpretation and their sources; detailed settings and
+  // intermediate values remain available directly above the summary.
   const finalPass = await service.updateReadingNote({
     libraryID: 1,
     finalSynthesis: true,
-    markdown: noteBody([
+    markdown: macroBody([
       "## Process chain",
-      "Directional solidification at 4 mm/min under an imposed gradient, followed by rapid hot pressing at 1180 C and 45 MPa for 90 s (chunk 10).",
+      "The core method combines directional solidification under an imposed gradient with rapid hot pressing to control the grain array (chunk 10).",
       "",
       "## Columnar-to-equiaxed transition",
-      "Section 2.1 reported the transition at a thermal gradient of 12 K/mm (chunk 2).",
+      "The study uses the columnar-to-equiaxed transition as the criterion for evaluating the process (chunk 2).",
       "",
       "## Validation and contribution",
-      "After correction for thermocouple lag the transition occurs at 8 K/mm, which also reconciles the disagreement with Ref. 14 (chunk 26).",
+      "Correcting thermocouple lag revises that criterion and reconciles the earlier disagreement with prior work (chunk 26).",
     ]),
   });
   assert.equal(finalPass.finalSynthesis, true);
@@ -959,7 +1024,7 @@ block("finalSynthesis is refused before the paper has been delivered", async () 
         libraryID: 1,
         itemKey: "SHORTONE",
         finalSynthesis: true,
-        markdown: noteBody(["## Anything", "..."]),
+        markdown: macroBody(["## Anything", "..."]),
       }),
     /The open paper is DEEPREAD/u,
     "the guard names which paper is actually open",
@@ -1185,10 +1250,13 @@ block("a crash between the temp write and the rename leaves the note intact", as
     itemKey: "RESUMEPR",
     limit: PAGE,
   });
-  const good = noteBody([
-    "## Calibration procedure",
-    "The pyrometer is referenced against embedded thermocouples at three plateau temperatures before each run.",
-  ]);
+  const good = noteBody(
+    [
+      "## Calibration procedure",
+      "The pyrometer is referenced against embedded thermocouples at three plateau temperatures before each run (chunk 0).",
+    ],
+    [1, 2, 3, 4, 5, 6, 7],
+  );
   await service.updateReadingNote({ libraryID: 1, markdown: good });
   const before = fs.readFileSync(
     (await readNoteFromDisk("RESUMEPR")).attachment.getFilePath(),
@@ -1200,10 +1268,13 @@ block("a crash between the temp write and the rename leaves the note intact", as
     () =>
       service.updateReadingNote({
         libraryID: 1,
-        markdown: noteBody([
-          "## Calibration procedure",
-          "Rewritten with the uncertainty budget folded in.",
-        ]),
+        markdown: noteBody(
+          [
+            "## Calibration procedure",
+            "Rewritten with the uncertainty budget folded in (chunk 0).",
+          ],
+          [1, 2, 3, 4, 5, 6, 7],
+        ),
       }),
     /simulated power loss/u,
   );
@@ -1220,10 +1291,13 @@ block("a crash between the temp write and the rename leaves the note intact", as
   // And the retry lands normally.
   const retried = await service.updateReadingNote({
     libraryID: 1,
-    markdown: noteBody([
-      "## Calibration procedure",
-      "Rewritten with the uncertainty budget folded in.",
-    ]),
+    markdown: noteBody(
+      [
+        "## Calibration procedure",
+        "Rewritten with the uncertainty budget folded in (chunk 0).",
+      ],
+      [1, 2, 3, 4, 5, 6, 7],
+    ),
   });
   assert.equal(retried.integrated, true);
 });
@@ -1244,13 +1318,16 @@ block("a fresh process resumes mid-paper from the note on disk", async () => {
   });
   await service.updateReadingNote({
     libraryID: 1,
-    markdown: noteBody([
-      "## Calibration procedure",
-      "Referenced against embedded thermocouples at three plateau temperatures, with drift checked between runs.",
-      "",
-      "## Uncertainty budget",
-      "Dominated by emissivity uncertainty rather than by detector noise.",
-    ]),
+    markdown: noteBody(
+      [
+        "## Calibration procedure",
+        "Referenced against embedded thermocouples at three plateau temperatures, with drift checked between runs (chunk 8).",
+        "",
+        "## Uncertainty budget",
+        "Dominated by emissivity uncertainty rather than by detector noise (chunk 9).",
+      ],
+      [10, 11, 12],
+    ),
   });
 
   // Everything in memory goes away: new database handle, new store, new

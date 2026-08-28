@@ -306,6 +306,22 @@ const HEADING = /^\s{0,3}#{1,6}\s+/u;
 const BLOCKQUOTE = /^\s{0,3}>/u;
 const TABLE_ROW = /^\s{0,3}\|/u;
 
+/**
+ * A bold line standing alone is a section label, not prose.
+ *
+ * `assertHolisticBody` has always read it that way - a heading is a heading
+ * whether it is written `## X` or `**X**` - and the block splitter used to
+ * disagree, gluing the label onto the paragraph beneath it. That difference
+ * had no consequences while labels were incidental. It acquired one the
+ * moment records arrived under a fixed template with CHINESE labels: the
+ * per-block citation rule measures a block against a shorter limit once it
+ * contains Han characters, so a two-character label was enough to drag an
+ * English paragraph from the 120-character limit to the 50-character one and
+ * demand a citation the rule never meant to ask for. The label is not the
+ * paragraph; splitting it off is what the other reader already believed.
+ */
+const BOLD_LABEL = /^\s{0,3}\*\*[^*]+\*\*\s*[:：]?\s*$/u;
+
 export interface WikiNoteBlock {
   /** The block's text with list markers and inline markup left in place. */
   text: string;
@@ -358,7 +374,12 @@ export function splitNoteBlocks(body: string): WikiNoteBlock[] {
       flush();
       return;
     }
-    if (HEADING.test(line) || BLOCKQUOTE.test(line) || TABLE_ROW.test(line)) {
+    if (
+      HEADING.test(line) ||
+      BLOCKQUOTE.test(line) ||
+      TABLE_ROW.test(line) ||
+      BOLD_LABEL.test(line)
+    ) {
       flush();
       blocks.push({ text: line.trim(), line: index + 1, prose: false });
       return;
@@ -513,11 +534,25 @@ function matches(patterns: readonly RegExp[], text: string): string | null {
   return null;
 }
 
+/**
+ * A citation naming SEVERAL chunks, for stripping only.
+ *
+ * `CHUNK_REFERENCE` reads one id per citation, which is what an Evidence
+ * trail needs and what multi-chunk-fusion counts. It is the wrong tool for
+ * erasing a citation from a sentence: given `(chunk 0、1、3、4)` it removes
+ * `chunk 0` and leaves `、1、3、4` behind, and those orphaned digits then read
+ * as a quantity. A sentence accounting for the thin chunks of a page - which
+ * is now required, and which normally also carries a negation - was flagged
+ * for a measurement it never mentioned.
+ */
+const CHUNK_REFERENCE_RUN =
+  /(?:chunks?|块|段)\s*#?\s*\d+(?:\s*(?:[-–—]|to|~|、|,|，|and)\s*\d+)*|第\s*\d+\s*(?:块|段)/giu;
+
 /** Digits that are neither a chunk citation nor a bibliography bracket. */
 function carriesQuantity(sentence: string): boolean {
   const stripped = String(sentence)
     .replace(REFERENCE_BRACKET, " ")
-    .replace(CHUNK_REFERENCE, " ");
+    .replace(CHUNK_REFERENCE_RUN, " ");
   return /\d/u.test(stripped);
 }
 

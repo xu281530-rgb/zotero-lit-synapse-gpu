@@ -1539,6 +1539,34 @@ export class WikiStore {
     return { deletedRows };
   }
 
+  /**
+   * Every relation in the library, named rather than numbered.
+   *
+   * The skeleton handed to a write-up has to be readable without a second
+   * lookup: `挤压铸造 --suppresses--> 非平衡共晶相` says what the Wiki already
+   * believes, where `76 -> 79` says only that it believes something.
+   */
+  async listRelationNames(
+    libraryID: number,
+  ): Promise<{ source: string; predicate: string; target: string }[]> {
+    await this.initialize();
+    const rows = await this.db.queryAsync(
+      `SELECT s.canonical_name AS source, r.predicate AS predicate,
+              t.canonical_name AS target
+         FROM wiki_relations r
+         JOIN wiki_concepts s ON s.concept_id = r.source_concept_id
+         JOIN wiki_concepts t ON t.concept_id = r.target_concept_id
+        WHERE s.library_id = ? AND t.library_id = ?
+        ORDER BY s.canonical_name, r.predicate`,
+      [libraryID, libraryID],
+    );
+    return rows.map((row: any) => ({
+      source: String(rowValue(row, "source", "source") ?? ""),
+      predicate: String(rowValue(row, "predicate", "predicate") ?? ""),
+      target: String(rowValue(row, "target", "target") ?? ""),
+    }));
+  }
+
   async listPages(libraryID: number): Promise<WikiPageRecord[]> {
     await this.initialize();
     const rows = await this.db.queryAsync(
