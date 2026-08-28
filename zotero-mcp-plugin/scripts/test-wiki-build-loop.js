@@ -167,9 +167,37 @@ function templated(body) {
     "**概念与术语**",
     "无。",
     "",
+    // Chunk accounting has its own slot now, and coverage is counted there:
+    // the content slots stopped having to name chunks so they could stop
+    // being a chunk index. Derived from the body so every fixture stays
+    // self-consistent without touching its call site.
+    "**本批覆盖**",
+    accountFor(body),
+    "",
     "**存疑与未交代**",
     "无。",
   ].join("\n");
+}
+
+/** One accounting line naming every chunk the body already cites. */
+function accountFor(text) {
+  const spans = [
+    ...new Set(
+      [
+        ...String(text).matchAll(
+          /(?:chunks?)[ ]*#?[ ]*[0-9]+(?:[ ]*(?:[-–—]|、|,|，)[ ]*[0-9]+)*/gu,
+        ),
+      ].map((match) => match[0]),
+    ),
+  ];
+  // One group per LINE. Fusing several separately cited runs into one sentence
+  // makes the overstatement audit read it as a multi-chunk assertion and ask
+  // for a quotation per chunk, which an accounting line can never give.
+  return spans.length
+    ? spans
+        .map((span) => "本批涉及 " + span + "。")
+        .join(String.fromCharCode(10))
+    : "无。";
 }
 
 /** Every page delivered for an item, across all reads of it. */

@@ -108,6 +108,13 @@ export const WIKI_RECORD_SECTIONS: readonly WikiTemplateSection[] = [
     hint: "准备写进 Wiki 的术语：名称 + 一句定义 + chunk 号。没有新术语时写「无」。",
   },
   {
+    label: "本批覆盖",
+    hint:
+      "逐 chunk 点名只在这一栏做，上面几栏不必为了「点到」而分行。按内容分组，" +
+      "三五行即可：「chunk 56-59 建立形核过冷度模型；chunk 60-63 推导生长速率与稳定性判据；" +
+      "chunk 3、16 为元数据与装置示意图，无独立数据」。本批每个 chunk 都要出现在这里。",
+  },
+  {
     label: "存疑与未交代",
     hint:
       "本批说得不清楚、看起来矛盾、或明显被推迟到后文的东西。三种情形必须写进来：" +
@@ -311,14 +318,32 @@ export function assertBatchChunkCoverage(
   batchChunkIds: readonly number[],
 ): void {
   if (!batchChunkIds.length) return;
-  const cited = new Set(expandedCitedChunkIds(record));
+  // Counted in 本批覆盖 when the record has one, and in the whole record when
+  // it does not - a question-driven record is not held to the template.
+  //
+  // The slot exists because of what happened when this obligation had nowhere
+  // of its own to live. "Every chunk must be cited" is checked; "not one line
+  // per chunk" was only prose, so the cheapest compliant shape was one line
+  // per chunk, and 做了什么 - the first content slot - became a chunk index:
+  // five records out of eight came back with exactly one line per delivered
+  // chunk, in ascending order, each saying what that chunk was ABOUT. The
+  // findings slot stayed at four lines while the method slot carried twelve.
+  // Giving the accounting its own place is what frees the other slots to be
+  // prose again; nothing about the obligation itself changes.
+  const sections = splitTemplateSections(record, WIKI_RECORD_SECTIONS);
+  const accounting = sections.get("本批覆盖");
+  const cited = new Set(
+    expandedCitedChunkIds(accounting?.trim() ? accounting : record),
+  );
   const missing = batchChunkIds.filter((id) => !cited.has(id));
   if (!missing.length) return;
   throw new WikiRecordTemplateError(
     `本批交付了 ${batchChunkIds.length} 个 chunk，记录只交代了 ` +
       `${batchChunkIds.length - missing.length} 个，未写入。\n\n` +
       `未被交代的 chunk：${missing.join(", ")}\n\n` +
-      "每一个交付的 chunk 都要在记录里出现。不是机械地一个 chunk 一行——" +
+      "点名写在「**本批覆盖**」那一栏里，按内容分组，三五行即可；" +
+      "上面几栏是写内容的，不要为了「点到」而拆成一个 chunk 一行。" +
+      "不是机械地一个 chunk 一行——" +
       "带参数或机理的 chunk 值得写好几行，内容单薄的 chunk 可以并进相邻句子的从句里，" +
       "确实没有独立内容的 chunk 也要点名并说明它装的是什么，例如" +
       "「chunk 44-47 是公式推导的中间步骤，无独立数据」——" +

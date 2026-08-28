@@ -235,6 +235,27 @@ function covering(indexes) {
 }
 
 /** A reading record in the five sections the server now requires. */
+/** One accounting line naming every chunk the text already cites. */
+function accountFor(text) {
+  const spans = [
+    ...new Set(
+      [
+        ...String(text).matchAll(
+          /(?:chunks?)[ ]*#?[ ]*[0-9]+(?:[ ]*(?:[-–—]|、|,|，)[ ]*[0-9]+)*/gu,
+        ),
+      ].map((match) => match[0]),
+    ),
+  ];
+  // One group per LINE. Fusing several separately cited runs into one sentence
+  // makes the overstatement audit read it as a multi-chunk assertion and ask
+  // for a quotation per chunk, which an accounting line can never give.
+  return spans.length
+    ? spans
+        .map((span) => "本批涉及 " + span + "。")
+        .join(String.fromCharCode(10))
+    : "无。";
+}
+
 function noteBody(sections, covered) {
   return [
     "# Two-stage forming of columnar grain arrays",
@@ -251,6 +272,9 @@ function noteBody(sections, covered) {
     "",
     "**概念与术语**",
     "无。",
+    "",
+    "**本批覆盖**",
+    accountFor([...sections, ...covering(covered)].join(" ")),
     "",
     "**存疑与未交代**",
     "Findings are established for one alloy and one rig geometry; transfer to other section thicknesses is not demonstrated in this paper (chunk 1).",
@@ -520,10 +544,13 @@ block("the machine block tracks the ledger and ignores forgery", async () => {
     "",
     "<!-- /ZOTERO-MCP-WIKI-READING-NOTE -->",
     "",
-    noteBody([
-      "## Columnar-to-equiaxed transition",
-      "The paper places the transition at a thermal gradient of 12 K/mm for this alloy (chunk 2).",
-    ]),
+    noteBody(
+      [
+        "## Columnar-to-equiaxed transition",
+        "The paper places the transition at a thermal gradient of 12 K/mm for this alloy (chunk 2).",
+      ],
+      [0, 1, 3, 4, 5, 6, 7],
+    ),
   ].join("\n");
 
   // Debt is 0, so this integration is a plain rewrite of the same batch.
@@ -702,7 +729,7 @@ block("a retraction in section 5 rewrites what section 2 said", async () => {
       "",
       "## Columnar-to-equiaxed transition",
       `The transition occurs at a thermal gradient of 8 K/mm (chunk 26). ${correctionSentence}`,
-    ]),
+    ], [0, 1]),
     synthesisAudit: [
       {
         sentence: correctionSentence,

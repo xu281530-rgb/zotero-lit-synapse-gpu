@@ -191,6 +191,27 @@ const service = new WikiService(store);
  * never been given chunk 0, and a citation the reading cannot resolve is
  * refused. The facts, and their citations, live in 测到了什么.
  */
+/** One accounting line naming every chunk the text already cites. */
+function accountFor(text) {
+  const spans = [
+    ...new Set(
+      [
+        ...String(text).matchAll(
+          /(?:chunks?)[ ]*#?[ ]*[0-9]+(?:[ ]*(?:[-–—]|、|,|，)[ ]*[0-9]+)*/gu,
+        ),
+      ].map((match) => match[0]),
+    ),
+  ];
+  // One group per LINE. Fusing several separately cited runs into one sentence
+  // makes the overstatement audit read it as a multi-chunk assertion and ask
+  // for a quotation per chunk, which an accounting line can never give.
+  return spans.length
+    ? spans
+        .map((span) => "本批涉及 " + span + "。")
+        .join(String.fromCharCode(10))
+    : "无。";
+}
+
 function note(facts) {
   return [
     "# Melt-pool geometry under imposed thermal gradients",
@@ -206,6 +227,9 @@ function note(facts) {
     "",
     "**概念与术语**",
     "无。",
+    "",
+    "**本批覆盖**",
+    accountFor(facts.join(" ")),
     "",
     "**存疑与未交代**",
     "One alloy and one rig geometry; nothing outside the reported gradient range is demonstrated by this work.",
@@ -751,6 +775,9 @@ function templated(body) {
     "",
     "**概念与术语**",
     "无。",
+    "",
+    "**本批覆盖**",
+    accountFor(body),
     "",
     "**存疑与未交代**",
     "无。",

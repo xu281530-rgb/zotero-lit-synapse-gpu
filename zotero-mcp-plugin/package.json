@@ -53,6 +53,7 @@
     "calibrate:chunk-threshold": "node --experimental-strip-types scripts/calibrate-chunk-threshold.js",
     "compare:keyword-scoring": "node --experimental-strip-types scripts/compare-keyword-scoring.js",
     "benchmark:keyword-index": "node --experimental-strip-types --experimental-sqlite scripts/benchmark-keyword-index.js",
+    "test:sentence-boundary": "node --experimental-strip-types scripts/test-sentence-boundary.js",
     "test:chunking": "node --experimental-strip-types scripts/test-chunking.js",
     "test:natural-language": "node scripts/test-natural-language.js",
     "test:body-index": "node --experimental-strip-types scripts/test-body-index.js",

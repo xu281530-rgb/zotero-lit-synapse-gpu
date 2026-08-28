@@ -61,6 +61,11 @@
  */
 
 import { normalizeWikiText } from "./wikiCanonicalizer";
+import {
+  CJK_TERMINATORS,
+  TRAILING_CLOSERS,
+  isFalseSentenceEnd,
+} from "../sentenceBoundary";
 
 /** Why one sentence has to be proved before the note is accepted. */
 export type WikiSynthesisRisk =
@@ -420,15 +425,8 @@ function unmask(text: string, spans: string[]): string {
   );
 }
 
-/** Abbreviations whose full stop does not end a sentence. */
-const ABBREVIATION =
-  /\b(?:e\.g|i\.e|cf|vs|approx|ca|Fig|Figs|Eq|Eqs|Ref|Refs|et\s+al|Dr|Prof|No|St|Inc|Ltd|at|wt|vol|mol)\.$/iu;
-
-/** Full-width terminators, which end a sentence with nothing after them. */
-const CJK_TERMINATORS = "。？！";
-
-/** Closing marks that belong to the sentence they follow, not the next one. */
-const TRAILING_CLOSERS = "”’」』）】》〉";
+// Where a sentence ends is decided in ../sentenceBoundary, shared with the
+// text chunker so the two can never disagree about "Xu et al. (2021)" again.
 
 /**
  * Split a block into sentences.
@@ -471,13 +469,8 @@ export function splitSentences(block: string): string[] {
         index += 1;
         current += masked[index];
       }
-    } else {
-      const next = masked.slice(index + 1);
-      if (!/^\s|^$/u.test(next)) continue;
-      const trimmed = current.trimEnd();
-      if (ABBREVIATION.test(trimmed)) continue;
-      // A decimal point, or a numbered list marker, inside the text.
-      if (/\d\.$/u.test(trimmed) && /^\s*\d/u.test(next)) continue;
+    } else if (isFalseSentenceEnd(current, masked.slice(index + 1))) {
+      continue;
     }
     const sentence = current.trim();
     if (sentence) out.push(unmask(sentence, spans));

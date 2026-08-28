@@ -13,6 +13,7 @@
 declare let ztoolkit: ZToolkit;
 
 import { getHybridSearchSettings } from '../hybridSearchSettings';
+import { isFalseSentenceEnd } from '../sentenceBoundary';
 
 // ============== Interfaces ==============
 
@@ -891,12 +892,38 @@ export class TextChunker {
   }
 
   /**
-   * Extract sentences (Chinese and English)
+   * Extract sentences (Chinese and English).
+   *
+   * The boundary rules come from ../sentenceBoundary, the same ones the
+   * reading-note auditor uses. They used not to: this split on any of
+   * `.!?;` with a bare lookbehind, so it ended a sentence inside "Xu et al.
+   * (2021)" and inside "0.1 MPa". The first of those was visible in the
+   * index - one chunk of a real paper ended "Meanwhile, Xu et al." and the
+   * next opened "(2021) studied that..." - and it matters because a chunk is
+   * the unit Evidence is quoted from and the unit a reading record has to
+   * account for. Half a citation is not a passage anybody can quote or
+   * summarise.
+   *
+   * `;` stays a boundary here although it is not a sentence end, because this
+   * splitter's job is to find safe places to break a long paragraph, and a
+   * semicolon is one. The abbreviation and decimal rules apply to `.` only,
+   * which is where the damage was.
    */
   private extractSentences(text: string): string[] {
-    // Split by sentence-ending punctuation
-    const sentences = text
-      .split(/(?<=[。！？.!?;；])\s*/)
+    const pieces: string[] = [];
+    let current = "";
+    for (let index = 0; index < text.length; index += 1) {
+      const character = text[index];
+      current += character;
+      if (!"。！？.!?;；".includes(character)) continue;
+      if (character === "." && isFalseSentenceEnd(current, text.slice(index + 1))) {
+        continue;
+      }
+      pieces.push(current);
+      current = "";
+    }
+    if (current) pieces.push(current);
+    const sentences = pieces
       .map(s => s.trim())
       .filter(s => s.length > 0);
 
