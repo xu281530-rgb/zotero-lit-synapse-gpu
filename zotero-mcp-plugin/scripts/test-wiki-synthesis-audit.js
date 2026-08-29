@@ -881,5 +881,59 @@ test("citations piled behind one assertion are still a fusion", () => {
 });
 
 
+
+
+test("a value transcribed from the source is not a suspicious quantity", () => {
+  // The sentence the template demands: every value carried, with its
+  // condition. It also carries a direction word, and direction + quantity is
+  // two weak signals - so doing what one rule requires tripped another, on
+  // every data sentence in the batch.
+  const chunks = [
+    {
+      chunkId: 1,
+      text:
+        "Considerable primary refinement was achieved at 100 MPa, with a significant decrease " +
+        "by 63% in the average grain size from 273 microns to 101 microns under applied " +
+        "pressure of 0.1-125 MPa.",
+    },
+  ];
+  const note =
+    "# Paper\n\n随施加压力从 0.1 MPa 增加至 125 MPa，在 100 MPa 下平均晶粒尺寸由 273 微米降至 101 微米，细化幅度达 63%（chunk 1）。\n";
+  assert.deepEqual(
+    flagsOf(note, chunks).filter((f) => f.reasons.includes("quantity")),
+    [],
+  );
+});
+
+test("a number the source does not carry is still a suspicious quantity", () => {
+  const chunks = [
+    { chunkId: 1, text: "The grain size fell under applied pressure of 0.1-125 MPa." },
+  ];
+  const note = "# Paper\n\n晶粒尺寸降低了 91%（chunk 1）。\n";
+  assert.ok(
+    flagsOf(note, chunks).some((f) => f.reasons.includes("quantity")),
+    "an invented figure has to stay flagged",
+  );
+});
+
+test("a comma-separated citation list reaches every chunk it names", () => {
+  // "(chunk 1, 2)" is the form the guidance itself uses. Reading only the
+  // first number told a sentence its subject appeared in none of its chunks,
+  // when the subject was in the second.
+  const chunks = [
+    { chunkId: 1, text: "the eutectic phases dissolve after T6 treatment." },
+    { chunkId: 2, text: "the binary eutectic reaction to Al7Cu2Fe was suppressed." },
+  ];
+  const flagged = auditSynthesis(
+    "二元共晶反应 Al7Cu2Fe 受到抑制（chunk 1, 2）。",
+    { chunks },
+  );
+  assert.deepEqual(
+    flagged.filter((f) => f.reasons.includes("subject-not-in-cited-chunks")),
+    [],
+  );
+});
+
+
 console.log(`\n${passed}/${passed + failed} passed`);
 if (failed) process.exit(1);

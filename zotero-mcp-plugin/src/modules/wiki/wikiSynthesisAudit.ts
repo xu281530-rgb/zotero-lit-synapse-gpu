@@ -564,6 +564,41 @@ function matches(patterns: readonly RegExp[], text: string): string | null {
 const CHUNK_REFERENCE_RUN =
   /(?:chunks?|块|段)\s*#?\s*\d+(?:\s*(?:[-–—]|to|~|、|,|，|and)\s*\d+)*|第\s*\d+\s*(?:块|段)/giu;
 
+/**
+ * Are the sentence's numbers the SOURCE's own numbers?
+ *
+ * `direction-word` and `quantity` are each weak, and two weak signals escalate
+ * - the calibration being that "increased by 10%" and "decreased by 10%" are
+ * indistinguishable without reading the source. That was written before the
+ * note was required to transcribe every measured value with its condition,
+ * and the two rules now meet head on: a sentence that does what the template
+ * demands - "压力由 0.1 MPa 增至 125 MPa，晶粒尺寸由 273 µm 降至 101 µm，
+ * 降幅 63%" - carries a direction word and four numbers, and is flagged every
+ * single time. A whole batch of such sentences was, which is how a reading
+ * stopped on its first page.
+ *
+ * The escalation was never about the number; it was about a number the source
+ * might not carry. So a number found in the cited chunks stops being a
+ * suspicious quantity. What remains, honestly stated: a sentence could copy
+ * the values correctly and still reverse their direction. Nothing here would
+ * catch that. It is a narrower hole than flagging every data sentence, which
+ * had already pushed notes into stating endpoints without trends - and the
+ * strong checks, `condition-dropped` above all, still read the source.
+ */
+function quantitiesComeFromSource(
+  sentence: string,
+  sources: readonly string[],
+): boolean {
+  if (!sources.length) return false;
+  const stripped = String(sentence).replace(CHUNK_REFERENCE_RUN, " ");
+  const numbers = [...stripped.matchAll(/\d+(?:\.\d+)?/gu)].map((m) => m[0]);
+  if (!numbers.length) return false;
+  const haystacks = sources.map((text) => flattenForTermMatch(text));
+  return numbers.every((value) =>
+    haystacks.some((text) => text.includes(value)),
+  );
+}
+
 /** Digits that are neither a chunk citation nor a bibliography bracket. */
 function carriesQuantity(sentence: string): boolean {
   const stripped = String(sentence)
@@ -653,14 +688,24 @@ function overlappingSourceSentences(
 export function citedChunkSpan(text: string): number[] {
   const cleaned = String(text ?? "").replace(REFERENCE_BRACKET, " ");
   const found = new Set<number>();
-  const RUN =
-    /(?:chunks?|块|段)\s*#?\s*(\d+)\s*(?:[-–—]|to|~)\s*(\d+)/giu;
-  for (const match of cleaned.matchAll(RUN)) {
-    const first = Number.parseInt(match[1], 10);
-    const last = Number.parseInt(match[2], 10);
-    if (!Number.isInteger(first) || !Number.isInteger(last)) continue;
-    if (last < first || last - first > 400) continue;
-    for (let id = first; id <= last; id += 1) found.add(id);
+  // A citation group is a run of numbers joined by dashes (a range) or by
+  // commas (a list), and both forms are in the guidance - "（chunk 44-47）"
+  // and "（chunk 1, 4）". Reading only the first number of a list is how a
+  // sentence citing `(chunk 1, 2)` was told its subject appears in none of
+  // the chunks it cites, when the subject was sitting in chunk 2.
+  const GROUP = /(?:chunks?|块|段)\s*#?\s*(\d+(?:\s*(?:[-–—]|to|~|、|,|，)\s*\d+)*)/giu;
+  for (const match of cleaned.matchAll(GROUP)) {
+    for (const part of match[1].split(/\s*(?:、|,|，)\s*/u)) {
+      const ends = part.split(/\s*(?:[-–—]|to|~)\s*/u).map((n) => Number.parseInt(n, 10));
+      if (!ends.length || ends.some((n) => !Number.isInteger(n))) continue;
+      const first = ends[0];
+      const last = ends[ends.length - 1];
+      if (last < first || last - first > 400) {
+        found.add(first);
+        continue;
+      }
+      for (let id = first; id <= last; id += 1) found.add(id);
+    }
   }
   for (const id of citedChunkIds(cleaned)) found.add(id);
   return [...found].sort((a, b) => a - b);
@@ -844,10 +889,19 @@ export function auditSynthesis(
         reasons.push("direction-word");
         details.push(`carries the direction word "${direction}"`);
       }
+      const sourceTexts = supporting
+        .map((id) => chunkText.get(id))
+        .filter((text): text is string => typeof text === "string");
+      // `hasQuantity` stays raw: `condition-dropped` below is a STRONG check
+      // and keys on it, and "the number lost its conditions" is a risk whether
+      // or not the number came from the source. Only the WEAK signal is
+      // suppressed when the value is demonstrably the source's own.
       const hasQuantity = carriesQuantity(sentence);
-      if (hasQuantity) {
+      if (hasQuantity && !quantitiesComeFromSource(rawSentence, sourceTexts)) {
         reasons.push("quantity");
-        details.push("carries a number");
+        details.push(
+          "carries a number that is not in the chunks it cites - transcribe the source's own value, or quote the passage this one comes from",
+        );
       }
       const negation = matches(NEGATION, sentence);
       if (negation) {
