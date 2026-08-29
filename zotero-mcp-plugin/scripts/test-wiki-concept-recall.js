@@ -161,6 +161,41 @@ const conceptIdOf = (name) =>
   one("SELECT concept_id FROM wiki_concepts WHERE canonical_name = ?", name)
     ?.concept_id;
 
+// --- 0. The empty Wiki -----------------------------------------------------
+
+await block("an empty Wiki has a revision and a skeleton", async () => {
+  /*
+   * The first paper of a library is written up against nothing: no pages, no
+   * concepts, no relations, and MAX() over an empty table is NULL rather than
+   * a number. Every one of those is a boundary the write-up crosses exactly
+   * once, on the run where a mistake is least likely to be noticed.
+   */
+  const revision = await store.wikiRevision(LIBRARY);
+  assert.equal(typeof revision, "string");
+  assert.ok(revision.length, "an empty Wiki still has to have a revision");
+  assert.ok(
+    !/NaN|undefined|null/u.test(revision),
+    `NULL aggregates must not leak into the revision: ${revision}`,
+  );
+  const neighbourhood = await store.conceptNeighbourhood({
+    libraryID: LIBRARY,
+    seedConceptIds: [],
+    model: "test-embed-model",
+  });
+  assert.deepEqual(neighbourhood.seeds, []);
+  assert.deepEqual(neighbourhood.neighbours, []);
+  assert.deepEqual(neighbourhood.relations, []);
+  assert.equal(neighbourhood.conceptCount, 0);
+  assert.deepEqual(
+    await store.matchConcepts({
+      libraryID: LIBRARY,
+      probes: [{ text: "挤压铸造", vector: fakeVector("挤压铸造") }],
+      model: "test-embed-model",
+    }),
+    [{ probe: "挤压铸造", matches: [] }],
+  );
+});
+
 // --- 1. The text a concept embeds as --------------------------------------
 
 await block("the embedding text does not depend on row order", async () => {

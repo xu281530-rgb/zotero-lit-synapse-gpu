@@ -1684,7 +1684,7 @@ export class WikiStore {
          FROM wiki_concepts c WHERE c.concept_id = ?`,
       [conceptId],
     );
-    if (!rows[0]) return;
+    if (!rows?.[0]) return;
     const text = conceptEmbeddingTextFromRow(rows[0]);
     if (!text) return;
     await this.conceptEmbeddingQueueStore.enqueue(conceptId, text);
@@ -2095,28 +2095,43 @@ export class WikiStore {
    */
   async wikiRevision(libraryID: number): Promise<string> {
     await this.initialize();
-    const row = await this.db.queryAsync(
-      `SELECT
-         (SELECT COUNT(*) FROM wiki_pages WHERE library_id = ?) AS pages,
-         (SELECT MAX(updated_at) FROM wiki_pages WHERE library_id = ?) AS page_at,
-         (SELECT COUNT(*) FROM wiki_concepts WHERE library_id = ?) AS concepts,
-         (SELECT MAX(concept_id) FROM wiki_concepts WHERE library_id = ?) AS concept_max,
-         (SELECT COUNT(*) FROM wiki_relations r JOIN wiki_concepts c
-            ON c.concept_id = r.source_concept_id
-           WHERE c.library_id = ?) AS relations,
-         (SELECT COUNT(*) FROM wiki_concept_embeddings) AS vectors,
-         (SELECT COUNT(*) FROM wiki_concept_embedding_queue) AS queued`,
-      [libraryID, libraryID, libraryID, libraryID, libraryID],
-    );
+    /*
+     * Seven scalar reads rather than one SELECT with seven subqueries.
+     *
+     * The single-query version was the only SELECT in this codebase with no
+     * FROM clause of its own, and `Zotero.DBConnection.queryAsync` handed it
+     * back `undefined` instead of a row array - so `row[0]` threw
+     * "can't access property 0, row is undefined" and took down every
+     * wiki_prepare_update, on every paper, for as long as the build was
+     * installed. Every other `rows[0]` in the plugin reads a SELECT with a
+     * real FROM, which is the shape that has always worked; this now uses the
+     * same `valueQueryAsync` path that `getStatus` runs a dozen times per call.
+     */
+    const scalar = async (sql: string, params: unknown[] = []) =>
+      Number((await this.db.valueQueryAsync(sql, params)) ?? 0);
     const parts = [
-      "pages",
-      "page_at",
-      "concepts",
-      "concept_max",
-      "relations",
-      "vectors",
-      "queued",
-    ].map((key) => Number(rowValue(row[0], key, key) ?? 0));
+      await scalar("SELECT COUNT(*) FROM wiki_pages WHERE library_id = ?", [
+        libraryID,
+      ]),
+      await scalar("SELECT MAX(updated_at) FROM wiki_pages WHERE library_id = ?", [
+        libraryID,
+      ]),
+      await scalar("SELECT COUNT(*) FROM wiki_concepts WHERE library_id = ?", [
+        libraryID,
+      ]),
+      await scalar(
+        "SELECT MAX(concept_id) FROM wiki_concepts WHERE library_id = ?",
+        [libraryID],
+      ),
+      await scalar(
+        `SELECT COUNT(*) FROM wiki_relations r
+           JOIN wiki_concepts c ON c.concept_id = r.source_concept_id
+          WHERE c.library_id = ?`,
+        [libraryID],
+      ),
+      await scalar("SELECT COUNT(*) FROM wiki_concept_embeddings"),
+      await scalar("SELECT COUNT(*) FROM wiki_concept_embedding_queue"),
+    ];
     const fingerprint = await this.db.valueQueryAsync(
       `SELECT group_concat(mark, ' ') FROM (
          SELECT c.normalized_name || ':' || COALESCE(e.text_hash, '') AS mark
@@ -2127,6 +2142,7 @@ export class WikiStore {
     );
     return `${parts.join("-")}-${await hashWikiText(String(fingerprint ?? ""))}`;
   }
+
 
   /**
    * Page titles and claim counts, without loading the pages.

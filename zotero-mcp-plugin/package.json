@@ -71,6 +71,7 @@
     "test:wiki-store": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-store.js",
     "test:wiki-concepts": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-concepts.js",
     "test:wiki-concept-recall": "node --experimental-strip-types scripts/test-wiki-concept-recall.js",
+    "test:db-query-shape": "node scripts/test-db-query-shape.js",
     "test:wiki-retrieval": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-retrieval.js",
     "test:wiki-ui": "node scripts/test-wiki-ui.js",
     "test:wiki-page-delete": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-page-delete.js",

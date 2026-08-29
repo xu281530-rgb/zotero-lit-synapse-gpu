@@ -140,7 +140,7 @@ export class WikiConceptLibrary {
          FROM wiki_concepts c WHERE c.concept_id = ?`,
       [conceptId],
     );
-    if (!rows[0]) return;
+    if (!rows?.[0]) return;
     const text = conceptEmbeddingTextFromRow(rows[0]);
     if (text) await this.embeddings.enqueue(conceptId, text);
   }
