@@ -35,6 +35,7 @@ const {
   expandedCitedChunkIds,
   measurementValues,
   normalizeMeasurementText,
+  renderTemplateGuide,
 } = await import("../src/modules/wiki/wikiRecordTemplate.ts");
 
 const { splitSentences } = await import(
@@ -614,6 +615,50 @@ check("a Markdown table is data, not an enumeration", () => {
     "| 125 MPa | 538 MPa | 4% |",
   ].join(String.fromCharCode(10));
   assertProseIsConnected(table, "阅读记录的「结果与结论」");
+});
+
+check("the guide a model reads before writing IS the table it is judged by", () => {
+  // The hints used to reach a model only through a rejection, and only for the
+  // sections it had left out - so a summary with all seven headings saw none of
+  // them. The instruction sent before writing was a second, hand-written copy
+  // that had already drifted: its 机理解释 line had lost 不要替它加强. Anything
+  // the table says must be in what gets sent, or the rule is not in force.
+  for (const sections of [WIKI_MACRO_SECTIONS, WIKI_RECORD_SECTIONS]) {
+    const guide = renderTemplateGuide(sections);
+    assert.ok(
+      guide.startsWith(String(sections.length)),
+      "the guide states how many sections there are",
+    );
+    for (const section of sections) {
+      assert.ok(
+        guide.includes(section.label),
+        `${section.label} is missing from the guide`,
+      );
+      assert.ok(
+        guide.includes(section.hint),
+        `${section.label}'s hint is paraphrased rather than sent`,
+      );
+    }
+  }
+});
+
+check("a named quantity in 机理解释 has to be given a direction", () => {
+  /*
+   * The whole-paper summary wrote 相对形核激活能 ΔG_n 与临界形核半径 r* 在加压下
+   * 发生改变（chunk 53） and 扩散层厚度 δ = D_L/v 受到调控（chunk 67）: the name of
+   * the quantity, a citation, and no statement about it. Those pass every
+   * mechanical check there is - nothing is overstated, nothing is uncited,
+   * nothing is missing - which is why the rule lives in the hint.
+   */
+  const hint = WIKI_MACRO_SECTIONS.find(
+    (section) => section.label === "机理解释",
+  ).hint;
+  assert.match(hint, /增大还是减小/u);
+  assert.match(hint, /说不出方向的量就不要点名/u);
+  assert.ok(
+    hint.includes("不要替它加强"),
+    "the new rule must not have displaced the anti-overstatement one",
+  );
 });
 
 console.log(`wiki record template: ${passed} check(s) passed`);

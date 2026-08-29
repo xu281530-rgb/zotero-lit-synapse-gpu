@@ -38,6 +38,9 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "zmp-reading-note-"));
 const fake = createZoteroFake({ rootDir: tempDir });
 fake.install();
 
+const { WIKI_MACRO_SECTIONS } = await import(
+  "../src/modules/wiki/wikiRecordTemplate.ts"
+);
 const { WikiStore } = await import("../src/modules/wiki/wikiStore.ts");
 const { WikiService } = await import("../src/modules/wiki/wikiService.ts");
 const { getVectorStore } = await import(
@@ -669,6 +672,7 @@ block("one outstanding batch stops new paging but not re-reading", async () => {
   });
   assert.equal(fourth.chunks[0].chunkIndex, 24);
   assert.equal(fourth.pagination.coverageComplete, true);
+
 });
 
 block('"unchanged" records real empty batches without a frequency quota', async () => {
@@ -721,7 +725,7 @@ block("a retraction in section 5 rewrites what section 2 said", async () => {
     "the note currently carries the paper's own preliminary number",
   );
 
-  await service.updateReadingNote({
+  const completed = await service.updateReadingNote({
     libraryID: 1,
     markdown: noteBody([
       "## Process chain",
@@ -752,6 +756,23 @@ block("a retraction in section 5 rewrites what section 2 said", async () => {
     "the correction is explained where the claim lives, not in a batch log",
   );
   assert.match(after, /### 第 \d+ 次 · chunk/u);
+
+  /*
+   * Every chunk has now been read, so this response is the one that tells the
+   * model how to write the whole-paper summary - and it must carry the
+   * template's OWN hints. It used to carry a hand-written paraphrase that had
+   * already drifted from the table it paraphrased (the 机理解释 line had lost
+   * 不要替它加强), and the only other route to the real text was a rejection
+   * listing the sections left out. A summary that produced all seven headings
+   * therefore never saw a word of the guidance it was being judged against.
+   */
+  assert.equal(completed.readingSession.coverageComplete, true);
+  for (const section of WIKI_MACRO_SECTIONS) {
+    assert.ok(
+      completed.nextStep.includes(section.hint),
+      `the whole-paper instruction is missing ${section.label}'s hint`,
+    );
+  }
 });
 
 // =========================================================================

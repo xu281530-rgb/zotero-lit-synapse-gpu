@@ -57,6 +57,7 @@ import {
 import {
   WIKI_MACRO_SECTIONS,
   WIKI_RECORD_SECTIONS,
+  renderTemplateGuide,
   assertBatchChunkCoverage,
   assertMacroIsNotPaste,
   assertProseIsConnected,
@@ -2604,11 +2605,9 @@ export class WikiService {
             "one explains another's mechanism, which corrects an earlier judgement, which are the same " +
             "phenomenon measured under different conditions. That relating is the job. Re-reading any " +
             "chunk while you write is free.\n" +
-            "七个小节，每个 `## 标签`，都不能空，用中文提炼核心内容和核心方法：" +
-            "**本篇讲了什么**（3-5 句通俗话，每句引用依据的 chunk，跨多处可用范围）、**研究对象与材料**（理解结论所需的对象与材料特征）、" +
-            "**核心方法**（研究设计、关键工艺路线与分析思路）、**主要结果**（核心发现、趋势与比较）、" +
-            "**机理解释**（论文自己的因果链）、**结论**（凝练论文的核心结论）、" +
-            "**边界与局限**（适用范围、缺的对照、作者自陈不足）。\n" +
+            "正文用中文，提炼核心论述、核心方法和核心结论。" +
+            renderTemplateGuide(WIKI_MACRO_SECTIONS) +
+            "\n" +
             "Do NOT paste the records end to end - more than 60% verbatim is refused. It adds nothing, " +
             "since those records sit directly above it in the same file. Do not reproduce full parameter " +
             "tables or preserve numbers mechanically; include a value only when it is necessary to express " +

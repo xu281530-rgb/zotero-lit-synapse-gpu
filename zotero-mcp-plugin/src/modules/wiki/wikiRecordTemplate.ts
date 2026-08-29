@@ -159,7 +159,12 @@ export const WIKI_MACRO_SECTIONS: readonly WikiTemplateSection[] = [
   },
   {
     label: "机理解释",
-    hint: "论文自己的因果链，按论文自己的强度写，不要替它加强。",
+    hint:
+      "论文自己的因果链，按论文自己的强度写，不要替它加强。" +
+      "点了名的量必须说清它往哪个方向变——增大还是减小、被促进还是被抑制；" +
+      "说不出方向的量就不要点名。" +
+      "「ΔG_n 与 r* 在加压下发生改变」「δ 受到调控」这类句子没有信息量，" +
+      "宁可略去，也不要用它占住一个位置。",
   },
   {
     label: "结论",
@@ -224,6 +229,26 @@ export function splitTemplateSections(
   }
   flush();
   return found;
+}
+
+/**
+ * The template, written out for a model that is about to write.
+ *
+ * The section hints used to reach the model only through
+ * {@link assertTemplateSections}, which fires on a REJECTION and lists only the
+ * sections that are missing or empty - so a write-up that produced all seven
+ * sections saw none of the guidance about what belongs in them. The
+ * instruction sent before writing was a second, hand-written paraphrase of the
+ * same table, and the two had already drifted: the prose copy of 机理解释 had
+ * lost "不要替它加强". Generated from the table instead, they cannot.
+ */
+export function renderTemplateGuide(
+  sections: readonly WikiTemplateSection[],
+): string {
+  return [
+    `${sections.length} 个小节，每个标题写成独立的一行 \`**标签**\`（\`## 标签\` 也可以），都不能空：`,
+    ...sections.map((section) => `  **${section.label}** —— ${section.hint}`),
+  ].join("\n");
 }
 
 /**
