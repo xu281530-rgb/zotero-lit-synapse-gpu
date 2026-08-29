@@ -195,6 +195,12 @@ export interface IndexStatus {
    * body could not be parsed. NULL for rows predating the column.
    */
   bodyRetrySignature?: string | null;
+  /**
+   * The chunking rules that produced this row's chunks, e.g.
+   * `paragraph-v6:1000:500`. NULL for rows predating the column, which reads
+   * as "not known to match" so a deliberate rebuild re-chunks them once.
+   */
+  chunkSignature?: string | null;
 }
 
 export interface FailedIndexItem {
@@ -897,6 +903,29 @@ export class VectorStore {
     try {
       await this.db.queryAsync(
         `ALTER TABLE index_status ADD COLUMN body_retry_signature TEXT`,
+      );
+    } catch {
+      // Column already exists.
+    }
+    /*
+     * The chunking rules that produced THIS row's chunks.
+     *
+     * The content hash answers "is the text the same"; it was being read as
+     * "are the chunks still current", and those are the same question only
+     * while the chunker itself does not change. When sentence boundaries were
+     * fixed so that "Xu et al. (2021)" stopped being split in half, an
+     * explicit rebuild of the affected paper reported success and changed
+     * nothing: the text was unchanged, so the shortcut took the cheap path and
+     * the old chunks survived. A per-item signature is what lets that decision
+     * be made correctly.
+     *
+     * NULL on rows written before the column existed, which counts as "not
+     * known to match" - so the first deliberate rebuild after an upgrade does
+     * the work, and passive incremental passes still do not.
+     */
+    try {
+      await this.db.queryAsync(
+        `ALTER TABLE index_status ADD COLUMN chunk_signature TEXT`,
       );
     } catch {
       // Column already exists.
@@ -2837,7 +2866,7 @@ export class VectorStore {
 
     // IMPORTANT: Single-line query to avoid Zotero queryAsync bug with multi-line SQL
     const storageKey = this.toStorageKey(itemKey, libraryID);
-    const rows = await this.db.queryAsync(`SELECT item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified, content_length, source_kind, body_retry_signature FROM index_status WHERE item_key = ?`, [storageKey]);
+    const rows = await this.db.queryAsync(`SELECT item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified, content_length, source_kind, body_retry_signature, chunk_signature FROM index_status WHERE item_key = ?`, [storageKey]);
 
     // Zotero's queryAsync returns undefined when no rows found
     if (!rows || rows.length === 0) return null;
@@ -2853,6 +2882,10 @@ export class VectorStore {
       attachmentModified: row.attachment_modified,
       contentLength: Number(row.content_length || 0),
       sourceKind: String(row.source_kind || 'on-demand'),
+      chunkSignature:
+        row.chunk_signature === undefined || row.chunk_signature === null
+          ? null
+          : String(row.chunk_signature),
       bodyRetrySignature:
         row.body_retry_signature === undefined ||
         row.body_retry_signature === null
@@ -2864,6 +2897,27 @@ export class VectorStore {
   /**
    * Update index status for an item (with optional timestamps)
    */
+  /**
+   * Stamp the chunking rules that produced this item's CURRENT chunks.
+   *
+   * Deliberately separate from `updateIndexStatus`, which also runs on the
+   * unchanged-content path: stamping there would write today's signature over
+   * chunks made by yesterday's rules and destroy the only evidence that they
+   * are stale. This is called from the path that actually re-chunks, and
+   * nowhere else.
+   */
+  async setChunkSignature(
+    itemKey: string,
+    signature: string,
+    libraryID?: number,
+  ): Promise<void> {
+    await this.ensureInitialized();
+    await this.db.queryAsync(
+      `UPDATE index_status SET chunk_signature = ? WHERE item_key = ?`,
+      [signature, this.toStorageKey(itemKey, libraryID)],
+    );
+  }
+
   async updateIndexStatus(
     itemKey: string,
     chunkCount: number,

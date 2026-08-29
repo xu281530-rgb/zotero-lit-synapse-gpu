@@ -428,7 +428,12 @@ export function getChunkingSignature(
   // and consecutive headings stack rather than each becoming an empty chunk.
   // Affiliation detection was also fixed, so "Key Laboratory of …" front matter
   // is recognised; both move boundaries.
-  return `paragraph-v5:${settings.chunkTargetChars}:${settings.chunkAppendToleranceChars}`;
+  // v6: a full stop no longer ends a sentence just because it is a full stop.
+  // It needs whitespace after it, it does not end one when an abbreviation
+  // precedes it, and a digit on both sides is a decimal the OCR split open.
+  // Boundaries move wherever a paper cites - one was indexed with a chunk
+  // ending "Meanwhile, Xu et al." and the next opening "(2021) studied that".
+  return `paragraph-v6:${settings.chunkTargetChars}:${settings.chunkAppendToleranceChars}`;
 }
 
 export const INDEX_CHUNK_SIGNATURE_PREF = `${PREF_PREFIX}semantic.indexChunkSignature`;

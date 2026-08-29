@@ -249,6 +249,17 @@ assert.notEqual(
   signature,
 );
 
+// The version half of the signature announces that the RULES moved, not the
+// settings. It was left at v5 when sentence splitting was fixed, and the
+// consequence was concrete: an explicit rebuild of the affected paper
+// reported success and returned the same chunks, because nothing downstream
+// could tell that the chunks predated the fix.
+assert.match(
+  signature,
+  /^paragraph-v6:/u,
+  "a chunker change that moves boundaries has to bump the signature version",
+);
+
 // Chunk signatures are per Library. A legacy global value proves completion
 // for none of them and remains untrusted until each Library is rebuilt.
 prefs.clear();

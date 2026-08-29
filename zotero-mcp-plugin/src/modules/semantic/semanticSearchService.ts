@@ -1841,6 +1841,29 @@ export class SemanticSearchService {
     // on every incremental pass would burn quota for nothing.
     const mustClearStaleBody =
       bodyState === 'metadata-only' && storedBodyState !== 'metadata-only';
+    /*
+     * The content hash says the TEXT is unchanged. It does not say the CHUNKS
+     * are, and the two are the same statement only while the chunker is fixed.
+     *
+     * This is how a fix failed to arrive. Sentence splitting was corrected so
+     * that "Xu et al. (2021)" stopped being cut in half; the user rebuilt the
+     * affected paper's index; the build reported success and produced exactly
+     * the same 94 chunks, because the text had not changed and the shortcut
+     * below never asks who made the chunks. A signature that only lives on the
+     * build session, and is only consulted to print a "consider rebuilding"
+     * notice, cannot answer that question for one item.
+     *
+     * Restricted to a FORCED run - an explicit rebuild of named items - so
+     * that a passive incremental pass never silently re-embeds the library
+     * after an upgrade. A stored signature that is missing counts as stale,
+     * because rows written before the column existed genuinely predate this
+     * knowledge.
+     */
+    const chunkRulesChanged =
+      force &&
+      storedStatus !== null &&
+      (storedStatus.chunkSignature ?? null) !==
+        getChunkingSignature(getHybridSearchSettings());
     if (!needsIndex && mustClearStaleBody) {
       ztoolkit.log(
         `[SemanticSearch] indexItem() ${item.key}: content hash unchanged but body text just failed ` +
@@ -1848,7 +1871,15 @@ export class SemanticSearchService {
         'warn',
       );
     }
-    if (!needsIndex && !mustClearStaleBody) {
+    if (chunkRulesChanged) {
+      ztoolkit.log(
+        `[SemanticSearch] indexItem() ${item.key}: content hash unchanged but the chunking rules ` +
+          `have changed since these chunks were written ` +
+          `(stored=${storedStatus?.chunkSignature ?? 'unknown'}); re-chunking rather than reporting ` +
+          `a rebuild that changed nothing`,
+      );
+    }
+    if (!needsIndex && !mustClearStaleBody && !chunkRulesChanged) {
       // Content hash unchanged, just update timestamps
       if (storedStatus) {
           await this.vectorStore.updateIndexStatus(
@@ -1934,6 +1965,13 @@ export class SemanticSearchService {
       attachmentModified,
       bodyRetrySignature,
     });
+    // Stamp the rules these chunks were made under, now that they are stored.
+    // Only here: the unchanged-content path must not claim them as current.
+    await this.vectorStore.setChunkSignature(
+      item.key,
+      getChunkingSignature(getHybridSearchSettings()),
+      item.libraryID,
+    );
     if (bodyState === 'body') {
       this._wikiBodyReadyItemKeys.add(item.key);
     }
