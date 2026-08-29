@@ -93,7 +93,10 @@ export interface WikiTemplateSection {
 export const WIKI_RECORD_SECTIONS: readonly WikiTemplateSection[] = [
   {
     label: "一句话",
-    hint: "通俗、不带术语、让人一眼看懂这批 chunk 在讲什么。这是唯一允许压缩的地方。",
+    hint:
+      "通俗、不带术语、让人一眼看懂这批 chunk 在讲什么。这是唯一允许压缩的地方。" +
+      "句末注明本批范围，例如「（chunk 0-7）」——这一栏按定义就是跨 chunk 的概括，" +
+      "而概括性段落恰恰是最需要留下溯源线索的那种。",
   },
   {
     label: "做了什么",
@@ -129,7 +132,10 @@ export const WIKI_RECORD_SECTIONS: readonly WikiTemplateSection[] = [
 export const WIKI_MACRO_SECTIONS: readonly WikiTemplateSection[] = [
   {
     label: "本篇讲了什么",
-    hint: "3-5 句，通俗，写给三个月后不记得这篇论文的自己。",
+    hint:
+      "3-5 句，通俗，写给三个月后不记得这篇论文的自己。" +
+      "每句都要引用它依据的 chunk——整篇的概括同样是概括，" +
+      "跨多处的判断可以引用范围，例如「（chunk 1, 4）」或「（chunk 88-89）」。",
   },
   {
     label: "研究对象与材料",

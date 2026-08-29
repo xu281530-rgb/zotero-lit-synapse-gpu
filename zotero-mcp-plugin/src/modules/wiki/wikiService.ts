@@ -2407,7 +2407,7 @@ export class WikiService {
             "phenomenon measured under different conditions. That relating is the job. Re-reading any " +
             "chunk while you write is free.\n" +
             "七个小节，每个 `## 标签`，都不能空，用中文提炼核心内容和核心方法：" +
-            "**本篇讲了什么**（3-5 句通俗话）、**研究对象与材料**（理解结论所需的对象与材料特征）、" +
+            "**本篇讲了什么**（3-5 句通俗话，每句引用依据的 chunk，跨多处可用范围）、**研究对象与材料**（理解结论所需的对象与材料特征）、" +
             "**核心方法**（研究设计、关键工艺路线与分析思路）、**主要结果**（核心发现、趋势与比较）、" +
             "**机理解释**（论文自己的因果链）、**结论**（凝练论文的核心结论）、" +
             "**边界与局限**（适用范围、缺的对照、作者自陈不足）。\n" +
@@ -4189,7 +4189,8 @@ export class WikiService {
         "their key data and their conclusions, and someone holding only this record should be able to " +
         "reconstruct what these chunks said.\n" +
         "用中文写，术语、化学式、数值和单位保留原文形式。五个小节，每个标题单独一行，都不能空：\n" +
-        "  **一句话** —— 通俗、不带术语、一眼看懂这批在讲什么。这是唯一允许压缩的地方。\n" +
+        "  **一句话** —— 通俗、不带术语、一眼看懂这批在讲什么。这是唯一允许压缩的地方，" +
+        "句末注明本批范围，例如「（chunk 0-7）」：它是跨 chunk 的概括，没有引用会被逐块引用检查拦下。\n" +
         "  **做了什么** —— 方法、设备、流程、软件；参数落值、带单位、带条件，参数表整表转写。\n" +
         "  **测到了什么** —— 结果与数据，原样保留；确无结果数据时写「本批无结果数据」。\n" +
         "  **概念与术语** —— 名称 + 一句定义 + chunk 号；没有写「无」。\n" +

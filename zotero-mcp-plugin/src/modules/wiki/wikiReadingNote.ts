@@ -552,7 +552,9 @@ export function assertBlockCitations(body: string): void {
       "a chunk. Every block that carries a fact, a parameter, a result, a mechanism or a conclusion has " +
       "to name the chunk it came from, written in the prose - not once per document, once per block. A " +
       "generalisation drawn across several chunks names all of them, and each one has to hold the claim " +
-      "on its own; if one of them only shares the topic, leave it out and make the sentence smaller. " +
+      "on its own; if one of them only shares the topic, leave it out and make the sentence smaller.\n" +
+      "若这一段是对整批的通俗概括（模板的「一句话」栏、宏观总结的「本篇讲了什么」栏就是这种），" +
+      "写出本批范围即可，例如「（chunk 0-7）」——范围算作一处引用，不会被夸大审计当成跨 chunk 推理。\n" +
       `Uncited block(s): ${shown.join(" | ")}` +
       (uncited.length > shown.length
         ? ` (and ${uncited.length - shown.length} more)`

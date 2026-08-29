@@ -557,6 +557,29 @@ test("a substantive CHINESE paragraph with no citation is refused too", () => {
   );
 });
 
+/**
+ * The 一句話 slot, in the words that actually hit this rule.
+ *
+ * The template gave the plain-language summary a slot of its own and did not
+ * say it had to cite anything, which made the refusal look random: 40
+ * characters slipped under the Chinese threshold and passed, 58 did not. The
+ * rule is right - a block generalising across a batch is exactly what it
+ * exists to tether - so the answer is the batch range, and the guidance now
+ * says so.
+ */
+test("a batch summary is refused uncited and accepted with its range", () => {
+  const summary =
+    "介绍了高强变形铝合金挤压铸造加压凝固的研究背景，概述了压力对组织细化、共晶相抑制和性能提升的总体效果及现有研究不足。";
+  assert.throws(
+    () => assertBlockCitations(`**一句话**\n\n${summary}\n`),
+    (error) =>
+      /without naming a chunk/.test(error.message) &&
+      /chunk 0-7/.test(error.message),
+    "and the refusal has to say that a range is the right answer here",
+  );
+  assertBlockCitations(`**一句话**\n\n${summary}（chunk 0-7）\n`);
+});
+
 test("a short Chinese connective line is still left alone", () => {
   assertBlockCitations(
     ["# 论文", "", "两个问题制约着它：", "", "- 第一个（chunk 3）", ""].join("\n"),
