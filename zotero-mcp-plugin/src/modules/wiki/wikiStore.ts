@@ -1697,18 +1697,43 @@ export class WikiStore {
     textHash: string;
   }): Promise<void> {
     await this.initialize();
-    const identities = await this.db.queryAsync(
-      "SELECT DISTINCT model, dimensions FROM wiki_concept_embeddings",
+    /*
+     * A vector from another embedding space is DISCARDED, not refused.
+     *
+     * The Claim version of this throws, and has to: a Claim embedding is
+     * expensive to rebuild and the user is told to clear the Wiki deliberately.
+     * A concept vector is derived from the concept and costs one API call, so
+     * refusing here buys nothing and costs everything - it is what turned one
+     * mis-stamped row into a permanent wall. That row said
+     * `text-embedding-3-small`; every one of the other 118 concepts was then
+     * rejected as foreign, exhausted its retries, and the neighbourhood recall
+     * this table exists for was blind for an entire 30-paper run while the
+     * Wiki reported itself healthy.
+     *
+     * So the incoming vector wins and the stale space is cleared and re-queued.
+     * Changing the embedding model becomes a supported operation for concepts
+     * rather than a silent, unrecoverable one.
+     */
+    const foreign = await this.db.queryAsync(
+      `SELECT concept_id FROM wiki_concept_embeddings
+        WHERE model != ? OR dimensions != ?`,
+      [options.model, options.vector.length],
     );
-    for (const identity of identities) {
-      if (
-        String(identity.model) !== options.model ||
-        Number(identity.dimensions) !== options.vector.length
-      ) {
-        throw new Error(
-          "Wiki Concept Embeddings already use a different model or dimensions; clear Wiki data before changing the embedding space",
-        );
+    for (const row of foreign ?? []) {
+      const conceptId = Number(rowValue(row, "concept_id", "conceptId"));
+      await this.db.queryAsync(
+        "DELETE FROM wiki_concept_embeddings WHERE concept_id = ?",
+        [conceptId],
+      );
+      if (conceptId !== options.conceptId) {
+        await this.enqueueConceptEmbedding(conceptId);
       }
+    }
+    if (foreign?.length) {
+      ztoolkit.log(
+        `[WikiStore] ${foreign.length} concept vector(s) were built in a ` +
+          `different embedding space and have been re-queued for ${options.model}`,
+      );
     }
     await this.db.queryAsync(
       `INSERT INTO wiki_concept_embeddings

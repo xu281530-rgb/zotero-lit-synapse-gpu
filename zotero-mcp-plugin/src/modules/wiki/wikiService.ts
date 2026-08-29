@@ -3308,26 +3308,46 @@ export class WikiService {
     };
   }
 
-  private async embedQueuedClaim(unit: WikiEmbeddingWorkUnit): Promise<void> {
+  /**
+   * The model name to stamp on a vector, read AFTER the vector was made.
+   *
+   * `getConfig()` returns DEFAULT_CONFIG until `initialize()` has read the
+   * user's preferences, and `embed()` is what triggers that initialization.
+   * Reading the name first therefore stamped whatever the first drain after a
+   * restart happened to catch: one concept was written as
+   * `text-embedding-3-small` while its vector had in fact come from
+   * `qwen3.7-text-embedding`, and the identity guard then rejected all 118
+   * other concepts as belonging to a different embedding space - permanently,
+   * since every retry hit the same wall. Concept recall was blind for a whole
+   * 30-paper run because of the order of two lines.
+   */
+  private async embedWithModel(
+    text: string,
+  ): Promise<{ vector: Float32Array; model: string }> {
     const embeddingService = getEmbeddingService();
-    const embeddingModel = embeddingService.getConfig().model;
-    const embedded = await embeddingService.embed(unit.text, "auto", false);
+    const embedded = await embeddingService.embed(text, "auto", false);
+    return {
+      vector: embedded.embedding,
+      model: embeddingService.getConfig().model,
+    };
+  }
+
+  private async embedQueuedClaim(unit: WikiEmbeddingWorkUnit): Promise<void> {
+    const { vector, model } = await this.embedWithModel(unit.text);
     await this.store.saveClaimEmbedding({
       claimId: unit.id,
-      vector: embedded.embedding,
-      model: embeddingModel,
+      vector,
+      model,
       textHash: await hashWikiText(unit.text),
     });
   }
 
   private async embedQueuedConcept(unit: WikiEmbeddingWorkUnit): Promise<void> {
-    const embeddingService = getEmbeddingService();
-    const embeddingModel = embeddingService.getConfig().model;
-    const embedded = await embeddingService.embed(unit.text, "auto", false);
+    const { vector, model } = await this.embedWithModel(unit.text);
     await this.store.saveConceptEmbedding({
       conceptId: unit.id,
-      vector: embedded.embedding,
-      model: embeddingModel,
+      vector,
+      model,
       textHash: await hashWikiText(unit.text),
     });
   }

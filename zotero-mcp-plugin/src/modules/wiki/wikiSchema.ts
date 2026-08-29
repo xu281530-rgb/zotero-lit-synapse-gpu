@@ -8,7 +8,7 @@ import {
 } from "./wikiConceptTerms";
 import { rowColumn } from "./wikiRow";
 
-export const WIKI_SCHEMA_VERSION = 9;
+export const WIKI_SCHEMA_VERSION = 10;
 
 /**
  * Add a column an older database does not have yet.
@@ -43,6 +43,9 @@ async function addColumnIfMissing(
 
 export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
   await db.queryAsync("PRAGMA foreign_keys = ON");
+  const priorVersion = Number(
+    (await db.valueQueryAsync("PRAGMA user_version", [])) ?? 0,
+  );
   await db.queryAsync(`
     CREATE TABLE IF NOT EXISTS wiki_concepts (
       concept_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -486,7 +489,36 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
   );
   await backfillConceptTerms(db);
   await backfillConceptEmbeddingQueue(db);
+  await rearmPoisonedConceptEmbeddings(db, priorVersion);
   await db.queryAsync(`PRAGMA user_version = ${WIKI_SCHEMA_VERSION}`);
+}
+
+/**
+ * Re-arm concept embeddings that a stamping bug drove to exhaustion.
+ *
+ * Schema 9 shipped with the model name read from `getConfig()` BEFORE
+ * `embed()` had initialized the service, so the first vector after a restart
+ * could be stamped with the default model rather than the configured one. The
+ * identity guard then rejected every other concept as foreign until all of
+ * them had spent their six attempts. A user upgrading past that build has a
+ * queue full of rows that will never be retried, describing a failure that no
+ * longer exists.
+ *
+ * Version-gated deliberately: exhaustion is a real signal and clearing it on
+ * every start would destroy it. This clears it exactly once, for the databases
+ * that were affected, and only alongside the fix that makes it not recur.
+ */
+async function rearmPoisonedConceptEmbeddings(
+  db: WikiDatabase,
+  priorVersion: number,
+): Promise<void> {
+  if (priorVersion < 9 || priorVersion >= 10) return;
+  await db.queryAsync(
+    `UPDATE wiki_concept_embedding_queue
+        SET attempts = 0, last_error = '', next_attempt_at = ?
+      WHERE attempts > 0`,
+    [Date.now()],
+  );
 }
 
 /**

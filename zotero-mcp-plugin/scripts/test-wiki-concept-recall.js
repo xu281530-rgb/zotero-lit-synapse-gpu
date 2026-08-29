@@ -367,6 +367,62 @@ await block("a rewritten concept is re-embedded; a failing one keeps its backoff
   assert.equal(await (await store.resyncConceptEmbeddings(LIBRARY)).requeued, 0);
 });
 
+// --- 5b. A foreign embedding space ----------------------------------------
+
+await block("a vector from another model is discarded, not enthroned", async () => {
+  /*
+   * This is the failure that cost a 30-paper run its entire concept recall.
+   * `getConfig().model` returns the DEFAULT until `embed()` has initialized the
+   * service, and the model name was read BEFORE the embedding - so one concept
+   * was stamped `text-embedding-3-small` while its vector came from the
+   * configured model. The identity guard then rejected all 118 others as
+   * foreign, they exhausted their retries, and the Wiki went on reporting
+   * itself healthy while every neighbourhood came back empty.
+   *
+   * Two things have to hold now: the stale row must not block the write, and
+   * it must be re-queued rather than left as a vector nobody can use.
+   */
+  const victim = conceptIdOf("挤压铸造");
+  sqlite
+    .prepare(
+      `INSERT INTO wiki_concept_embeddings
+         (concept_id, embedding, dimensions, model, text_hash, updated_at)
+       VALUES (?, ?, ?, 'text-embedding-3-small', 'stale', ?)
+       ON CONFLICT(concept_id) DO UPDATE SET model = excluded.model,
+         text_hash = excluded.text_hash`,
+    )
+    .run(
+      victim,
+      Buffer.from(new Float32Array(VOCAB.length + TAIL).buffer),
+      VOCAB.length + TAIL,
+      Date.now(),
+    );
+
+  const other = conceptIdOf("界面换热系数");
+  await store.saveConceptEmbedding({
+    conceptId: other,
+    vector: fakeVector("界面换热系数"),
+    model: "test-embed-model",
+    textHash: "whatever",
+  });
+
+  const spaces = rows(
+    "SELECT DISTINCT model FROM wiki_concept_embeddings",
+  ).map((row) => row.model);
+  assert.deepEqual(
+    spaces,
+    ["test-embed-model"],
+    "one foreign row must not survive to reject every future write",
+  );
+  const queue = await store.conceptEmbeddingQueue();
+  assert.ok(
+    (await queue.list()).some((row) => row.id === victim),
+    "the concept whose vector was discarded has to be re-queued for the new space",
+  );
+  await service.pumpEmbeddingQueue({ limit: 100 });
+  assert.equal(await queue.pendingCount(), 0);
+});
+
 // --- 6. Duplicate detection -----------------------------------------------
 
 await block("a near-synonym under another name is caught", async () => {
