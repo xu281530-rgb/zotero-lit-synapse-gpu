@@ -267,7 +267,20 @@ export interface EmbeddingConfig {
 const DEFAULT_CONFIG: EmbeddingConfig = {
   apiBase: 'https://api.openai.com/v1',
   apiKey: '',
-  model: 'text-embedding-3-small',
+  /*
+   * No default model, deliberately.
+   *
+   * A name here is not a harmless placeholder: `getConfig().model` answers with
+   * it until `initialize()` has read the preferences, so anything that asked
+   * for the model before the first `embed()` was told 'text-embedding-3-small'
+   * whatever the user had configured. One Wiki concept vector was stamped with
+   * that name while its numbers came from the configured model, and the
+   * identity guard then rejected 118 others as foreign. An empty string cannot
+   * be mistaken for an answer: every call site already refuses to embed
+   * without a model, so an unconfigured service now fails loudly instead of
+   * silently claiming to be OpenAI's.
+   */
+  model: '',
   dimensions: 512,  // Smaller dimensions for efficiency
   timeout: 30000,
   maxRetries: 3,

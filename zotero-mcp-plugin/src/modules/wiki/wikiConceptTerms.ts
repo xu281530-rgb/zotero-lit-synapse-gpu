@@ -462,3 +462,39 @@ export function classifyLegacyName(
 export function termSearchNames(fields: WikiTermFields): string[] {
   return [fields.zh, fields.en, fields.abbr].filter(Boolean);
 }
+
+/**
+ * How many "units" a concept name is, counting a Latin/number run as one.
+ *
+ * `Lomer-Cottrell位错锁高温阻碍效应` is 23 characters and a real term of the
+ * field; `柱状晶长度调控二冷优化技术` is 13 and is a paper title. Counting raw
+ * characters would flag the first and clear the second, which is backwards -
+ * so a run of Latin letters and digits counts as one unit, the way a reader
+ * treats it.
+ */
+export function conceptNameUnits(name: string): number {
+  return String(name ?? "")
+    .replace(/[A-Za-z0-9][A-Za-z0-9\-()._]*/gu, "X")
+    .trim().length;
+}
+
+/**
+ * Names long enough to be worth a second look, never a refusal.
+ *
+ * There is no reliable string test for "is this a term of the field": the
+ * property that matters is whether another paper would use the same name, and
+ * that is not in the string. Three candidate rules were measured against a
+ * 119-concept library built from thirty papers - a conjunction test matched 4,
+ * a containment test matched 4 and got one of them wrong (`不连续动态再结晶` is
+ * not a malformed `连续动态再结晶`), and only length correlated at all.
+ *
+ * So this warns and does not block. At this threshold it marked 25 of those 119
+ * concepts, and they are the ones like `增材修复熔池柱状晶外延生长与CET抑制` and
+ * `双辉等离子表面合金化柱状晶Ni涂层` - paper titles wearing a concept's clothes.
+ * A genuine long term stays, and the caller is asked rather than overruled.
+ */
+export const CONCEPT_NAME_REVIEW_UNITS = 12;
+
+export function conceptNamesWorthReviewing(names: string[]): string[] {
+  return names.filter((name) => conceptNameUnits(name) > CONCEPT_NAME_REVIEW_UNITS);
+}

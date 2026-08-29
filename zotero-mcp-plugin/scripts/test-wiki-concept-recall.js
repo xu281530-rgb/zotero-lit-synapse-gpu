@@ -736,4 +736,106 @@ await block("an embedding outage degrades the skeleton, it does not block it", a
   }
 });
 
+// --- 5c. Concept names that are really paper titles ------------------------
+
+await block("a paper-shaped concept name is flagged, never refused", async () => {
+  /*
+   * Thirty papers produced 119 concepts and not one was used by a second
+   * paper, because the names were this-paper-only compounds. There is no
+   * string test for "is this a term of the field" - the property lives in
+   * whether another paper would use the name - so this warns and writes.
+   */
+  const recorded = await service.recordConcepts({
+    libraryID: LIBRARY,
+    concepts: [
+      {
+        primaryTerm: { zh: "增材修复熔池柱状晶外延生长与CET抑制" },
+        conceptType: "phenomenon",
+        sources: [{ itemKey: "PAPERTWO" }],
+      },
+      {
+        primaryTerm: { zh: "位错锁高温阻碍效应", en: "Lomer-Cottrell lock" },
+        conceptType: "mechanism",
+        sources: [{ itemKey: "PAPERTWO" }],
+      },
+    ],
+  });
+  assert.ok(recorded.written, "a long name is still recorded, not rejected");
+  assert.deepEqual(
+    recorded.conceptNamesToReview?.names,
+    ["增材修复熔池柱状晶外延生长与CET抑制"],
+    "the paper-shaped one is raised and the real term is left alone",
+  );
+  assert.match(recorded.conceptNamesToReview.note, /领域术语/u);
+
+  const { conceptNameUnits } = await import(
+    "../src/modules/wiki/wikiConceptTerms.ts"
+  );
+  assert.ok(
+    conceptNameUnits("Lomer-Cottrell位错锁高温阻碍效应") <
+      conceptNameUnits("柱状晶长度调控二冷优化技术"),
+    "a Latin run counts as one unit, or every foreign term is flagged and every compound cleared",
+  );
+});
+
+await block("existing pages are ranked as extension candidates", async () => {
+  /*
+   * Thirty papers were written up with the complete page list in every
+   * response and produced thirty pages, each backed by one paper. A list of
+   * titles is the raw material for "which page does this belong on", not an
+   * answer to it. Pages have no vector of their own - primary_concept_id was
+   * null for all thirty - so they are reached through their Claims, which do.
+   */
+  const now = Date.now();
+  sqlite
+    .prepare(
+      `INSERT INTO wiki_pages (library_id, canonical_title, normalized_title,
+         summary, status, created_at, updated_at, version)
+       VALUES (?, ?, ?, '', 'active', ?, ?, 1)`,
+    )
+    .run(LIBRARY, "压力对凝固组织的调控", "压力对凝固组织的调控", now, now);
+  const pageId = one("SELECT last_insert_rowid() id").id;
+  sqlite
+    .prepare(
+      `INSERT INTO wiki_claims (page_id, claim_text, normalized_claim_text,
+         claim_type, epistemic_status, coverage_level, confidence,
+         created_at, updated_at, version)
+       VALUES (?, ?, ?, 'mechanism', 'supported', 'section_read', 1, ?, ?, 1)`,
+    )
+    .run(
+      pageId,
+      "挤压铸造压力使初生晶粒由粗大枝晶转变为细小等轴晶。",
+      "挤压铸造压力使初生晶粒由粗大枝晶转变为细小等轴晶。",
+      now,
+      now,
+    );
+  const claimId = one("SELECT last_insert_rowid() id").id;
+  const queue = await store.embeddingQueue();
+  await queue.enqueue(claimId, "挤压铸造压力使初生晶粒由粗大枝晶转变为细小等轴晶。");
+  await service.pumpEmbeddingQueue({ limit: 100 });
+
+  const near = await store.pagesNearVectors({
+    libraryID: LIBRARY,
+    vectors: [fakeVector("挤压铸造晶粒细化")],
+    model: "test-embed-model",
+  });
+  assert.equal(near.length, 1);
+  assert.equal(near[0].title, "压力对凝固组织的调控");
+  assert.ok(near[0].score > 0, "an unscored candidate is not a candidate");
+  assert.ok(
+    near[0].nearestClaim.includes("等轴晶"),
+    "the reason a page is a candidate has to travel with it",
+  );
+
+  assert.deepEqual(
+    await store.pagesNearVectors({
+      libraryID: LIBRARY,
+      vectors: [],
+      model: "test-embed-model",
+    }),
+    [],
+    "no probe is not a reason to recommend every page",
+  );
+});
+
 console.log(`\n${passed} concept-recall blocks passed`);

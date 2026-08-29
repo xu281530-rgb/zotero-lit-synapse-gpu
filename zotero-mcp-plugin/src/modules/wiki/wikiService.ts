@@ -1,6 +1,7 @@
 import { getStoredChunkingSignature } from "../hybridSearchSettings";
 import { bodyIndexStateFromSourceKind } from "../semantic/bodyIndexState";
 import { getEmbeddingService } from "../semantic/embeddingService";
+import { conceptNamesWorthReviewing } from "./wikiConceptTerms";
 import { getVectorStore } from "../semantic/vectorStore";
 import {
   hashWikiText,
@@ -157,6 +158,15 @@ export const WIKI_WRITE_OFF_MIN_REASON_CHARS = 40;
  */
 export const WIKI_SKELETON_NEIGHBOURS = 40;
 export const WIKI_SKELETON_HUBS = 12;
+
+/**
+ * How many existing pages are offered as extension candidates.
+ *
+ * Six, because the list has to be short enough to actually be read against the
+ * paper in hand. The complete page list is still in the same response; this is
+ * the shortlist, ranked by how close the page's own Claims sit to this paper.
+ */
+export const WIKI_SKELETON_EXTENDABLE_PAGES = 6;
 
 /** The Evidence excerpt floor this service enforces; defined in the leaf so
  * `toolCatalog` can state the same number without importing the wiki stack. */
@@ -1107,7 +1117,7 @@ export class WikiService {
     const seedConceptIds = options.itemKey
       ? await this.store.conceptIdsForItem(libraryID, options.itemKey)
       : [];
-    const [pages, neighbourhood, duplicates] = await Promise.all([
+    const [pages, neighbourhood, duplicates, extendable] = await Promise.all([
       this.store.listPageTitles(libraryID),
       this.store.conceptNeighbourhood({
         libraryID,
@@ -1120,6 +1130,15 @@ export class WikiService {
         hubLimit: WIKI_SKELETON_HUBS,
       }),
       this.store.matchConcepts({ libraryID, probes, model, limit: 5 }),
+      this.store.pagesNearVectors({
+        libraryID,
+        vectors: probes
+          .map((probe) => probe.vector)
+          .filter((vector): vector is Float32Array => Boolean(vector)),
+        seedConceptIds,
+        model,
+        limit: WIKI_SKELETON_EXTENDABLE_PAGES,
+      }),
     ]);
 
     const describe = (concept: {
@@ -1137,11 +1156,15 @@ export class WikiService {
     return {
       note:
         "这不是 Wiki 全量，是以本篇论文为中心召回的邻域——页目录是完整的，" +
-        "概念只给与本篇相关的那些。写入前先看它：本篇该扩展哪一页、" +
+        "概念只给与本篇相关的那些。写入前先看它：本篇该扩展哪些页、" +
         "哪些概念已经存在（别重复造）、能和哪些概念建立关系。" +
+        "一页 ≠ 一篇文献：页是主题，一篇文献通常横跨好几个主题，" +
+        "所以正常结果是把 Claim 分别挂到若干个已有页上，而不是新建一页装下整篇。" +
+        "pagesToExtend 按语义近似列出了最可能容纳本篇的已有页。" +
         "要展开某一页用 wiki_get_page；要在邻域之外找概念用 wiki_list_concepts。",
       pageCount: pages.length,
       pages,
+      pagesToExtend: extendable,
       conceptCount: neighbourhood.conceptCount,
       duplicateCandidates: duplicates,
       paperConcepts: neighbourhood.seeds.map((concept) => concept.name),
@@ -3730,12 +3753,45 @@ export class WikiService {
           }
         : {}),
     });
+    /*
+     * Names that read like a paper rather than like a term of the field.
+     *
+     * Reported here, at the moment they are written, because everything
+     * downstream is too late: `wiki_prepare_update` shows duplicate candidates,
+     * but by then these are already in the library and a concept only one paper
+     * will ever use is not a duplicate of anything. Advisory by design - see
+     * CONCEPT_NAME_REVIEW_UNITS for why no rule refuses them.
+     */
+    const written = await (
+      await this.store.concepts()
+    ).list(options.libraryID);
+    const touched = new Set(result.conceptIds ?? []);
+    const review = conceptNamesWorthReviewing(
+      written
+        .filter((concept: any) => touched.has(concept.conceptId))
+        .map(
+          (concept: any) => concept.displayName ?? concept.canonicalName ?? "",
+        ),
+    );
     return {
       ...result,
       written: true,
       fromStaging: staged.length,
       warnings: [...result.warnings, ...warnings],
       final: options.final === true,
+      ...(review.length
+        ? {
+            conceptNamesToReview: {
+              names: review,
+              note:
+                "这些名字更像本篇论文的描述，而不像别的论文也会用到的领域术语——" +
+                "而只有后者才可能被共用、被关联、被复用。" +
+                "请检查：去掉牌号、工艺参数和「…技术/…工艺/…调控」的尾巴之后剩下的是什么，" +
+                "把它作为概念，本篇具体做了什么交给 Claim 承载。" +
+                "确实是领域自己的术语（如 Lomer-Cottrell 位错锁）就保留，不必改。",
+            },
+          }
+        : {}),
       ...(open
         ? {
             readingSession: {

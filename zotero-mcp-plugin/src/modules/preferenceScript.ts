@@ -1498,7 +1498,10 @@ function bindEmbeddingSettings(doc: Document) {
 
   initValue(apiBaseInput, "extensions.zotero.zotero-mcp-plugin.embedding.apiBase", "https://api.openai.com/v1");
   initValue(apiKeyInput, "extensions.zotero.zotero-mcp-plugin.embedding.apiKey", "");
-  initValue(modelInput, "extensions.zotero.zotero-mcp-plugin.embedding.model", "text-embedding-3-small");
+  // No fallback: the box shows what is configured, and its placeholder shows
+  // an example. Pre-filling a real model name made an unconfigured install
+  // look configured, and that name then got stamped onto vectors.
+  initValue(modelInput, "extensions.zotero.zotero-mcp-plugin.embedding.model", "");
   initValue(dimensionsInput, "extensions.zotero.zotero-mcp-plugin.embedding.dimensions", "512");
 
   // API endpoint preview
@@ -1637,7 +1640,7 @@ function bindEmbeddingSettings(doc: Document) {
         Zotero.Prefs.get(
           "extensions.zotero.zotero-mcp-plugin.embedding.model",
           true,
-        ) || "text-embedding-3-small",
+        ) ?? "",
       );
       await refreshDataCompatibilityLockUI(doc);
       return;

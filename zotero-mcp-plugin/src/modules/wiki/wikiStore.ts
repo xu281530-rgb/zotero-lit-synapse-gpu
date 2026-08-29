@@ -2009,6 +2009,107 @@ export class WikiStore {
     return results;
   }
 
+  /**
+   * Pages this paper could extend, found through their Claims.
+   *
+   * The Wiki grew one page per paper for thirty papers in a row, with the
+   * complete page list in front of the model every time. A list of thirty
+   * titles is not an answer to "which of these is about what I just read" - it
+   * is the raw material for that question, and the model answered it by not
+   * answering it.
+   *
+   * Pages cannot be compared to a paper directly: `wiki_pages.primary_concept_id`
+   * was null for all thirty, so there is no edge from a page into the concept
+   * graph. Their CLAIMS have vectors though, and a page is what its claims say,
+   * so the nearest claims name the nearest pages. Scored by the best claim
+   * rather than the average: a page of four claims where one is exactly this
+   * paper's subject is a page to extend, and averaging that against the other
+   * three would hide it.
+   */
+  async pagesNearVectors(options: {
+    libraryID: number;
+    vectors: Float32Array[];
+    /** Concepts of the paper being written up; their vectors probe too. */
+    seedConceptIds?: number[];
+    model: string;
+    limit?: number;
+  }): Promise<
+    { pageId: number; title: string; score: number; nearestClaim: string }[]
+  > {
+    await this.initialize();
+    /*
+     * The paper's own concepts probe alongside the caller's query. The query is
+     * the model's one-line description of what it just read, which is a fair
+     * probe; the concepts are what it actually recorded, which is a better one,
+     * and they are already in the database by the time this runs.
+     */
+    const probes = [...options.vectors];
+    for (const id of options.seedConceptIds ?? []) {
+      const rows = await this.db.queryAsync(
+        `SELECT embedding, dimensions, model FROM wiki_concept_embeddings
+          WHERE concept_id = ?`,
+        [id],
+      );
+      const row = rows?.[0];
+      if (!row) continue;
+      if (String(rowValue(row, "model", "model") ?? "") !== options.model) {
+        continue;
+      }
+      const vector = floatVector(
+        rowValue(row, "embedding", "embedding"),
+        Number(rowValue(row, "dimensions", "dimensions") ?? 0),
+      );
+      if (vector) probes.push(vector);
+    }
+    if (!probes.length) return [];
+    const rows = await this.db.queryAsync(
+      `SELECT p.page_id AS page_id, p.canonical_title AS title,
+              c.claim_text AS claim_text,
+              e.embedding AS embedding, e.dimensions AS dimensions,
+              e.model AS model
+         FROM wiki_claim_embeddings e
+         JOIN wiki_claims c ON c.claim_id = e.claim_id
+         JOIN wiki_pages p ON p.page_id = c.page_id
+        WHERE p.library_id = ? AND p.status = 'active'`,
+      [options.libraryID],
+    );
+    const best = new Map<
+      number,
+      { pageId: number; title: string; score: number; nearestClaim: string }
+    >();
+    for (const row of rows ?? []) {
+      if (String(rowValue(row, "model", "model") ?? "") !== options.model) {
+        continue;
+      }
+      const vector = floatVector(
+        rowValue(row, "embedding", "embedding"),
+        Number(rowValue(row, "dimensions", "dimensions") ?? 0),
+      );
+      if (!vector) continue;
+      let score = 0;
+      for (const probe of probes) {
+        if (probe.length === vector.length) {
+          score = Math.max(score, cosine(probe, vector));
+        }
+      }
+      if (score <= 0) continue;
+      const pageId = Number(rowValue(row, "page_id", "pageId"));
+      const current = best.get(pageId);
+      if (current && current.score >= score) continue;
+      best.set(pageId, {
+        pageId,
+        title: String(rowValue(row, "title", "title") ?? ""),
+        score: Number(score.toFixed(4)),
+        nearestClaim: String(
+          rowValue(row, "claim_text", "claimText") ?? "",
+        ).slice(0, 160),
+      });
+    }
+    return [...best.values()]
+      .sort((left, right) => right.score - left.score)
+      .slice(0, Math.max(1, Math.min(20, options.limit ?? 6)));
+  }
+
   /** {@link WikiConceptNeighbourhood} for one paper's concepts. */
   async conceptNeighbourhood(options: {
     libraryID: number;
