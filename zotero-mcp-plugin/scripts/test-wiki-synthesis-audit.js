@@ -763,5 +763,98 @@ test("the prefix search finds the exact divergence offset", () => {
 
 // --- Result ---------------------------------------------------------------
 
+
+// ---------------------------------------------------------------------------
+// False positives that stopped a real reading dead
+// ---------------------------------------------------------------------------
+
+test("a semicolon ends a clause, so connected prose is not one fused sentence", () => {
+  // Asked for connected prose, a Chinese note joins clauses with a semicolon.
+  // Read as ONE sentence it cited three chunks and was refused as a fusion -
+  // punishing exactly the shape the guidance had just asked for.
+  const sentences = splitSentences(
+    "采用扫描电镜表征组织（chunk 1）；理论上基于状态方程建立自由能差（chunk 2）；文中评述了既有细化手段（chunk 5）。",
+  );
+  assert.equal(sentences.length, 3);
+  const flagged = auditSynthesis(
+    "采用扫描电镜表征组织（chunk 1）；理论上基于状态方程建立自由能差（chunk 2）；文中评述了既有细化手段（chunk 5）。",
+    { chunks: [] },
+  );
+  assert.deepEqual(
+    flagged.filter((f) => f.reasons.includes("multi-chunk-fusion")),
+    [],
+  );
+});
+
+test("a range citation may be supported by any chunk it reaches", () => {
+  // The guidance asks for grouped citations; the subject check was reading
+  // only the first chunk of the group, so a term from the middle of the range
+  // "appeared in none of the chunks it cites".
+  const chunks = [
+    { chunkId: 4, text: "This section introduces the experimental layout." },
+    { chunkId: 5, text: "Coarse Fe-IMCs form multilayer flakes at the boundaries." },
+    { chunkId: 6, text: "Their morphology changes under pressure." },
+  ];
+  const flagged = auditSynthesis(
+    "chunk 4-6 阐述了铸态组织中 Fe-IMCs 的形貌演变。",
+    { chunks },
+  );
+  assert.deepEqual(
+    flagged.filter((f) => f.reasons.includes("subject-not-in-cited-chunks")),
+    [],
+  );
+});
+
+test("a term is found through the OCR's maths", () => {
+  const chunks = [
+    {
+      chunkId: 5,
+      text: "the phases consist of Mg (Zn, Cu, Al)$_{2}$, S(Al$_{2}$CuMg) and $\theta$(Al$_{2}$Cu).",
+    },
+  ];
+  const flagged = auditSynthesis("S(Al2CuMg) 属于非平衡共晶相（chunk 5）。", {
+    chunks,
+  });
+  assert.deepEqual(
+    flagged.filter((f) => f.reasons.includes("subject-not-in-cited-chunks")),
+    [],
+  );
+});
+
+test("an acronym finds the phrase its source spelled out", () => {
+  const chunks = [
+    {
+      chunkId: 1,
+      text: "characterised by scanning electron microscopy and by measuring the ultimate tensile strength.",
+    },
+  ];
+  const flagged = auditSynthesis("采用 SEM 表征并测定 UTS（chunk 1）。", {
+    chunks,
+  });
+  assert.deepEqual(
+    flagged.filter((f) => f.reasons.includes("subject-not-in-cited-chunks")),
+    [],
+  );
+  // An acronym the source never introduces is still caught.
+  const invented = auditSynthesis("采用 XRD 表征（chunk 1）。", { chunks });
+  assert.ok(
+    invented.some((f) => f.reasons.includes("subject-not-in-cited-chunks")),
+    "an acronym with no expansion in the chunk is still refused",
+  );
+});
+
+test("non-equilibrium is a phase name, not a negation", () => {
+  const flagged = auditSynthesis(
+    "非平衡共晶相的体积分数为 5%，non-equilibrium eutectic networks 沿晶界分布（chunk 1）。",
+    { chunks: [{ chunkId: 1, text: "non-equilibrium eutectic networks, 5% by volume" }] },
+  );
+  assert.deepEqual(
+    flagged.filter((f) => f.reasons.includes("negation")),
+    [],
+    "the prefix used to add a weak signal that, paired with the number, refused the sentence",
+  );
+});
+
+
 console.log(`\n${passed}/${passed + failed} passed`);
 if (failed) process.exit(1);

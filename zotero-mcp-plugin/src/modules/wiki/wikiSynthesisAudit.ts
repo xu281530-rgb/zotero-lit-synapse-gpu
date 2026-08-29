@@ -216,7 +216,14 @@ const CONDITION_MARKERS: readonly RegExp[] = [
  */
 const NEGATION: readonly RegExp[] = [
   /\bnot\b|\bnone\b|\bneither\b|\bnor\b|\bwithout\b/i,
-  /\bfree\s+from\b|\bfails?\s+to\b|\bfailed\s+to\b|\bunable\b|\bnon-\w/i,
+  // `non-` is deliberately absent. In a materials library it is vocabulary,
+  // not logic: "non-equilibrium eutectic phase" is the NAME of a phase and
+  // appears in almost every sentence about one, so counting it as a negation
+  // put a weak signal on half the note and, paired with the number those
+  // sentences also carry, pushed them over the two-weak-signals threshold.
+  // Dropping a real negation is still caught by `negation-dropped`, which
+  // compares the sentence against its source rather than reading a prefix.
+  /\bfree\s+from\b|\bfails?\s+to\b|\bfailed\s+to\b|\bunable\b/i,
   /\brather\s+than\b|\binstead\s+of\b/i,
   /不能|无法|未能|不会|并非|没有|不再|无需|不足以/u,
 ];
@@ -459,7 +466,23 @@ export function splitSentences(block: string): string[] {
   for (let index = 0; index < masked.length; index += 1) {
     const character = masked[index];
     current += character;
-    if (!".?!。？！".includes(character)) continue;
+    /*
+     * The FULL-WIDTH semicolon closes a clause; the ASCII one does not.
+     *
+     * `；` had to become a boundary: notes are written in Chinese, the
+     * guidance asks for connected prose, and Chinese connects coordinate
+     * clauses with it. Read as sentence-internal, a chain of three such
+     * clauses - each carrying its own citation, exactly as asked - came out
+     * as ONE sentence citing three chunks and was refused as a fusion.
+     *
+     * ASCII `;` stayed out after trying it. English prose puts a clause
+     * before it that is not expected to carry its own citation, and such a
+     * fragment inherits its block's citations and is then read as the very
+     * fusion this was meant to stop: "Findings are established for one alloy
+     * and one rig geometry;" was flagged for citing two chunks it never
+     * named. Fixing one false positive by minting another is not a trade.
+     */
+    if (!".?!。？！；".includes(character)) continue;
     if (CJK_TERMINATORS.includes(character)) {
       // A closing quote or bracket after the stop closes THIS sentence.
       while (
@@ -616,6 +639,78 @@ function overlappingSourceSentences(
   return out;
 }
 
+/**
+ * Every chunk a citation reaches, expanding a range into its members.
+ *
+ * `citedChunkIds` reads one number per citation, and that is right for the
+ * fusion count: `chunk 4-6` is one contiguous span the sentence draws on, not
+ * three facts welded together. It is wrong for the opposite question - which
+ * chunks are allowed to SUPPORT the sentence - and the two were sharing an
+ * answer. A record that wrote "chunk 4-6 阐述 … Fe-IMCs …", exactly as the
+ * guidance asks, was refused because the term appears in chunk 5 while the
+ * check was only looking in chunk 4.
+ */
+export function citedChunkSpan(text: string): number[] {
+  const cleaned = String(text ?? "").replace(REFERENCE_BRACKET, " ");
+  const found = new Set<number>();
+  const RUN =
+    /(?:chunks?|块|段)\s*#?\s*(\d+)\s*(?:[-–—]|to|~)\s*(\d+)/giu;
+  for (const match of cleaned.matchAll(RUN)) {
+    const first = Number.parseInt(match[1], 10);
+    const last = Number.parseInt(match[2], 10);
+    if (!Number.isInteger(first) || !Number.isInteger(last)) continue;
+    if (last < first || last - first > 400) continue;
+    for (let id = first; id <= last; id += 1) found.add(id);
+  }
+  for (const id of citedChunkIds(cleaned)) found.add(id);
+  return [...found].sort((a, b) => a - b);
+}
+
+/**
+ * Flatten the OCR's maths so a term can be found through it.
+ *
+ * The index stores what MinerU produced: `S(Al$_{2}$CuMg)`, `$\mathrm{i.e.,}$`.
+ * A note writes the same phase as `S(Al2CuMg)`, which is correct and is what
+ * a person would write - and a plain substring test then reports the term as
+ * appearing in none of the chunks it cites. The comparison has to see through
+ * the markup, on both sides.
+ */
+export function flattenForTermMatch(text: string): string {
+  return String(text ?? "")
+    .replace(/\\(?:mathrm|mathbf|mathit|text|rm)\s*\{([^{}]*)\}/gu, "$1")
+    .replace(/\\[a-zA-Z]+/gu, " ")
+    .replace(/[${}_^~\\]/gu, "")
+    .replace(/\s+/gu, " ")
+    .toLowerCase();
+}
+
+/**
+ * Does this chunk introduce the acronym the sentence used?
+ *
+ * A reading note writes SEM where the paper wrote "scanning electron
+ * microscopy", which is what a specialist writing for another specialist
+ * does. The substring test cannot see it and reports the technique as absent
+ * from its own source. Matching the initials is enough to tell an expansion
+ * from an invention: three or more capitals in order, against the first
+ * letters of consecutive words.
+ */
+export function chunkIntroducesAcronym(token: string, chunkText: string): boolean {
+  const letters = token.replace(/[^A-Za-z]/gu, "").toLowerCase();
+  if (letters.length < 3) return false;
+  const words = chunkText.toLowerCase().match(/[a-z]+/gu) ?? [];
+  for (let start = 0; start + letters.length <= words.length; start += 1) {
+    let ok = true;
+    for (let step = 0; step < letters.length; step += 1) {
+      if (words[start + step][0] !== letters[step]) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return true;
+  }
+  return false;
+}
+
 /** Acronym-shaped names the sentence asserts something about. */
 export function techniqueTokens(sentence: string): string[] {
   const out = new Set<string>();
@@ -663,6 +758,20 @@ export function auditSynthesis(
       // fusion and produce an error the model cannot act on.
       const own = citedChunkIds(sentence);
       const citedChunks = own.length ? own : blockChunks;
+      /*
+       * Two different questions, two different answers.
+       *
+       * `citedChunks` counts CITATIONS, and is what decides fusion: a range
+       * is one span the sentence draws on, not several facts welded together.
+       * `supporting` is every chunk that range REACHES, and is what the
+       * source-reading checks are allowed to look in. Sharing one answer
+       * refused a record that wrote "chunk 4-6 阐述 … Fe-IMCs …" - exactly the
+       * grouped form the guidance asks for - because the term sits in chunk 5
+       * and only chunk 4 was being read.
+       */
+      const supporting = own.length
+        ? citedChunkSpan(sentence)
+        : citedChunkSpan(block.text);
       const reasons: WikiSynthesisRisk[] = [];
       const details: string[] = [];
 
@@ -705,7 +814,7 @@ export function auditSynthesis(
       // The checks that read the source. A sentence citing nothing gets none
       // of them, and is refused separately by the citation rule rather than
       // passing silently.
-      const cited = citedChunks
+      const cited = supporting
         .map((id) => ({ id, text: chunkText.get(id) }))
         .filter(
           (entry): entry is { id: number; text: string } =>
@@ -714,9 +823,16 @@ export function auditSynthesis(
 
       if (cited.length) {
         const missingSubjects = techniqueTokens(rawSentence).filter((token) => {
-          const needle = token.toLowerCase();
-          return !cited.some((entry) =>
-            entry.text.toLowerCase().includes(needle),
+          const needle = flattenForTermMatch(token);
+          return !cited.some(
+            (entry) =>
+              // Seen through the OCR's maths, so `S(Al2CuMg)` finds
+              // `S(Al$_{2}$CuMg)`...
+              flattenForTermMatch(entry.text).includes(needle) ||
+              // ...and an acronym finds the phrase the paper spelled out,
+              // which is what a note writing SEM for "scanning electron
+              // microscopy" was being refused for.
+              chunkIntroducesAcronym(token, entry.text),
           );
         });
         if (missingSubjects.length) {

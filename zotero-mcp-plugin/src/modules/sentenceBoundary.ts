@@ -37,8 +37,17 @@
 export const ABBREVIATION =
   /\b(?:e\.g|i\.e|cf|vs|approx|ca|Fig|Figs|Eq|Eqs|Ref|Refs|et\s+al|al|Dr|Prof|No|St|Inc|Ltd|at|wt|vol|mol)\.$/iu;
 
-/** Full-width terminators, which end a sentence with nothing after them. */
-export const CJK_TERMINATORS = "。？！";
+/**
+ * Full-width terminators, which end a sentence with nothing after them.
+ *
+ * The full-width semicolon is here because Chinese does not put a space after
+ * it, so the "a stop needs whitespace after it" rule would never let it close
+ * a clause. It has to close one: asked to write connected prose, a Chinese
+ * note joins clauses with `；`, and read as a single sentence that clause
+ * chain cited three chunks at once and was refused as a fusion - punishing
+ * exactly the shape the guidance had just asked for.
+ */
+export const CJK_TERMINATORS = "。？！；";
 
 /** Closing marks that belong to the sentence they follow, not the next one. */
 export const TRAILING_CLOSERS = "”’」』）】》〉";

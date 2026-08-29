@@ -243,17 +243,28 @@ function assertSynthesisEvidenceClosure(
   body: string,
   chunks: readonly WikiAuditChunk[],
   submittedAudit: readonly WikiSynthesisAuditEntry[],
+  /**
+   * What is being written, so the refusal can name it.
+   *
+   * This check runs on every reading record as well as on the whole-paper
+   * pass, but the message only ever described the latter: an ordinary batch
+   * was told "The whole-paper synthesis has 3 sentence(s) that reach past..."
+   * and instructed to "resubmit the WHOLE note with finalSynthesis true" - a
+   * call that batch is not allowed to make. The check was right; the only way
+   * out of it was misdescribed, which is its own kind of wrong.
+   */
+  what: "record" | "synthesis" = "synthesis",
 ): void {
   const flagged = auditSynthesis(body, { chunks });
   if (!flagged.length) return;
 
   if (!submittedAudit.length) {
     throw new WikiSynthesisAuditRequired(
-      `The whole-paper synthesis has ${flagged.length} sentence(s) that reach past what the chunks they ` +
-        "cite can be shown to say, so nothing was written. This is the one gate between a finished " +
-        "reading and the paper's settled account of itself, and it exists because coverage cannot " +
-        "catch this: every chunk really was delivered, and the drift happened afterwards, while the " +
-        "note was being made to read well.\n\n" +
+      `${what === "record" ? "This reading record" : "The whole-paper synthesis"} has ` +
+        `${flagged.length} sentence(s) that reach past what the chunks they ` +
+        "cite can be shown to say, so nothing was written. Coverage cannot catch this: the chunks " +
+        "really were delivered, and the drift happened afterwards, while the text was being made to " +
+        "read well.\n\n" +
         "FOR EACH SENTENCE BELOW, DO ONE OF TWO THINGS.\n" +
         "(a) Prove it. Re-read the chunks it cites and copy out, VERBATIM, the passage that carries " +
         "it - one quotation per cited chunk, at least " +
@@ -268,7 +279,10 @@ function assertSynthesisEvidenceClosure(
         "mechanisms into one sentence each, so each cites only the chunk that carries it. Restore a " +
         "dropped item from an enumeration, especially when the dropped one was the difficulty. A " +
         "rewritten sentence is not flagged and needs no quotation.\n\n" +
-        "Then resubmit the WHOLE note with finalSynthesis true and synthesisAudit carrying one entry " +
+        (what === "record"
+          ? "Then resubmit THIS RECORD - the same wiki_update_reading_note call, with readingRecord " +
+            "and NOT finalSynthesis - carrying synthesisAudit with one entry "
+          : "Then resubmit the WHOLE summary with finalSynthesis true and synthesisAudit carrying one entry ") +
         "for every sentence that is still flagged:\n" +
         '  synthesisAudit: [{ "sentence": "<the sentence exactly as it stands in the note you ' +
         'submit>", "support": [{ "chunkId": 18, "quote": "<verbatim from chunk 18>" }, ...] }]' +
@@ -925,6 +939,7 @@ export class WikiService {
         ? readable.filter((chunk) => currentChunkAddresses.has(chunk.chunkId))
         : readable,
       synthesisAudit,
+      "record",
     );
   }
 
