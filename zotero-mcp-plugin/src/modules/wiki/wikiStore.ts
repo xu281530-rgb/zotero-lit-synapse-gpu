@@ -6,7 +6,16 @@ import {
 import { ensureWikiSchema } from "./wikiSchema";
 import { mapWikiEvidenceRow } from "./wikiDto";
 import { rowColumn as rowValue } from "./wikiRow";
-import { WikiEmbeddingQueue } from "./wikiEmbeddingQueue";
+import {
+  CLAIM_EMBEDDING_TARGET,
+  CONCEPT_EMBEDDING_TARGET,
+  WikiEmbeddingQueue,
+} from "./wikiEmbeddingQueue";
+import {
+  CONCEPT_EMBEDDING_COLUMNS,
+  conceptEmbeddingTextFromRow,
+} from "./wikiConceptEmbedding";
+import { cosine, floatVector, vectorBytes } from "./wikiVector";
 import { WikiConceptLibrary } from "./wikiConceptLibrary";
 import { classifyLegacyName } from "./wikiConceptTerms";
 import { WikiReadingSessions } from "./wikiReadingSession";
@@ -64,6 +73,59 @@ export function countWikiPersistentRows(
   );
 }
 
+interface WikiConceptScanRow {
+  conceptId: number;
+  name: string;
+  type: string;
+  description: string;
+  vector: Float32Array | null;
+  model: string;
+}
+
+export interface WikiScoredConcept {
+  conceptId: number;
+  name: string;
+  type: string;
+  description: string;
+  score: number;
+}
+
+export interface WikiConceptMatch {
+  probe: string;
+  matches: (WikiScoredConcept & { matchedBy: "name" | "vector" })[];
+}
+
+/**
+ * What the Wiki looks like from where this paper is standing.
+ *
+ * Everything here is bounded by the paper, not by the library: the same
+ * response comes back for a library of ninety concepts and one of ninety
+ * thousand. That is the whole point of computing it - the flat enumeration it
+ * replaces grew with the library and stopped fitting in a context window
+ * somewhere around two thousand papers, which is a functional failure rather
+ * than an expense.
+ */
+export interface WikiConceptNeighbourhood {
+  conceptCount: number;
+  /** Concepts still waiting for a vector; recall is partial while non-zero. */
+  pendingVectors: number;
+  seeds: WikiScoredConcept[];
+  /** Nearest by meaning - the ones this paper might be repeating or relating to. */
+  neighbours: WikiScoredConcept[];
+  /** One relation away from a seed: already asserted to be connected. */
+  related: WikiScoredConcept[];
+  /**
+   * The most-connected concepts in the library.
+   *
+   * The cheap catch-all for what vector proximity structurally cannot find: a
+   * genuine link between two distant fields. A hub is by definition the
+   * concept most likely to connect to something new, and there are a dozen of
+   * them however large the library gets.
+   */
+  hubs: (WikiScoredConcept & { degree: number })[];
+  relations: string[];
+}
+
 export class WikiStore {
   private initialized = false;
   private readonly db: WikiDatabase;
@@ -76,12 +138,20 @@ export class WikiStore {
    */
   private readonly sessions: WikiReadingSessions;
   private readonly embeddingQueueStore: WikiEmbeddingQueue;
+  private readonly conceptEmbeddingQueueStore: WikiEmbeddingQueue;
   private readonly conceptLibrary: WikiConceptLibrary;
 
   constructor(db: WikiDatabase) {
     this.db = db;
     this.sessions = new WikiReadingSessions(db);
-    this.embeddingQueueStore = new WikiEmbeddingQueue(db);
+    this.embeddingQueueStore = new WikiEmbeddingQueue(
+      db,
+      CLAIM_EMBEDDING_TARGET,
+    );
+    this.conceptEmbeddingQueueStore = new WikiEmbeddingQueue(
+      db,
+      CONCEPT_EMBEDDING_TARGET,
+    );
     this.conceptLibrary = new WikiConceptLibrary(db);
   }
 
@@ -99,6 +169,11 @@ export class WikiStore {
   async embeddingQueue(): Promise<WikiEmbeddingQueue> {
     await this.initialize();
     return this.embeddingQueueStore;
+  }
+
+  async conceptEmbeddingQueue(): Promise<WikiEmbeddingQueue> {
+    await this.initialize();
+    return this.conceptEmbeddingQueueStore;
   }
 
   async initialize(): Promise<void> {
@@ -286,6 +361,11 @@ export class WikiStore {
         }))
         .filter((entry: { name: string }) => entry.name),
     ]);
+    // Inside the caller's transaction, so the intent to embed is exactly as
+    // durable as the concept - the same guarantee the Claim queue relies on.
+    // Also covers the branch where an EXISTING concept was matched and merely
+    // gained aliases: its old vector no longer reflects its names.
+    await this.enqueueConceptEmbedding(conceptId);
     return conceptId;
   }
 
@@ -1478,6 +1558,34 @@ export class WikiStore {
           pageParams,
         ),
       ),
+      /*
+       * Reported, but deliberately NOT in WIKI_PERSISTENT_STATUS_KEYS. Those
+       * keys count what a reset destroys and what the user would lose; a
+       * concept vector is derived from the concept and is rebuilt from it, so
+       * counting it would inflate "rows deleted" with rows nobody wrote. It is
+       * reported because the gap between the two numbers below is exactly how
+       * incomplete concept recall currently is.
+       */
+      conceptEmbeddings: Number(
+        await this.db.valueQueryAsync(
+          libraryID === undefined
+            ? "SELECT COUNT(*) FROM wiki_concept_embeddings"
+            : `SELECT COUNT(*) FROM wiki_concept_embeddings ce
+               JOIN wiki_concepts c ON c.concept_id = ce.concept_id
+               WHERE c.library_id = ?`,
+          pageParams,
+        ),
+      ),
+      pendingConceptEmbeddings: Number(
+        await this.db.valueQueryAsync(
+          libraryID === undefined
+            ? "SELECT COUNT(*) FROM wiki_concept_embedding_queue"
+            : `SELECT COUNT(*) FROM wiki_concept_embedding_queue q
+               JOIN wiki_concepts c ON c.concept_id = q.concept_id
+               WHERE c.library_id = ?`,
+          pageParams,
+        ),
+      ),
       pendingRelink: Number(
         await this.db.valueQueryAsync(
           libraryID === undefined
@@ -1519,6 +1627,8 @@ export class WikiStore {
     await this.db.executeTransaction(async () => {
       for (const table of [
         "wiki_claim_embeddings",
+        "wiki_concept_embeddings",
+        "wiki_concept_embedding_queue",
         "wiki_evidence",
         "wiki_relations",
         "wiki_concept_term_sources",
@@ -1564,6 +1674,486 @@ export class WikiStore {
       source: String(rowValue(row, "source", "source") ?? ""),
       predicate: String(rowValue(row, "predicate", "predicate") ?? ""),
       target: String(rowValue(row, "target", "target") ?? ""),
+    }));
+  }
+
+  /** Queue one concept for a vector, using its text as it stands now. */
+  private async enqueueConceptEmbedding(conceptId: number): Promise<void> {
+    const rows = await this.db.queryAsync(
+      `SELECT ${CONCEPT_EMBEDDING_COLUMNS}
+         FROM wiki_concepts c WHERE c.concept_id = ?`,
+      [conceptId],
+    );
+    if (!rows[0]) return;
+    const text = conceptEmbeddingTextFromRow(rows[0]);
+    if (!text) return;
+    await this.conceptEmbeddingQueueStore.enqueue(conceptId, text);
+  }
+
+  async saveConceptEmbedding(options: {
+    conceptId: number;
+    vector: Float32Array;
+    model: string;
+    textHash: string;
+  }): Promise<void> {
+    await this.initialize();
+    const identities = await this.db.queryAsync(
+      "SELECT DISTINCT model, dimensions FROM wiki_concept_embeddings",
+    );
+    for (const identity of identities) {
+      if (
+        String(identity.model) !== options.model ||
+        Number(identity.dimensions) !== options.vector.length
+      ) {
+        throw new Error(
+          "Wiki Concept Embeddings already use a different model or dimensions; clear Wiki data before changing the embedding space",
+        );
+      }
+    }
+    await this.db.queryAsync(
+      `INSERT INTO wiki_concept_embeddings
+       (concept_id, embedding, dimensions, model, text_hash, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(concept_id) DO UPDATE SET embedding = excluded.embedding,
+       dimensions = excluded.dimensions, model = excluded.model,
+       text_hash = excluded.text_hash, updated_at = excluded.updated_at`,
+      [
+        options.conceptId,
+        vectorBytes(options.vector),
+        options.vector.length,
+        options.model,
+        options.textHash,
+        Date.now(),
+      ],
+    );
+  }
+
+  /**
+   * Re-queue concepts whose stored vector no longer matches their text.
+   *
+   * A concept's text changes from more places than a Claim's ever does - a
+   * rename, an alias added while reading, a description rewritten in the terms
+   * UI, a legacy term completed by hand - and an enqueue call planted in each
+   * of those paths is a list that will be incomplete the first time someone
+   * adds a fifth. This compares hashes instead, so a stale vector is found by
+   * what it IS rather than by having been reported.
+   *
+   * Two exclusions, both for the same reason - an enqueue RESETS the backoff,
+   * so re-enqueuing a row that is already owed is not idempotent, it erases
+   * the record of how many times the backend has already refused it, and a
+   * permanently failing concept would never reach "exhausted" and never be
+   * reported:
+   *
+   *   - a concept with NO vector is already queued by the schema backfill;
+   *   - a concept already sitting in the queue has already been noticed.
+   *
+   * What is left is exactly the case nothing else can see: a vector that
+   * exists, is not queued, and no longer describes its concept.
+   */
+  async resyncConceptEmbeddings(
+    libraryID?: number,
+  ): Promise<{ requeued: number }> {
+    await this.initialize();
+    const rows = await this.db.queryAsync(
+      `SELECT c.concept_id AS concept_id, ${CONCEPT_EMBEDDING_COLUMNS},
+              e.text_hash AS stored_hash
+         FROM wiki_concepts c
+         JOIN wiki_concept_embeddings e ON e.concept_id = c.concept_id
+        WHERE NOT EXISTS (
+                SELECT 1 FROM wiki_concept_embedding_queue q
+                 WHERE q.concept_id = c.concept_id)
+          ${libraryID === undefined ? "" : "AND c.library_id = ?"}`,
+      libraryID === undefined ? [] : [libraryID],
+    );
+    let requeued = 0;
+    for (const row of rows) {
+      const text = conceptEmbeddingTextFromRow(row);
+      if (!text) continue;
+      const stored = String(rowValue(row, "stored_hash", "storedHash") ?? "");
+      if (!stored || stored === (await hashWikiText(text))) continue;
+      await this.conceptEmbeddingQueueStore.enqueue(
+        Number(rowValue(row, "concept_id", "conceptId")),
+        text,
+      );
+      requeued += 1;
+    }
+    return { requeued };
+  }
+
+  /**
+   * The concepts this paper introduced or reused.
+   *
+   * The join exists because `wiki_record_concepts` records, for every term it
+   * writes, the paper and chunk the term was read out of. That makes the
+   * paper's own concept list recoverable from the database rather than from
+   * something the model has to restate - which is what lets the server seed
+   * its own recall instead of waiting for the model to write a query, the
+   * distinction the whole neighbourhood design rests on.
+   */
+  async conceptIdsForItem(
+    libraryID: number,
+    itemKey: string,
+  ): Promise<number[]> {
+    await this.initialize();
+    const rows = await this.db.queryAsync(
+      `SELECT DISTINCT t.concept_id AS concept_id
+         FROM wiki_concept_term_sources s
+         JOIN wiki_concept_terms t ON t.term_id = s.term_id
+         JOIN wiki_concepts c ON c.concept_id = t.concept_id
+        WHERE s.library_id = ? AND s.item_key = ? AND c.library_id = ?`,
+      [libraryID, itemKey, libraryID],
+    );
+    return rows.map((row: any) =>
+      Number(rowValue(row, "concept_id", "conceptId")),
+    );
+  }
+
+  private async conceptScanRows(
+    libraryID: number,
+  ): Promise<WikiConceptScanRow[]> {
+    const rows = await this.db.queryAsync(
+      `SELECT c.concept_id AS concept_id, c.canonical_name AS canonical_name,
+              c.concept_type AS concept_type, c.description AS description,
+              e.embedding AS embedding, e.dimensions AS dimensions,
+              e.model AS model
+         FROM wiki_concepts c
+         LEFT JOIN wiki_concept_embeddings e ON e.concept_id = c.concept_id
+        WHERE c.library_id = ?`,
+      [libraryID],
+    );
+    return rows.map((row: any) => ({
+      conceptId: Number(rowValue(row, "concept_id", "conceptId")),
+      name: String(rowValue(row, "canonical_name", "canonicalName") ?? ""),
+      type: String(rowValue(row, "concept_type", "conceptType") ?? ""),
+      description: String(rowValue(row, "description", "description") ?? ""),
+      vector: floatVector(
+        rowValue(row, "embedding", "embedding"),
+        Number(rowValue(row, "dimensions", "dimensions") ?? 0),
+      ),
+      model: String(rowValue(row, "model", "model") ?? ""),
+    }));
+  }
+
+  /** How many relations each concept in this library takes part in. */
+  private async conceptDegrees(
+    libraryID: number,
+  ): Promise<Map<number, number>> {
+    const rows = await this.db.queryAsync(
+      `SELECT concept_id, COUNT(*) AS degree FROM (
+         SELECT r.source_concept_id AS concept_id FROM wiki_relations r
+           JOIN wiki_concepts c ON c.concept_id = r.source_concept_id
+          WHERE c.library_id = ?
+         UNION ALL
+         SELECT r.target_concept_id AS concept_id FROM wiki_relations r
+           JOIN wiki_concepts c ON c.concept_id = r.target_concept_id
+          WHERE c.library_id = ?
+       ) GROUP BY concept_id`,
+      [libraryID, libraryID],
+    );
+    return new Map(
+      rows.map((row: any) => [
+        Number(rowValue(row, "concept_id", "conceptId")),
+        Number(rowValue(row, "degree", "degree")),
+      ]),
+    );
+  }
+
+  /** Concepts one relation away from any of these. */
+  private async relationNeighbours(
+    conceptIds: number[],
+  ): Promise<Set<number>> {
+    if (!conceptIds.length) return new Set();
+    const list = conceptIds.map(() => "?").join(",");
+    const rows = await this.db.queryAsync(
+      `SELECT source_concept_id AS a, target_concept_id AS b
+         FROM wiki_relations
+        WHERE source_concept_id IN (${list}) OR target_concept_id IN (${list})`,
+      [...conceptIds, ...conceptIds],
+    );
+    const found = new Set<number>();
+    for (const row of rows) {
+      found.add(Number(rowValue(row, "a", "a")));
+      found.add(Number(rowValue(row, "b", "b")));
+    }
+    for (const id of conceptIds) found.delete(id);
+    return found;
+  }
+
+  /** Relations with BOTH ends inside this set, named rather than numbered. */
+  private async relationsAmong(conceptIds: number[]): Promise<string[]> {
+    if (conceptIds.length < 2) return [];
+    const list = conceptIds.map(() => "?").join(",");
+    const rows = await this.db.queryAsync(
+      `SELECT s.canonical_name AS source, r.predicate AS predicate,
+              t.canonical_name AS target
+         FROM wiki_relations r
+         JOIN wiki_concepts s ON s.concept_id = r.source_concept_id
+         JOIN wiki_concepts t ON t.concept_id = r.target_concept_id
+        WHERE r.source_concept_id IN (${list})
+          AND r.target_concept_id IN (${list})
+        ORDER BY s.canonical_name, r.predicate`,
+      [...conceptIds, ...conceptIds],
+    );
+    return rows.map(
+      (row: any) =>
+        `${rowValue(row, "source", "source")} --${rowValue(
+          row,
+          "predicate",
+          "predicate",
+        )}--> ${rowValue(row, "target", "target")}`,
+    );
+  }
+
+  /**
+   * Existing concepts that a proposed name may already be.
+   *
+   * Two retrievals, because they fail in opposite directions. The lexical one
+   * is exact and certain: a hit on `normalized_name` or the alias table means
+   * the concept IS this one, and it is reported first with score 1. The vector
+   * one is approximate and is the only thing that can see that `界面换热系数`
+   * and `界面传热系数` are one concept - normalization cannot, since they differ
+   * by a character, which is precisely how a library ends up holding both.
+   */
+  async matchConcepts(options: {
+    libraryID: number;
+    probes: { text: string; vector: Float32Array | null }[];
+    model: string;
+    limit?: number;
+  }): Promise<WikiConceptMatch[]> {
+    await this.initialize();
+    const limit = Math.max(1, Math.min(20, options.limit ?? 5));
+    const rows = await this.conceptScanRows(options.libraryID);
+    const byId = new Map(rows.map((row) => [row.conceptId, row]));
+    const results: WikiConceptMatch[] = [];
+    for (const probe of options.probes) {
+      const normalized = normalizeWikiName(probe.text);
+      const exact = normalized
+        ? await this.db.queryAsync(
+            `SELECT concept_id FROM wiki_concepts
+              WHERE library_id = ? AND normalized_name = ?
+              UNION
+             SELECT a.concept_id FROM wiki_aliases a
+               JOIN wiki_concepts c ON c.concept_id = a.concept_id
+              WHERE c.library_id = ? AND a.normalized_alias = ?`,
+            [options.libraryID, normalized, options.libraryID, normalized],
+          )
+        : [];
+      const matched: WikiConceptMatch["matches"] = [];
+      const seen = new Set<number>();
+      for (const row of exact) {
+        const hit = byId.get(Number(rowValue(row, "concept_id", "conceptId")));
+        if (!hit || seen.has(hit.conceptId)) continue;
+        seen.add(hit.conceptId);
+        matched.push({
+          conceptId: hit.conceptId,
+          name: hit.name,
+          type: hit.type,
+          description: hit.description,
+          score: 1,
+          matchedBy: "name",
+        });
+      }
+      if (probe.vector) {
+        const scored = rows
+          .filter(
+            (row) =>
+              !seen.has(row.conceptId) &&
+              row.vector &&
+              row.model === options.model &&
+              row.vector.length === probe.vector!.length,
+          )
+          .map((row) => ({
+            row,
+            score: cosine(probe.vector as Float32Array, row.vector!),
+          }))
+          .sort((left, right) => right.score - left.score)
+          .slice(0, limit);
+        for (const entry of scored) {
+          matched.push({
+            conceptId: entry.row.conceptId,
+            name: entry.row.name,
+            type: entry.row.type,
+            description: entry.row.description,
+            score: Number(entry.score.toFixed(4)),
+            matchedBy: "vector",
+          });
+        }
+      }
+      results.push({ probe: probe.text, matches: matched.slice(0, limit) });
+    }
+    return results;
+  }
+
+  /** {@link WikiConceptNeighbourhood} for one paper's concepts. */
+  async conceptNeighbourhood(options: {
+    libraryID: number;
+    seedConceptIds: number[];
+    seedVectors?: Float32Array[];
+    model: string;
+    limit?: number;
+    hubLimit?: number;
+  }): Promise<WikiConceptNeighbourhood> {
+    await this.initialize();
+    const limit = Math.max(1, Math.min(200, options.limit ?? 40));
+    const hubLimit = Math.max(0, Math.min(50, options.hubLimit ?? 12));
+    const rows = await this.conceptScanRows(options.libraryID);
+    const byId = new Map(rows.map((row) => [row.conceptId, row]));
+    const seedIds = new Set(
+      options.seedConceptIds.filter((id) => byId.has(id)),
+    );
+
+    const usable = (row: WikiConceptScanRow): row is WikiConceptScanRow =>
+      Boolean(row.vector) && row.model === options.model;
+    const seedVectors = [
+      ...(options.seedVectors ?? []),
+      ...rows
+        .filter((row) => seedIds.has(row.conceptId) && usable(row))
+        .map((row) => row.vector as Float32Array),
+    ];
+
+    const scored = rows
+      .filter((row) => !seedIds.has(row.conceptId) && usable(row))
+      .map((row) => ({
+        row,
+        score: seedVectors.reduce(
+          (best, seed) =>
+            seed.length === row.vector!.length
+              ? Math.max(best, cosine(seed, row.vector!))
+              : best,
+          0,
+        ),
+      }))
+      .filter((entry) => entry.score > 0)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, limit);
+
+    const toScored = (
+      row: WikiConceptScanRow,
+      score: number,
+    ): WikiScoredConcept => ({
+      conceptId: row.conceptId,
+      name: row.name,
+      type: row.type,
+      description: row.description,
+      score: Number(score.toFixed(4)),
+    });
+
+    const neighbourIds = new Set(scored.map((entry) => entry.row.conceptId));
+    const relatedIds = await this.relationNeighbours([...seedIds]);
+    for (const id of neighbourIds) relatedIds.delete(id);
+
+    const degrees = await this.conceptDegrees(options.libraryID);
+    const claimed = new Set([...seedIds, ...neighbourIds, ...relatedIds]);
+    const hubs = rows
+      .filter((row) => !claimed.has(row.conceptId) && degrees.get(row.conceptId))
+      .sort(
+        (left, right) =>
+          (degrees.get(right.conceptId) ?? 0) -
+          (degrees.get(left.conceptId) ?? 0),
+      )
+      .slice(0, hubLimit);
+
+    const inScope = [
+      ...seedIds,
+      ...neighbourIds,
+      ...relatedIds,
+      ...hubs.map((row) => row.conceptId),
+    ];
+    const queue = await this.conceptEmbeddingQueue();
+    return {
+      conceptCount: rows.length,
+      pendingVectors: await queue.pendingCount(),
+      seeds: [...seedIds].map((id) => toScored(byId.get(id)!, 1)),
+      neighbours: scored.map((entry) => toScored(entry.row, entry.score)),
+      related: [...relatedIds]
+        .map((id) => byId.get(id))
+        .filter(Boolean)
+        .map((row) => toScored(row as WikiConceptScanRow, 0)),
+      hubs: hubs.map((row) => ({
+        ...toScored(row, 0),
+        degree: degrees.get(row.conceptId) ?? 0,
+      })),
+      relations: await this.relationsAmong(inScope),
+    };
+  }
+
+  /**
+   * A value that changes whenever anything in the skeleton would change.
+   *
+   * The skeleton is recomputed and re-sent on every `wiki_prepare_update`, and
+   * in question-driven reading that is once per answering turn - several
+   * identical copies of the same structure inside one conversation. This is
+   * what lets the second one be answered with "unchanged" instead.
+   *
+   * Counts and max-ids rather than a timestamp, because `wiki_concepts` has no
+   * `updated_at` and an edit in place moves neither a count nor a max id. The
+   * two hashes cover that gap: the names catch a rename, and the stored
+   * embedding hashes catch a rewritten description - a description edit
+   * re-queues the concept, which moves `queued`, and then changes its stored
+   * hash when the drain lands, so the edit is visible at both ends of the
+   * round trip rather than only after it completes.
+   */
+  async wikiRevision(libraryID: number): Promise<string> {
+    await this.initialize();
+    const row = await this.db.queryAsync(
+      `SELECT
+         (SELECT COUNT(*) FROM wiki_pages WHERE library_id = ?) AS pages,
+         (SELECT MAX(updated_at) FROM wiki_pages WHERE library_id = ?) AS page_at,
+         (SELECT COUNT(*) FROM wiki_concepts WHERE library_id = ?) AS concepts,
+         (SELECT MAX(concept_id) FROM wiki_concepts WHERE library_id = ?) AS concept_max,
+         (SELECT COUNT(*) FROM wiki_relations r JOIN wiki_concepts c
+            ON c.concept_id = r.source_concept_id
+           WHERE c.library_id = ?) AS relations,
+         (SELECT COUNT(*) FROM wiki_concept_embeddings) AS vectors,
+         (SELECT COUNT(*) FROM wiki_concept_embedding_queue) AS queued`,
+      [libraryID, libraryID, libraryID, libraryID, libraryID],
+    );
+    const parts = [
+      "pages",
+      "page_at",
+      "concepts",
+      "concept_max",
+      "relations",
+      "vectors",
+      "queued",
+    ].map((key) => Number(rowValue(row[0], key, key) ?? 0));
+    const fingerprint = await this.db.valueQueryAsync(
+      `SELECT group_concat(mark, ' ') FROM (
+         SELECT c.normalized_name || ':' || COALESCE(e.text_hash, '') AS mark
+           FROM wiki_concepts c
+           LEFT JOIN wiki_concept_embeddings e ON e.concept_id = c.concept_id
+          WHERE c.library_id = ? ORDER BY c.concept_id)`,
+      [libraryID],
+    );
+    return `${parts.join("-")}-${await hashWikiText(String(fingerprint ?? ""))}`;
+  }
+
+  /**
+   * Page titles and claim counts, without loading the pages.
+   *
+   * `listPages` hydrates every Claim and every piece of Evidence of every
+   * page, which is the right thing for the Wiki panel and the wrong thing for
+   * a header that shows titles: the write-up's skeleton needed two fields per
+   * page and was reading the entire Wiki to get them, on every prepare. The
+   * token cost of that response was the visible problem; this was the
+   * invisible one underneath it.
+   */
+  async listPageTitles(
+    libraryID: number,
+  ): Promise<{ title: string; claims: number }[]> {
+    await this.initialize();
+    const rows = await this.db.queryAsync(
+      `SELECT p.canonical_title AS title,
+              (SELECT COUNT(*) FROM wiki_claims c WHERE c.page_id = p.page_id)
+                AS claims
+         FROM wiki_pages p
+        WHERE p.library_id = ? AND p.status = 'active'
+        ORDER BY p.updated_at DESC, p.page_id`,
+      [libraryID],
+    );
+    return rows.map((row: any) => ({
+      title: String(rowValue(row, "title", "title") ?? ""),
+      claims: Number(rowValue(row, "claims", "claims") ?? 0),
     }));
   }
 
@@ -1693,6 +2283,9 @@ export class WikiStore {
           );
         }
       }
+      // A rename or an alias change moves the concept in the embedding space,
+      // so the vector it has is now a vector for a name it no longer carries.
+      await this.enqueueConceptEmbedding(options.conceptId);
     });
   }
 

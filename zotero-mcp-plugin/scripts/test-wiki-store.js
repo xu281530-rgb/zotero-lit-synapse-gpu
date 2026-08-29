@@ -1398,6 +1398,10 @@ assert.deepEqual(await store.getStatus(), {
   relations: 0,
   evidence: 0,
   claimEmbeddings: 0,
+  // Derived from concepts, so a reset must leave none behind even though they
+  // are not counted as rows the user lost.
+  conceptEmbeddings: 0,
+  pendingConceptEmbeddings: 0,
   pendingRelink: 0,
   validEvidence: 0,
   staleEvidence: 0,

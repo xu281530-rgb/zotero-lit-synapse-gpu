@@ -1157,8 +1157,9 @@ export function buildToolCatalog(): ToolDefinition[] {
   },
   {
     name: 'wiki_prepare_update',
-    // NOTE: the response carries wikiSkeleton - every Page title, every
-    // Concept and every relation the library already holds. See below.
+    // NOTE: the response carries wikiSkeleton - the full page list, plus the
+    // CONCEPT NEIGHBOURHOOD of this paper rather than every concept in the
+    // library. See below, and WikiService.wikiSkeleton for why.
     category: 'wiki',
     description: [
       'Search existing Wiki Page, Concept/Alias, Claim keyword and Claim embedding candidates before proposing a controlled Wiki update. This tool never writes. CREATE_PAGE requires the short-lived prepareToken returned here.',
@@ -1171,9 +1172,12 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'wikiReview is accepted ONLY once every chunk has been delivered, the whole-paper synthesis is recorded, AND wiki_record_concepts final true has completed. Sent earlier it is refused and nothing is stored — the order is finalSynthesis, terminology final, then the five-axis Wiki review. Committing what you have read so far is still allowed while a paper is unfinished; just leave wikiReview out of those calls.',
       '',
-      'THE RESPONSE CARRIES wikiSkeleton: every Page title, every Concept with its type and one-line description, and every relation already asserted, written as "挤压铸造 --suppresses--> 非平衡共晶相". READ IT BEFORE YOU WRITE. The rest of this response is query-driven recall, which answers "has this been said before" and cannot answer "how does this paper sit against the thirty already in here" - you do not know what to search for until you can see what is there. Thirty-one papers written up without it produced zero relations between them: not one was refused, none was ever offered.',
+      'THE RESPONSE CARRIES wikiSkeleton, AND IT IS NOT THE WHOLE WIKI. pages is complete - every Page title with its Claim count. The concept side is a NEIGHBOURHOOD computed around this paper: duplicateCandidates (existing Concepts your proposed titles may already be, matched by name AND by meaning, so a near-synonym under another name is caught), paperConcepts (what this paper recorded), nearbyConcepts (nearest by meaning), relatedConcepts (already one relation away), hubConcepts (the most-connected entries in the library), and relations among those, written as "挤压铸造 --suppresses--> 非平衡共晶相". READ IT BEFORE YOU WRITE. The rest of this response is query-driven recall, which answers "has this been said before" and cannot answer "how does this paper sit against the thirty already in here" - you do not know what to search for until you can see what is there. Thirty-one papers written up without any of it produced zero relations between them: not one was refused, none was ever offered.',
+
       '',
-      'SO, WITH THE SKELETON IN VIEW: does this paper extend a Page that exists rather than deserving a parallel one? Do its Concepts already exist under another name, and should they become aliases instead of new entities? And what does it let you assert BETWEEN concepts — that one process suppresses a phenomenon another paper described, that one theory incorporates another\'s mechanism? Propose those relations in the commit. "本篇与现有条目无关联，因为…" is a real answer and sometimes the right one; silence is not.'
+      'WHAT THE NEIGHBOURHOOD CANNOT SHOW YOU: a link to a concept that is far away in meaning and not yet connected to anything you touched. hubConcepts is the cheap guard against that and is not a guarantee. If you suspect a connection to a part of the Wiki that is not in front of you, wiki_list_concepts enumerates the library and wiki_get_page opens any page. conceptCount tells you how much is out there that this response did not show.',
+      '',
+      'SO, WITH THE NEIGHBOURHOOD IN VIEW: does this paper extend a Page that exists rather than deserving a parallel one? Do its Concepts already exist under another name, and should they become aliases instead of new entities? And what does it let you assert BETWEEN concepts — that one process suppresses a phenomenon another paper described, that one theory incorporates another\'s mechanism? Propose those relations in the commit. "本篇与现有条目无关联，因为…" is a real answer and sometimes the right one; silence is not.'
     ].join('\n'),
     inputSchema: {
       type: 'object',
@@ -1182,6 +1186,10 @@ export function buildToolCatalog(): ToolDefinition[] {
         itemKey: {
           type: 'string',
           description: 'Paper whose completed reading is being reconciled. Required for a question-driven macro summary because several QA papers may be open at once.'
+        },
+        refreshSkeleton: {
+          type: 'boolean',
+          description: 'Re-send wikiSkeleton even when the Wiki has not changed since the last one. Normally unnecessary: an unchanged skeleton comes back as {unchanged: true} and the copy you already have is still current. Pass true if you do not have it.'
         },
         query: { type: 'string' },
         limit: { type: 'integer', minimum: 1, maximum: 50 },

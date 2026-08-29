@@ -145,6 +145,18 @@ interface WikiNoteStatusWriteOptions {
  */
 export const WIKI_WRITE_OFF_MIN_REASON_CHARS = 40;
 
+/**
+ * How many nearby concepts the write-up is shown, and how many hubs.
+ *
+ * Fixed numbers, not a fraction of the library: the whole point of the
+ * neighbourhood is that its size does not depend on how much is in the Wiki.
+ * Forty is roughly what a paper's own concept list can be usefully compared
+ * against in one pass; a dozen hubs is the entire high-degree tail of a Wiki
+ * this size and stays a dozen when there are thousands of concepts.
+ */
+export const WIKI_SKELETON_NEIGHBOURS = 40;
+export const WIKI_SKELETON_HUBS = 12;
+
 /** The Evidence excerpt floor this service enforces; defined in the leaf so
  * `toolCatalog` can state the same number without importing the wiki stack. */
 export { WIKI_EVIDENCE_MIN_EXCERPT_CHARS };
@@ -361,6 +373,15 @@ export class WikiService {
   private readonly store: WikiStore;
   private readonly retriever: WikiRetriever;
   private readonly notes: WikiReadingNoteStore;
+  /**
+   * The Wiki revision each library's skeleton was last sent at.
+   *
+   * Lives for as long as the plugin does, which is longer than a conversation
+   * - so a stale entry can only ever cost a client one "unchanged" it did not
+   * expect, never wrong data. See {@link skeletonFor}.
+   */
+  private readonly skeletonRevisions = new Map<string, string>();
+
   private readonly prepareTokens = new Map<
     string,
     {
@@ -396,6 +417,8 @@ export class WikiService {
     query: string;
     limit?: number;
     proposedPageTitles?: string[];
+    /** Re-send the Wiki skeleton even if it has not changed. */
+    refreshSkeleton?: boolean;
     /**
      * The whole-Wiki review, required once a paper has been read in full.
      * See {@link assertReadyToWriteUp}.
@@ -538,7 +561,7 @@ export class WikiService {
       semanticClaims: semanticCandidates.claims.slice(0, options.limit ?? 10),
       semanticWarnings: semanticCandidates.warnings,
       searched: ["title", "alias", "concept", "claim", "embedding"],
-      wikiSkeleton: await this.wikiSkeleton(options.libraryID),
+      wikiSkeleton: await this.skeletonFor(options, proposedPageTitles),
       preparedPageTitles: proposedPageTitles,
       pagePreparations,
       prepareToken,
@@ -944,49 +967,196 @@ export class WikiService {
   }
 
   /**
-   * Everything the Wiki already holds, in one page a model can actually read.
+   * The Wiki as seen from where this paper is standing.
    *
-   * The recall around it is query-driven: a proposed title and a semantic
-   * search return perhaps ten neighbouring Claims. That is the right tool for
-   * "has this been said before", and the wrong one for "how does this paper
-   * sit against the thirty already in here" - a question no query answers,
-   * because the model does not know what to ask for until it can see what is
-   * there. Thirty-one papers were written up through the query path and
-   * produced ZERO relations between them; not one was refused, and none was
-   * ever offered, because the Wiki was never in view.
+   * WHY NOT A QUERY. The recall around this is query-driven: a proposed title
+   * and a semantic search return perhaps ten neighbouring Claims. That is the
+   * right tool for "has this been said before", and the wrong one for "how
+   * does this paper sit against the thirty already in here" - because the
+   * model does not know what to ask for until it can see what is there.
+   * Thirty-one papers written up through the query path produced ZERO
+   * relations between them; not one was refused, and none was ever offered.
    *
-   * Titles, concept names and predicates only. A library of a hundred Claims
-   * fits in a few thousand characters this way, and the Claims themselves stay
-   * behind `wiki_get_page` for whichever page turns out to matter.
+   * WHY NOT THE WHOLE WIKI EITHER. The first fix for that was to enumerate
+   * everything - every page, every concept with a 120-character description,
+   * every relation. That is 102 characters per concept, and it is sent again
+   * for every paper written up, so reading a library front to back costs
+   * roughly N squared. Measured on this library's own entries it reaches
+   * ~120k tokens per call at 500 papers and ~376k at 2000, where it stops
+   * being an expense and becomes a functional failure: the response cannot be
+   * sent, so the Wiki cannot be written at all.
+   *
+   * WHAT REPLACES IT. The failure that produced zero relations was not "the
+   * model saw too little", it was "the model had to name what it wanted".
+   * The server does not have that problem: `wiki_record_concepts` is a
+   * precondition of this call and records, for every term, the paper it was
+   * read out of - so by the time we are here the paper's own concept list is
+   * in the database and can seed a recall nobody had to think of.
+   *
+   * The three parts of the old dump have different growth rates and are
+   * handled differently:
+   *
+   *   - PAGES stay complete. They grow per topic, not per paper - a thousand
+   *     papers is still tens of pages - and the page list is the answer to
+   *     "which page does this extend", which is the question the skeleton
+   *     exists for.
+   *   - CONCEPTS become a neighbourhood: what this paper may be duplicating,
+   *     what sits near it in meaning, what is already one relation away, and
+   *     the dozen most-connected hubs as the catch-all for a real link that
+   *     embedding proximity cannot see. Bounded by the paper, not the library.
+   *   - RELATIONS are restricted to that neighbourhood, since a relation
+   *     between two concepts this paper has nothing to do with is not
+   *     something it can extend.
+   *
+   * What is deliberately NOT here is the flat list of every concept name.
+   * Duplicate detection was the reason to keep it, and a vector search does
+   * that job better than a wall of names a model skims: `界面换热系数` and
+   * `界面传热系数` normalize differently and are the same concept, which only
+   * the vectors can see. The cost of that is real and stated in the response:
+   * a link between two genuinely distant fields is not reachable this way,
+   * and `wiki_list_concepts` remains the way to go looking for one.
    */
-  private async wikiSkeleton(libraryID: number): Promise<any> {
-    const [pages, library, relations] = await Promise.all([
-      this.store.listPages(libraryID),
-      this.store.concepts(),
-      this.store.listRelationNames(libraryID),
+  /**
+   * The skeleton, or a note saying it has not changed since the last one.
+   *
+   * `wiki_prepare_update` is called once per paper in a full-text read but
+   * once per answering turn in question-driven reading, and the structure it
+   * returns is usually identical across those turns - several verbatim copies
+   * of the same thing accumulating in one conversation's context. Sending
+   * "unchanged" instead costs a line.
+   *
+   * Keyed per library, and per paper only in the sense that the revision moves
+   * when the Wiki does. That makes the suppression wrong in exactly one case:
+   * a second client, on the same library, that never saw the first copy. It is
+   * made harmless rather than prevented - the response always carries the
+   * revision and says how to get the full thing, and `refreshSkeleton` forces
+   * it unconditionally, so a model that finds itself without the data has a
+   * way out that does not require anyone to have guessed right here.
+   */
+  private async skeletonFor(
+    options: {
+      libraryID: number;
+      itemKey?: string;
+      query: string;
+      refreshSkeleton?: boolean;
+    },
+    proposedPageTitles: string[],
+  ): Promise<any> {
+    const revision = await this.store.wikiRevision(options.libraryID);
+    const key = String(options.libraryID);
+    if (!options.refreshSkeleton && this.skeletonRevisions.get(key) === revision) {
+      return {
+        unchanged: true,
+        revision,
+        note:
+          "Wiki 结构自本次会话上一份骨架以来没有变化，沿用那一份。" +
+          "若你手上没有它，用 refreshSkeleton true 重新获取。",
+      };
+    }
+    const probes = Array.from(
+      new Set(
+        [...proposedPageTitles, options.query]
+          .map((text) => normalizeWikiText(text ?? ""))
+          .filter(Boolean),
+      ),
+    );
+    const skeleton = await this.wikiSkeleton(options.libraryID, {
+      itemKey: options.itemKey,
+      probes,
+    });
+    this.skeletonRevisions.set(key, revision);
+    return { ...skeleton, revision };
+  }
+
+  private async wikiSkeleton(
+    libraryID: number,
+    options: { itemKey?: string; probes: string[] },
+  ): Promise<any> {
+    const warnings: string[] = [];
+    let model = "";
+    const probes: { text: string; vector: Float32Array | null }[] = [];
+    try {
+      const embeddingService = getEmbeddingService();
+      model = embeddingService.getConfig().model;
+      for (const text of options.probes) {
+        probes.push({
+          text,
+          vector: (await embeddingService.embed(text, "auto", true)).embedding,
+        });
+      }
+    } catch (error) {
+      /*
+       * Degrade rather than fail. Without vectors the duplicate check falls
+       * back to exact name and alias matching, which is what it was before
+       * concepts had vectors at all - weaker, but a write-up blocked entirely
+       * because an embedding backend is down would be worse.
+       */
+      warnings.push(
+        `概念向量召回不可用，本次查重只做名称与别名的字面匹配（近义异名可能漏判）：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      for (const text of options.probes) {
+        if (!probes.some((probe) => probe.text === text)) {
+          probes.push({ text, vector: null });
+        }
+      }
+    }
+
+    const seedConceptIds = options.itemKey
+      ? await this.store.conceptIdsForItem(libraryID, options.itemKey)
+      : [];
+    const [pages, neighbourhood, duplicates] = await Promise.all([
+      this.store.listPageTitles(libraryID),
+      this.store.conceptNeighbourhood({
+        libraryID,
+        seedConceptIds,
+        seedVectors: probes
+          .map((probe) => probe.vector)
+          .filter((vector): vector is Float32Array => Boolean(vector)),
+        model,
+        limit: WIKI_SKELETON_NEIGHBOURS,
+        hubLimit: WIKI_SKELETON_HUBS,
+      }),
+      this.store.matchConcepts({ libraryID, probes, model, limit: 5 }),
     ]);
-    const concepts = await library.list(libraryID);
+
+    const describe = (concept: {
+      name: string;
+      type: string;
+      description: string;
+      score?: number;
+    }) => ({
+      name: concept.name,
+      type: concept.type,
+      description: concept.description.slice(0, 120),
+      ...(concept.score ? { score: concept.score } : {}),
+    });
+
     return {
       note:
-        "这是 Wiki 当前的全貌（只有标题、概念名和关系，不含 Claim 正文）。" +
-        "写入前先看它，判断这篇文献是扩展了哪一页、跟哪些概念相关、" +
-        "能不能和已有概念之间建立关系。要展开某一页用 wiki_get_page。",
+        "这不是 Wiki 全量，是以本篇论文为中心召回的邻域——页目录是完整的，" +
+        "概念只给与本篇相关的那些。写入前先看它：本篇该扩展哪一页、" +
+        "哪些概念已经存在（别重复造）、能和哪些概念建立关系。" +
+        "要展开某一页用 wiki_get_page；要在邻域之外找概念用 wiki_list_concepts。",
       pageCount: pages.length,
-      pages: pages.map((page: any) => ({
-        title: page.canonicalTitle ?? page.title,
-        claims: page.claims?.length ?? 0,
+      pages,
+      conceptCount: neighbourhood.conceptCount,
+      duplicateCandidates: duplicates,
+      paperConcepts: neighbourhood.seeds.map((concept) => concept.name),
+      nearbyConcepts: neighbourhood.neighbours.map(describe),
+      relatedConcepts: neighbourhood.related.map(describe),
+      hubConcepts: neighbourhood.hubs.map((concept) => ({
+        ...describe(concept),
+        degree: concept.degree,
       })),
-      conceptCount: concepts.length,
-      concepts: concepts.map((concept: any) => ({
-        name: concept.displayName ?? concept.canonicalName,
-        type: concept.conceptType,
-        description: String(concept.description ?? "").slice(0, 120),
-      })),
-      relationCount: relations.length,
-      relations: relations.map(
-        (relation) =>
-          `${relation.source} --${relation.predicate}--> ${relation.target}`,
-      ),
+      relations: neighbourhood.relations,
+      ...(neighbourhood.pendingVectors
+        ? {
+            recallIncomplete: `${neighbourhood.pendingVectors} 个概念还没有向量，本次邻域召回不完整；后台建完后会自动补上。`,
+          }
+        : {}),
+      ...(warnings.length ? { warnings } : {}),
     };
   }
 
@@ -3122,22 +3292,44 @@ export class WikiService {
   async pumpEmbeddingQueue(
     options: { limit?: number } = {},
   ): Promise<{ processed: number; succeeded: number; failed: number }> {
-    const queue = await this.store.embeddingQueue();
-    return queue.drain(
+    const claims = await this.store.embeddingQueue();
+    const concepts = await this.store.conceptEmbeddingQueue();
+    const claimResult = await claims.drain(
       (unit: WikiEmbeddingWorkUnit) => this.embedQueuedClaim(unit),
       options,
     );
+    const conceptResult = await concepts.drain(
+      (unit: WikiEmbeddingWorkUnit) => this.embedQueuedConcept(unit),
+      options,
+    );
+    return {
+      processed: claimResult.processed + conceptResult.processed,
+      succeeded: claimResult.succeeded + conceptResult.succeeded,
+      failed: claimResult.failed + conceptResult.failed,
+    };
   }
 
   private async embedQueuedClaim(unit: WikiEmbeddingWorkUnit): Promise<void> {
     const embeddingService = getEmbeddingService();
     const embeddingModel = embeddingService.getConfig().model;
-    const embedded = await embeddingService.embed(unit.claimText, "auto", false);
+    const embedded = await embeddingService.embed(unit.text, "auto", false);
     await this.store.saveClaimEmbedding({
-      claimId: unit.claimId,
+      claimId: unit.id,
       vector: embedded.embedding,
       model: embeddingModel,
-      textHash: await hashWikiText(unit.claimText),
+      textHash: await hashWikiText(unit.text),
+    });
+  }
+
+  private async embedQueuedConcept(unit: WikiEmbeddingWorkUnit): Promise<void> {
+    const embeddingService = getEmbeddingService();
+    const embeddingModel = embeddingService.getConfig().model;
+    const embedded = await embeddingService.embed(unit.text, "auto", false);
+    await this.store.saveConceptEmbedding({
+      conceptId: unit.id,
+      vector: embedded.embedding,
+      model: embeddingModel,
+      textHash: await hashWikiText(unit.text),
     });
   }
 
@@ -3196,6 +3388,11 @@ export class WikiService {
         );
       }
     }
+    // "Recheck everything" includes the concept vectors. A concept renamed or
+    // rewritten through a path that does not enqueue leaves a vector that
+    // still describes its old text, and nothing else in the system would ever
+    // notice: recall would keep working and keep being subtly wrong.
+    await this.store.resyncConceptEmbeddings(libraryID);
     const relinker = new WikiEvidenceRelinker(this.store, {
       sourceExists: async (sourceLibraryID, itemKey) => {
         const item = await Zotero.Items.getByLibraryAndKeyAsync(

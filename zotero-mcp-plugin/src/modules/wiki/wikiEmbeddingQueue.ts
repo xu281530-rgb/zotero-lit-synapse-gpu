@@ -17,15 +17,27 @@
  * no code path existed that would ever notice.
  *
  * This queue moves the embedding out of the request. The database transaction
- * is the commit; once it lands the caller is answered. Claims needing a vector
- * are written into `wiki_embedding_queue` inside that same transaction, so the
- * intent to embed is exactly as durable as the claim itself - a crash between
- * the two is impossible. A background drain then works the queue with
- * exponential backoff, and rows survive a Zotero restart because they are
- * rows, not memory.
+ * is the commit; once it lands the caller is answered. Rows needing a vector
+ * are written into the queue inside that same transaction, so the intent to
+ * embed is exactly as durable as the row itself - a crash between the two is
+ * impossible. A background drain then works the queue with exponential
+ * backoff, and rows survive a Zotero restart because they are rows, not
+ * memory.
+ *
+ * TWO KINDS OF ROW go through this, Claims and Concepts, and they share one
+ * implementation rather than two. The backoff schedule, the "exhausted but
+ * not deleted" rule and the re-entrancy guard are subtle enough that a second
+ * copy would drift from this one, and a drift in a retry policy is invisible
+ * until the day the backend is down. What differs between them - which table,
+ * which id column, and how a row's current text is assembled - is the target
+ * descriptor below and nothing else.
  */
 
 import { hashWikiText } from "./wikiCanonicalizer";
+import {
+  CONCEPT_EMBEDDING_COLUMNS,
+  conceptEmbeddingTextFromRow,
+} from "./wikiConceptEmbedding";
 import { rowColumn } from "./wikiRow";
 import type { WikiDatabase } from "./wikiTypes";
 
@@ -42,15 +54,16 @@ const RETRY_BACKOFF_MS = [
 ];
 
 /**
- * Attempts after which a claim stops being retried automatically.
+ * Attempts after which a row stops being retried automatically.
  *
- * It is not deleted: the row stays as the record that this claim still has no
- * vector, so `wiki_status` can report it and a manual reverify can pick it up.
+ * It is not deleted: the row stays as the record that this Claim or Concept
+ * still has no vector, so `wiki_status` can report it and a manual reverify
+ * can pick it up.
  */
 export const MAX_EMBEDDING_ATTEMPTS = RETRY_BACKOFF_MS.length;
 
 export interface WikiEmbeddingQueueRow {
-  claimId: number;
+  id: number;
   textHash: string;
   attempts: number;
   lastError: string;
@@ -59,14 +72,79 @@ export interface WikiEmbeddingQueueRow {
 }
 
 export interface WikiEmbeddingWorkUnit {
-  claimId: number;
-  claimText: string;
+  id: number;
+  text: string;
   attempts: number;
 }
 
-function mapRow(row: any): WikiEmbeddingQueueRow {
+/**
+ * What makes one queue different from another.
+ *
+ * `loadDue` returns the text as it stands NOW rather than the text that was
+ * queued. That is deliberate: a Claim edited between enqueue and drain should
+ * be embedded as it currently reads, and the stored `text_hash` then says
+ * whether the vector still matches the row.
+ */
+export interface WikiEmbeddingTarget {
+  /** Used in log lines; also what `wiki_status` calls these rows. */
+  readonly kind: string;
+  readonly queueTable: string;
+  readonly idColumn: string;
+  loadDue(
+    db: WikiDatabase,
+    now: number,
+    limit: number,
+    maxAttempts: number,
+  ): Promise<WikiEmbeddingWorkUnit[]>;
+}
+
+export const CLAIM_EMBEDDING_TARGET: WikiEmbeddingTarget = {
+  kind: "claim",
+  queueTable: "wiki_embedding_queue",
+  idColumn: "claim_id",
+  async loadDue(db, now, limit, maxAttempts) {
+    const rows = await db.queryAsync(
+      `SELECT q.claim_id AS id, q.attempts AS attempts, c.claim_text AS text
+         FROM wiki_embedding_queue q
+         JOIN wiki_claims c ON c.claim_id = q.claim_id
+        WHERE q.next_attempt_at <= ? AND q.attempts < ?
+        ORDER BY q.next_attempt_at, q.claim_id
+        LIMIT ?`,
+      [now, maxAttempts, limit],
+    );
+    return rows.map((row: any) => ({
+      id: Number(rowColumn(row, "id", "id")),
+      text: String(rowColumn(row, "text", "text") ?? ""),
+      attempts: Number(rowColumn(row, "attempts", "attempts")),
+    }));
+  },
+};
+
+export const CONCEPT_EMBEDDING_TARGET: WikiEmbeddingTarget = {
+  kind: "concept",
+  queueTable: "wiki_concept_embedding_queue",
+  idColumn: "concept_id",
+  async loadDue(db, now, limit, maxAttempts) {
+    const rows = await db.queryAsync(
+      `SELECT q.concept_id AS id, q.attempts AS attempts, ${CONCEPT_EMBEDDING_COLUMNS}
+         FROM wiki_concept_embedding_queue q
+         JOIN wiki_concepts c ON c.concept_id = q.concept_id
+        WHERE q.next_attempt_at <= ? AND q.attempts < ?
+        ORDER BY q.next_attempt_at, q.concept_id
+        LIMIT ?`,
+      [now, maxAttempts, limit],
+    );
+    return rows.map((row: any) => ({
+      id: Number(rowColumn(row, "id", "id")),
+      text: conceptEmbeddingTextFromRow(row),
+      attempts: Number(rowColumn(row, "attempts", "attempts")),
+    }));
+  },
+};
+
+function mapRow(row: any, idColumn: string): WikiEmbeddingQueueRow {
   return {
-    claimId: Number(rowColumn(row, "claim_id", "claimId")),
+    id: Number(rowColumn(row, idColumn, idColumn)),
     textHash: String(rowColumn(row, "text_hash", "textHash")),
     attempts: Number(rowColumn(row, "attempts", "attempts")),
     lastError: String(rowColumn(row, "last_error", "lastError") ?? ""),
@@ -77,92 +155,79 @@ function mapRow(row: any): WikiEmbeddingQueueRow {
 
 export class WikiEmbeddingQueue {
   private readonly db: WikiDatabase;
+  private readonly target: WikiEmbeddingTarget;
   private draining = false;
 
-  constructor(db: WikiDatabase) {
+  constructor(db: WikiDatabase, target: WikiEmbeddingTarget) {
     this.db = db;
+    this.target = target;
+  }
+
+  get kind(): string {
+    return this.target.kind;
   }
 
   /**
-   * Mark a claim as needing a vector.
+   * Mark a row as needing a vector.
    *
-   * Call inside the commit transaction. Re-enqueuing an already queued claim
+   * Call inside the commit transaction. Re-enqueuing an already queued row
    * resets its backoff, which is what a caller re-submitting the same text
    * means.
    */
-  async enqueue(claimId: number, claimText: string): Promise<void> {
+  async enqueue(id: number, text: string): Promise<void> {
     const now = Date.now();
+    const { queueTable, idColumn } = this.target;
     await this.db.queryAsync(
-      `INSERT INTO wiki_embedding_queue
-       (claim_id, text_hash, attempts, last_error, enqueued_at, next_attempt_at)
+      `INSERT INTO ${queueTable}
+       (${idColumn}, text_hash, attempts, last_error, enqueued_at, next_attempt_at)
        VALUES (?, ?, 0, '', ?, ?)
-       ON CONFLICT(claim_id) DO UPDATE SET
+       ON CONFLICT(${idColumn}) DO UPDATE SET
          text_hash = excluded.text_hash,
          attempts = 0,
          last_error = '',
          next_attempt_at = excluded.next_attempt_at`,
-      [claimId, await hashWikiText(claimText), now, now],
+      [id, await hashWikiText(text), now, now],
     );
   }
 
-  async remove(claimId: number): Promise<void> {
+  async remove(id: number): Promise<void> {
     await this.db.queryAsync(
-      "DELETE FROM wiki_embedding_queue WHERE claim_id = ?",
-      [claimId],
+      `DELETE FROM ${this.target.queueTable} WHERE ${this.target.idColumn} = ?`,
+      [id],
     );
   }
 
-  /** Claims still waiting for a vector, whether or not they are due. */
+  /** Rows still waiting for a vector, whether or not they are due. */
   async pendingCount(): Promise<number> {
     return Number(
       (await this.db.valueQueryAsync(
-        "SELECT COUNT(*) FROM wiki_embedding_queue",
+        `SELECT COUNT(*) FROM ${this.target.queueTable}`,
         [],
       )) ?? 0,
     );
   }
 
-  /** Claims that have exhausted their automatic retries. */
+  /** Rows that have exhausted their automatic retries. */
   async exhaustedCount(): Promise<number> {
     return Number(
       (await this.db.valueQueryAsync(
-        "SELECT COUNT(*) FROM wiki_embedding_queue WHERE attempts >= ?",
+        `SELECT COUNT(*) FROM ${this.target.queueTable} WHERE attempts >= ?`,
         [MAX_EMBEDDING_ATTEMPTS],
       )) ?? 0,
     );
   }
 
   async list(limit = 100): Promise<WikiEmbeddingQueueRow[]> {
+    const { queueTable, idColumn } = this.target;
     const rows = await this.db.queryAsync(
-      `SELECT * FROM wiki_embedding_queue ORDER BY next_attempt_at, claim_id LIMIT ?`,
+      `SELECT * FROM ${queueTable} ORDER BY next_attempt_at, ${idColumn} LIMIT ?`,
       [Math.max(1, Math.min(1000, Math.floor(limit)))],
     );
-    return rows.map(mapRow);
-  }
-
-  /** Queued claims whose backoff has elapsed, joined to their current text. */
-  private async due(
-    now: number,
-    limit: number,
-  ): Promise<WikiEmbeddingWorkUnit[]> {
-    const rows = await this.db.queryAsync(
-      `SELECT q.claim_id, q.attempts, c.claim_text
-       FROM wiki_embedding_queue q
-       JOIN wiki_claims c ON c.claim_id = q.claim_id
-       WHERE q.next_attempt_at <= ? AND q.attempts < ?
-       ORDER BY q.next_attempt_at, q.claim_id
-       LIMIT ?`,
-      [now, MAX_EMBEDDING_ATTEMPTS, limit],
-    );
-    return rows.map((row) => ({
-      claimId: Number(rowColumn(row, "claim_id", "claimId")),
-      claimText: String(rowColumn(row, "claim_text", "claimText")),
-      attempts: Number(rowColumn(row, "attempts", "attempts")),
-    }));
+    return rows.map((row: any) => mapRow(row, idColumn));
   }
 
   private async recordFailure(
-    claimId: number,
+    id: number,
     attempts: number,
     error: unknown,
   ): Promise<void> {
@@ -170,14 +235,14 @@ export class WikiEmbeddingQueue {
     const backoff =
       RETRY_BACKOFF_MS[Math.min(next, RETRY_BACKOFF_MS.length - 1)];
     await this.db.queryAsync(
-      `UPDATE wiki_embedding_queue
-       SET attempts = ?, last_error = ?, next_attempt_at = ?
-       WHERE claim_id = ?`,
+      `UPDATE ${this.target.queueTable}
+          SET attempts = ?, last_error = ?, next_attempt_at = ?
+        WHERE ${this.target.idColumn} = ?`,
       [
         next,
         error instanceof Error ? error.message : String(error),
         Date.now() + backoff,
-        claimId,
+        id,
       ],
     );
   }
@@ -186,11 +251,11 @@ export class WikiEmbeddingQueue {
    * Work the queue once.
    *
    * `embedOne` does the embedding and persists it; it throws to signal a
-   * retryable failure. A claim that succeeds leaves the queue, so the queue
-   * being empty is the same statement as "every claim has a current vector".
+   * retryable failure. A row that succeeds leaves the queue, so the queue
+   * being empty is the same statement as "every row has a current vector".
    *
    * Re-entrancy is guarded rather than queued: a second concurrent drain would
-   * embed the same claims twice for no benefit.
+   * embed the same rows twice for no benefit.
    */
   async drain(
     embedOne: (unit: WikiEmbeddingWorkUnit) => Promise<void>,
@@ -200,16 +265,21 @@ export class WikiEmbeddingQueue {
     this.draining = true;
     try {
       const now = options.now ?? Date.now();
-      const units = await this.due(now, options.limit ?? 25);
+      const units = await this.target.loadDue(
+        this.db,
+        now,
+        options.limit ?? 25,
+        MAX_EMBEDDING_ATTEMPTS,
+      );
       let succeeded = 0;
       let failed = 0;
       for (const unit of units) {
         try {
           await embedOne(unit);
-          await this.remove(unit.claimId);
+          await this.remove(unit.id);
           succeeded += 1;
         } catch (error) {
-          await this.recordFailure(unit.claimId, unit.attempts, error);
+          await this.recordFailure(unit.id, unit.attempts, error);
           failed += 1;
         }
       }
@@ -220,7 +290,7 @@ export class WikiEmbeddingQueue {
   }
 
   /**
-   * Reset the backoff on every queued claim so the next drain retries all of
+   * Reset the backoff on every queued row so the next drain retries all of
    * them, including ones that had exhausted their attempts.
    *
    * This is what a user-triggered "retry indexing" means.
@@ -228,11 +298,13 @@ export class WikiEmbeddingQueue {
   async retryAll(): Promise<number> {
     const pending = await this.pendingCount();
     await this.db.queryAsync(
-      `UPDATE wiki_embedding_queue SET attempts = 0, next_attempt_at = ?`,
+      `UPDATE ${this.target.queueTable} SET attempts = 0, next_attempt_at = ?`,
       [Date.now()],
     );
     if (pending) {
-      ztoolkit.log(`[WikiEmbeddingQueue] re-armed ${pending} claim(s)`);
+      ztoolkit.log(
+        `[WikiEmbeddingQueue] re-armed ${pending} ${this.target.kind}(s)`,
+      );
     }
     return pending;
   }

@@ -9,6 +9,7 @@ import type {
   WikiRelationRecord,
 } from "./wikiTypes";
 import type { WikiStore } from "./wikiStore";
+import { cosine, floatVector } from "./wikiVector";
 
 const ONE_HOP_DECAY = 0.72;
 
@@ -28,37 +29,6 @@ function lexicalScore(queryTerms: string[], value: string): number {
   return Math.min(1, matched / queryTerms.length);
 }
 
-function floatVector(blob: unknown, dimensions: number): Float32Array | null {
-  if (!Number.isInteger(dimensions) || dimensions <= 0) return null;
-  const expectedBytes = dimensions * Float32Array.BYTES_PER_ELEMENT;
-  if (blob instanceof Uint8Array) {
-    if (blob.byteLength !== expectedBytes) return null;
-    return new Float32Array(
-      blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength),
-      0,
-      dimensions,
-    );
-  }
-  if (blob instanceof ArrayBuffer) {
-    if (blob.byteLength !== expectedBytes) return null;
-    return new Float32Array(blob, 0, dimensions);
-  }
-  return null;
-}
-
-function cosine(left: Float32Array, right: Float32Array): number {
-  if (left.length !== right.length || !left.length) return 0;
-  let dot = 0;
-  let leftNorm = 0;
-  let rightNorm = 0;
-  for (let index = 0; index < left.length; index += 1) {
-    dot += left[index] * right[index];
-    leftNorm += left[index] * left[index];
-    rightNorm += right[index] * right[index];
-  }
-  if (!leftNorm || !rightNorm) return 0;
-  return Math.max(0, Math.min(1, dot / Math.sqrt(leftNorm * rightNorm)));
-}
 
 export interface WikiClaimSearchResult {
   claimId: number;

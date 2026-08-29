@@ -22,6 +22,14 @@
  */
 
 import { hashWikiText, normalizeWikiName, normalizeWikiText } from "./wikiCanonicalizer";
+import {
+  CONCEPT_EMBEDDING_COLUMNS,
+  conceptEmbeddingTextFromRow,
+} from "./wikiConceptEmbedding";
+import {
+  CONCEPT_EMBEDDING_TARGET,
+  WikiEmbeddingQueue,
+} from "./wikiEmbeddingQueue";
 import { rowColumn } from "./wikiRow";
 import {
   EMPTY_ORIGINS,
@@ -102,8 +110,39 @@ function keyOf(fields: WikiTermFields, part: "zh" | "en"): string {
 export class WikiConceptLibrary {
   private readonly db: WikiDatabase;
 
+  /**
+   * The concept embedding queue.
+   *
+   * Constructed here rather than passed in because the only thing it needs is
+   * this same database handle, and because the alternative - having the store
+   * remember to re-queue after every call into this class - is the kind of
+   * list that is complete on the day it is written and wrong a release later.
+   */
+  private readonly embeddings: WikiEmbeddingQueue;
+
   constructor(db: WikiDatabase) {
     this.db = db;
+    this.embeddings = new WikiEmbeddingQueue(db, CONCEPT_EMBEDDING_TARGET);
+  }
+
+  /**
+   * Mark this concept's vector as owed.
+   *
+   * Called from {@link syncProjection}, which is the single funnel every term
+   * mutation passes through on its way to `canonical_name` and `wiki_aliases`.
+   * Placing it there rather than at each of the nine write paths above is why
+   * a term edited in the UI, a merge, a rename and a paper recording a new
+   * alias all reach the queue without any of them knowing it exists.
+   */
+  private async queueEmbedding(conceptId: number): Promise<void> {
+    const rows = await this.db.queryAsync(
+      `SELECT ${CONCEPT_EMBEDDING_COLUMNS}
+         FROM wiki_concepts c WHERE c.concept_id = ?`,
+      [conceptId],
+    );
+    if (!rows[0]) return;
+    const text = conceptEmbeddingTextFromRow(rows[0]);
+    if (text) await this.embeddings.enqueue(conceptId, text);
   }
 
   // ---- Reading ------------------------------------------------------------
@@ -987,6 +1026,8 @@ export class WikiConceptLibrary {
         [conceptId, entry.name, normalized, entry.source],
       );
     }
+    // The names are now settled, so the vector for the old ones is owed.
+    await this.queueEmbedding(conceptId);
   }
 
   /**

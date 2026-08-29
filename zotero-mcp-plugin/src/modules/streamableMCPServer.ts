@@ -1431,6 +1431,7 @@ Nothing in this server returns a whole document in one response. Every reading t
             query: args.query,
             limit: args.limit,
             proposedPageTitles: this.coerceStringArray(args.proposedPageTitles),
+            refreshSkeleton: args.refreshSkeleton === true,
             wikiReview:
               args.wikiReview && typeof args.wikiReview === 'object'
                 ? args.wikiReview

@@ -8,7 +8,7 @@ import {
 } from "./wikiConceptTerms";
 import { rowColumn } from "./wikiRow";
 
-export const WIKI_SCHEMA_VERSION = 8;
+export const WIKI_SCHEMA_VERSION = 9;
 
 /**
  * Add a column an older database does not have yet.
@@ -231,6 +231,32 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
       updated_at INTEGER NOT NULL
     )
   `);
+  /*
+   * Concepts get vectors of their own, and not as a symmetry with Claims.
+   *
+   * Two jobs needed them. Duplicate detection ran on `normalized_name` and the
+   * alias table, which is exact matching wearing a normaliser: it cannot see
+   * that `界面换热系数` and `界面传热系数` are one concept, so the library grows
+   * a second record for a term it already has and neither copy is wrong enough
+   * to notice. And the write-up's neighbourhood - which existing concepts does
+   * this paper sit next to - had no way to be computed at all, because the
+   * concept graph and the Claim graph do not touch: `wiki_relations` joins
+   * concepts to concepts, `wiki_evidence` joins claims to sources, and there is
+   * no edge between the two, so Claim vectors could not be borrowed as a proxy.
+   *
+   * The same shape as `wiki_claim_embeddings` deliberately, down to the
+   * `text_hash` that says whether the stored vector still matches the row.
+   */
+  await db.queryAsync(`
+    CREATE TABLE IF NOT EXISTS wiki_concept_embeddings (
+      concept_id INTEGER PRIMARY KEY REFERENCES wiki_concepts(concept_id) ON DELETE CASCADE,
+      embedding BLOB NOT NULL,
+      dimensions INTEGER NOT NULL,
+      model TEXT NOT NULL,
+      text_hash TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `);
   await db.queryAsync(`
     CREATE TABLE IF NOT EXISTS wiki_reading_sessions (
       session_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -385,6 +411,16 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
       next_attempt_at INTEGER NOT NULL
     )
   `);
+  await db.queryAsync(`
+    CREATE TABLE IF NOT EXISTS wiki_concept_embedding_queue (
+      concept_id INTEGER PRIMARY KEY REFERENCES wiki_concepts(concept_id) ON DELETE CASCADE,
+      text_hash TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT NOT NULL DEFAULT '',
+      enqueued_at INTEGER NOT NULL,
+      next_attempt_at INTEGER NOT NULL
+    )
+  `);
   // At most one paper may be READ IN FULL per library. A partial unique index
   // makes that the database's rule rather than a check the service could
   // forget: the "start B while A is unfinished" case cannot be written at all.
@@ -444,8 +480,46 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
   await db.queryAsync(
     `CREATE INDEX IF NOT EXISTS idx_wiki_relations_target ON wiki_relations(target_concept_id)`,
   );
+  await db.queryAsync(
+    `CREATE INDEX IF NOT EXISTS idx_wiki_concept_embedding_queue_due
+       ON wiki_concept_embedding_queue(next_attempt_at)`,
+  );
   await backfillConceptTerms(db);
+  await backfillConceptEmbeddingQueue(db);
   await db.queryAsync(`PRAGMA user_version = ${WIKI_SCHEMA_VERSION}`);
+}
+
+/**
+ * Queue every concept that has no current vector.
+ *
+ * Written as a set operation rather than a version-gated migration on purpose.
+ * A migration keyed on `user_version < 9` would run once and be right once;
+ * this is also the repair path for a concept whose embedding attempt was
+ * abandoned, for a library restored from a backup taken mid-drain, and for
+ * every concept that existed before this table did. It costs one query with
+ * two NOT EXISTS on an up-to-date database and inserts nothing.
+ *
+ * `text_hash` goes in empty because at this point nobody has assembled the
+ * concept's text. That is not a gap: the queue's hash is advisory everywhere -
+ * the drain reads the row's CURRENT text and computes the authoritative hash
+ * when it stores the vector, which is what lets a concept edited between
+ * enqueue and drain be embedded as it now reads.
+ */
+async function backfillConceptEmbeddingQueue(db: WikiDatabase): Promise<void> {
+  const now = Date.now();
+  await db.queryAsync(
+    `INSERT OR IGNORE INTO wiki_concept_embedding_queue
+       (concept_id, text_hash, attempts, last_error, enqueued_at, next_attempt_at)
+     SELECT c.concept_id, '', 0, '', ?, ?
+       FROM wiki_concepts c
+      WHERE NOT EXISTS (
+              SELECT 1 FROM wiki_concept_embeddings e
+               WHERE e.concept_id = c.concept_id)
+        AND NOT EXISTS (
+              SELECT 1 FROM wiki_concept_embedding_queue q
+               WHERE q.concept_id = c.concept_id)`,
+    [now, now],
+  );
 }
 
 /**
