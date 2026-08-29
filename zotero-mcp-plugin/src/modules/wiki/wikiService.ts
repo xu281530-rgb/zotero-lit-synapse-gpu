@@ -59,6 +59,8 @@ import {
   WIKI_RECORD_SECTIONS,
   assertBatchChunkCoverage,
   assertMacroIsNotPaste,
+  assertProseIsConnected,
+  splitTemplateSections,
   assertMacroTouchesEveryRecord,
   assertRecordLedgerIntact,
   assertTemplateSections,
@@ -2269,7 +2271,8 @@ export class WikiService {
       });
       assertBlockCitations(summary);
       if (session.mode === "fulltext") {
-        assertTemplateSections(summary, WIKI_MACRO_SECTIONS, "宏观总结");
+        assertTemplateSections(summary, WIKI_MACRO_SECTIONS, "全文总结");
+        assertProseIsConnected(summary, "全文总结");
       }
       assertMacroIsNotPaste(previousBody, summary);
       assertMacroTouchesEveryRecord(
@@ -2337,6 +2340,14 @@ export class WikiService {
         // it just the same.
         if (session.mode === "fulltext") {
           assertTemplateSections(record, WIKI_RECORD_SECTIONS, "阅读记录");
+          // Only the narrative slots. 概念与术语 is a glossary and 本批覆盖 is
+          // an accounting line; both are lists by nature and reading them as
+          // prose would be asking for the wrong thing.
+          const sections = splitTemplateSections(record, WIKI_RECORD_SECTIONS);
+          for (const label of ["方法", "结果与结论"]) {
+            const body = sections.get(label);
+            if (body?.trim()) assertProseIsConnected(body, `阅读记录的「${label}」`);
+          }
         }
         assertBatchChunkCoverage(record, recordChunkIds);
         assertValuesLanded(record, batchChunks, "阅读记录");
@@ -2401,7 +2412,9 @@ export class WikiService {
           "already been given costs nothing against the integration gate."
         : coverage.complete
           ? "Every chunk has been delivered. Do the whole-paper pass now: call wiki_update_reading_note " +
-            "once more with finalSynthesis true and macroSummary. The last page handed the whole note " +
+            "once more with finalSynthesis true and macroSummary. It is written under the heading " +
+            "全文总结, and it is written FROM THE WHOLE PAPER AT ONCE rather than from the last page - " +
+            "that vantage point is the requirement itself. The last page handed the whole note " +
             "back to you: read every reading record together FIRST and work out how they relate - which " +
             "one explains another's mechanism, which corrects an earlier judgement, which are the same " +
             "phenomenon measured under different conditions. That relating is the job. Re-reading any " +
@@ -4188,11 +4201,13 @@ export class WikiService {
         "delivered establish. DISTIL them, do not compress them: the record owes their core reasoning, " +
         "their key data and their conclusions, and someone holding only this record should be able to " +
         "reconstruct what these chunks said.\n" +
-        "用中文写，术语、化学式、数值和单位保留原文形式。五个小节，每个标题单独一行，都不能空：\n" +
-        "  **一句话** —— 通俗、不带术语、一眼看懂这批在讲什么。这是唯一允许压缩的地方，" +
+        "用中文写，术语、化学式、数值和单位保留原文形式。六个小节，每个标题单独一行，都不能空：\n" +
+        "  **阅读总结** —— 本批读到的内容，通俗、连贯地讲清楚。这是唯一允许压缩的地方，" +
         "句末注明本批范围，例如「（chunk 0-7）」：它是跨 chunk 的概括，没有引用会被逐块引用检查拦下。\n" +
-        "  **做了什么** —— 方法、设备、流程、软件；参数落值、带单位、带条件，参数表整表转写。\n" +
-        "  **测到了什么** —— 结果与数据，原样保留；确无结果数据时写「本批无结果数据」。\n" +
+        "  **方法** —— 实验流程、设备、软件、表征手段，以及理论推导路径与模型、判据的建立方式；" +
+        "参数落值、带单位、带条件，参数表整表转写。\n" +
+        "  **结果与结论** —— 测量值、对比、趋势、推导出的关系式、模型输出、作者的判断；" +
+        "不限于实验数据。数值原样保留、带条件；确实没有时写「本批未得出结果或结论」。\n" +
         "  **概念与术语** —— 名称 + 一句定义 + chunk 号；没有写「无」。\n" +
         "  **存疑与未交代** —— 本批说不清、看似矛盾、或推迟到后文的；没有写「无」。\n" +
         "TWO THINGS ARE CHECKED, and both scale with how big a page you asked for. Every chunk on this " +

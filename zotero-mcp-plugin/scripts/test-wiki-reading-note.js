@@ -260,13 +260,13 @@ function noteBody(sections, covered) {
   return [
     "# Two-stage forming of columnar grain arrays",
     "",
-    "**一句话**",
+    "**阅读总结**",
     "Whether an imposed thermal gradient during directional solidification, followed by rapid hot pressing, can fix a columnar grain array without losing its alignment (chunk 0).",
     "",
-    "**做了什么**",
+    "**方法**",
     "A nickel-base superalloy processed on a directional solidification rig instrumented with embedded thermocouples and a pyrometer (chunk 1).",
     "",
-    "**测到了什么**",
+    "**结果与结论**",
     ...sections,
     ...covering(covered),
     "",
@@ -277,7 +277,7 @@ function noteBody(sections, covered) {
     accountFor([...sections, ...covering(covered)].join(" ")),
     "",
     "**存疑与未交代**",
-    "Findings are established for one alloy and one rig geometry; transfer to other section thicknesses is not demonstrated in this paper (chunk 1).",
+    "Findings are established for one alloy and one rig geometry; transfer to other section thicknesses is not demonstrated in this paper (chunk 1). No comparison rig was run (chunk 0).",
   ].join("\n");
 }
 
@@ -285,10 +285,10 @@ function noteBody(sections, covered) {
 function macroBody(sections) {
   return [
     "## 本篇讲了什么",
-    "Whether an imposed thermal gradient during directional solidification, followed by rapid hot pressing, can fix a columnar grain array without losing its alignment (chunk 0).",
+    "Whether an imposed thermal gradient during directional solidification, followed by rapid hot pressing, can fix a columnar grain array without losing its alignment (chunk 0). The paper answers it by reading the traverse station by station (chunk 1).",
     "",
     "## 研究对象与材料",
-    "A nickel-base superalloy processed on a directional solidification rig instrumented with embedded thermocouples and a pyrometer (chunk 1).",
+    "A nickel-base superalloy processed on a directional solidification rig instrumented with embedded thermocouples and a pyrometer (chunk 1). The same rig supplies every station reading discussed below (chunk 0).",
     "",
     "## 核心方法",
     // The summary must CITE something from every substantive record, and this
@@ -296,16 +296,16 @@ function macroBody(sections) {
     // reaching them is what a summary does when it accounts for the whole
     // traverse rather than only its endpoints - and it costs nothing against
     // the paste rule, because it is worded as a summary, not copied.
-    "Stations through the middle of the traverse were read as one continuous series (chunk 16).",
+    "Stations through the middle of the traverse were read as one continuous series (chunk 16). The endpoints are therefore only part of the evidence for the trend (chunk 0).",
     "",
     "## 主要结果",
     ...sections,
     "",
     "## 机理解释",
-    "夹具未给出机理。",
+    "夹具未给出机理，因果链留待原文补充（chunk 1）。可以确定的只有站位之间的先后关系（chunk 0）。",
     "",
     "## 结论",
-    "夹具未给出结论。",
+    "夹具未给出结论，这一节不作断言（chunk 1）。贡献部分同样留空（chunk 0）。",
     "",
     "## 边界与局限",
     "Findings are established for one alloy and one rig geometry; transfer to other section thicknesses is not demonstrated in this paper (chunk 1).",

@@ -41,6 +41,7 @@
  */
 
 import { normalizeWikiText } from "./wikiCanonicalizer";
+import { splitNoteBlocks, splitSentences } from "./wikiSynthesisAudit";
 
 /**
  * Every measured value a chunk carries has to reach the record. All of them,
@@ -92,19 +93,26 @@ export interface WikiTemplateSection {
  */
 export const WIKI_RECORD_SECTIONS: readonly WikiTemplateSection[] = [
   {
-    label: "一句话",
+    label: "阅读总结",
     hint:
-      "通俗、不带术语、让人一眼看懂这批 chunk 在讲什么。这是唯一允许压缩的地方。" +
+      "本批读到的内容，通俗、连贯地讲清楚，让人一眼看懂这批在说什么。这是唯一允许压缩的地方。" +
       "句末注明本批范围，例如「（chunk 0-7）」——这一栏按定义就是跨 chunk 的概括，" +
       "而概括性段落恰恰是最需要留下溯源线索的那种。",
   },
   {
-    label: "做了什么",
-    hint: "方法、设备、流程、软件。参数必须落值、带单位、带条件；工艺参数表整表转写。",
+    label: "方法",
+    hint:
+      "本批涉及的做法：实验流程、设备、软件、表征手段、理论推导路径、模型与判据的建立方式——" +
+      "理论文章的推导过程同样是方法。参数落值、带单位、带条件；工艺参数表整表转写。" +
+      "写成连贯段落，不要一个 chunk 一行。",
   },
   {
-    label: "测到了什么",
-    hint: "结果与数据，原样保留：测量值、对比组、体积分数、性能指标。本批确无结果数据时写明「本批无结果数据」。",
+    label: "结果与结论",
+    hint:
+      "本批得出的东西：测量值、对比、趋势、推导出的关系式、模型输出、作者下的判断。" +
+      "不限于实验数据——理论推导得到的表达式、模拟给出的曲线、文献对比的结论都算。" +
+      "数值原样保留、带条件。本批确实什么都没得出时写明「本批未得出结果或结论」。" +
+      "写成连贯段落，不要一个 chunk 一行。",
   },
   {
     label: "概念与术语",
@@ -761,5 +769,75 @@ export function assertRecordLedgerIntact(
       "请先确认这篇文献的笔记附件（`Wiki Reading Note (…)`）是不是被删除或替换过。" +
       "丢掉的正文无法从数据库恢复——只能用 wiki_finish_reading 以 outcome \"failed\" 关闭这次阅读，" +
       "然后重新读一遍。",
+  );
+}
+
+/** Below this many prose blocks, "is it a list" is not a fair question. */
+export const WIKI_CONNECTED_MIN_BLOCKS = 5;
+
+/** Above this share of one-sentence blocks, it is a list, not an account. */
+export const WIKI_CONNECTED_SINGLETON_RATIO = 0.75;
+
+/**
+ * Refuse an account written as one fact per line.
+ *
+ * What a finished reading kept coming back as:
+ *
+ *   施加压力使相变吉布斯自由能差 ΔG_v 发生改变（chunk 46）。
+ *   在 100 MPa 下计算得到平衡熔化温度变化量 ΔTm 约为 10.8 K（chunk 49）。
+ *   加压改变了形核激活能与临界晶核半径（chunk 53）。
+ *   在 100 MPa 压力下溶质扩散系数比值为 0.85（chunk 54）。
+ *
+ * Forty-three lines, every one a single sentence citing a single chunk, in
+ * ascending chunk order, with not one connective between them. Every fact is
+ * there and nothing is related to anything: it is the index with sentences
+ * where the page numbers were.
+ *
+ * The shape is not laziness, it is the cheapest thing the surrounding rules
+ * allow. `multi-chunk-fusion` flags a SENTENCE citing several chunks and its
+ * own message offers "or split the sentence" as the cheap way out, so a
+ * sentence that joins two findings costs a verbatim quotation per chunk while
+ * one fact per line costs nothing. Nothing then asked for the joining, so
+ * nothing was joined.
+ *
+ * This asks for it, in the only form that cannot collide with that audit:
+ * sentences stay one-chunk-per-sentence and get put in the same PARAGRAPH.
+ * Each sentence keeps its own citation - which is also what keeps a paragraph
+ * safe, since a sentence with no citation of its own inherits the whole
+ * block's and is then read as a cross-chunk assertion.
+ *
+ * Tables and headings are not prose and are not counted, so a results table
+ * stays the right way to carry a column of measurements.
+ *
+ * @throws WikiRecordTemplateError
+ */
+export function assertProseIsConnected(text: string, what: string): void {
+  const blocks = splitNoteBlocks(String(text ?? "")).filter(
+    (block) => block.prose,
+  );
+  if (blocks.length < WIKI_CONNECTED_MIN_BLOCKS) return;
+  const singletons = blocks.filter(
+    (block) => splitSentences(block.text).length <= 1,
+  );
+  const ratio = singletons.length / blocks.length;
+  if (ratio < WIKI_CONNECTED_SINGLETON_RATIO) return;
+  throw new WikiRecordTemplateError(
+    `${what}是 ${blocks.length} 段、其中 ${singletons.length} 段只有一句话` +
+      `（${Math.round(ratio * 100)}%），这是一份清单，不是一段论述，未写入。\n\n` +
+      "把彼此相关的句子放进同一个自然段，用因果和转折把它们连起来——" +
+      "哪一条是另一条的机理、哪一条是同一现象在不同条件下的测量、" +
+      "哪一条限制了前一条的适用范围。事实一个都不要少，改的是它们之间有没有关系。\n\n" +
+      "**每一句仍然各自引用自己的 chunk**，这一点不变，而且正是它让整段是安全的：" +
+      "段落里某一句如果没有自己的引用，它会继承整段的全部引用，" +
+      "然后被夸大审计当成跨 chunk 的推断而拦下。所以是「一句一引用、多句一段」，" +
+      "不是「一句一行」。\n\n" +
+      "示例——把\n" +
+      "  加压改变了形核激活能与临界晶核半径（chunk 53）。\n" +
+      "  在 100 MPa 压力下溶质扩散系数比值为 0.85（chunk 54）。\n" +
+      "改成\n" +
+      "  加压抬高了相变自由能差，形核激活能与临界晶核半径随之下降（chunk 53）；" +
+      "与此同时溶质扩散被压制，100 MPa 下扩散系数只剩常压的 0.85 倍（chunk 54），" +
+      "于是形核变快而长大变慢，两条路径把晶粒推向细小等轴（chunk 69）。\n\n" +
+      "纯数据可以用 Markdown 表格承载，表格不算作段落，也不受这条检查约束。",
   );
 }

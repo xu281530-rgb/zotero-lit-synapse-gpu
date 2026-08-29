@@ -190,7 +190,30 @@ export function formatChunkRanges(indexes: readonly number[]): string {
 }
 
 export const WIKI_READING_RECORDS_HEADING = "## 阅读记录";
-export const WIKI_MACRO_SUMMARY_HEADING = "## 宏观总结";
+
+/**
+ * The heading written for the whole-paper pass.
+ *
+ * Renamed from 宏观总结. "Macro" was describing the VANTAGE POINT the model
+ * has to write from - the whole paper at once, rather than the page in front
+ * of it - and a heading is the wrong place to keep an instruction: it ended
+ * up read as a genre, and produced summaries pitched at a height where no
+ * detail survives. The instruction now lives in the guidance, where it can be
+ * said properly, and the heading just names the section.
+ */
+export const WIKI_MACRO_SUMMARY_HEADING = "## 全文总结";
+
+/**
+ * Every heading that has ever meant "the whole-paper pass", newest first.
+ *
+ * Notes already on disk carry the old one. Parsing has to keep recognising it
+ * or a resumed reading would treat a finished summary as part of the records
+ * and append a second one beside it.
+ */
+export const WIKI_MACRO_SUMMARY_HEADINGS: readonly string[] = [
+  WIKI_MACRO_SUMMARY_HEADING,
+  "## 宏观总结",
+];
 
 export interface WikiReadingRecord {
   number: number;
@@ -256,10 +279,13 @@ export function parseAppendOnlyReadingNote(
   const legacyBody = legacyPrefix.replace(/\n\s*-{3,}\s*$/u, "").trimEnd();
   const afterRecordsHeading =
     recordsStart + WIKI_READING_RECORDS_HEADING.length;
-  const summaryRelative = sectionStart(
-    text.slice(afterRecordsHeading),
-    WIKI_MACRO_SUMMARY_HEADING,
-  );
+  const afterRecords = text.slice(afterRecordsHeading);
+  const summaryMatch = WIKI_MACRO_SUMMARY_HEADINGS.map((heading) => ({
+    heading,
+    at: sectionStart(afterRecords, heading),
+  })).find((candidate) => candidate.at !== -1);
+  const summaryRelative = summaryMatch?.at ?? -1;
+  const summaryHeading = summaryMatch?.heading ?? WIKI_MACRO_SUMMARY_HEADING;
   const summaryStart =
     summaryRelative === -1 ? -1 : afterRecordsHeading + summaryRelative;
   const recordsText = text.slice(
@@ -287,7 +313,7 @@ export function parseAppendOnlyReadingNote(
   const macroSummary =
     summaryStart === -1
       ? null
-      : text.slice(summaryStart + WIKI_MACRO_SUMMARY_HEADING.length).trim();
+      : text.slice(summaryStart + summaryHeading.length).trim();
   return { legacyBody, records, macroSummary, appendOnly: true };
 }
 
@@ -296,7 +322,9 @@ function assertAppendPayload(content: string, kind: string): string {
   if (!clean) throw new Error(`${kind} is required and cannot be empty.`);
   if (
     sectionStart(clean, WIKI_READING_RECORDS_HEADING) !== -1 ||
-    sectionStart(clean, WIKI_MACRO_SUMMARY_HEADING) !== -1 ||
+    WIKI_MACRO_SUMMARY_HEADINGS.some(
+      (heading) => sectionStart(clean, heading) !== -1,
+    ) ||
     /^###\s+第\s*\d+\s*次\s*·/mu.test(clean)
   ) {
     throw new Error(

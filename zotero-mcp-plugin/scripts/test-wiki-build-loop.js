@@ -155,13 +155,13 @@ const count = (sql, ...p) => Number(sqlite.prepare(sql).get(...p).n);
  */
 function templated(body) {
   return [
-    "**一句话**",
+    "**阅读总结**",
     "本批讲的是定向凝固。",
     "",
-    "**做了什么**",
+    "**方法**",
     body,
     "",
-    "**测到了什么**",
+    "**结果与结论**",
     "本批无结果数据。",
     "",
     "**概念与术语**",
@@ -243,35 +243,40 @@ function summaryForPaper(itemKey) {
   const pages = (pagesByItem.get(itemKey) ?? []).filter(
     (page) => page.chunks.length > 0,
   );
+  // ONE paragraph, several sentences, each with its own citation. That is the
+  // shape the connectedness check asks for, and joining them is what turns a
+  // summary from a list of the pages it was read from into an account.
   const method = pages.length
     ? pages
         .map(
-          (page) =>
-            `论文以定向凝固站位序列作为核心研究方法（${citationFor(page)}）。`,
+          (page, index) =>
+            (index === 0
+              ? "论文以定向凝固站位序列作为核心研究方法"
+              : "同一序列继续向后展开") + `（${citationFor(page)}）。`,
         )
-        .join("\n\n")
-    : "夹具未给出方法细节。";
+        .join("")
+    : "夹具未给出方法细节，方法来源因此不明。";
   return [
     "## 本篇讲了什么",
-    "这篇论文讨论定向凝固。",
+    "这篇论文讨论定向凝固，关注站位序列上的组织演变。因此它的结论也按站位顺序给出。",
     "",
     "## 研究对象与材料",
-    "合成夹具，未给出材料牌号。",
+    "合成夹具，未给出材料牌号，所以材料特征无从判断。样品范围同样只能按站位编号描述。",
     "",
     "## 核心方法",
     method,
     "",
     "## 主要结果",
-    "夹具未给出结果数据。",
+    "夹具未给出结果数据，因此没有可比较的测量值。趋势只能从站位序列本身推断。",
     "",
     "## 机理解释",
-    "夹具未给出机理。",
+    "夹具未给出机理，因果链留待原文补充。可以确定的只有站位之间的先后关系。",
     "",
     "## 结论",
-    "夹具未给出结论。",
+    "夹具未给出结论，因此这一节不作断言。贡献部分同样只能留空。",
     "",
     "## 边界与局限",
-    "作者未讨论。",
+    "作者未讨论适用范围，也没有给出对照。因此边界只能视为未知。",
   ].join("\n");
 }
 

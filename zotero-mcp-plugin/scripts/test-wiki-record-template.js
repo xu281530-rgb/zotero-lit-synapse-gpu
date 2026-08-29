@@ -31,6 +31,7 @@ const {
   assertValuesLanded,
   assertUnchangedCarriesNothingNew,
   assertMacroIsNotPaste,
+  assertProseIsConnected,
   expandedCitedChunkIds,
   measurementValues,
   normalizeMeasurementText,
@@ -159,7 +160,7 @@ check("REAL FAILURE 1: the composition table written as a list of elements", () 
 
 check("transcribing both tables passes", () => {
   assertValuesLanded(
-    `**做了什么**
+    `**方法**
 浇注温度 690 °C，初始模温 180 °C，保压时间 130 s，充填速度 20 mm/s；
 压力取 0.1 (atm)、25、50、75、100、125 MPa，对应模拟冷却速率 1.58、1.67、1.76、1.83、1.90、1.91 K/s（chunk 19）。
 成分 Al-8.5Zn-2Mg-2Cu：Zn 8.56、Mg 1.96、Cu 2.07、Si 0.135、Fe 0.174、Ti 0.149、Mn 0.175 wt%，余量 Al（chunk 19）。`,
@@ -265,8 +266,8 @@ check("a record missing sections is refused, and told which", () => {
   const error = refuses(
     () => assertTemplateSections("随便写了一段（chunk 3）。", WIKI_RECORD_SECTIONS, "阅读记录"),
     "阅读记录不符合模板",
-    "**一句话**",
-    "**测到了什么**",
+    "**阅读总结**",
+    "**结果与结论**",
   );
   assert.ok(error.message.includes("存疑与未交代"));
 });
@@ -276,11 +277,11 @@ check("an empty section is refused as loudly as a missing one", () => {
     () =>
       assertTemplateSections(
         [
-          "**一句话**",
+          "**阅读总结**",
           "本批介绍挤压铸造工艺（chunk 13）。",
-          "**做了什么**",
+          "**方法**",
           "1800 吨压铸机，H13 钢模（chunk 13）。",
-          "**测到了什么**",
+          "**结果与结论**",
           "",
           "**概念与术语**",
           "挤压铸造：高压下凝固的近净成形工艺（chunk 13）。",
@@ -293,18 +294,18 @@ check("an empty section is refused as loudly as a missing one", () => {
         "阅读记录",
       ),
     "小节存在但为空",
-    "测到了什么",
+    "结果与结论",
   );
 });
 
 check("the full five-section record passes", () => {
   assertTemplateSections(
     [
-      "**一句话**",
+      "**阅读总结**",
       "本批交代了怎么做的实验：设备、压力范围和热处理制度（chunk 13-19）。",
-      "**做了什么**",
+      "**方法**",
       "1800 吨压铸机配 H13 钢模，压力 0.1–125 MPa（chunk 18）。",
-      "**测到了什么**",
+      "**结果与结论**",
       "本批无结果数据（chunk 13-19）。",
       "**概念与术语**",
       "挤压铸造 —— 高压下凝固的近净成形铸造工艺（chunk 13）。",
@@ -488,6 +489,78 @@ check("records carried over from an earlier reading never trip it", () => {
   // A note accumulates across sessions; the ledger counts one session. More
   // records than integrations is the normal shape, not a fault.
   assertRecordLedgerIntact(14, 3);
+});
+
+// ------------------------------------------------- one fact per line is a list
+
+/**
+ * The shape a finished summary kept coming back as: forty-three lines, each a
+ * single sentence citing a single chunk, in ascending chunk order, with not
+ * one connective between them. Every fact present, nothing related to
+ * anything.
+ */
+check("REAL FAILURE: a summary written as one fact per line is refused", () => {
+  const pile = [
+    "施加压力使相变吉布斯自由能差发生改变（chunk 46）。",
+    "",
+    "在 100 MPa 下平衡熔化温度变化量约为 10.8 K（chunk 49）。",
+    "",
+    "加压改变了形核激活能与临界晶核半径（chunk 53）。",
+    "",
+    "在 100 MPa 压力下溶质扩散系数比值为 0.85（chunk 54）。",
+    "",
+    "成分过冷区域受限使得枝晶突出受阻（chunk 69）。",
+    "",
+    "溶质抑制形核区调控最终晶粒尺寸（chunk 71）。",
+  ].join(String.fromCharCode(10));
+  refuses(
+    () => assertProseIsConnected(pile, "全文总结"),
+    "这是一份清单，不是一段论述",
+    "每一句仍然各自引用自己的 chunk",
+  );
+});
+
+check("the same facts joined into paragraphs pass", () => {
+  const joined = [
+    "加压抬高了相变自由能差，形核激活能与临界晶核半径随之下降（chunk 53）；" +
+      "在 100 MPa 下平衡熔化温度上移约 10.8 K，这正是驱动力增大的来源（chunk 49）。" +
+      "自由能差本身随压力的变化则由状态方程给出（chunk 46）。",
+    "",
+    "与形核加快并行的是长大被压制：100 MPa 下溶质扩散系数只剩常压的 0.85 倍（chunk 54），" +
+      "成分过冷区因此收窄而枝晶突起受阻（chunk 69）。" +
+      "两条路径最终由溶质抑制形核区的宽度共同决定晶粒尺寸（chunk 71）。",
+  ].join(String.fromCharCode(10));
+  assertProseIsConnected(joined, "全文总结");
+});
+
+check("a short section is not accused of being a list", () => {
+  assertProseIsConnected("本批未得出结果或结论（chunk 3）。", "阅读记录的「结果与结论」");
+});
+
+check("a Markdown table is data, not a pile of one-line paragraphs", () => {
+  const table = [
+    "各压力下的实测强度如下（chunk 36）：",
+    "",
+    "| 压力 | 抗拉强度 | 屈服强度 | 延伸率 |",
+    "| --- | --- | --- | --- |",
+    "| 0.1 MPa | 428 MPa | 427 MPa | 屈服前断裂 |",
+    "| 50 MPa | 473 MPa | 452 MPa | 1% |",
+    "| 125 MPa | 538 MPa | 476 MPa | 4% |",
+  ].join(String.fromCharCode(10));
+  assertProseIsConnected(table, "阅读记录的「结果与结论」");
+});
+
+check("the record template now names the slots the reader asked for", () => {
+  assert.deepEqual(
+    WIKI_RECORD_SECTIONS.map((section) => section.label),
+    ["阅读总结", "方法", "结果与结论", "概念与术语", "本批覆盖", "存疑与未交代"],
+  );
+  const results = WIKI_RECORD_SECTIONS.find((s) => s.label === "结果与结论");
+  assert.match(
+    results.hint,
+    /不限于实验数据/u,
+    "the slot has to say it is not only for papers with experiments",
+  );
 });
 
 console.log(`wiki record template: ${passed} check(s) passed`);
