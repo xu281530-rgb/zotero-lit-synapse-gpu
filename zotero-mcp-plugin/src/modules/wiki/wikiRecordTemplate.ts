@@ -811,10 +811,44 @@ export const WIKI_CONNECTED_SINGLETON_RATIO = 0.75;
  *
  * @throws WikiRecordTemplateError
  */
+/** `1. `, `2) `, `- `, `* ` at the head of a line: an enumerated point. */
+const LIST_MARKER = /^\s{0,8}(?:[-*+]|\d{1,3}[.)])\s+/u;
+
 export function assertProseIsConnected(text: string, what: string): void {
   const blocks = splitNoteBlocks(String(text ?? "")).filter(
     (block) => block.prose,
   );
+  /*
+   * No enumerated points in a narrative section.
+   *
+   * Refusing "one fact per line" moved the shape rather than fixing it: the
+   * next reading came back as numbered points, two or three sentences each,
+   * which satisfies a sentences-per-paragraph rule exactly while still being
+   * an enumeration - 96% of the note's lines began with "1." or "2.". A
+   * threshold gets optimised against; a plain prohibition does not, and this
+   * one is unambiguous to comply with.
+   *
+   * The sections that ARE lists - the glossary, the chunk accounting - never
+   * reach this function. A Markdown table is not a list marker, so a column
+   * of measurements is still the right way to carry data.
+   */
+  const listed = blocks.filter((block) => LIST_MARKER.test(block.text));
+  if (listed.length) {
+    const shown = listed
+      .slice(0, 4)
+      .map((block) => `  行 ${block.line}: ${block.text.slice(0, 44)}…`);
+    throw new WikiRecordTemplateError(
+      `${what}用分点罗列写成（${listed.length} 处），未写入。\n\n` +
+        shown.join("\n") +
+        "\n\n这一栏要的是连贯论述，不是要点清单。把编号和项目符号去掉，" +
+        "让句子按论证顺序接续下来：先说清楚做了什么或发现了什么，" +
+        "再说它为什么成立、跟前一句是什么关系、又限制了什么。\n" +
+        "分点会把这些关系省掉——每一点自成一句，读者得自己去猜它们怎么连在一起，" +
+        "而那个连接恰恰是这一栏唯一比原文多出来的东西。\n\n" +
+        "每一句仍然各自引用自己的 chunk，这一点不变。" +
+        "纯数据可以放进 Markdown 表格，表格不算分点，也不受这条约束。",
+    );
+  }
   if (blocks.length < WIKI_CONNECTED_MIN_BLOCKS) return;
   const singletons = blocks.filter(
     (block) => splitSentences(block.text).length <= 1,

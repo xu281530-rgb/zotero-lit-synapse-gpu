@@ -1891,7 +1891,7 @@ block("paging walks the unread chunks, wherever the holes are", async () => {
         libraryID: 1,
         itemKey: "HOLEPAPR",
         readingRecord: templated(
-          "- Chunk 3 discusses melt-pool depth at its station (chunk 3).",
+          "Chunk 3 discusses melt-pool depth at its station (chunk 3).",
         ),
       }),
     /cannot resolve|not been delivered/iu,
@@ -1902,7 +1902,7 @@ block("paging walks the unread chunks, wherever the holes are", async () => {
     libraryID: 1,
     itemKey: "HOLEPAPR",
     readingRecord: templated(
-      "- The earlier holes report melt-pool depth under imposed gradients (chunk 0、2、4、5).",
+      "The earlier holes report melt-pool depth under imposed gradients (chunk 0、2、4、5).",
     ),
   });
   const records = parseAppendOnlyReadingNote(

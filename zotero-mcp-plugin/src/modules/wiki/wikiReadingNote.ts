@@ -320,13 +320,24 @@ export function parseAppendOnlyReadingNote(
 function assertAppendPayload(content: string, kind: string): string {
   const clean = String(content ?? "").trim();
   if (!clean) throw new Error(`${kind} is required and cannot be empty.`);
-  if (
-    sectionStart(clean, WIKI_READING_RECORDS_HEADING) !== -1 ||
-    WIKI_MACRO_SUMMARY_HEADINGS.some(
-      (heading) => sectionStart(clean, heading) !== -1,
-    ) ||
-    /^###\s+第\s*\d+\s*次\s*·/mu.test(clean)
-  ) {
+  /*
+   * The server writes the section heading; the model writes what goes under
+   * it. Matched by TITLE rather than by exact line, because a summary came
+   * back opening with `# 全文总结` under the server's own `## 全文总结` - one
+   * hash short of the string this used to compare against, so it slipped
+   * through and the note carried the title twice.
+   */
+  const ownedTitles = [
+    WIKI_READING_RECORDS_HEADING,
+    ...WIKI_MACRO_SUMMARY_HEADINGS,
+  ].map((heading) => heading.replace(/^#+\s*/u, ""));
+  const repeatsOwnedTitle = clean
+    .split(/\r?\n/u)
+    .some((line) => {
+      const heading = /^\s{0,3}#{1,6}\s+(.*\S)\s*$/u.exec(line);
+      return heading ? ownedTitles.includes(heading[1].trim()) : false;
+    });
+  if (repeatsOwnedTitle || /^###\s+第\s*\d+\s*次\s*·/mu.test(clean)) {
     throw new Error(
       `${kind} contains a server-owned reading-note heading. Send only this turn's content; ` +
         "the server numbers records and writes the section structure.",

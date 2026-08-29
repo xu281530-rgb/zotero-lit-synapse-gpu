@@ -55,7 +55,19 @@ export function isFalseSentenceEnd(before: string, after: string): boolean {
   // A stop with no space after it is inside a token, not between sentences.
   if (!/^\s|^$/u.test(after)) return true;
   if (ABBREVIATION.test(trimmed)) return true;
-  // A decimal the OCR opened a gap in, and a numbered list marker.
+  /*
+   * A bare number and a stop, with nothing in front of it, is the marker of
+   * an ordered list - "1. 断口表征方法：…" - and counting it as a sentence
+   * made every list item look like two.
+   *
+   * That was not cosmetic. A check meant to refuse "one fact per line"
+   * measures sentences per paragraph, and with the marker counted, a numbered
+   * item of one sentence scored two: the check passed a whole note in which
+   * 96% of the lines were enumerated points. The rule that catches lists was
+   * blind to the one punctuation mark that makes a list.
+   */
+  if (/^\d{1,3}\.$/u.test(trimmed)) return true;
+  // A decimal the OCR opened a gap in.
   if (/\d\.$/u.test(trimmed) && /^\s*\d/u.test(after)) return true;
   return false;
 }

@@ -37,6 +37,10 @@ const {
   normalizeMeasurementText,
 } = await import("../src/modules/wiki/wikiRecordTemplate.ts");
 
+const { splitSentences } = await import(
+  "../src/modules/wiki/wikiSynthesisAudit.ts",
+);
+
 let passed = 0;
 const check = (name, fn) => {
   try {
@@ -561,6 +565,55 @@ check("the record template now names the slots the reader asked for", () => {
     /不限于实验数据/u,
     "the slot has to say it is not only for papers with experiments",
   );
+});
+
+/**
+ * The shape the pile turned into once "one fact per line" was refused:
+ * numbered points, two or three sentences each, which satisfies a
+ * sentences-per-paragraph rule exactly while still being an enumeration.
+ * 96% of a real note's lines began with a marker.
+ */
+check("REAL FAILURE: numbered points are refused even when each is a paragraph", () => {
+  const points = [
+    "1. 断口表征方法：观察 0.1 MPa 下 T6 态拉伸断口形貌（chunk 41）。缩孔直径约 35–55 µm（chunk 41）。",
+    "2. 热力学驱动力建模：基于状态方程建立自由能差公式（chunk 46）。单位体积形式见公式 5（chunk 47）。",
+    "3. 平衡熔点计算：基于 Clapeyron 方程给出熔点随压力的变化（chunk 49）。100 MPa 下升高约 10.8 K（chunk 49）。",
+  ].join(String.fromCharCode(10));
+  refuses(
+    () => assertProseIsConnected(points, "阅读记录的「方法」"),
+    "用分点罗列写成",
+    "这一栏要的是连贯论述",
+  );
+});
+
+check("a list marker is not a sentence, so a one-sentence point is caught too", () => {
+  // The marker used to count as its own sentence, which made every numbered
+  // item look like two and left the single-sentence rule unable to fire.
+  assert.equal(
+    splitSentences("1. 断口表征方法：观察断口形貌（chunk 41）。").length,
+    1,
+  );
+});
+
+check("the same content as flowing prose passes", () => {
+  const prose =
+    "断口表征从常压试样开始：0.1 MPa 下断口呈沿晶脆性形貌，近断口处可见 35–55 µm 的粗大缩孔（chunk 41）。" +
+    "压力升到 125 MPa 后这些缩孔缩到 7 µm 以下，断口转为韧窝主导（chunk 43）。" +
+    "为解释这一转变，作者基于状态方程建立了相变自由能差的表达式（chunk 46），" +
+    "并以 Clapeyron 方程给出平衡熔点随压力的抬升——100 MPa 下约 10.8 K（chunk 49）。";
+  assertProseIsConnected(prose, "阅读记录的「方法」");
+});
+
+check("a Markdown table is data, not an enumeration", () => {
+  const table = [
+    "各压力下的实测强度如下（chunk 36）：",
+    "",
+    "| 压力 | 抗拉强度 | 延伸率 |",
+    "| --- | --- | --- |",
+    "| 0.1 MPa | 428 MPa | 屈服前断裂 |",
+    "| 125 MPa | 538 MPa | 4% |",
+  ].join(String.fromCharCode(10));
+  assertProseIsConnected(table, "阅读记录的「结果与结论」");
 });
 
 console.log(`wiki record template: ${passed} check(s) passed`);
