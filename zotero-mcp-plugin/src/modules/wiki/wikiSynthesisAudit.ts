@@ -711,6 +711,56 @@ export function chunkIntroducesAcronym(token: string, chunkText: string): boolea
   return false;
 }
 
+/**
+ * Does this sentence ATTRIBUTE its chunks, or pile them behind one assertion?
+ *
+ * The fusion rule exists for one shape: two facts welded into a relationship
+ * neither source states, which is written as a single assertion with the
+ * citations gathered at the end - "A and B jointly cause C (chunk 46, chunk
+ * 53)". Neither chunk carries that on its own, so each is asked to prove it.
+ *
+ * It was firing on a different shape as well, and that shape is the one every
+ * instruction in this system has been asking for:
+ *
+ *     加压抬高了相变自由能差（chunk 46），因而形核激活能随之下降（chunk 53）。
+ *
+ * Each clause names its own source. Nothing is claimed that is not attributed;
+ * the sentence relates two findings without asserting anything beyond them.
+ * Refusing it made connected prose cost a verbatim quotation per chunk while
+ * one fact per line cost nothing - so notes came back as one fact per line,
+ * round after round, and every formatting rule added to stop that was
+ * arguing with an incentive rather than removing it.
+ *
+ * The distinction is where the citations SIT. Separated by a clause boundary,
+ * they attribute their own clauses. Adjacent, with no boundary between them,
+ * they are trailing one assertion, and that is the shape worth proving.
+ */
+export function citationsAreDistributed(sentence: string): boolean {
+  const text = String(sentence ?? "").replace(REFERENCE_BRACKET, " ");
+  const spots: Array<{ start: number; end: number }> = [];
+  for (const match of text.matchAll(CHUNK_REFERENCE)) {
+    if (match.index === undefined) continue;
+    spots.push({ start: match.index, end: match.index + match[0].length });
+  }
+  if (spots.length < 2) return true;
+  for (let i = 1; i < spots.length; i += 1) {
+    const between = text.slice(spots[i - 1].end, spots[i].start);
+    // A separator is necessary and nowhere near sufficient: the comma in
+    // "(chunk 3, chunk 8)" is one, and that is exactly the pile-at-the-end
+    // shape this rule exists for. What separates attribution from a pile is
+    // whether a CLAUSE stands between them - words of the model's own that
+    // the second citation is attached to.
+    const separated =
+      /[,，、;；:：]|and|while|whereas|so|thus|because/u.test(between);
+    const words = between.replace(
+      /[\s,;:.·()（）\[\]{}、，；：。-]+/gu,
+      "",
+    );
+    if (!separated || words.length < 4) return false;
+  }
+  return true;
+}
+
 /** Acronym-shaped names the sentence asserts something about. */
 export function techniqueTokens(sentence: string): string[] {
   const out = new Set<string>();
@@ -804,10 +854,10 @@ export function auditSynthesis(
         reasons.push("negation");
         details.push(`carries the negation "${negation}"`);
       }
-      if (citedChunks.length > 1) {
+      if (citedChunks.length > 1 && !citationsAreDistributed(rawSentence)) {
         reasons.push("multi-chunk-fusion");
         details.push(
-          `cites ${citedChunks.length} chunks (${citedChunks.join(", ")}), so each one has to support it ON ITS OWN - quote all of them, or split the sentence`,
+          `cites ${citedChunks.length} chunks (${citedChunks.join(", ")}) behind one assertion, so each one has to support it ON ITS OWN - quote all of them, or attribute each clause separately: "A（chunk 46），因而 B（chunk 53）" is a chain of attributed facts and is not flagged`,
         );
       }
 

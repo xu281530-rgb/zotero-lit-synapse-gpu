@@ -4217,7 +4217,8 @@ export class WikiService {
         "their key data and their conclusions, and someone holding only this record should be able to " +
         "reconstruct what these chunks said.\n" +
         "用中文写，术语、化学式、数值和单位保留原文形式。六个小节，每个标题单独一行，都不能空。\n" +
-        "「方法」「结果与结论」两栏写成连贯段落：不要一句一行，也不要用 1. 2. 或 - 分点，" +
+        "「方法」「结果与结论」两栏写成连贯段落：不要一句一行，也不要用 1. 2. 或 - 分点；" +
+        "一句话里可以串联多个 chunk，只要每个分句各自带引用，这不算缝合。" +
         "句子按论证顺序接续；每句仍各自引用自己的 chunk。纯数据可用 Markdown 表格。\n" +
         "  **阅读总结** —— 本批读到的内容，通俗、连贯地讲清楚。这是唯一允许压缩的地方，" +
         "句末注明本批范围，例如「（chunk 0-7）」：它是跨 chunk 的概括，没有引用会被逐块引用检查拦下。\n" +

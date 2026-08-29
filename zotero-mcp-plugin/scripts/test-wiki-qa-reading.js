@@ -223,7 +223,10 @@ function note(facts) {
     "A nickel-base superalloy on a directional solidification rig, with depth measured at numbered stations.",
     "",
     "**结果与结论**",
-    ...facts,
+    // One LINE carrying every fact, not one line each: the narrative slots
+    // refuse a section whose lines are one sentence apiece, which is what a
+    // list looks like once the bullets are gone.
+    facts.join(" "),
     "",
     "**概念与术语**",
     "无。",

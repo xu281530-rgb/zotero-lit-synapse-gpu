@@ -832,6 +832,54 @@ export function assertProseIsConnected(text: string, what: string): void {
    * reach this function. A Markdown table is not a list marker, so a column
    * of measurements is still the right way to carry data.
    */
+  /*
+   * One sentence per LINE, which a block-based measure cannot see.
+   *
+   * Markdown folds consecutive lines into one paragraph, so a section written
+   * as
+   *
+   *     压力提高了平衡熔点（chunk 49）。
+   *     溶质扩散系数降至 0.85 倍（chunk 54）。
+   *     成分过冷区因此收窄（chunk 69）。
+   *
+   * arrives as a single block of three sentences and scores perfectly on
+   * "sentences per paragraph" - the metric the previous version of this check
+   * used. It is still a list; only the bullets are missing. Lines are what a
+   * person reads, so lines are what this counts.
+   */
+  const contentLines = String(text ?? "")
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(
+      (line) =>
+        line &&
+        !/^#{1,6}\s/u.test(line) &&
+        !/^\*\*[^*]+\*\*\s*[:：]?$/u.test(line) &&
+        !line.startsWith("|") &&
+        !/^\s*[-:|\s]+$/u.test(line),
+    );
+  const oneSentenceLines = contentLines.filter(
+    (line) => splitSentences(line).length === 1,
+  );
+  if (
+    contentLines.length >= WIKI_CONNECTED_MIN_BLOCKS &&
+    oneSentenceLines.length / contentLines.length >=
+      WIKI_CONNECTED_SINGLETON_RATIO
+  ) {
+    throw new WikiRecordTemplateError(
+      `${what}是 ${contentLines.length} 行、其中 ${oneSentenceLines.length} 行各自只有一句话` +
+        `（${Math.round((oneSentenceLines.length / contentLines.length) * 100)}%），` +
+        "这仍然是一份清单——只是省掉了编号，未写入。\n\n" +
+        "把相关的句子写进同一行、同一段，让它们连起来。" +
+        "一句话里可以串联多个 chunk，只要每个分句各自带引用：\n" +
+        "  加压抬高了相变自由能差（chunk 46），因而形核激活能与临界晶核半径随之下降（chunk 53）；" +
+        "与此同时溶质扩散被压制，100 MPa 下扩散系数只剩常压的 0.85 倍（chunk 54），" +
+        "成分过冷区因此收窄而枝晶突起受阻（chunk 69）。\n" +
+        "这样写不会被夸大审计拦——引用分布在各个分句上就是「逐句归属」，" +
+        "只有把多个引用堆在同一句断言的末尾才算缝合。\n\n" +
+        "纯数据可以用 Markdown 表格承载，表格不受这条约束。",
+    );
+  }
   const listed = blocks.filter((block) => LIST_MARKER.test(block.text));
   if (listed.length) {
     const shown = listed

@@ -856,5 +856,30 @@ test("non-equilibrium is a phase name, not a negation", () => {
 });
 
 
+
+
+test("attributed clauses are a chain, not a fusion", () => {
+  // The shape every instruction in this system asks for, and the one the
+  // fusion rule was refusing: each clause names its own source, so nothing is
+  // claimed that is not attributed. Refusing it made connected prose cost a
+  // quotation per chunk while one fact per line cost nothing.
+  const chain =
+    "# Paper\n\n全旋转配合针状试样可缓解缺失楔形伪影（chunk 3），因而 X 射线采集效率随之提高（chunk 8）。\n";
+  assert.deepEqual(
+    flagsOf(chain, CHUNKS).filter((f) => f.reasons.includes("multi-chunk-fusion")),
+    [],
+  );
+});
+
+test("citations piled behind one assertion are still a fusion", () => {
+  // Same two chunks, same claim, but nothing of the model's own stands
+  // between the citations - they trail a single assertion neither chunk makes.
+  const note =
+    "# Paper\n\nFull rotation with needle specimens removes missing wedge artifacts and raises " +
+    "X-ray collection efficiency (chunk 3, chunk 8).\n";
+  assertFlagged(note, CHUNKS, "multi-chunk-fusion");
+});
+
+
 console.log(`\n${passed}/${passed + failed} passed`);
 if (failed) process.exit(1);

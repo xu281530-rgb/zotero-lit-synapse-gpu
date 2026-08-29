@@ -519,8 +519,8 @@ check("REAL FAILURE: a summary written as one fact per line is refused", () => {
   ].join(String.fromCharCode(10));
   refuses(
     () => assertProseIsConnected(pile, "全文总结"),
-    "这是一份清单，不是一段论述",
-    "每一句仍然各自引用自己的 chunk",
+    "仍然是一份清单",
+    "只要每个分句各自带引用",
   );
 });
 
