@@ -92,7 +92,22 @@ export interface WikiScoredConcept {
 
 export interface WikiConceptMatch {
   probe: string;
-  matches: (WikiScoredConcept & { matchedBy: "name" | "vector" })[];
+  matches: (WikiScoredConcept & {
+    matchedBy: "name" | "vector";
+    /**
+     * How many distinct documents are recorded as sources of this concept, and
+     * whether the paper being written up is already one of them.
+     *
+     * Present only when `matchConcepts` was given an itemKey. They exist
+     * because "this concept already exists" was being read as "nothing to do
+     * here": a concept the model recognises in a second paper needs that paper
+     * added as a source, and a duplicate list that does not say whether that
+     * happened cannot ask for it. A term sourced from one document can never
+     * connect two.
+     */
+    sourceDocuments?: number;
+    sourcedFromThisPaper?: boolean;
+  })[];
 }
 
 /**
@@ -1944,6 +1959,8 @@ export class WikiStore {
     probes: { text: string; vector: Float32Array | null }[];
     model: string;
     limit?: number;
+    /** The paper being written up; annotates each match with its source state. */
+    itemKey?: string;
   }): Promise<WikiConceptMatch[]> {
     await this.initialize();
     const limit = Math.max(1, Math.min(20, options.limit ?? 5));
@@ -2006,7 +2023,58 @@ export class WikiStore {
       }
       results.push({ probe: probe.text, matches: matched.slice(0, limit) });
     }
+    const itemKey = String(options.itemKey ?? "").trim();
+    if (itemKey) {
+      const attestation = await this.conceptSourceAttestation(
+        options.libraryID,
+        itemKey,
+      );
+      for (const result of results) {
+        for (const match of result.matches) {
+          const state = attestation.get(match.conceptId);
+          match.sourceDocuments = state?.sourceDocuments ?? 0;
+          match.sourcedFromThisPaper = state?.sourcedFromThisPaper ?? false;
+        }
+      }
+    }
     return results;
+  }
+
+  /**
+   * Per concept: how many documents source it, and whether `itemKey` is one.
+   *
+   * One aggregate for the whole library rather than a lookup per match - the
+   * duplicate list is short, but it is computed on every write-up and the
+   * concept count is not bounded by it.
+   */
+  private async conceptSourceAttestation(
+    libraryID: number,
+    itemKey: string,
+  ): Promise<Map<number, { sourceDocuments: number; sourcedFromThisPaper: boolean }>> {
+    const rows = await this.db.queryAsync(
+      `SELECT t.concept_id AS concept_id,
+              COUNT(DISTINCT s.item_key) AS source_documents,
+              MAX(CASE WHEN s.item_key = ? THEN 1 ELSE 0 END) AS this_paper
+         FROM wiki_concept_terms t
+         JOIN wiki_concept_term_sources s ON s.term_id = t.term_id
+        WHERE s.library_id = ?
+        GROUP BY t.concept_id`,
+      [itemKey, libraryID],
+    );
+    const attestation = new Map<
+      number,
+      { sourceDocuments: number; sourcedFromThisPaper: boolean }
+    >();
+    for (const row of rows) {
+      attestation.set(Number(rowValue(row, "concept_id", "conceptId")), {
+        sourceDocuments: Number(
+          rowValue(row, "source_documents", "sourceDocuments") ?? 0,
+        ),
+        sourcedFromThisPaper:
+          Number(rowValue(row, "this_paper", "thisPaper") ?? 0) > 0,
+      });
+    }
+    return attestation;
   }
 
   /**

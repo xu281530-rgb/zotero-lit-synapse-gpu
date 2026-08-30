@@ -1129,7 +1129,16 @@ export class WikiService {
         limit: WIKI_SKELETON_NEIGHBOURS,
         hubLimit: WIKI_SKELETON_HUBS,
       }),
-      this.store.matchConcepts({ libraryID, probes, model, limit: 5 }),
+      this.store.matchConcepts({
+        libraryID,
+        probes,
+        model,
+        limit: 5,
+        // Annotates each candidate with sourceDocuments / sourcedFromThisPaper.
+        // Without it the duplicate list says a concept exists and stops there,
+        // which the model reads as "nothing to do" - see WikiConceptMatch.
+        itemKey: options.itemKey,
+      }),
       this.store.pagesNearVectors({
         libraryID,
         vectors: probes
@@ -1158,6 +1167,10 @@ export class WikiService {
         "这不是 Wiki 全量，是以本篇论文为中心召回的邻域——页目录是完整的，" +
         "概念只给与本篇相关的那些。写入前先看它：本篇该扩展哪些页、" +
         "哪些概念已经存在（别重复造）、能和哪些概念建立关系。" +
+        "duplicateCandidates 里 sourcedFromThisPaper false 的条目，" +
+        "是本篇也在用、但还没把本篇登记为来源的概念：把它原样再提交一次" +
+        "（带本篇的 itemKey 和原文摘录），服务器会追加来源而不是新建概念。" +
+        "只被一篇文献引用的术语连接不了任何两篇文献，sourceDocuments 就是它现在连了几篇。" +
         "一页 ≠ 一篇文献：页是主题，一篇文献通常横跨好几个主题，" +
         "所以正常结果是把 Claim 分别挂到若干个已有页上，而不是新建一页装下整篇。" +
         "pagesToExtend 按语义近似列出了最可能容纳本篇的已有页。" +
