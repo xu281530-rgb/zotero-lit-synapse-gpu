@@ -1,7 +1,10 @@
 import { getStoredChunkingSignature } from "../hybridSearchSettings";
 import { bodyIndexStateFromSourceKind } from "../semantic/bodyIndexState";
 import { getEmbeddingService } from "../semantic/embeddingService";
-import { conceptNamesWorthReviewing } from "./wikiConceptTerms";
+import {
+  conceptNamesWorthReviewing,
+  normalizeOrigin,
+} from "./wikiConceptTerms";
 import { getVectorStore } from "../semantic/vectorStore";
 import {
   hashWikiText,
@@ -5191,7 +5194,7 @@ export class WikiService {
       // A staged entity remembers which paper it was staged for, so a stretch
       // read before the reader moved on still cites the right document.
       const itemKey = String(entity.itemKey ?? "").trim() || defaultItemKey;
-      prepared.push({
+      const entityPrepared = {
         ...entity,
         sources: await this.prepareTermSources(
           libraryID,
@@ -5224,9 +5227,120 @@ export class WikiService {
             ),
           })),
         ),
-      });
+      };
+      await this.verifyClaimedOrigins(libraryID, entityPrepared, warnings);
+      prepared.push(entityPrepared);
     }
     return { prepared, warnings, sourceValidationFailures };
+  }
+
+  /**
+   * Downgrade a "quoted from the paper" claim the paper does not support.
+   *
+   * `origin: literature` is a factual assertion — this exact string appears in
+   * the source document — and it is the one provenance value that cannot be
+   * revised later: a field marked `ai` is upgraded to `literature` the day a
+   * paper confirms it, and corrected outright if a paper contradicts it, but a
+   * field already marked `literature` is treated as settled by every write
+   * that follows. A false one is therefore permanent.
+   *
+   * Models mark everything `literature`. Measured on a real library: six
+   * concepts, and all six declared their CHINESE name quoted from papers
+   * written in English — 不连续动态再结晶 from Xie 2019, 层错能 from Zhou 2022.
+   * The tool documentation already says the default is `ai` and that
+   * `literature` means the text you read actually contains it; saying it again
+   * would be the fourth time this session that asking has failed to work.
+   *
+   * So the server checks. The term's own source documents are already indexed,
+   * so "does this paper contain this string" is a lookup, not a judgement. A
+   * field that survives keeps `literature` and its full weight; one that does
+   * not is stored as `ai`, which is what it is — the model supplied it from
+   * its own knowledge, which is allowed and useful, and only the claim about
+   * where it came from was wrong.
+   */
+  private async verifyClaimedOrigins(
+    libraryID: number,
+    entity: WikiConceptEntityInput & { sources?: WikiPreparedSource[] },
+    warnings: string[],
+  ): Promise<void> {
+    const terms = [entity.primaryTerm, ...(entity.terms ?? [])].filter(
+      (term): term is NonNullable<typeof term> => Boolean(term),
+    );
+    if (!terms.length) return;
+
+    // One haystack per paper, built once for the whole entity.
+    const haystacks = new Map<string, string>();
+    const textFor = async (itemKey: string): Promise<string> => {
+      const cached = haystacks.get(itemKey);
+      if (cached !== undefined) return cached;
+      let text = "";
+      try {
+        const vectorStore = getVectorStore();
+        await vectorStore.initialize();
+        const chunks = await vectorStore.getChunksForItem(itemKey, libraryID);
+        text = normalizeWikiName(
+          chunks.map((chunk) => chunk.text).join("\n"),
+        );
+      } catch (error) {
+        ztoolkit.log("[wiki] could not read a paper to check provenance", error);
+      }
+      haystacks.set(itemKey, text);
+      return text;
+    };
+
+    for (const term of terms) {
+      const sources = [
+        ...((term.sources ?? []) as WikiPreparedSource[]),
+        ...((entity.sources ?? []) as WikiPreparedSource[]),
+      ];
+      const itemKeys = Array.from(
+        new Set(sources.map((source) => String(source.itemKey)).filter(Boolean)),
+      );
+      if (!itemKeys.length) continue;
+
+      const fallback = String(term.origin ?? "");
+      const declared = {
+        zh: String(term.origins?.zh ?? fallback),
+        en: String(term.origins?.en ?? fallback),
+        abbr: String(term.origins?.abbr ?? fallback),
+      };
+      const values = {
+        zh: String(term.zh ?? "").trim(),
+        en: String(term.en ?? "").trim(),
+        abbr: String(term.abbr ?? "").trim(),
+      };
+      const corrected: Record<string, string> = { ...declared };
+      let changed = false;
+
+      for (const field of ["zh", "en", "abbr"] as const) {
+        const value = values[field];
+        if (!value) continue;
+        if (normalizeOrigin(declared[field]) !== "literature") continue;
+        const needle = normalizeWikiName(value);
+        if (!needle) continue;
+        let found = false;
+        for (const itemKey of itemKeys) {
+          if ((await textFor(itemKey)).includes(needle)) {
+            found = true;
+            break;
+          }
+        }
+        if (found) continue;
+        corrected[field] = "ai";
+        changed = true;
+        warnings.push(
+          `"${value}" was submitted as quoted from ${itemKeys.join(", ")}, but none of those ` +
+            "documents contains it. Stored as ai — supplied from your own knowledge — which is " +
+            "allowed and can still be upgraded to literature by a paper that does state it. " +
+            "A literature mark cannot be revised once stored, so it is only ever set from text.",
+        );
+      }
+      if (!changed) continue;
+      // Expanded to explicit per-field origins: a `origin` shorthand would
+      // otherwise put the unverified value back on the fields just corrected.
+      term.origins = corrected as typeof term.origins;
+      delete (term as { origin?: string }).origin;
+    }
   }
 
   /**

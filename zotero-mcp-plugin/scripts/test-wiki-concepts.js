@@ -107,6 +107,15 @@ const CHUNKS = new Map([
         text: "The columnar-to-equiaxed transition is observed at a thermal gradient of 8 K/mm.",
         language: "en",
       },
+      {
+        // Here so that a `literature` mark on the English name is a claim this
+        // paper actually supports. The server verifies that claim against the
+        // document's own text, because it is the one provenance value that
+        // cannot be revised once stored.
+        chunkId: 13,
+        text: "No twinning induced plasticity was detected under these conditions.",
+        language: "en",
+      },
     ],
   ],
   [
@@ -115,6 +124,13 @@ const CHUNKS = new Map([
       {
         chunkId: 21,
         text: "动态再结晶导致位错密度显著下降，是本文观察到的主要软化机制。",
+        language: "zh",
+      },
+      {
+        // The Chinese name and the corrected abbreviation, so the promote and
+        // correct paths below are exercised with provenance the paper bears out.
+        chunkId: 22,
+        text: "孪晶诱导塑性（twinning induced plasticity）在本合金中记为 TRIP。",
         language: "zh",
       },
     ],
@@ -1011,6 +1027,74 @@ await block("each field remembers where it came from", async () => {
     en: "literature",
     abbr: "ai",
   });
+});
+
+await block("a literature mark the paper does not bear out is stored as ai", async () => {
+  // Measured on a real library: six concepts, and all six declared their
+  // CHINESE name quoted from papers written in English - 不连续动态再结晶 from
+  // Xie 2019, 层错能 from Zhou 2022. The tool documentation already said the
+  // default is ai and that literature means the text really contains it.
+  //
+  // It matters because literature is the one provenance value that cannot be
+  // revised: ai is upgraded the day a paper confirms it and corrected outright
+  // when a paper contradicts it, while literature is treated as settled by
+  // every write that follows. A false one is permanent.
+  const written = await service.recordConcepts({
+    libraryID: 1,
+    concepts: [
+      {
+        primaryTerm: {
+          // PAPERONE is in English and says nothing about 层错能.
+          zh: "层错能",
+          en: "stacking fault energy",
+          abbr: "SFE",
+          origin: "literature",
+        },
+        sources: [{ itemKey: "PAPERONE" }],
+      },
+    ],
+  });
+  const concept = await byName("层错能");
+  assert.equal(
+    concept.primaryTerm.origins.zh,
+    "ai",
+    "an English paper cannot be the source of a Chinese name it does not contain",
+  );
+  assert.equal(concept.primaryTerm.origins.en, "ai");
+  assert.equal(concept.primaryTerm.origins.abbr, "ai");
+  assert.equal(
+    concept.primaryTerm.zh,
+    "层错能",
+    "the NAME is kept - supplying it from your own knowledge is allowed",
+  );
+  assert.ok(
+    written.warnings.some((line) => /none of those documents contains it/u.test(line)),
+    "and the correction is reported rather than made silently",
+  );
+
+  // The same claim, from a paper that does contain the words, stands. A fresh
+  // English name, because an existing one would be deduplicated into the
+  // concept that already owns it rather than founding a second.
+  await service.recordConcepts({
+    libraryID: 1,
+    concepts: [
+      {
+        primaryTerm: {
+          zh: "临界应变",
+          en: "critical strain",
+          origins: { zh: "ai", en: "literature" },
+        },
+        sources: [{ itemKey: "PAPERONE" }],
+      },
+    ],
+  });
+  const kept = await byName("临界应变");
+  assert.equal(
+    kept.primaryTerm.origins.en,
+    "literature",
+    "PAPERONE really does say 'critical strain', so the claim stands",
+  );
+  assert.equal(kept.primaryTerm.origins.zh, "ai", "and the Chinese name does not");
 });
 
 await block("an unmarked field is never called literature", async () => {
