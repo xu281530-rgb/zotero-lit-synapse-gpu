@@ -798,7 +798,7 @@ export function citationsAreDistributed(sentence: string): boolean {
     const separated =
       /[,，、;；:：]|and|while|whereas|so|thus|because/u.test(between);
     const words = between.replace(
-      /[\s,;:.·()（）\[\]{}、，；：。-]+/gu,
+      /[\s,;:.·()（）[\]{}、，；：。-]+/gu,
       "",
     );
     if (!separated || words.length < 4) return false;

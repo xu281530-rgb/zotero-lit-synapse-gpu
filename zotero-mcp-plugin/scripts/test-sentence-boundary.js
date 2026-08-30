@@ -21,7 +21,6 @@ register("./ts-ext-hooks.mjs", import.meta.url);
 
 // The chunker logs through ztoolkit and reads preferences through Zotero.Prefs,
 // so both have to exist before it is imported. See test-chunking.js.
-/* global Zotero */
 const prefs = new Map();
 globalThis.Zotero = {
   Prefs: {
