@@ -1406,6 +1406,11 @@ assert.deepEqual(await store.getStatus(), {
   validEvidence: 0,
   staleEvidence: 0,
   deletedSources: 0,
+  // Derived from concept sources, like the two above: a reset leaves nothing
+  // connected because it leaves no concept sources at all.
+  conceptsWithMultipleSources: 0,
+  conceptSourceDocumentPairs: 0,
+  conceptSourceOnlyWrites: 0,
 });
 assert.equal(
   searchSqlite.prepare("SELECT COUNT(*) AS count FROM embeddings").get().count,

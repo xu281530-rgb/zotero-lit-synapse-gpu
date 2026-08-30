@@ -45,6 +45,28 @@ pref("wiki.shadowMode", true);
 pref("wiki.minScore", "0");
 pref("wiki.rrfWeight", "0");
 pref("wiki.searchTimeoutMs", 5000);
+// Cross-paper link candidates. Computation is on: it produces suggestions and
+// changes nothing the Wiki asserts. `mandatorySettlement` is the one setting
+// that changes what the server REFUSES - it makes a candidate whose passages
+// have both been read block the commit that ignores it - and it stays off
+// until real-library calibration, because a bad threshold there does not
+// produce a noisy suggestion, it produces a commit nobody can complete.
+//
+// Every number below is an initial value, not a measured one. The design
+// requires them to be calibrated on 50- and 500-paper libraries; they are
+// prefs so that calibration can move them without a build.
+pref("wiki.link.enabled", true);
+pref("wiki.link.mandatorySettlement", false);
+pref("wiki.link.topK", 8);
+pref("wiki.link.coarseCandidates", 24);
+pref("wiki.link.anchorsPerType", 3);
+pref("wiki.link.minSymmetricScore", "0.45");
+pref("wiki.link.minDirectionalScore", "0.35");
+pref("wiki.link.breadthChunkScore", "0.5");
+pref("wiki.link.breadthCapFraction", "0.3");
+pref("wiki.link.lexicalTermsPerPair", 3);
+pref("wiki.link.lexicalMaxDocumentFraction", "0.25");
+pref("wiki.link.scanTimeoutMs", 60000);
 pref("semantic.autoUpdate", false);
 pref("embedding.apiBase", "");
 pref("embedding.apiKey", "");

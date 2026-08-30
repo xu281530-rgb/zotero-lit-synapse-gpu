@@ -66,6 +66,7 @@ export const WIKI_TOOL_NAMES: ReadonlySet<string> = new Set([
   "wiki_update_reading_note",
   "wiki_get_reading_note",
   "wiki_finish_reading",
+  "wiki_scan_links",
 ]);
 
 /**
@@ -1181,7 +1182,7 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'WHAT THE NEIGHBOURHOOD CANNOT SHOW YOU: a link to a concept that is far away in meaning and not yet connected to anything you touched. hubConcepts is the cheap guard against that and is not a guarantee. If you suspect a connection to a part of the Wiki that is not in front of you, wiki_list_concepts enumerates the library and wiki_get_page opens any page. conceptCount tells you how much is out there that this response did not show.',
       '',
-      'EVERY duplicateCandidate CARRIES sourceDocuments AND sourcedFromThisPaper. A candidate with sourcedFromThisPaper false is a concept the library already defines and this paper also uses, with this paper NOT yet recorded as one of its sources. That is not "already covered, skip it" - it is the single commonest way this Wiki ends up as a set of islands. Fix it in the same turn: re-submit that concept through wiki_record_concepts, unchanged, with this paper\'s itemKey and an excerpt from this paper. The server adds a source to the existing concept; it does not create a second one. sourceDocuments is how many papers that term currently connects, and a term sitting at 1 connects nothing.',
+      'EVERY duplicateCandidate CARRIES sourceDocuments AND sourcedFromThisPaper. A candidate with sourcedFromThisPaper false is a concept the library already defines and this paper also uses, with this paper NOT yet recorded as one of its sources. That is not "already covered, skip it" - it is the single commonest way this Wiki ends up as a set of islands. Fix it in the same turn, with wiki_record_concepts: pass that candidate\'s conceptId, one source carrying this paper\'s itemKey, the chunkIdSnapshot of a passage you actually read, and an excerpt quoted from THAT chunk - and no naming fields at all. It is written immediately rather than staged, which matters because a question-driven read never drains its staging. (Re-submitting the whole concept by its terms also works and is what a full-text read does at its final pass.) The server adds a source to the existing concept; it does not create a second one. sourceDocuments is how many papers that term currently connects, and a term sitting at 1 connects nothing.',
       '',
       'SO, WITH THE NEIGHBOURHOOD IN VIEW: does this paper extend a Page that exists rather than deserving a parallel one? Do its Concepts already exist under another name, so that this paper should be added to them as a source rather than founding a parallel entry? And what does it let you assert BETWEEN concepts — that one process suppresses a phenomenon another paper described, that one theory incorporates another\'s mechanism? Propose those relations in the commit. "本篇与现有条目无关联，因为…" is a real answer and sometimes the right one; silence is not.'
     ].join('\n'),
@@ -1300,11 +1301,22 @@ export function buildToolCatalog(): ToolDefinition[] {
                   'UPDATE_CLAIM',
                   'CREATE_PAGE',
                   'LINK_RELATION',
-                  'MARK_CONFLICT'
+                  'MARK_CONFLICT',
+                  'DISMISS_LINK_SIGNALS'
                 ]
               },
               ref: { type: 'string' },
               itemKey: { type: 'string' },
+              resolvesSignalIds: {
+                type: 'array',
+                items: { type: 'integer', minimum: 1 },
+                description: 'Cross-paper candidate signals this write settles, from pendingLinkSignals in wiki_prepare_update. Put them on the action that ACTUALLY settles them: ADD_CLAIM or ATTACH_EVIDENCE when both papers now support one Claim, CREATE_PAGE when they belong under one entry as separate Claims, MARK_CONFLICT when they disagree under comparable conditions, LINK_RELATION when the shared concepts form a provable relation. The server reads the resolution type off the action rather than trusting a label, because the action is what happened. A signal is settled once; settling it twice is refused.'
+              },
+              signalIds: {
+                type: 'array',
+                items: { type: 'integer', minimum: 1 },
+                description: 'DISMISS_LINK_SIGNALS only: the candidate signals that establish nothing.'
+              },
               chunkIds: {
                 type: 'array',
                 items: { type: 'integer', minimum: 0 },
@@ -1312,7 +1324,7 @@ export function buildToolCatalog(): ToolDefinition[] {
               },
               reason: {
                 type: 'string',
-                description: 'SKIP only, required with chunkIds: what those passages establish, and which existing Page, Claim, Concept or relation already holds it. At least 40 characters and it must argue rather than assert — "nothing new", "already known" and their equivalents are refused. One reason covers the whole group.'
+                description: 'SKIP (with chunkIds) or DISMISS_LINK_SIGNALS. For SKIP: what those passages establish, and which existing Page, Claim, Concept or relation already holds it. For DISMISS_LINK_SIGNALS: what each side actually claims, and why they cannot support one Claim, sit under one Page, contradict each other or form a concept relation — argued from the two excerpts the signal carries. At least 40 characters either way, and it must argue rather than assert: "nothing new", "not related" and their equivalents are refused. One reason covers the whole group, and it is kept permanently.'
               },
               pageId: {},
               claimId: {},
@@ -1440,10 +1452,56 @@ export function buildToolCatalog(): ToolDefinition[] {
   {
     name: 'wiki_status',
     category: 'wiki',
-    description: 'Report independent Wiki database counts and Evidence relink state.',
+    description: [
+      'Report independent Wiki database counts, Evidence relink state, and the cross-paper link layer.',
+      '',
+      'THE COUNTS WORTH READING. conceptTermSources against conceptTerms says whether terminology is CONNECTING papers or merely accumulating: one source apiece is the failure state, and it looks identical to healthy growth in the concept count alone. conceptsWithMultipleSources and conceptSourceDocumentPairs are the same question asked directly.',
+      '',
+      'For cross-paper candidates, read the by-type breakdowns rather than the totals: linkPendingByType and linkRejectedByType say WHICH of semantic, lexical and concept discovery is producing noise, and an average over the three answers nothing. linkRejectedRate is the guard against the opposite failure - a reader who dismisses everything leaves a library indistinguishable from one with no real connections. linkSignalsMandatory counts only signals whose passages have BOTH been read; it is zero unless mandatory settlement is enabled.'
+    ].join('\n'),
     inputSchema: {
       type: 'object',
       properties: { libraryID: { type: 'number' } }
+    }
+  },
+  {
+    name: 'wiki_scan_links',
+    category: 'wiki',
+    description: [
+      'Compute cross-paper link candidates: which papers in this library are related to which, through which passages, terms or concepts.',
+      '',
+      'WHAT THIS IS FOR, AND WHAT IT IS NOT. It answers "what might be connected to what, and on what evidence" once, so that question stops being re-asked. It does NOT answer a user question - hybrid_search, semantic_search and search_fulltext still do that, against the live index. Precomputation replaces the repeated DISCOVERY of candidate connections, not the finding of answers.',
+      '',
+      'NORMALLY YOU DO NOT CALL THIS. A paper is queued for scanning automatically the first time it produces a real reading record, and the queue drains in the background. Call it to drain the queue now, to scan one paper on demand, or - with scope "library" - to work through every paper that has been read. Importing five hundred papers deliberately does NOT trigger five hundred scans: a paper nobody has read has told us nothing about whether its connections are worth computing.',
+      '',
+      'COST. One scan is a full-library vector pass using at most 20 representative chunks of the paper, then a pairwise refinement over the top candidates that does NOT re-scan the library. Scans run one at a time; a failure is retried with backoff and survives a restart.',
+      '',
+      'The candidates it writes are SUGGESTIONS. They appear in wiki_prepare_update as pendingLinkSignals, where each one carries both passages and a server-computed mustResolve. Nothing here writes a Page, a Claim, Evidence, a Concept or a relation.'
+    ].join('\n'),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        libraryID: { type: 'number' },
+        itemKey: {
+          type: 'string',
+          description: 'Scan just this paper, now. It must already have a body index and a reading record.'
+        },
+        scope: {
+          type: 'string',
+          enum: ['queue', 'library'],
+          description: 'queue (default) drains whatever is already waiting. library queues every paper that has been read, then drains. Ignored when itemKey is given.'
+        },
+        force: {
+          type: 'boolean',
+          description: 'With scope "library", re-queue papers that were already scanned. Use after changing the embedding model, the chunking parameters or the scoring algorithm; an ordinary re-run skips them.'
+        },
+        maxScans: {
+          type: 'number',
+          minimum: 1,
+          maximum: 200,
+          description: 'Stop after this many papers so a large library can be worked through in sittings. Default 25.'
+        }
+      }
     }
   },
   {
@@ -1460,6 +1518,8 @@ export function buildToolCatalog(): ToolDefinition[] {
     category: 'wiki',
     description: [
       'Record the professional concepts you recognised while ACTUALLY READING a paper - DRX, CET, columnar grain, dislocation density - into the independent concept library. This is not keyword extraction: a concept goes in only when the text you read establishes what it means in this field.',
+      '',
+      'ATTACHING THIS PAPER TO A CONCEPT THAT ALREADY EXISTS IS THE EXCEPTION TO STAGING. Submit conceptId plus sources and nothing else, and it is written immediately rather than staged - see the conceptId field. That path exists because staging loses it: a question-driven read never reaches the whole-paper pass, so a source staged during one is staged forever and the concept keeps connecting exactly one document. Everything that names, founds, renames or merges a concept still goes through the staged whole-paper pass below.',
       '',
       'WHEN TO CALL. Calls WITHOUT final are STAGED on the open reading session: they are checked and held, nothing is written, and the user is not asked to confirm anything. Use them to note candidates as you read. Then call ONCE with final true after the whole paper has been delivered and synthesised; that call writes everything you staged plus everything you pass to it, in a single database write and a single confirmation. Read the paper, understand it, decide which terms are genuinely concepts of the field, then write. wiki_prepare_update refuses to start the write-up until the final pass has happened. A paper that introduced nothing new is answered with an empty concepts list and noConceptsReason.',
       '',
@@ -1506,6 +1566,11 @@ export function buildToolCatalog(): ToolDefinition[] {
           items: {
             type: 'object',
             properties: {
+              conceptId: {
+                type: 'integer',
+                minimum: 1,
+                description: 'ATTACH-ONLY. The id of a concept that ALREADY exists, from duplicateCandidates in wiki_prepare_update or from wiki_list_concepts. Submit it with sources and NOTHING ELSE - no primaryTerm, no terms, no conceptType, no description - and this paper is recorded as another source document behind that concept IMMEDIATELY, without being staged and without a confirmation prompt. Every source must name the paper this call is about, carry chunkIdSnapshot and excerpt, point at a chunk that is in that paper\'s reading ledger, and quote text that is really in THAT chunk; anything else refuses the whole batch. Combining conceptId with any naming field is refused - founding, renaming, completing and merging still go through the ordinary submission and its confirmation.'
+              },
               conceptType: { type: 'string' },
               description: {
                 type: 'string',

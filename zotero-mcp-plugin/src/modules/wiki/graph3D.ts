@@ -24,8 +24,36 @@
 
 export type GraphMode = "2d" | "3d";
 
-/** Solid links are shared claims; dashed links are shared knowledge entries. */
-export type GraphLinkStyle = "solid" | "dashed";
+/**
+ * Solid links are shared claims; dashed links are shared knowledge entries;
+ * dot-dash links are shared concepts.
+ *
+ * The three are separate styles rather than one weighted line because they are
+ * separate kinds of evidence. A solid link means some claim cites both papers.
+ * A dashed one means only that both sit under one entry. A dot-dash one means
+ * both papers were read to use the same term, which is the weakest of the
+ * three and also the only one that exists before anyone has written a claim
+ * spanning two papers - so it is the one that has to be distinguishable at a
+ * glance rather than blended in.
+ */
+export type GraphLinkStyle = "solid" | "dashed" | "dotdash" | "dotted";
+
+/**
+ * How much of a document the reader has actually seen.
+ *
+ * Three states rather than the drawn/dim pair, because that pair could not
+ * distinguish the two cases that matter most. A paper read in full with no
+ * edges yet and a paper nobody has opened both came out grey, and they are
+ * opposite situations: the first says "this really does not connect to
+ * anything", the second says "nobody has looked".
+ *
+ *   solid - read in full and reconciled. Its edge set is trustworthy.
+ *   half  - read in part. Its edges are real but its edge set is incomplete,
+ *           so an absent edge means nothing.
+ *   ghost - never read; drawn only because a candidate reached it. An
+ *           invitation, not a finding.
+ */
+export type GraphNodeShade = "solid" | "half" | "ghost";
 
 /** A link carrying at least one contradiction reads as contested. */
 export type GraphLinkTone = "neutral" | "conflict";
@@ -43,6 +71,8 @@ export interface GraphNodeInput {
   group?: number;
   /** Drawn faint: a document nothing else connects to. */
   dim?: boolean;
+  /** How much of it has been read. See GraphNodeShade. */
+  shade?: GraphNodeShade;
   /** Opaque payload handed back through onSelectNode. */
   payload?: unknown;
 }
@@ -52,6 +82,16 @@ export interface GraphLinkInput {
   target: string;
   style?: GraphLinkStyle;
   tone?: GraphLinkTone;
+  /**
+   * What the link is, in the tooltip's one line.
+   *
+   * A shared-claim link can say "3 条论断" from `strength` alone and a
+   * same-entry link says the same sentence every time, but a shared-concept
+   * link is worthless without naming the concepts: "余弦 0.62" and "共享概念"
+   * are the same non-answer. Optional, and only read where the style has
+   * nothing better to say.
+   */
+  label?: string;
   /** Drives line width; typically the number of shared claims. */
   strength?: number;
   /** Opaque payload handed back through onSelectLink. */
@@ -275,15 +315,28 @@ function layout(nodes: RuntimeNode[], links: RuntimeLink[]): void {
     for (const link of links) {
       const a = link.source;
       const b = link.target;
-      // A shared claim is a stronger tie than a shared knowledge entry.
-      const rest = link.style === "dashed" ? 168 : 118;
+      // A shared claim is a stronger tie than a shared knowledge entry, and a
+      // shared term is weaker still: it should place a paper in the right
+      // region without pulling it into a cluster it has not earned.
+      const weak =
+        link.style === "dashed" ||
+        link.style === "dotdash" ||
+        link.style === "dotted";
+      const rest =
+        link.style === "dotted" ? 224 : link.style === "dotdash" ? 196 : weak ? 168 : 118;
       const dx = b.x - a.x;
       const dy = b.y - a.y;
       const dz = b.z - a.z;
       const distance = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
       const pull =
         ((distance - rest) / distance) *
-        (link.style === "dashed" ? 0.016 : 0.045) *
+        (link.style === "dotted"
+          ? 0.005
+          : link.style === "dotdash"
+            ? 0.009
+            : weak
+              ? 0.016
+              : 0.045) *
         link.strength;
       a.vx += dx * pull;
       a.vy += dy * pull;
@@ -355,7 +408,12 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
   let nodes: RuntimeNode[] = [];
   let links: RuntimeLink[] = [];
   let byId = new Map<string, RuntimeNode>();
-  let visibleStyles = new Set<GraphLinkStyle>(["solid", "dashed"]);
+  let visibleStyles = new Set<GraphLinkStyle>([
+    "solid",
+    "dashed",
+    "dotdash",
+    "dotted",
+  ]);
   let showIsolated = true;
 
   let yaw = 0.6;
@@ -595,7 +653,15 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
         0.6,
         5,
       );
-      context.setLineDash?.(link.style === "dashed" ? [4, 5] : []);
+      context.setLineDash?.(
+        link.style === "dashed"
+          ? [4, 5]
+          : link.style === "dotdash"
+            ? [7, 4, 1.5, 4]
+            : link.style === "dotted"
+              ? [1.5, 4]
+              : [],
+      );
       context.beginPath();
       context.moveTo(a.sx, a.sy);
       context.quadraticCurveTo(link.cx, link.cy, b.sx, b.sy);
@@ -608,8 +674,15 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
     const labels: RuntimeNode[] = [];
     const taken: Array<[number, number, number, number]> = [];
     for (const node of active) {
+      // Reading state dims a node more than isolation does: a ghost is a paper
+      // nobody has opened, and it must not compete for attention with one that
+      // has been read and simply has no edges yet.
+      const shade = node.input.shade ?? "solid";
+      const shadeAlpha = shade === "ghost" ? 0.3 : shade === "half" ? 0.72 : 1;
       const alpha =
-        depthAlpha(node.depth, cameraDistance) * (node.dim ? 0.45 : 1);
+        depthAlpha(node.depth, cameraDistance) *
+        (node.dim ? 0.45 : 1) *
+        shadeAlpha;
       const focused = node === hoveredNode || node === selectedNode;
       const linked =
         (hoveredLink !== null &&
@@ -633,6 +706,19 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
       context.fillStyle = sphere;
       context.arc(node.sx, node.sy, node.sr, 0, Math.PI * 2);
       context.fill();
+      // A ghost is drawn as an outline rather than a body: it is a place in
+      // the library, not a thing the Wiki knows anything about yet.
+      if (shade === "ghost") {
+        context.globalAlpha = Math.min(1, (focused || linked ? 1 : alpha) * 2.1);
+        context.beginPath();
+        context.strokeStyle = color;
+        context.setLineDash?.([2.5, 2.5]);
+        context.lineWidth = 1.1;
+        context.arc(node.sx, node.sy, node.sr, 0, Math.PI * 2);
+        context.stroke();
+        context.setLineDash?.([]);
+        context.globalAlpha = focused || linked ? 1 : alpha;
+      }
       if (focused || linked) {
         context.beginPath();
         context.strokeStyle = color;
@@ -804,7 +890,9 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
           `${link.source.input.label} ↔ ${link.target.input.label}`,
           link.style === "dashed"
             ? "同属一个知识条目"
-            : `共享 ${link.strength} 条论断${link.tone === "conflict" ? " · 含分歧" : ""}`,
+            : link.style === "dotdash" || link.style === "dotted"
+              ? (link.input.label ?? "候选连接")
+              : `共享 ${link.strength} 条论断${link.tone === "conflict" ? " · 含分歧" : ""}`,
         ],
         event.clientX,
         event.clientY,

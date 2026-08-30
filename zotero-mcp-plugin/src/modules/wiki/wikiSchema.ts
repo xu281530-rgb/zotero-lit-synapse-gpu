@@ -8,7 +8,7 @@ import {
 } from "./wikiConceptTerms";
 import { rowColumn } from "./wikiRow";
 
-export const WIKI_SCHEMA_VERSION = 10;
+export const WIKI_SCHEMA_VERSION = 12;
 
 /**
  * Add a column an older database does not have yet.
@@ -137,9 +137,29 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
       excerpt TEXT NOT NULL DEFAULT '',
       excerpt_hash TEXT NOT NULL DEFAULT '',
       created_at INTEGER NOT NULL,
+      write_path TEXT NOT NULL DEFAULT '',
       UNIQUE(term_id, library_id, item_key, excerpt_hash)
     )
   `);
+  // Schema 11. WHICH call wrote this source row.
+  //
+  // 'attach' is the source-only write: a paper being recorded as another
+  // document behind a concept that already exists, without founding, merging
+  // or renaming anything. It is separated from the ordinary concept write for
+  // one reason - it is the whole of phase 0A, and "did phase 0A actually run"
+  // cannot be answered by the concept count, which does not move when this
+  // path works. wiki_status reports it as conceptSourceOnlyWrites.
+  //
+  // '' is the correct carried-over value: a row written before this column
+  // existed genuinely does not record which path produced it, and stamping
+  // every one of them 'concept' would invent exactly the distinction the
+  // column exists to make honest.
+  await addColumnIfMissing(
+    db,
+    "wiki_concept_term_sources",
+    "write_path",
+    "TEXT NOT NULL DEFAULT ''",
+  );
   // Exactly one primary term per concept, enforced by the database rather than
   // by whichever write path happens to remember. A concept with two primaries
   // would render two different titles for one entry depending on which query
@@ -487,10 +507,192 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
     `CREATE INDEX IF NOT EXISTS idx_wiki_concept_embedding_queue_due
        ON wiki_concept_embedding_queue(next_attempt_at)`,
   );
+  await ensureLinkSchema(db);
   await backfillConceptTerms(db);
   await backfillConceptEmbeddingQueue(db);
   await rearmPoisonedConceptEmbeddings(db, priorVersion);
   await db.queryAsync(`PRAGMA user_version = ${WIKI_SCHEMA_VERSION}`);
+}
+
+/**
+ * Schema 12. Cross-paper link candidates, in three layers.
+ *
+ * The layering is the whole design, so it is worth saying why one table would
+ * not do. A pair of papers is not in ONE relationship. The same two papers can
+ * support a shared Claim, sit under a shared Page, contradict each other on a
+ * different question, share four concepts, and have a fifth resemblance that
+ * turns out to be boilerplate about EBSD sample preparation. A single
+ * `state = shared_claim | same_page | conflict` column forces one of those to
+ * stand for all of them, and rejecting the boilerplate then deletes the real
+ * connection alongside it.
+ *
+ *   wiki_link_candidates  - the PAIR. One row per unordered pair, holding the
+ *       two directional scores and the lifecycle of the container. It is a
+ *       cache and a lifecycle, never a knowledge claim.
+ *   wiki_link_signals     - a DISCOVERY. One row per reason to think the pair
+ *       is related, each with its own algorithm version, its own fingerprint,
+ *       the passages on both sides, and its own settled/rejected state.
+ *   wiki_link_resolutions - a SETTLEMENT. What was actually written into the
+ *       Wiki because of one or more signals, joined through
+ *       wiki_link_resolution_signals because one Claim may settle several.
+ *
+ * Authority stays where it already is. Pages, Claims, Evidence, Concepts and
+ * Relations remain the only records of what the library believes; nothing here
+ * is read as knowledge. These tables answer "what has been noticed, what was
+ * done about it, and is that still valid" - the audit trail, not the finding.
+ */
+async function ensureLinkSchema(db: WikiDatabase): Promise<void> {
+  await db.queryAsync(`
+    CREATE TABLE IF NOT EXISTS wiki_link_candidates (
+      link_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      library_id           INTEGER NOT NULL,
+      a_item_key           TEXT NOT NULL,
+      b_item_key           TEXT NOT NULL,
+
+      score_ab             REAL,
+      score_ba             REAL,
+      score_symmetric      REAL,
+
+      status               TEXT NOT NULL
+        CHECK(status IN ('open','resolved','dismissed','stale','source_deleted')),
+
+      computed_at          INTEGER NOT NULL,
+      reviewed_at          INTEGER,
+
+      a_content_hash       TEXT,
+      a_chunk_signature    TEXT,
+      a_reset_generation   TEXT,
+      b_content_hash       TEXT,
+      b_chunk_signature    TEXT,
+      b_reset_generation   TEXT,
+
+      semantic_model             TEXT,
+      semantic_dimensions        INTEGER,
+      semantic_algorithm_version TEXT,
+      semantic_selector_version  TEXT,
+
+      UNIQUE(library_id, a_item_key, b_item_key),
+      CHECK(a_item_key < b_item_key)
+    )
+  `);
+  await db.queryAsync(`
+    CREATE TABLE IF NOT EXISTS wiki_link_signals (
+      signal_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      link_id                INTEGER NOT NULL
+        REFERENCES wiki_link_candidates(link_id) ON DELETE CASCADE,
+
+      signal_type            TEXT NOT NULL
+        CHECK(signal_type IN ('semantic','lexical','concept')),
+      direction              TEXT NOT NULL
+        CHECK(direction IN ('a_to_b','b_to_a','symmetric')),
+
+      algorithm_version      TEXT NOT NULL,
+      source_model           TEXT,
+      signal_fingerprint     TEXT NOT NULL,
+
+      score                  REAL NOT NULL,
+      specificity_weight     REAL,
+      breadth_docs           INTEGER,
+
+      term_id                INTEGER,
+      term_snapshot          TEXT,
+
+      a_chunk_id_snapshot    INTEGER,
+      b_chunk_id_snapshot    INTEGER,
+      a_chunk_text_hash      TEXT,
+      b_chunk_text_hash      TEXT,
+      a_excerpt              TEXT,
+      b_excerpt              TEXT,
+      a_excerpt_hash         TEXT,
+      b_excerpt_hash         TEXT,
+
+      state                  TEXT NOT NULL
+        CHECK(state IN ('pending','accepted','rejected','stale')),
+      rejected_reason        TEXT,
+
+      created_at             INTEGER NOT NULL,
+      settled_at             INTEGER,
+
+      UNIQUE(link_id, signal_fingerprint)
+    )
+  `);
+  await db.queryAsync(`
+    CREATE TABLE IF NOT EXISTS wiki_link_resolutions (
+      resolution_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+      link_id             INTEGER NOT NULL
+        REFERENCES wiki_link_candidates(link_id) ON DELETE CASCADE,
+
+      resolution_type     TEXT NOT NULL
+        CHECK(resolution_type IN (
+          'shared_claim',
+          'same_page',
+          'conflict',
+          'concept_relation',
+          'no_action'
+        )),
+
+      claim_id            INTEGER,
+      page_id             INTEGER,
+      relation_id         INTEGER,
+      resolution_note     TEXT NOT NULL,
+      created_at          INTEGER NOT NULL
+    )
+  `);
+  await db.queryAsync(`
+    CREATE TABLE IF NOT EXISTS wiki_link_resolution_signals (
+      resolution_id INTEGER NOT NULL
+        REFERENCES wiki_link_resolutions(resolution_id) ON DELETE CASCADE,
+      signal_id     INTEGER NOT NULL
+        REFERENCES wiki_link_signals(signal_id) ON DELETE CASCADE,
+      PRIMARY KEY (resolution_id, signal_id)
+    )
+  `);
+  /*
+   * The scan ledger. Not in the design document, and needed by it anyway:
+   * §5.1 says a paper enters the queue on its FIRST real reading and §5.4 says
+   * a full-library scan must resume after a restart, and neither is possible
+   * if "which papers have been scanned, with which algorithm, and what went
+   * wrong" lives only in memory. Keyed by paper because a scan is per paper -
+   * one coarse pass over the library, from that paper's representative chunks.
+   */
+  await db.queryAsync(`
+    CREATE TABLE IF NOT EXISTS wiki_link_scan_queue (
+      library_id          INTEGER NOT NULL,
+      item_key            TEXT NOT NULL,
+      state               TEXT NOT NULL
+        CHECK(state IN ('queued','running','done','failed')),
+      reason              TEXT NOT NULL DEFAULT '',
+      attempts            INTEGER NOT NULL DEFAULT 0,
+      last_error          TEXT NOT NULL DEFAULT '',
+      enqueued_at         INTEGER NOT NULL,
+      next_attempt_at     INTEGER NOT NULL,
+      started_at          INTEGER,
+      finished_at         INTEGER,
+      content_hash        TEXT NOT NULL DEFAULT '',
+      chunk_signature     TEXT NOT NULL DEFAULT '',
+      reset_generation    TEXT NOT NULL DEFAULT '',
+      selector_version    TEXT NOT NULL DEFAULT '',
+      algorithm_version   TEXT NOT NULL DEFAULT '',
+      embedding_model     TEXT NOT NULL DEFAULT '',
+      candidates_written  INTEGER NOT NULL DEFAULT 0,
+      signals_written     INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (library_id, item_key)
+    )
+  `);
+  for (const sql of [
+    `CREATE INDEX IF NOT EXISTS idx_wiki_link_a
+       ON wiki_link_candidates(library_id, a_item_key, status)`,
+    `CREATE INDEX IF NOT EXISTS idx_wiki_link_b
+       ON wiki_link_candidates(library_id, b_item_key, status)`,
+    `CREATE INDEX IF NOT EXISTS idx_wiki_link_signal_state
+       ON wiki_link_signals(link_id, state, signal_type)`,
+    `CREATE INDEX IF NOT EXISTS idx_wiki_link_resolution_link
+       ON wiki_link_resolutions(link_id, resolution_type)`,
+    `CREATE INDEX IF NOT EXISTS idx_wiki_link_scan_due
+       ON wiki_link_scan_queue(state, next_attempt_at)`,
+  ]) {
+    await db.queryAsync(sql);
+  }
 }
 
 /**

@@ -754,6 +754,69 @@ export class KeywordIndexStore {
   }
 
   /** How many postings a term has, used to read the rarest terms first. */
+  /**
+   * How many LIVE documents contain each of these terms.
+   *
+   * The real document frequency, which nothing exposed before. `libraryFieldStats`
+   * is sometimes mistaken for this and is not: it computes the average field
+   * LENGTHS BM25F normalises against, which says nothing about how rare a term
+   * is. Anything that wants IDF - the cross-paper lexical signals do - needs
+   * this count and cannot be built on that one.
+   *
+   * Dead documents are excluded through the same `slot / CHUNK_STRIDE` identity
+   * the posting table already encodes, so a deleted paper stops inflating the
+   * frequency of every term it contained without any posting being rewritten.
+   *
+   * Terms are normalised here, exactly as `lookup` does: the index and the
+   * query must agree on normalisation or every count is a coincidence.
+   */
+  async documentFrequencies(
+    libraryID: number,
+    terms: readonly string[],
+  ): Promise<Map<string, number>> {
+    await this.ensureSchema();
+    const frequencies = new Map<string, number>();
+    const wanted = Array.from(
+      new Set(terms.map((term) => normalize(term)).filter(Boolean)),
+    );
+    if (!wanted.length) return frequencies;
+    // Batched rather than one query per term: a pair of papers routinely
+    // shares a few hundred terms, and a round trip apiece would cost more
+    // than the vector scan that produced the pair.
+    const BATCH = 400;
+    for (let start = 0; start < wanted.length; start += BATCH) {
+      const slice = wanted.slice(start, start + BATCH);
+      const placeholders = slice.map(() => "?").join(",");
+      const rows = await this.db.queryAsync(
+        `SELECT t.term AS term, COUNT(DISTINCT p.slot / ${CHUNK_STRIDE}) AS df
+           FROM kw_postings p
+           JOIN kw_terms t ON t.term_id = p.term_id
+          WHERE t.library_id = ? AND t.term IN (${placeholders})
+            AND p.slot / ${CHUNK_STRIDE} NOT IN (
+                  SELECT doc_id FROM kw_docs WHERE alive = 0)
+          GROUP BY t.term`,
+        [libraryID, ...slice],
+      );
+      for (const row of rows ?? []) {
+        frequencies.set(String(row.term), Number(row.df ?? 0));
+      }
+    }
+    for (const term of wanted) {
+      if (!frequencies.has(term)) frequencies.set(term, 0);
+    }
+    return frequencies;
+  }
+
+  /** How many live documents the library holds. The N in log((N+1)/(df+1)). */
+  async liveDocumentCount(libraryID: number): Promise<number> {
+    await this.ensureSchema();
+    const rows = await this.db.queryAsync(
+      "SELECT COUNT(*) AS n FROM kw_docs WHERE library_id = ? AND alive = 1",
+      [libraryID],
+    );
+    return Number(rows?.[0]?.n ?? 0);
+  }
+
   async postingCount(libraryID: number, term: string): Promise<number> {
     await this.ensureSchema();
     const rows = await this.db.queryAsync(

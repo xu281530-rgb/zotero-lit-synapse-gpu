@@ -59,6 +59,12 @@ export const WIKI_ACTIONS = [
   "CREATE_PAGE",
   "LINK_RELATION",
   "MARK_CONFLICT",
+  // The only settlement that writes no knowledge. Everything else settles a
+  // cross-paper candidate by carrying `resolvesSignalIds` on the write it
+  // already had to make; "these two passages only look alike" has no such
+  // write, and without a way to say it the honest answer would be unavailable
+  // - which is how a reader ends up inventing a Claim to clear a checklist.
+  "DISMISS_LINK_SIGNALS",
 ] as const;
 export type WikiActionName = (typeof WIKI_ACTIONS)[number];
 
@@ -109,6 +115,7 @@ export type WikiCommitAction =
       /** Accepted for compatibility but ignored; summaries are derived from Claims. */
       summary?: string;
       primaryConcept?: WikiConceptInput;
+      resolvesSignalIds?: number[];
     }
   | {
       action: "ADD_CLAIM";
@@ -120,11 +127,21 @@ export type WikiCommitAction =
       coverageLevel: WikiCoverageLevel;
       confidence: number;
       evidence: WikiEvidenceInput[];
+      /**
+       * Cross-paper candidate signals this write settles.
+       *
+       * Reusing the existing actions rather than inventing a parallel set of
+       * "settle a candidate" verbs is the whole point: a shared Claim IS the
+       * settlement, and a second action to announce it could be sent without
+       * the Claim ever being written.
+       */
+      resolvesSignalIds?: number[];
     }
   | {
       action: "ATTACH_EVIDENCE";
       claimId: number | string;
       evidence: WikiEvidenceInput[];
+      resolvesSignalIds?: number[];
     }
   | {
       action: "UPDATE_CLAIM";
@@ -137,6 +154,7 @@ export type WikiCommitAction =
       confidence?: number;
       /** Required when changing Claim text or promoting coverage/status. */
       evidence?: WikiEvidenceInput[];
+      resolvesSignalIds?: number[];
     }
   | {
       action: "LINK_RELATION";
@@ -144,11 +162,19 @@ export type WikiCommitAction =
       predicate: string;
       targetConceptId: number | string;
       confidence: number;
+      resolvesSignalIds?: number[];
     }
   | {
       action: "MARK_CONFLICT";
       claimId: number | string;
       evidence: WikiEvidenceInput[];
+      resolvesSignalIds?: number[];
+    }
+  | {
+      action: "DISMISS_LINK_SIGNALS";
+      signalIds: number[];
+      /** At least 40 characters, arguing from both sides' quoted text. */
+      reason: string;
     };
 
 export interface WikiCommitInput {

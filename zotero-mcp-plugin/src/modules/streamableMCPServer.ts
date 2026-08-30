@@ -1486,8 +1486,45 @@ Nothing in this server returns a whole document in one response. Every reading t
           result = await getWikiService().getStore().getClaim(args.claimId);
           break;
         case 'wiki_status':
-          result = await getWikiService().getStore().getStatus(args?.libraryID);
+          result = await getWikiService().status(args?.libraryID);
           break;
+        case 'wiki_scan_links': {
+          assertWikiEnabled();
+          const libraryID = args?.libraryID ?? Zotero.Libraries.userLibraryID;
+          const links = getWikiService().links;
+          const maxScans = Number.isFinite(Number(args?.maxScans))
+            ? Math.max(1, Math.min(200, Math.floor(Number(args.maxScans))))
+            : 25;
+          if (args?.itemKey) {
+            // One named paper, synchronously. The caller asked for this
+            // paper's candidates and is entitled to know whether it worked,
+            // so the error is not swallowed the way a queued scan's is.
+            await links.runScan(libraryID, String(args.itemKey));
+            result = {
+              scanned: 1,
+              itemKey: String(args.itemKey),
+              ...(await links.statistics(libraryID)),
+            };
+            break;
+          }
+          const queued =
+            args?.scope === 'library'
+              ? await links.enqueueLibraryScan(libraryID, {
+                  force: args?.force === true,
+                })
+              : { queued: 0, skipped: 0 };
+          const drained = await links.pumpQueue(maxScans);
+          result = {
+            ...queued,
+            ...drained,
+            ...(await links.statistics(libraryID)),
+            note:
+              drained.failed > 0
+                ? 'Some scans failed and were re-queued with backoff; wiki_status reports linkScanFailed once they are exhausted.'
+                : undefined,
+          };
+          break;
+        }
         case 'wiki_export':
           result = await getWikiService().exportMarkdown(
             args?.libraryID ?? Zotero.Libraries.userLibraryID,

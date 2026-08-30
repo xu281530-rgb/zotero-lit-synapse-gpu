@@ -280,6 +280,75 @@ export class WikiConceptLibrary {
   // ---- Writing ------------------------------------------------------------
 
   /**
+   * Record one more document behind a concept that already exists.
+   *
+   * The narrowest write in the concept library, and deliberately so. It adds
+   * rows to `wiki_concept_term_sources` and touches nothing else: no concept
+   * is founded, merged or renamed, no term is created or completed, no primary
+   * election runs and no name projection is rewritten. That is what lets it
+   * skip the confirmation gate the ordinary concept write goes through - there
+   * is no naming decision here for a person to approve, only the record that a
+   * paper the reader just read uses a term the library already defines.
+   *
+   * Sources land on the concept's PRIMARY term. A term-level home is required
+   * by the table, but every question this feeds - `conceptIdsForItem`,
+   * `conceptSourceAttestation`, the shared-concept edges - aggregates back up
+   * to the concept, so which of a concept's synonyms carries the row does not
+   * change any answer. The primary is the one that is guaranteed to exist.
+   *
+   * The caller is responsible for having verified the sources; see
+   * `WikiService.attachExistingConceptSources`, which is the only path in.
+   */
+  async attachExistingSources(options: {
+    libraryID: number;
+    conceptId: number;
+    sources: WikiPreparedSource[];
+  }): Promise<{
+    conceptId: number;
+    termId: number;
+    displayName: string;
+    added: number;
+  }> {
+    const conceptId = Number(options.conceptId);
+    const owner = await this.db.valueQueryAsync(
+      "SELECT library_id FROM wiki_concepts WHERE concept_id = ?",
+      [conceptId],
+    );
+    if (owner == null) {
+      throw new WikiTermError(
+        `Concept ${conceptId} does not exist. conceptId comes from duplicateCandidates in ` +
+          "wiki_prepare_update or from wiki_list_concepts; nothing was written.",
+      );
+    }
+    if (Number(owner) !== Number(options.libraryID)) {
+      throw new WikiTermError(
+        `Concept ${conceptId} belongs to library ${Number(owner)}, not ${options.libraryID}. ` +
+          "Concepts are never shared across libraries; nothing was written.",
+      );
+    }
+    const terms = await this.termsOf(conceptId);
+    const home = terms.find((term) => term.role === "primary") ?? terms[0];
+    if (!home) {
+      throw new WikiTermError(
+        `Concept ${conceptId} has no terms, so there is nothing to attach a source to. ` +
+          "Nothing was written.",
+      );
+    }
+    const added = await this.attachSources(
+      home.termId,
+      options.libraryID,
+      options.sources,
+      "attach",
+    );
+    return {
+      conceptId,
+      termId: home.termId,
+      displayName: termDisplayName(home) || home.abbr || String(conceptId),
+      added,
+    };
+  }
+
+  /**
    * Record the concepts one reading pass recognised.
    *
    * Every entity is resolved against what the library already holds before
@@ -860,6 +929,7 @@ export class WikiConceptLibrary {
     termId: number,
     libraryID: number,
     sources: WikiTermSourceInput[],
+    writePath = "",
   ): Promise<number> {
     let added = 0;
     for (const source of sources ?? []) {
@@ -875,8 +945,9 @@ export class WikiConceptLibrary {
       );
       await this.db.queryAsync(
         `INSERT OR IGNORE INTO wiki_concept_term_sources
-           (term_id, library_id, item_key, chunk_id_snapshot, excerpt, excerpt_hash, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           (term_id, library_id, item_key, chunk_id_snapshot, excerpt, excerpt_hash,
+            created_at, write_path)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           termId,
           Number(source.libraryID ?? libraryID),
@@ -887,6 +958,7 @@ export class WikiConceptLibrary {
           excerpt,
           excerptHash,
           Date.now(),
+          writePath,
         ],
       );
       const after = Number(

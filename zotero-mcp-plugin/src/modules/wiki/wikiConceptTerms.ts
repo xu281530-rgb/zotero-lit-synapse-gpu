@@ -97,6 +97,20 @@ export interface WikiTermInput extends Partial<WikiTermFields> {
 }
 
 export interface WikiConceptEntityInput {
+  /**
+   * An existing concept this entity IS, rather than one to resolve by name.
+   *
+   * Set on its own - with sources and nothing else - it means "record this
+   * paper as another document behind that concept". That submission is written
+   * immediately instead of being staged, because the reason it exists is that
+   * staging loses it: a question-driven read never reaches the whole-paper
+   * pass, so a source staged during one sits in the session forever and the
+   * concept keeps connecting exactly one document.
+   *
+   * Combined with any naming field it is refused. Renaming, merging and
+   * founding still go through the ordinary path, confirmation gate included.
+   */
+  conceptId?: number;
   /** The term the caller believes is primary. May be overruled; see below. */
   primaryTerm?: WikiTermInput;
   /** Alias terms. A caller may also put everything here and omit primaryTerm. */

@@ -822,7 +822,8 @@ Claim 只能建立在阅读总结已经涵盖的内容之上。该附件也被�
 - `wiki_record_concepts` —— 记录在真正阅读文献时识别出的专业概念：每个概念一个实体，含一个主术语与任意别名术语，每组术语都由中文全称、英文全称、简称三个字段构成，并记录来源文献。未带 `final` 的调用只暂存在当前阅读会话中、不写库也不弹确认；带 `final` 的那一次把全部内容一次写入，因此一篇文献只有一次写入、一次确认。每个字段单独记录来源类型（文献原文 / AI 补全 / 人工修改），AI 可以依据可靠专业知识补全中文、英文或简称，但必须如实标注
 - `wiki_list_concepts` —— 列出独立术语库，含全部术语与来源
 - `wiki_export_concepts` —— 单独导出术语库 Markdown
-- `wiki_reverify` —— 索引重建后重新定位 Evidence
+- `wiki_reverify` —— 索引重建后重新定位 Evidence，并在同一轮里重新校验全部未结算的跨文献候选连接
+- `wiki_scan_links` —— 计算跨文献候选连接：库中哪些文献可能相关，具体通过哪些段落、术语或概念相关。通常不需要手动调用——一篇文献首次产生真实阅读记录时会自动入队，队列在后台消化；批量导入不会触发扫描。一次扫描 = 用该文献最多 20 个代表性段落做一次全库向量粗召回，再在 top 候选上做文献对局部双向精查，精查阶段不再扫全库。它写入的只是候选：会出现在 `wiki_prepare_update` 的 `pendingLinkSignals` 里，带两侧原文摘录和由服务端计算的 `mustResolve`；这里不写入任何 Page、Claim、Evidence、概念或关系
 - `wiki_build_from_paper` —— 阅读用户明确指定的单篇文献：先给元数据与摘要，再分页下发正文；用 `pagination.nextCursor` 逐页翻到 `pagination.coverageComplete` 为真，且必须先结束当前这篇才能开始下一篇；继承该文献问答阶段已读的 chunk 与阅读总结，只补读未读部分。这个「一次一篇」的独占限制只针对全文阅读，问答式阅读不受限，可同时累积多篇
 - `wiki_set_reading_expert` —— 依据元数据与摘要生成该文献专属的领域专家角色，并在条目下创建持久化 Markdown 阅读总结
 - `wiki_update_reading_note` —— 用当前对该文献的理解整体替换阅读总结。全文阅读时每读完一批调用一次；问答后对每篇真正读过的文献调用一次，并传入 `readChunkIds`（本轮真正读过并用于作答的 chunk）与检索时的 `domain` / `expertRole`。`finalSynthesis` 表示全文交付后的最终整体重构，问答路径不可用

@@ -20,6 +20,11 @@ import {
   section,
   shorten,
 } from "./wikiDom";
+import {
+  buildConceptEdges,
+  conceptEdgeLabel,
+  conceptEdgeStrength,
+} from "./wikiConceptEdges";
 import { rowColumn } from "./wikiRow";
 import { createWikiTermsView } from "./wikiTermsView";
 import type { WikiTermRecord } from "./wikiConceptTerms";
@@ -99,6 +104,13 @@ const EVIDENCE_ROLE_LABELS: Record<WikiEvidenceRole, string> = {
   EXAMPLE: "示例",
 };
 
+/** What produced a candidate, in the language the detail pane speaks. */
+const LINK_SIGNAL_TYPE_LABELS: Record<string, string> = {
+  semantic: "语义相似",
+  lexical: "共享术语",
+  concept: "共享概念",
+};
+
 const LINK_STATE_LABELS: Record<WikiLinkState, string> = {
   valid: "有效",
   pending_relink: "等待重连",
@@ -107,12 +119,18 @@ const LINK_STATE_LABELS: Record<WikiLinkState, string> = {
 };
 
 /**
- * Both kinds of relation the knowledge space draws between two documents.
+ * The three kinds of relation the knowledge space draws between two documents.
  *
  * A solid link is the strong one: some claim cites both papers as evidence.
- * A dashed link is the weak one: they only appear under the same knowledge
- * entry. They are toggled separately because the dashed set is much larger
- * and is context rather than argument.
+ * A dashed link is weaker: they only appear under the same knowledge entry.
+ * A dot-dash link is weaker still and comes from somewhere else entirely -
+ * both papers were read to use the same concept, recorded in
+ * `wiki_concept_term_sources` while reading rather than derived from any
+ * claim. It is the only one of the three that can exist before a claim spans
+ * two papers, which is exactly the state a young Wiki is in.
+ *
+ * They are toggled separately because the weaker sets are much larger and are
+ * context rather than argument.
  */
 const GRAPH_LINK_FILTERS: Array<{
   style: GraphLinkStyle;
@@ -129,10 +147,110 @@ const GRAPH_LINK_FILTERS: Array<{
     label: "同一条目",
     title: "显示或隐藏同属一个知识条目的连线",
   },
+  {
+    style: "dotdash",
+    label: "共享概念",
+    title: "显示或隐藏两篇文献都用到同一概念的连线",
+  },
+  {
+    style: "dotted",
+    label: "候选连接",
+    title: "显示或隐藏尚未结算的跨文献候选连接",
+  },
 ];
 
 /** A page cited by more documents than this contributes no dashed clique. */
 const SAME_PAGE_CLIQUE_LIMIT = 40;
+
+/**
+ * A concept read out of more documents than this draws no dot-dash edges.
+ *
+ * Not a rarity judgement - IDF already handles that, and a common concept
+ * still deserves a faint edge. This is the combinatorial guard: a concept
+ * behind n documents proposes n(n-1)/2 pairs, so one term every paper in a
+ * metallurgy library mentions turns the whole graph into a complete one at
+ * around forty papers and there is nothing left to read. Above the limit the
+ * concept still counts toward every document frequency and still appears in
+ * the link detail; it just stops proposing pairs of its own.
+ */
+const CONCEPT_CLIQUE_LIMIT = 40;
+
+/** Concepts named on a shared-concept edge before the rest become a count. */
+const CONCEPT_EDGE_LABELS = 3;
+
+/**
+ * How many unsettled candidates one document may draw.
+ *
+ * The design's 6-8, at the top of the range. A candidate edge is the weakest
+ * thing on the canvas and there can be one for every paper in the library, so
+ * without a per-document cap the picture the strong edges make would be buried
+ * under suggestions - which is the failure this whole feature is supposed to
+ * avoid, arriving from the other direction.
+ */
+const CANDIDATE_NEIGHBOURS = 8;
+
+/**
+ * How many never-read papers may surface as ghosts at once.
+ *
+ * Ghosts are invitations to read, and an invitation list of ninety is not one.
+ * Whatever does not fit is reported as a count in the graph hint rather than
+ * drawn, so nothing is hidden - it is just not competing for the same pixels.
+ */
+const GHOST_NODES = 12;
+
+/**
+ * One unsettled cross-paper candidate, as the panel needs it.
+ *
+ * Flattened from the link store deliberately: the panel should not have to
+ * know the difference between a candidate row, its signals and its
+ * resolutions to draw one line.
+ */
+export interface GraphCandidate {
+  linkId: number;
+  aItemKey: string;
+  bItemKey: string;
+  scoreSymmetric: number | null;
+  mustResolve: boolean;
+  signals: Array<{
+    signalId: number;
+    signalType: string;
+    score: number;
+    termSnapshot: string;
+    thisExcerpt: string;
+    otherExcerpt: string;
+    mustResolve: boolean;
+  }>;
+}
+
+/**
+ * What a candidate edge says on the canvas.
+ *
+ * A candidate with no readable label is not drawn at all, which is why this
+ * may return the empty string. "Cosine 0.62" is not something a reader can
+ * act on; neither is the bare word "candidate". A lexical or concept signal
+ * carries its term, and a purely semantic one is described by its two
+ * excerpts - truncated hard, because this is a tooltip, not the detail pane.
+ */
+function candidateLabel(candidate: GraphCandidate): string {
+  const terms = Array.from(
+    new Set(
+      candidate.signals
+        .map((signal) => signal.termSnapshot)
+        .filter((term) => Boolean(term)),
+    ),
+  );
+  if (terms.length) {
+    return `候选连接：${terms.slice(0, CONCEPT_EDGE_LABELS).join("、")}`;
+  }
+  const excerpt = candidate.signals
+    .map((signal) => signal.thisExcerpt || signal.otherExcerpt)
+    .find((text) => Boolean(text));
+  if (!excerpt) return "";
+  const trimmed = excerpt.length > 40 ? `${excerpt.slice(0, 39)}…` : excerpt;
+  return `候选连接：${trimmed}`;
+}
+
+
 
 /**
  * The delete drawer, in pixels.
@@ -595,6 +713,8 @@ async function renderWikiPanelContent(
   graphLegend.append(
     element(doc, "span", "legend-solid", "共享论断"),
     element(doc, "span", "legend-dashed", "同一条目"),
+    element(doc, "span", "legend-dotdash", "共享概念"),
+    element(doc, "span", "legend-dotted", "候选连接"),
     element(doc, "span", "legend-conflict", "存在分歧"),
   );
   graphStage.append(canvas, graphToolbar, graphLegend, graphTooltip);
@@ -1059,6 +1179,14 @@ async function renderWikiPanelContent(
     /** Wiki page this document contributes most claims to; drives its colour. */
     group: number;
     degree: number;
+    /**
+     * How much of it has been read.
+     *
+     * `ghost` is a document with no Wiki content at all, drawn only because a
+     * candidate reached it. It is the one node kind that is NOT evidence of
+     * anything the Wiki believes.
+     */
+    shade: "solid" | "half" | "ghost";
   }
 
   const documents = new Map<string, DocumentFacts>();
@@ -1091,6 +1219,7 @@ async function renderWikiPanelContent(
                 claims: [],
                 group: 0,
                 degree: 0,
+                shade: "half",
               })
               .get(itemKey)!;
           facts.claims.push({ page, claim, roles: Array.from(roles) });
@@ -1146,23 +1275,63 @@ async function renderWikiPanelContent(
 
   /** A link the reader can open: which two documents, and what they share. */
   interface LinkFacts {
-    kind: "shared-claim" | "same-page";
+    kind: "shared-claim" | "same-page" | "shared-concept" | "candidate";
     a: string;
     b: string;
     claimIds: number[];
     pageId?: number;
+    /** shared-concept only: every concept behind the edge, rarest first. */
+    concepts?: Array<{
+      conceptId: number;
+      name: string;
+      df: number;
+      idf: number;
+    }>;
+    /** shared-concept only: Σ idf over the concepts above. */
+    conceptScore?: number;
+    /** candidate only: the unsettled signals behind the edge. */
+    signals?: Array<{
+      signalId: number;
+      signalType: string;
+      score: number;
+      termSnapshot: string;
+      thisExcerpt: string;
+      otherExcerpt: string;
+      mustResolve: boolean;
+    }>;
+    /** candidate only: the pair's symmetric score. */
+    candidateScore?: number;
+    /** candidate only: at least one signal both of whose passages were read. */
+    mustResolve?: boolean;
   }
 
-  const buildGraphData = (documentGraph: {
-    nodes: Array<{ itemKey: string; claimCount: number; conceptCount: number }>;
-    edges: Array<{
-      source: string;
-      target: string;
-      strength: number;
-      claimIds: number[];
-      relations: string[];
-    }>;
-  }): GraphData => {
+  const buildGraphData = (
+    documentGraph: {
+      nodes: Array<{
+        itemKey: string;
+        claimCount: number;
+        conceptCount: number;
+      }>;
+      edges: Array<{
+        source: string;
+        target: string;
+        strength: number;
+        claimIds: number[];
+        relations: string[];
+      }>;
+    },
+    conceptSources: {
+      documentCount: number;
+      concepts: Array<{
+        conceptId: number;
+        name: string;
+        df: number;
+        idf: number;
+        itemKeys: string[];
+      }>;
+    } | null,
+    candidates: GraphCandidate[],
+  ): GraphData => {
     const links: GraphLinkInput[] = [];
     const pairKey = (a: string, b: string) =>
       a < b ? `${a} ${b}` : `${b} ${a}`;
@@ -1226,6 +1395,108 @@ async function renderWikiPanelContent(
       }
     }
 
+    /*
+     * Dot-dash: both documents were read to use the same concept.
+     *
+     * The one edge kind that does not come from a claim. `wiki_relations`
+     * joins concepts to concepts and `wiki_evidence` joins claims to sources,
+     * so neither can produce a document-to-document edge from shared
+     * terminology - but the source table has been recording, for every term,
+     * which paper and which passage it was read out of, and two papers behind
+     * one concept is a connection with the quotations already stored. Five
+     * papers all discussing 不连续动态再结晶 drew five isolated nodes purely
+     * because nothing read the table that way.
+     *
+     * The pairing, the rarity weighting and the combinatorial guard live in
+     * wikiConceptEdges as pure functions, so the rule that one ubiquitous term
+     * must not draw a complete graph is testable without a window.
+     */
+    const conceptPairs = new Set<string>();
+    for (const edge of buildConceptEdges(conceptSources?.concepts ?? [], {
+      visibleDocuments: new Set(documents.keys()),
+      // One pair, one line: a shared claim or a shared entry is the stronger
+      // relation and the one worth drawing.
+      excludedPairs: new Set([...solidPairs, ...dashedSeen]),
+      cliqueLimit: CONCEPT_CLIQUE_LIMIT,
+    })) {
+      conceptPairs.add(pairKey(edge.a, edge.b));
+      const label = conceptEdgeLabel(edge, CONCEPT_EDGE_LABELS);
+      // An unlabelled edge is a line the reader cannot act on. Every concept
+      // has a name, so this only fires on a library whose names are blank.
+      if (!label) continue;
+      links.push({
+        source: `item:${edge.a}`,
+        target: `item:${edge.b}`,
+        style: "dotdash",
+        tone: "neutral",
+        strength: conceptEdgeStrength(edge.score),
+        label,
+        payload: {
+          kind: "shared-concept",
+          a: edge.a,
+          b: edge.b,
+          claimIds: [],
+          concepts: edge.concepts,
+          conceptScore: edge.score,
+        } satisfies LinkFacts,
+      });
+    }
+
+    /*
+     * Dotted: a candidate nobody has settled yet.
+     *
+     * The weakest thing on the canvas, and the only kind that is not a
+     * statement about what the Wiki believes. It says the server noticed a
+     * resemblance - through representative passages, a shared rare term or a
+     * shared concept - and that nobody has yet decided whether it means
+     * anything. Drawn faint, drawn last, and capped per document, because a
+     * library of five hundred papers can produce a candidate for almost every
+     * pair and burying the settled edges under suggestions would be a worse
+     * failure than the islands this feature exists to fix.
+     *
+     * Two rules keep it honest. A pair that already has a settled edge gets no
+     * dotted line - one pair, one line, strongest wins. And a candidate with
+     * no label is not drawn at all: "cosine 0.62" is not something a reader
+     * can act on, so an edge that cannot say what it is about earns no pixels.
+     */
+    const drawnCandidates = new Map<string, number>();
+    for (const candidate of candidates) {
+      const key = pairKey(candidate.aItemKey, candidate.bItemKey);
+      if (solidPairs.has(key) || dashedSeen.has(key)) continue;
+      if (conceptPairs.has(key)) continue;
+      const aDrawn = drawnCandidates.get(candidate.aItemKey) ?? 0;
+      const bDrawn = drawnCandidates.get(candidate.bItemKey) ?? 0;
+      if (aDrawn >= CANDIDATE_NEIGHBOURS || bDrawn >= CANDIDATE_NEIGHBOURS) {
+        continue;
+      }
+      if (!documents.has(candidate.aItemKey) || !documents.has(candidate.bItemKey)) {
+        continue;
+      }
+      const label = candidateLabel(candidate);
+      if (!label) continue;
+      drawnCandidates.set(candidate.aItemKey, aDrawn + 1);
+      drawnCandidates.set(candidate.bItemKey, bDrawn + 1);
+      links.push({
+        source: `item:${candidate.aItemKey}`,
+        target: `item:${candidate.bItemKey}`,
+        style: "dotted",
+        tone: "neutral",
+        // Width carries the symmetric score, which is what the pair's own
+        // ranking is built on. Kept under 2 so no candidate outdraws a claim.
+        strength: 1 + Math.min(1, Math.max(0, candidate.scoreSymmetric ?? 0)),
+        label,
+        payload: {
+          kind: "candidate",
+          a: candidate.aItemKey,
+          b: candidate.bItemKey,
+          claimIds: [],
+          signals: candidate.signals,
+          candidateScore: candidate.scoreSymmetric ?? undefined,
+          mustResolve: candidate.mustResolve,
+        } satisfies LinkFacts,
+      });
+    }
+
     for (const facts of documents.values()) facts.degree = 0;
     for (const link of links) {
       const a = String(link.source).slice(5);
@@ -1252,7 +1523,10 @@ async function renderWikiPanelContent(
         // the rim: depth carries how central a document is to the library.
         depth: maxDegree ? 1 - facts.degree / maxDegree : 1,
         group: facts.group,
-        dim: facts.degree === 0,
+        // Isolation and unreadness are now separate signals. A paper read in
+        // full with no edges is a finding; a paper nobody opened is not.
+        dim: facts.degree === 0 && facts.shade !== "ghost",
+        shade: facts.shade,
         payload: { kind: "document", itemKey: facts.itemKey },
       }),
     );
@@ -1265,6 +1539,12 @@ async function renderWikiPanelContent(
   let showIsolated = true;
   let documentGraph: Awaited<ReturnType<typeof store.getDocumentGraph>> | null =
     null;
+  let conceptSources: Awaited<
+    ReturnType<typeof store.getConceptDocumentSources>
+  > | null = null;
+  let graphCandidates: GraphCandidate[] = [];
+  /** Never-read papers a candidate reached but that did not fit the canvas. */
+  let hiddenGhosts = 0;
 
   const claimsById = new Map<number, { page: any; claim: any }>();
   for (const page of pages) {
@@ -1390,6 +1670,97 @@ async function renderWikiPanelContent(
         `${a?.title ?? facts.a} ↔ ${b?.title ?? facts.b}`,
       ),
     );
+    if (facts.kind === "candidate") {
+      const signals = facts.signals ?? [];
+      graphDetails.append(
+        element(
+          doc,
+          "p",
+          "",
+          `服务器发现的候选连接，尚未结算：对称相关度 ${(facts.candidateScore ?? 0).toFixed(3)}，` +
+            `${signals.length} 条发现信号。` +
+            (facts.mustResolve
+              ? "其中至少有一条，两侧所指的段落都已经被读过，写入时必须给出结论。"
+              : "两侧段落尚未都被读过，因此只是线索，不要求现在处理，也不必为此去读对方全文。"),
+        ),
+      );
+      // Both excerpts, always. A candidate the reader cannot check is a
+      // number, and "cosine 0.62" is not a reason to do anything.
+      for (const signal of signals) {
+        const card = element(doc, "div", "zmp-wiki-graph-claim");
+        const head = element(doc, "div", "zmp-wiki-graph-claim-head");
+        head.append(
+          element(
+            doc,
+            "span",
+            "zmp-wiki-claim-type",
+            labelFor(LINK_SIGNAL_TYPE_LABELS, signal.signalType),
+          ),
+          element(
+            doc,
+            "small",
+            "zmp-wiki-graph-context",
+            signal.termSnapshot
+              ? `${signal.termSnapshot} · 分数 ${signal.score.toFixed(3)}`
+              : `分数 ${signal.score.toFixed(3)}`,
+          ),
+        );
+        card.append(head);
+        for (const [side, text] of [
+          [a?.title ?? facts.a, signal.thisExcerpt],
+          [b?.title ?? facts.b, signal.otherExcerpt],
+        ] as const) {
+          if (!text) continue;
+          const quote = element(doc, "div", "zmp-wiki-graph-stance");
+          quote.append(
+            element(doc, "span", "zmp-wiki-graph-stance-name", shorten(side, 18)),
+            element(doc, "span", "", text),
+          );
+          card.append(quote);
+        }
+        graphDetails.append(card);
+      }
+      return;
+    }
+    if (facts.kind === "shared-concept") {
+      const concepts = facts.concepts ?? [];
+      graphDetails.append(
+        element(
+          doc,
+          "p",
+          "",
+          `两篇文献都被读到使用了 ${concepts.length} 个相同概念，但还没有共享同一条论断，也不同属一个知识条目。` +
+            `按稀有度加权的连接强度 ${(facts.conceptScore ?? 0).toFixed(2)}。`,
+        ),
+      );
+      // Rarest first - the same order the edge label used, so the line and the
+      // panel agree about what makes these two papers related.
+      for (const concept of concepts) {
+        const card = element(doc, "div", "zmp-wiki-graph-claim");
+        const head = element(doc, "div", "zmp-wiki-graph-claim-head");
+        head.append(
+          element(
+            doc,
+            "small",
+            "zmp-wiki-graph-context",
+            `${concept.df} 篇文献使用 · 稀有度 ${concept.idf.toFixed(2)}`,
+          ),
+        );
+        // The concept library is where the passages behind this live: which
+        // paper, which chunk, which sentence.
+        const open = commandBlock(
+          doc,
+          concept.name,
+          `在术语库中打开概念 ${concept.conceptId}`,
+        );
+        open.addEventListener("click", () =>
+          openConceptInTerms(concept.conceptId),
+        );
+        card.append(head, open);
+        graphDetails.append(card);
+      }
+      return;
+    }
     if (facts.kind === "same-page") {
       const page =
         facts.pageId == null ? undefined : pagesById.get(facts.pageId);
@@ -1538,9 +1909,115 @@ async function renderWikiPanelContent(
   });
   graphToolbar.append(isolatedButton);
 
+  const ghostCount = (): number => {
+    let total = 0;
+    for (const facts of documents.values()) {
+      if (facts.shade === "ghost") total += 1;
+    }
+    return total;
+  };
+
+  /**
+   * Unsettled candidates, flattened for the canvas.
+   *
+   * Best-effort by design. Candidates are suggestions ABOUT the Wiki; a link
+   * table that cannot be read must cost the reader those suggestions and
+   * nothing else, so a failure here draws the settled graph rather than an
+   * error card.
+   */
+  const loadCandidates = async (): Promise<GraphCandidate[]> => {
+    try {
+      const links = await store.links();
+      const candidates = await links.listCandidates(libraryID, ["open"]);
+      const flattened: GraphCandidate[] = [];
+      for (const candidate of candidates) {
+        const signals = await links.pendingSignalsForItem({
+          libraryID,
+          itemKey: candidate.aItemKey,
+          limit: 20,
+        });
+        const mine = signals.filter(
+          (signal) => signal.linkId === candidate.linkId,
+        );
+        if (!mine.length) continue;
+        flattened.push({
+          linkId: candidate.linkId,
+          aItemKey: candidate.aItemKey,
+          bItemKey: candidate.bItemKey,
+          scoreSymmetric: candidate.scoreSymmetric,
+          // The panel does not recompute mustResolve: that rule reads the
+          // reading ledger and belongs to WikiLinkService, and a second
+          // implementation of it would eventually disagree with the first.
+          mustResolve: false,
+          signals: mine.map((signal) => ({
+            signalId: signal.signalId,
+            signalType: signal.signalType,
+            score: signal.score,
+            termSnapshot: signal.termSnapshot,
+            thisExcerpt: signal.a.excerpt,
+            otherExcerpt: signal.b.excerpt,
+            mustResolve: false,
+          })),
+        });
+      }
+      return flattened;
+    } catch (error) {
+      ztoolkit.log("[wiki] link candidates unavailable for the graph", error);
+      return [];
+    }
+  };
+
   const drawGraph = async () => {
-    documentGraph = await store.getDocumentGraph(libraryID);
+    const [freshGraph, sources, readDepths, candidates] = await Promise.all([
+      store.getDocumentGraph(libraryID),
+      store.getConceptDocumentSources(libraryID),
+      store.getDocumentReadDepths(libraryID),
+      loadCandidates(),
+    ]);
+    documentGraph = freshGraph;
+    conceptSources = sources;
+    graphCandidates = candidates;
     collectDocuments();
+    /*
+     * Reading state, then ghosts.
+     *
+     * A node's shade says how much of the paper has been read, which is a
+     * different question from how many edges it has. The two used to be
+     * conflated into one grey: a paper read in full that genuinely connects to
+     * nothing looked exactly like a paper nobody had opened, and those are
+     * opposite findings.
+     *
+     * Ghosts are papers with no Wiki content at all, drawn only because a
+     * candidate reached them. They are invitations to read - never evidence -
+     * so they are capped hard and whatever does not fit is reported as a
+     * count rather than silently dropped.
+     */
+    for (const facts of documents.values()) {
+      facts.shade =
+        readDepths.get(facts.itemKey) === "paper_reviewed" ? "solid" : "half";
+    }
+    hiddenGhosts = 0;
+    const ghostCandidates = new Set<string>();
+    for (const candidate of graphCandidates) {
+      for (const itemKey of [candidate.aItemKey, candidate.bItemKey]) {
+        if (!documents.has(itemKey)) ghostCandidates.add(itemKey);
+      }
+    }
+    for (const itemKey of ghostCandidates) {
+      if (documents.size && ghostCount() >= GHOST_NODES) {
+        hiddenGhosts += 1;
+        continue;
+      }
+      documents.set(itemKey, {
+        itemKey,
+        title: itemKey,
+        detail: "",
+        claims: [],
+        group: 0,
+        degree: 0,
+        shade: "ghost",
+      });
+    }
     await nameDocuments();
     if (!graph) {
       graph = createGraph3D({
@@ -1554,8 +2031,18 @@ async function renderWikiPanelContent(
     graph.setMode(graphMode);
     graph.setVisibleLinkStyles(Array.from(linkStyles));
     graph.setShowIsolated(showIsolated);
-    graph.setData(buildGraphData(documentGraph));
-    graphHint(GRAPH_HINT);
+    graph.setData(
+      buildGraphData(
+        documentGraph ?? { nodes: [], edges: [] },
+        conceptSources,
+        graphCandidates,
+      ),
+    );
+    graphHint(
+      hiddenGhosts > 0
+        ? `${GRAPH_HINT} 另有 ${hiddenGhosts} 篇尚未阅读的低相关候选文献未画出。`
+        : GRAPH_HINT,
+    );
   };
 
   // ---- One view at a time ------------------------------------------------

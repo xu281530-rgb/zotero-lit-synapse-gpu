@@ -88,6 +88,8 @@ import type {
   WikiTermInput,
   WikiTermSourceInput,
 } from "./wikiConceptTerms";
+import { WikiLinkService } from "./wikiLinkService";
+import type { WikiLinkResolutionType } from "./wikiLinkTypes";
 import { WikiRetriever } from "./wikiRetriever";
 import type {
   WikiClaimSearchResult,
@@ -167,6 +169,18 @@ export const WIKI_SKELETON_HUBS = 12;
  * the shortlist, ranked by how close the page's own Claims sit to this paper.
  */
 export const WIKI_SKELETON_EXTENDABLE_PAGES = 6;
+
+/**
+ * How many cross-paper candidates one write-up is shown.
+ *
+ * Bounded for the same reason the neighbourhood is: the number must not grow
+ * with the library, or the response stops fitting and the list stops being
+ * read. Twelve because a pair carries two excerpts and a verdict - three or
+ * four of those is real work, and a list nobody finishes is worse than a
+ * shorter one somebody does. Mandatory signals sort first, so a truncated list
+ * never hides the ones that block the commit.
+ */
+export const WIKI_PENDING_LINK_SIGNAL_LIMIT = 12;
 
 /** The Evidence excerpt floor this service enforces; defined in the leaf so
  * `toolCatalog` can state the same number without importing the wiki stack. */
@@ -413,6 +427,40 @@ export class WikiService {
     this.store = store;
     this.retriever = new WikiRetriever(store);
     this.notes = notes;
+    this.links = new WikiLinkService(store);
+  }
+
+  /** Cross-paper candidates. Public so the panel and the tools can reach it. */
+  readonly links: WikiLinkService;
+
+  /**
+   * `wiki_status`, with the cross-paper layer folded in.
+   *
+   * The link counters are reported by TYPE as well as in total, because the
+   * question they exist to answer is "which of the three discovery paths is
+   * producing noise" and one aggregate cannot answer it. A rejection rate of
+   * 0.8 on lexical signals and 0.1 on concept ones is a finding; their average
+   * is a number with no referent.
+   *
+   * `linkRejectedRate` is watched for the opposite failure too. A model that
+   * dismisses everything produces a library that looks exactly like one with
+   * no real connections, and the ratio is what tells them apart.
+   */
+  async status(libraryID?: number): Promise<any> {
+    const base = await this.store.getStatus(libraryID);
+    if (libraryID === undefined) return base;
+    try {
+      return { ...base, ...(await this.links.statistics(libraryID)) };
+    } catch (error) {
+      // Status must answer. A link layer that cannot be read is itself worth
+      // reporting, and is not a reason to withhold the Wiki's own counts.
+      ztoolkit.log("[wiki] link statistics unavailable", error);
+      return {
+        ...base,
+        linkStatisticsError:
+          error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   private prunePrepareTokens(): void {
@@ -556,6 +604,43 @@ export class WikiService {
     // list exists to make impossible to overlook.
     const pendingWiki = await sessions.listPendingWiki(options.libraryID);
 
+    /*
+     * Cross-paper candidates touching what this turn read.
+     *
+     * Narrowed to the chunks of the papers whose reading is being written up,
+     * not to the whole library. A question that read five passages must not be
+     * handed every candidate in the library that happens to mention one of
+     * those papers: a forty-item checklist is not a checklist, and the honest
+     * answer to most of it would be "I have not read that passage".
+     *
+     * `mustResolve` is computed by the server, per signal, against the reading
+     * ledger. The model is never asked to judge whether the other paper "seems
+     * to have been read" - that judgement is exactly the one it cannot make
+     * and would answer optimistically.
+     */
+    const linkTargets = new Map<string, number[]>();
+    if (options.itemKey) linkTargets.set(options.itemKey, []);
+    for (const entry of pendingWiki) {
+      linkTargets.set(entry.session.itemKey, entry.pendingChunkIds);
+    }
+    const pendingLinkSignals: any[] = [];
+    for (const [itemKey, chunkIds] of linkTargets) {
+      try {
+        pendingLinkSignals.push(
+          ...(await this.links.pendingSignals({
+            libraryID: options.libraryID,
+            itemKey,
+            chunkIds: chunkIds.length ? chunkIds : undefined,
+            limit: WIKI_PENDING_LINK_SIGNAL_LIMIT,
+          })),
+        );
+      } catch (error) {
+        // A broken candidate table must not stop a write-up. The Wiki is the
+        // durable thing here; candidates are suggestions about it.
+        ztoolkit.log("[wiki] pending link signals unavailable", error);
+      }
+    }
+
     const prepareToken = `${Date.now().toString(36)}-${Math.random()
       .toString(36)
       .slice(2, 14)}`;
@@ -587,6 +672,21 @@ export class WikiService {
               mode: openSession.mode,
               wikiReviewRecorded: openSession.wikiReviewAt !== null,
             },
+          }
+        : {}),
+      ...(pendingLinkSignals.length
+        ? {
+            pendingLinkSignals,
+            pendingLinkNote:
+              "跨文献候选连接：这些文献对是服务器根据代表性段落的语义相似度、" +
+              "共享稀有术语或共享概念发现的，还没有被结算。" +
+              "mustResolve=true 表示两侧所指向的**具体段落都已经被读过**，" +
+              "本次写入必须对它给出结论；其余只是可选线索，不阻塞提交，也不要求你去读对方全文。" +
+              "允许的结论有五种：共同支撑同一条 Claim（两侧都要写 Evidence）、" +
+              "属于同一个主题 Page 但应保持为不同 Claim、在条件相当时给出矛盾结论、" +
+              "能形成 concept↔concept 的可证关系、以及「只是套话或条件不可比」。" +
+              "最后一种用 DISMISS_LINK_SIGNALS，理由不少于 40 字并结合两侧原文；" +
+              "其余四种在对应的写入动作上带 resolvesSignalIds。",
           }
         : {}),
       ...(pendingWiki.length
@@ -1168,8 +1268,10 @@ export class WikiService {
         "概念只给与本篇相关的那些。写入前先看它：本篇该扩展哪些页、" +
         "哪些概念已经存在（别重复造）、能和哪些概念建立关系。" +
         "duplicateCandidates 里 sourcedFromThisPaper false 的条目，" +
-        "是本篇也在用、但还没把本篇登记为来源的概念：把它原样再提交一次" +
-        "（带本篇的 itemKey 和原文摘录），服务器会追加来源而不是新建概念。" +
+        "是本篇也在用、但还没把本篇登记为来源的概念：用 wiki_record_concepts " +
+        "提交它的 conceptId，配一条 source（本篇 itemKey、真正读过的 chunkIdSnapshot、" +
+        "以及从该 chunk 原文摘出的 excerpt），不要带任何命名字段——这种提交会立即写入，" +
+        "不进暂存，服务器只追加来源，不新建概念。" +
         "只被一篇文献引用的术语连接不了任何两篇文献，sourceDocuments 就是它现在连了几篇。" +
         "一页 ≠ 一篇文献：页是主题，一篇文献通常横跨好几个主题，" +
         "所以正常结果是把 Claim 分别挂到若干个已有页上，而不是新建一页装下整篇。" +
@@ -1775,6 +1877,10 @@ export class WikiService {
       // or whose chunks owe nothing, must fail the commit rather than let the
       // Claims land while the debt it was meant to settle quietly survives.
       writeOffs = await this.readWriteOffs(input.actions, input.libraryID);
+      // Same reason, one layer along: a dismissal whose reason does not argue
+      // must not clear a candidate, and a mandatory candidate this commit
+      // ignores must not be able to slip past by being unmentioned.
+      await this.assertLinkSignalsAnswered(input);
       const hydrated = await this.hydrateActions(
         input.actions,
         input.libraryID,
@@ -1825,6 +1931,13 @@ export class WikiService {
     // just finished open.
     for (const writeOff of writeOffs) citedKeys.add(writeOff.itemKey);
 
+    // After the durable boundary, and deliberately so: a resolution says
+    // "this Claim was written because of that signal", and it can only be true
+    // once the Claim exists. Failures here are logged rather than thrown - the
+    // Wiki write is permanent, and turning a successful commit into an error
+    // because an audit row could not be added would be the wrong trade.
+    const linkSettlement = await this.settleLinkSignals(input, actions);
+
     const questionReading = await this.settleQuestionReading(
       input.libraryID,
       citedChunkIdsByItem,
@@ -1854,7 +1967,203 @@ export class WikiService {
           : undefined,
       ...(readingSession ? { readingSession } : {}),
       ...(questionReading ? { questionReading } : {}),
+      ...(linkSettlement ? { linkSettlement } : {}),
     };
+  }
+
+  /**
+   * Refuse a commit that ignores a candidate both of whose passages were read.
+   *
+   * "Both passages were read" is the whole of the rule, and it is checked per
+   * signal against the reading ledger by {@link WikiLinkService}. A candidate
+   * pointing at a passage nobody has opened is a suggestion and stays one: it
+   * goes in the queue, it may draw a ghost node, and it never blocks anything.
+   * Without that distinction the feature would demand that a reader reconcile
+   * text they have not seen, which they can only do by guessing.
+   *
+   * Off unless `wiki.link.mandatorySettlement` is set. The design is explicit
+   * that this gate must not be switched on before real-library calibration: a
+   * bad threshold here does not produce a noisy suggestion, it produces a
+   * commit nobody can complete.
+   */
+  private async assertLinkSignalsAnswered(
+    input: WikiCommitInput,
+  ): Promise<void> {
+    const settled = new Set<number>();
+    for (const action of input.actions) {
+      for (const raw of (action as any).resolvesSignalIds ?? []) {
+        settled.add(Number(raw));
+      }
+      if (action.action !== "DISMISS_LINK_SIGNALS") continue;
+      const signalIds = Array.isArray((action as any).signalIds)
+        ? (action as any).signalIds.map((id: unknown) => Number(id))
+        : [];
+      const reason = String((action as any).reason ?? "").trim();
+      if (!signalIds.length) {
+        throw new Error(
+          "DISMISS_LINK_SIGNALS needs the signalIds it dismisses. They come from " +
+            "pendingLinkSignals in wiki_prepare_update.",
+        );
+      }
+      // Shape before size, exactly as SKIP does: both refuse the same answer,
+      // but naming the reflex tells the caller what is wanted where a length
+      // complaint only invites padding.
+      if (VACUOUS_WRITE_OFF_REASON.test(reason)) {
+        throw new Error(
+          `A link dismissal asserts rather than argues: "${reason}". "Not related" is exactly what a ` +
+            "reader who compared nothing would also say. Quote what each side actually claims, and say " +
+            "why they cannot support one Claim, sit under one Page, contradict each other, or form a " +
+            "concept relation.",
+        );
+      }
+      if (reason.length < WIKI_WRITE_OFF_MIN_REASON_CHARS) {
+        throw new Error(
+          `DISMISS_LINK_SIGNALS needs a reason of at least ${WIKI_WRITE_OFF_MIN_REASON_CHARS} ` +
+            "characters, argued from the quoted text on both sides. This judgement is kept permanently " +
+            "and is what stops the same pair being offered again, so it has to be readable later.",
+        );
+      }
+      for (const signalId of signalIds) settled.add(signalId);
+    }
+
+    const itemKeys = new Set<string>();
+    for (const action of input.actions) {
+      for (const entry of (action as any).evidence ?? []) {
+        if (entry?.itemKey) itemKeys.add(String(entry.itemKey));
+      }
+      const named = (action as any).itemKey;
+      if (named) itemKeys.add(String(named));
+    }
+    if (!itemKeys.size) return;
+    const outstanding = await this.links.unsettledMandatory({
+      libraryID: input.libraryID,
+      itemKeys,
+      settledSignalIds: settled,
+    });
+    if (!outstanding.length) return;
+    const described = outstanding
+      .slice(0, 5)
+      .map(
+        (signal) =>
+          `signal ${signal.signalId} (${signal.aItemKey} - ${signal.bItemKey})`,
+      )
+      .join(", ");
+    throw new Error(
+      `${outstanding.length} cross-paper candidate signal(s) point at passages that have BOTH been ` +
+        `read, and this commit neither used nor dismissed them: ${described}` +
+        `${outstanding.length > 5 ? ", ..." : ""}. Each needs one of: a shared Claim citing both ` +
+        "papers, a Page holding both as separate Claims, a MARK_CONFLICT, or a LINK_RELATION - each " +
+        "carrying resolvesSignalIds - or a DISMISS_LINK_SIGNALS saying why the resemblance establishes " +
+        "nothing. Nothing was written.",
+    );
+  }
+
+  /**
+   * Record which signals this commit's writes settled.
+   *
+   * The resolution type is read off the ACTION rather than declared by the
+   * caller, because the action is what actually happened: a Claim citing both
+   * papers is a shared_claim whatever anyone calls it, and letting the two
+   * disagree would make the audit trail describe a different commit from the
+   * one that ran.
+   */
+  private async settleLinkSignals(
+    input: WikiCommitInput,
+    actions: WikiCommitAction[],
+  ): Promise<
+    | { settledSignals: number; resolutions: number; dismissed: number }
+    | undefined
+  > {
+    const settlements: Array<{
+      signalIds: number[];
+      resolutionType: WikiLinkResolutionType;
+      claimId?: number | null;
+      note: string;
+    }> = [];
+    for (const action of actions) {
+      if (action.action === "DISMISS_LINK_SIGNALS") {
+        settlements.push({
+          signalIds: ((action as any).signalIds ?? []).map((id: unknown) =>
+            Number(id),
+          ),
+          resolutionType: "no_action",
+          note: String((action as any).reason ?? ""),
+        });
+        continue;
+      }
+      const signalIds = ((action as any).resolvesSignalIds ?? []).map(
+        (id: unknown) => Number(id),
+      );
+      if (!signalIds.length) continue;
+      const rawClaimId = Number((action as any).claimId);
+      const claimId = Number.isFinite(rawClaimId) ? rawClaimId : null;
+      switch (action.action) {
+        case "ADD_CLAIM":
+        case "ATTACH_EVIDENCE":
+          settlements.push({
+            signalIds,
+            resolutionType: "shared_claim",
+            claimId,
+            note: "Settled by Evidence attached to a shared Claim.",
+          });
+          break;
+        case "UPDATE_CLAIM":
+          settlements.push({
+            signalIds,
+            resolutionType: "shared_claim",
+            claimId,
+            note: "Settled by revising a Claim both papers now support.",
+          });
+          break;
+        case "MARK_CONFLICT":
+          settlements.push({
+            signalIds,
+            resolutionType: "conflict",
+            claimId,
+            note: "Settled as a contradiction between the two papers.",
+          });
+          break;
+        case "CREATE_PAGE":
+          settlements.push({
+            signalIds,
+            resolutionType: "same_page",
+            note: "Settled by placing both papers under one knowledge entry.",
+          });
+          break;
+        case "LINK_RELATION":
+          settlements.push({
+            signalIds,
+            resolutionType: "concept_relation",
+            note: "Settled as a relation between concepts the two papers share.",
+          });
+          break;
+        default:
+          break;
+      }
+    }
+    if (!settlements.length) return undefined;
+    let settledSignals = 0;
+    let resolutions = 0;
+    let dismissed = 0;
+    for (const settlement of settlements) {
+      try {
+        const outcome = await this.links.resolveSignals({
+          libraryID: input.libraryID,
+          signalIds: settlement.signalIds,
+          resolutionType: settlement.resolutionType,
+          claimId: settlement.claimId,
+          note: settlement.note,
+        });
+        settledSignals += outcome.settled;
+        resolutions += outcome.resolutionIds.length;
+        if (settlement.resolutionType === "no_action") {
+          dismissed += outcome.settled;
+        }
+      } catch (error) {
+        ztoolkit.log("[wiki] could not settle a link signal", error);
+      }
+    }
+    return { settledSignals, resolutions, dismissed };
   }
 
   /**
@@ -2877,6 +3186,12 @@ export class WikiService {
       integratedIndexes: booked.newIndexes,
       finalSynthesis: false,
     });
+    // The paper now has a real reading record, which is the trigger for
+    // cross-paper candidates - not being imported, and not being returned by
+    // retrieval. Queued, never awaited: this answer must not wait on a
+    // full-library vector pass, and a scan that cannot start is a missing
+    // suggestion rather than a lost page of reading.
+    void this.links.onPaperRead(options.libraryID, itemKey);
     const refreshed = (await sessions.get(session.sessionId)) ?? session;
     // The machine block was rendered from the ledger as it stood BEFORE the
     // booking, so it now understates what has been read. Re-render it. This is
@@ -3482,7 +3797,32 @@ export class WikiService {
         return bodyIndexStateFromSourceKind(status?.sourceKind) === "body";
       },
     });
-    return relinker.relinkPending({ libraryID, itemKeys });
+    const evidence = await relinker.relinkPending({ libraryID, itemKeys });
+    /*
+     * Link signals are re-verified in the same pass, and by their OWN relinker.
+     *
+     * The two must run together: a reindex that relocates a Claim's Evidence
+     * while leaving a candidate signal pointing at the old chunk id would give
+     * one library two different opinions about where a passage lives, and the
+     * signal's opinion is the dangerous one - it is offered as settleable debt.
+     *
+     * They cannot be the same relinker. `wikiEvidenceRelinker` writes
+     * `wiki_evidence`: its columns, its unique constraint, its `link_state`
+     * vocabulary and the Claim-status recomputation it triggers. A signal has
+     * none of those. What they share is the locating primitive, which is now
+     * `wikiChunkLocator` and is used by both.
+     *
+     * Best-effort: Evidence provenance is the durable thing here, and a
+     * candidate that could not be re-checked stays pending and is checked
+     * again next time.
+     */
+    let links: Awaited<ReturnType<WikiLinkService["relink"]>> | undefined;
+    try {
+      links = await this.links.relink({ libraryID, itemKeys });
+    } catch (error) {
+      ztoolkit.log("[wiki] link signal relink failed", error);
+    }
+    return { ...evidence, ...(links ? { linkSignals: links } : {}) };
   }
 
   async exportMarkdown(libraryID: number): Promise<string> {
@@ -3641,7 +3981,40 @@ export class WikiService {
       );
     }
     const defaultItemKey = options.itemKey?.trim() || open?.itemKey || "";
-    const entities = Array.isArray(options.concepts) ? options.concepts : [];
+    const submitted = Array.isArray(options.concepts) ? options.concepts : [];
+
+    /*
+     * Source-only attachments are split off before anything else happens.
+     *
+     * They are the one submission that must NOT be staged. Everything else in
+     * this method is shaped around the whole-paper pass - stage while reading,
+     * write once at the end - and that shape is correct for naming decisions,
+     * which deserve one confirmation per paper rather than one per batch. It
+     * is wrong for "this paper also uses that concept": a question-driven read
+     * never reaches the whole-paper pass, so a source staged during one is
+     * staged forever, and the concept it would have connected keeps reading as
+     * a term sourced from a single document. Five papers discussing the same
+     * mechanism produced five isolated nodes exactly this way.
+     *
+     * They are also written on the `final` path, unchanged, so the two calls
+     * mean the same thing wherever they appear.
+     */
+    const attachments: Array<{ index: number; entity: any }> = [];
+    const entities: typeof submitted = [];
+    submitted.forEach((entity, index) => {
+      if (entity && (entity as any).conceptId != null) {
+        attachments.push({ index, entity });
+      } else {
+        entities.push(entity);
+      }
+    });
+    const attachmentResult = attachments.length
+      ? await this.attachExistingConceptSources(
+          options.libraryID,
+          defaultItemKey,
+          attachments,
+        )
+      : null;
 
     // ---- Staging: no write, no prompt ------------------------------------
     if (options.final !== true && open) {
@@ -3671,16 +4044,29 @@ export class WikiService {
       return {
         staged: entities.length,
         totalStaged,
+        // Still false: no CONCEPT was written. Attached sources are reported
+        // on their own keys, because "a source row landed" and "a concept was
+        // created or renamed" are different events and only the second one is
+        // what this flag has ever meant.
         written: false,
-        warnings: stagedPreparation.warnings,
+        ...(attachmentResult ?? {}),
+        warnings: [
+          ...stagedPreparation.warnings,
+          ...(attachmentResult?.warnings ?? []),
+        ],
         readingSession: {
           sessionId: open.sessionId,
           itemKey: open.itemKey,
           conceptPassRecorded: false,
         },
         note:
-          "Held for the whole-paper pass. Call wiki_record_concepts with final true " +
-          "after the paper has been read to write these, plus anything else you found, in one go.",
+          (attachmentResult
+            ? `${attachmentResult.added} source(s) were recorded immediately against ${attachmentResult.attachedConcepts.length} existing concept(s) — those are not staged, because a question-driven read never reaches the whole-paper pass. `
+            : "") +
+          (stagedEntities.length
+            ? "The rest is held for the whole-paper pass. Call wiki_record_concepts with final true " +
+              "after the paper has been read to write these, plus anything else you found, in one go."
+            : "Nothing new was staged by this call."),
       };
     }
 
@@ -3788,9 +4174,14 @@ export class WikiService {
     );
     return {
       ...result,
+      ...(attachmentResult ?? {}),
       written: true,
       fromStaging: staged.length,
-      warnings: [...result.warnings, ...warnings],
+      warnings: [
+        ...result.warnings,
+        ...warnings,
+        ...(attachmentResult?.warnings ?? []),
+      ],
       final: options.final === true,
       ...(review.length
         ? {
@@ -3843,6 +4234,189 @@ export class WikiService {
       }
     }
     return warnings;
+  }
+
+  /**
+   * Record this paper as another source document behind existing concepts.
+   *
+   * Phase 0A of the cross-paper link work, and the whole of it. The concept
+   * library already knew how to hold several source documents per term; what
+   * was missing was a way for that to HAPPEN during the reading that actually
+   * produces the observation. A question-driven read is where a model notices
+   * that the paper in front of it uses a term the library defines, and it was
+   * also the one path whose concept submissions were staged into a session
+   * that never closes.
+   *
+   * Everything here is a check rather than a courtesy, because this write
+   * skips the user confirmation the ordinary concept write raises. What it may
+   * do is add a row saying "this document, this chunk, this quotation". So the
+   * server, not the model, establishes each of those three:
+   *
+   *   - the concept exists, in THIS library;
+   *   - the entity carries no naming payload at all, so nothing can be founded,
+   *     merged, renamed or completed through this door;
+   *   - the source names the paper the call is about, and no other;
+   *   - the chunk is in that paper's reading ledger, so a passage nobody read
+   *     cannot become evidence that the paper uses the term;
+   *   - the quotation is really in THAT chunk - not merely somewhere in the
+   *     paper, which is the weaker check `prepareTermSources` settles for when
+   *     it has a whole confirmed concept write to fall back on.
+   *
+   * Every attachment is validated before any of them is written, so a batch
+   * with one bad entry writes nothing rather than half of itself.
+   */
+  private async attachExistingConceptSources(
+    libraryID: number,
+    defaultItemKey: string,
+    attachments: Array<{ index: number; entity: any }>,
+  ): Promise<{
+    added: number;
+    attachedConcepts: Array<{
+      conceptId: number;
+      displayName: string;
+      added: number;
+    }>;
+    warnings: string[];
+  }> {
+    const where = (index: number) => `concepts[${index}]`;
+    const failures: string[] = [];
+    const planned: Array<{
+      conceptId: number;
+      sources: WikiPreparedSource[];
+    }> = [];
+    const sessions = await this.store.readingSessions();
+
+    for (const { index, entity } of attachments) {
+      const conceptId = Number(entity.conceptId);
+      if (!Number.isInteger(conceptId) || conceptId <= 0) {
+        failures.push(
+          `${where(index)}: conceptId must be a positive integer; received ${JSON.stringify(entity.conceptId)}.`,
+        );
+        continue;
+      }
+      const naming = [
+        entity.primaryTerm ? "primaryTerm" : "",
+        Array.isArray(entity.terms) && entity.terms.length ? "terms" : "",
+        String(entity.conceptType ?? "").trim() ? "conceptType" : "",
+        String(entity.description ?? "").trim() ? "description" : "",
+      ].filter(Boolean);
+      if (naming.length) {
+        failures.push(
+          `${where(index)}: conceptId attaches a source to a concept that already exists, so it cannot carry ${naming.join(", ")}. ` +
+            "To rename, complete or merge a concept, submit it the ordinary way - by its terms, without conceptId - and it goes through the whole-paper pass and its confirmation.",
+        );
+        continue;
+      }
+      const rawSources = Array.isArray(entity.sources) ? entity.sources : [];
+      if (!rawSources.length) {
+        failures.push(
+          `${where(index)}: conceptId with no sources records nothing. Give the chunkIdSnapshot and the excerpt from this paper that uses the term.`,
+        );
+        continue;
+      }
+      const sources: WikiPreparedSource[] = [];
+      for (let position = 0; position < rawSources.length; position += 1) {
+        const source = rawSources[position] ?? {};
+        const at = `${where(index)}.sources[${position}]`;
+        const itemKey = String(source.itemKey ?? "").trim() || defaultItemKey;
+        if (!itemKey) {
+          failures.push(
+            `${at}: no itemKey, and no paper is open or named on the call, so there is nothing to attach.`,
+          );
+          continue;
+        }
+        if (itemKey !== defaultItemKey) {
+          failures.push(
+            `${at}: names ${itemKey}, but this call is about ${defaultItemKey}. A source may only be attached for the paper being read; record the other paper while reading it.`,
+          );
+          continue;
+        }
+        const chunkId = Number(source.chunkIdSnapshot);
+        if (!Number.isInteger(chunkId)) {
+          failures.push(
+            `${at}: chunkIdSnapshot is required and must be the integer chunkId of the passage that uses the term.`,
+          );
+          continue;
+        }
+        const excerpt = normalizeWikiText(String(source.excerpt ?? ""));
+        if (!excerpt) {
+          failures.push(
+            `${at}: excerpt is required. A source with no quotation cannot be checked, and this write is not confirmed by anyone.`,
+          );
+          continue;
+        }
+        if (!(await sessions.hasReadChunkId(libraryID, itemKey, chunkId))) {
+          failures.push(
+            `${at}: chunk ${chunkId} of ${itemKey} is not in that paper's reading ledger. Attach a source only for a passage that was actually delivered and read.`,
+          );
+          continue;
+        }
+        if (!(await this.excerptIsInChunk(libraryID, itemKey, chunkId, excerpt))) {
+          failures.push(
+            `${at}: the quotation was not found in chunk ${chunkId} of ${itemKey}. Quote the text of that chunk itself.`,
+          );
+          continue;
+        }
+        sources.push({ libraryID, itemKey, chunkIdSnapshot: chunkId, excerpt });
+      }
+      if (sources.length) planned.push({ conceptId, sources });
+    }
+
+    if (failures.length) {
+      throw new Error(
+        `Concept source attachment refused: ${failures.join(" ")} Nothing was written; correct the batch and retry.`,
+      );
+    }
+
+    const library = await this.store.concepts();
+    const attachedConcepts: Array<{
+      conceptId: number;
+      displayName: string;
+      added: number;
+    }> = [];
+    const warnings: string[] = [];
+    let added = 0;
+    for (const plan of planned) {
+      const outcome = await library.attachExistingSources({
+        libraryID,
+        conceptId: plan.conceptId,
+        sources: plan.sources,
+      });
+      added += outcome.added;
+      attachedConcepts.push({
+        conceptId: outcome.conceptId,
+        displayName: outcome.displayName,
+        added: outcome.added,
+      });
+      if (outcome.added < plan.sources.length) {
+        warnings.push(
+          `${plan.sources.length - outcome.added} source(s) for 「${outcome.displayName}」 were already recorded for ${defaultItemKey} and were not duplicated.`,
+        );
+      }
+    }
+    return { added, attachedConcepts, warnings };
+  }
+
+  /** Is this quotation in THIS chunk - not merely somewhere in the paper? */
+  private async excerptIsInChunk(
+    libraryID: number,
+    itemKey: string,
+    chunkId: number,
+    excerpt: string,
+  ): Promise<boolean> {
+    try {
+      const vectorStore = getVectorStore();
+      await vectorStore.initialize();
+      const chunks = await vectorStore.getChunksForItem(itemKey, libraryID);
+      const named = chunks.find(
+        (candidate) => Number(candidate.chunkId) === chunkId,
+      );
+      if (!named) return false;
+      return normalizeWikiText(named.text).includes(excerpt);
+    } catch (error) {
+      ztoolkit.log("[wiki] could not verify an attached concept source", error);
+      return false;
+    }
   }
 
   private async prepareConceptEntities(
@@ -4350,6 +4924,9 @@ export class WikiService {
       session.sessionId,
       rows.map((row) => ({ chunkIndex: row.chunkIndex, chunkId: row.chunkId })),
     );
+    // Same trigger on the full-text path. Idempotent, so a paper delivered
+    // page by page enqueues once and every later page costs one SELECT.
+    void this.links.onPaperRead(session.libraryID, session.itemKey);
     const [coverage, afterDelivery, deliveredAfter] = await Promise.all([
       sessions.coverage(session.sessionId),
       sessions.get(session.sessionId),

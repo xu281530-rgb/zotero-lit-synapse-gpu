@@ -17,6 +17,7 @@ import {
 } from "./wikiConceptEmbedding";
 import { cosine, floatVector, vectorBytes } from "./wikiVector";
 import { WikiConceptLibrary } from "./wikiConceptLibrary";
+import { WikiLinkStore } from "./wikiLinkStore";
 import { classifyLegacyName } from "./wikiConceptTerms";
 import { WikiReadingSessions } from "./wikiReadingSession";
 import {
@@ -155,6 +156,7 @@ export class WikiStore {
   private readonly embeddingQueueStore: WikiEmbeddingQueue;
   private readonly conceptEmbeddingQueueStore: WikiEmbeddingQueue;
   private readonly conceptLibrary: WikiConceptLibrary;
+  private readonly linkStore: WikiLinkStore;
 
   constructor(db: WikiDatabase) {
     this.db = db;
@@ -168,11 +170,18 @@ export class WikiStore {
       CONCEPT_EMBEDDING_TARGET,
     );
     this.conceptLibrary = new WikiConceptLibrary(db);
+    this.linkStore = new WikiLinkStore(db);
   }
 
   async readingSessions(): Promise<WikiReadingSessions> {
     await this.initialize();
     return this.sessions;
+  }
+
+  /** Cross-paper link candidates, signals and resolutions. Schema-initialised. */
+  async links(): Promise<WikiLinkStore> {
+    await this.initialize();
+    return this.linkStore;
   }
 
   /** The structured term store. Schema-initialised, like the other two. */
@@ -738,6 +747,11 @@ export class WikiStore {
     await this.db.executeTransaction(async () => {
       for (const action of input.actions) {
         if (action.action === "SKIP") continue;
+        // Settled by WikiService once the transaction is durable, because the
+        // link tables record what a write PRODUCED - and a resolution written
+        // inside a transaction that then rolls back would claim a settlement
+        // for a Claim that does not exist.
+        if (action.action === "DISMISS_LINK_SIGNALS") continue;
         if (
           "ref" in action &&
           action.ref &&
@@ -1633,6 +1647,78 @@ export class WikiStore {
           pageParams,
         ),
       ),
+      /*
+       * Whether concepts are CONNECTING anything, which the three counts above
+       * them cannot say.
+       *
+       * `concepts` and `conceptTermSources` both grow when a paper founds
+       * twenty terms of its own and connects to nothing - the observed state
+       * this work exists to fix was 20 concepts against 20 sources, one
+       * apiece. These three move only when a term reaches a second document:
+       *
+       *   conceptsWithMultipleSources - concepts behind 2+ documents; the
+       *     numerator of "is the concept library load-bearing yet".
+       *   conceptSourceDocumentPairs  - distinct document pairs any concept
+       *     connects; the shared-concept edges before rarity weighting.
+       *   conceptSourceOnlyWrites     - source rows written by the attach
+       *     path. Zero while a reader stages terminology it never submits.
+       */
+      ...(await this.conceptConnectionStats(libraryID)),
+    };
+  }
+
+  /** The three "are concepts connecting papers yet" counts. See getStatus. */
+  private async conceptConnectionStats(libraryID?: number): Promise<{
+    conceptsWithMultipleSources: number;
+    conceptSourceDocumentPairs: number;
+    conceptSourceOnlyWrites: number;
+  }> {
+    const scope =
+      libraryID === undefined ? "" : " AND c.library_id = ? AND s.library_id = ?";
+    const params = libraryID === undefined ? [] : [libraryID, libraryID];
+    const rows = await this.db.queryAsync(
+      `SELECT t.concept_id AS concept_id, s.item_key AS item_key
+         FROM wiki_concept_term_sources s
+         JOIN wiki_concept_terms t ON t.term_id = s.term_id
+         JOIN wiki_concepts c ON c.concept_id = t.concept_id
+        WHERE 1 = 1${scope}
+        GROUP BY t.concept_id, s.item_key`,
+      params,
+    );
+    const byConcept = new Map<number, string[]>();
+    for (const row of rows) {
+      const conceptId = Number(rowValue(row, "concept_id", "conceptId"));
+      const itemKey = String(rowValue(row, "item_key", "itemKey") ?? "");
+      if (!itemKey) continue;
+      (byConcept.get(conceptId) ?? byConcept.set(conceptId, []).get(conceptId)!)
+        .push(itemKey);
+    }
+    const pairs = new Set<string>();
+    let multiple = 0;
+    for (const itemKeys of byConcept.values()) {
+      if (itemKeys.length < 2) continue;
+      multiple += 1;
+      const ordered = itemKeys.slice().sort();
+      for (let left = 0; left < ordered.length; left += 1) {
+        for (let right = left + 1; right < ordered.length; right += 1) {
+          pairs.add(`${ordered[left]} ${ordered[right]}`);
+        }
+      }
+    }
+    return {
+      conceptsWithMultipleSources: multiple,
+      conceptSourceDocumentPairs: pairs.size,
+      conceptSourceOnlyWrites: Number(
+        await this.db.valueQueryAsync(
+          libraryID === undefined
+            ? "SELECT COUNT(*) FROM wiki_concept_term_sources WHERE write_path = 'attach'"
+            : `SELECT COUNT(*) FROM wiki_concept_term_sources s
+                 JOIN wiki_concept_terms t ON t.term_id = s.term_id
+                 JOIN wiki_concepts c ON c.concept_id = t.concept_id
+                WHERE s.write_path = 'attach' AND c.library_id = ?`,
+          libraryID === undefined ? [] : [libraryID],
+        ),
+      ),
     };
   }
 
@@ -1641,6 +1727,11 @@ export class WikiStore {
     const deletedRows = countWikiPersistentRows(before);
     await this.db.executeTransaction(async () => {
       for (const table of [
+        // The link layer first: its rows reference nothing outside itself, but
+        // every one of them DESCRIBES a pair of papers, and leaving candidates
+        // behind after a reset would leave the graph drawing edges between
+        // documents the Wiki no longer knows anything about.
+        ...WikiLinkStore.TABLES,
         "wiki_claim_embeddings",
         "wiki_concept_embeddings",
         "wiki_concept_embedding_queue",
@@ -2873,6 +2964,150 @@ export class WikiStore {
       await this.assertPageFullyDeleted(pageId, claimIds, conceptId, bindings);
       return plan;
     });
+  }
+
+  /**
+   * How much of each paper has actually been read, in one query.
+   *
+   * The graph needs this for every node it draws, and asking per document
+   * would be one round trip per paper on a view that already reads the whole
+   * Wiki. The distinction it supports is not cosmetic: a paper read in full
+   * with no edges is evidence that it really does not connect to anything,
+   * while a paper nobody has opened is evidence of nothing at all, and the
+   * old drawn/dim pair rendered them identically.
+   *
+   * `paper_reviewed` keeps its strict meaning - a full-text session, every
+   * chunk delivered, whole-paper synthesis recorded. A question-driven session
+   * that happens to have touched every chunk is `section_read`, exactly as
+   * Evidence depth treats it.
+   */
+  async getDocumentReadDepths(
+    libraryID: number,
+  ): Promise<Map<string, "paper_reviewed" | "section_read">> {
+    await this.initialize();
+    const rows = await this.db.queryAsync(
+      `SELECT s.item_key AS item_key, s.mode AS mode, s.total_chunks AS total_chunks,
+              s.final_synthesis_at AS final_synthesis_at,
+              COUNT(DISTINCT c.chunk_index) AS delivered
+         FROM wiki_reading_sessions s
+         LEFT JOIN wiki_reading_chunks c ON c.session_id = s.session_id
+        WHERE s.library_id = ?
+        GROUP BY s.session_id
+        ORDER BY s.session_id`,
+      [libraryID],
+    );
+    const depths = new Map<string, "paper_reviewed" | "section_read">();
+    for (const row of rows) {
+      const itemKey = String(rowValue(row, "item_key", "itemKey") ?? "");
+      if (!itemKey) continue;
+      const mode = String(rowValue(row, "mode", "mode") ?? "fulltext");
+      const total = Number(rowValue(row, "total_chunks", "totalChunks") ?? 0);
+      const delivered = Number(rowValue(row, "delivered", "delivered") ?? 0);
+      const synthesised =
+        rowValue(row, "final_synthesis_at", "finalSynthesisAt") != null;
+      const reviewed =
+        mode === "fulltext" && synthesised && total > 0 && delivered >= total;
+      // A paper may have several sessions over its life; the deepest reading
+      // is the one that describes the state of knowledge about it.
+      if (reviewed) depths.set(itemKey, "paper_reviewed");
+      else if (!depths.has(itemKey)) depths.set(itemKey, "section_read");
+    }
+    return depths;
+  }
+
+  /**
+   * Which documents each concept was read out of, with its rarity.
+   *
+   * The raw material for the shared-concept edges. `wiki_relations` joins
+   * concepts to concepts and `wiki_evidence` joins claims to sources, so
+   * neither can say that two PAPERS both discuss one concept - but the source
+   * table has recorded exactly that all along, and nothing was reading it that
+   * way. A concept behind two or more documents is a demonstrated connection
+   * between them, with the passages that show it already stored.
+   *
+   * Aggregated per CONCEPT rather than per term. Two papers that use the
+   * Chinese name and the English name of one thing share that thing, and
+   * splitting them by term would hide the connection the concept library
+   * exists to record.
+   *
+   * Rarity is what keeps this from drawing a complete graph. Every paper in a
+   * metallurgy library discusses 再结晶; almost none discuss Lomer-Cottrell
+   * 位错锁, and the second is worth far more as evidence that two papers are
+   * about the same thing:
+   *
+   *     df(concept)  = documents this concept was read out of
+   *     idf(concept) = log((N + 1) / (df + 1))
+   *
+   * N is the number of documents with ANY concept source, not the size of the
+   * Zotero library. A Wiki covering five papers of nine hundred would
+   * otherwise score every one of its concepts as vanishingly rare, which says
+   * something about the import backlog rather than about the terms.
+   *
+   * Pairing and the hub cutoff are the caller's: this returns facts, and how
+   * many of them to draw is a rendering decision.
+   */
+  async getConceptDocumentSources(libraryID: number): Promise<{
+    documentCount: number;
+    concepts: Array<{
+      conceptId: number;
+      name: string;
+      df: number;
+      idf: number;
+      itemKeys: string[];
+    }>;
+  }> {
+    await this.initialize();
+    const rows = await this.db.queryAsync(
+      `SELECT DISTINCT t.concept_id AS concept_id,
+              c.canonical_name AS canonical_name,
+              s.item_key AS item_key
+         FROM wiki_concept_term_sources s
+         JOIN wiki_concept_terms t ON t.term_id = s.term_id
+         JOIN wiki_concepts c ON c.concept_id = t.concept_id
+        WHERE s.library_id = ? AND c.library_id = ?
+        ORDER BY t.concept_id, s.item_key`,
+      [libraryID, libraryID],
+    );
+    const byConcept = new Map<
+      number,
+      { conceptId: number; name: string; itemKeys: Set<string> }
+    >();
+    const documents = new Set<string>();
+    for (const row of rows) {
+      const conceptId = Number(rowValue(row, "concept_id", "conceptId"));
+      const itemKey = String(rowValue(row, "item_key", "itemKey") ?? "");
+      if (!itemKey) continue;
+      documents.add(itemKey);
+      const entry =
+        byConcept.get(conceptId) ??
+        byConcept
+          .set(conceptId, {
+            conceptId,
+            name: String(
+              rowValue(row, "canonical_name", "canonicalName") ?? "",
+            ),
+            itemKeys: new Set<string>(),
+          })
+          .get(conceptId)!;
+      entry.itemKeys.add(itemKey);
+    }
+    const documentCount = documents.size;
+    const concepts = Array.from(byConcept.values())
+      .map((entry) => {
+        const df = entry.itemKeys.size;
+        return {
+          conceptId: entry.conceptId,
+          name: entry.name,
+          df,
+          idf: Math.log((documentCount + 1) / (df + 1)),
+          itemKeys: Array.from(entry.itemKeys).sort(),
+        };
+      })
+      // Rarest first, so a caller that truncates keeps what discriminates.
+      .sort(
+        (left, right) => right.idf - left.idf || left.conceptId - right.conceptId,
+      );
+    return { documentCount, concepts };
   }
 
   async getDocumentGraph(libraryID: number): Promise<{

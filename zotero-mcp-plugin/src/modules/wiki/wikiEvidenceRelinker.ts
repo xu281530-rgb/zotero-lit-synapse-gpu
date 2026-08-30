@@ -1,4 +1,5 @@
-import { hashWikiText, normalizeWikiName } from "./wikiCanonicalizer";
+import { hashWikiText } from "./wikiCanonicalizer";
+import { locateChunk } from "./wikiChunkLocator";
 import type { WikiEvidenceSource, WikiSourceChunk } from "./wikiTypes";
 import type { WikiStore } from "./wikiStore";
 
@@ -10,25 +11,6 @@ export interface WikiRelinkReport {
   sourceDeleted: number;
 }
 
-function tokenOverlap(excerpt: string, text: string): number {
-  const needle = normalizeWikiName(excerpt);
-  const haystack = normalizeWikiName(text);
-  if (!needle || !haystack) return 0;
-  if (haystack.includes(needle)) return 1;
-  const grams = (value: string): Set<string> => {
-    const output = new Set<string>();
-    for (let index = 0; index + 2 <= value.length; index += 1) {
-      output.add(value.slice(index, index + 2));
-    }
-    return output;
-  };
-  const left = grams(needle);
-  const right = grams(haystack);
-  let common = 0;
-  for (const gram of left) if (right.has(gram)) common += 1;
-  return left.size ? common / left.size : 0;
-}
-
 export class WikiEvidenceRelinker {
   private readonly store: WikiStore;
   private readonly source: WikiEvidenceSource;
@@ -38,20 +20,21 @@ export class WikiEvidenceRelinker {
     this.source = source;
   }
 
+  /**
+   * The chunk this Evidence now belongs to, or null.
+   *
+   * Delegates to the shared locator so that Evidence and link signals answer
+   * "where did this passage go" the same way. They must: a library reindexed
+   * once should not relocate a Claim's Evidence while leaving the candidate
+   * signal that quoted the same paragraph pointing somewhere else.
+   */
   private async chooseChunk(
     chunkTextHash: string,
     excerpt: string,
     chunks: WikiSourceChunk[],
   ): Promise<WikiSourceChunk | null> {
-    for (const chunk of chunks) {
-      if ((await hashWikiText(chunk.text)) === chunkTextHash) return chunk;
-    }
-    let best: { chunk: WikiSourceChunk; score: number } | null = null;
-    for (const chunk of chunks) {
-      const score = tokenOverlap(excerpt, chunk.text);
-      if (!best || score > best.score) best = { chunk, score };
-    }
-    return best && best.score >= 0.72 ? best.chunk : null;
+    const match = await locateChunk(chunkTextHash, excerpt, chunks);
+    return match ? match.chunk : null;
   }
 
   async relinkPending(
