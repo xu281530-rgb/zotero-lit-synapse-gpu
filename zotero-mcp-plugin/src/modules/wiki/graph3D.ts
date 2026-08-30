@@ -982,16 +982,42 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
 
   return {
     setData(data: GraphData) {
-      let minWeight = Infinity;
-      let maxWeight = -Infinity;
+      /*
+       * Size encodes how many Claims cite a document. Two things about how.
+       *
+       * ANCHORED AT ONE, not at the smallest node present. This used to stretch
+       * the observed range across the whole radius scale, so the smallest node
+       * was always 5px and the largest always 21px whatever the numbers were.
+       * On a library of four papers citing 2, 3, 3 and 2 Claims that turned a
+       * one-Claim difference into 4.2x the radius and about 18x the ink - the
+       * chart said "this paper is enormously more central" about a difference
+       * of one. It also meant the scale silently restretched itself whenever
+       * the graph was filtered.
+       *
+       * AREA, not radius, is proportional to the count. A circle is read by how
+       * much ink it puts on the page, so scaling the radius by the value
+       * overstates every difference by squaring it. sqrt puts the value in the
+       * area, which is the standard way round and much closer to how the
+       * picture is actually read.
+       */
+      let maxWeight = 1;
       for (const input of data.nodes) {
-        const weight = input.weight ?? 1;
-        minWeight = Math.min(minWeight, weight);
-        maxWeight = Math.max(maxWeight, weight);
+        maxWeight = Math.max(maxWeight, input.weight ?? 1);
       }
-      const range = Math.max(1e-6, maxWeight - minWeight);
+      const low = 1;
+      const high = Math.sqrt(maxWeight);
+      const uniform = high - low < 1e-9;
       nodes = data.nodes.map((input) => {
-        const normalized = ((input.weight ?? 1) - minWeight) / range;
+        // Every node the same size is a real answer - they all carry the same
+        // number of Claims - and the middle of the scale says so better than
+        // the bottom of it, which would draw the whole graph as dots.
+        const normalized = uniform
+          ? 0.5
+          : clamp(
+              (Math.sqrt(Math.max(1, input.weight ?? 1)) - low) / (high - low),
+              0,
+              1,
+            );
         const node: RuntimeNode = {
           input,
           shell: mix(SHELL[0], SHELL[1], clamp(input.depth ?? 0.5, 0, 1)),

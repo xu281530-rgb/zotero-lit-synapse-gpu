@@ -25,6 +25,7 @@ import {
   conceptEdgeLabel,
   conceptEdgeStrength,
 } from "./wikiConceptEdges";
+import { assignDocumentGroups } from "./wikiGraphGroups";
 import { rowColumn } from "./wikiRow";
 import { createWikiTermsView } from "./wikiTermsView";
 import type { WikiTermRecord } from "./wikiConceptTerms";
@@ -1190,15 +1191,10 @@ async function renderWikiPanelContent(
   }
 
   const documents = new Map<string, DocumentFacts>();
-  const pageIndex = new Map<number, number>();
-  pages.forEach((page: any, index: number) =>
-    pageIndex.set(page.pageId, index),
-  );
 
   /** Collect, per document, every claim that cites it and the role it plays. */
   const collectDocuments = (): void => {
     documents.clear();
-    const groupVotes = new Map<string, Map<number, number>>();
     for (const page of pages) {
       for (const claim of page.claims) {
         const roleByItem = new Map<string, Set<string>>();
@@ -1223,23 +1219,29 @@ async function renderWikiPanelContent(
               })
               .get(itemKey)!;
           facts.claims.push({ page, claim, roles: Array.from(roles) });
-          const votes =
-            groupVotes.get(itemKey) ??
-            groupVotes.set(itemKey, new Map()).get(itemKey)!;
-          votes.set(page.pageId, (votes.get(page.pageId) ?? 0) + 1);
         }
       }
     }
-    for (const [itemKey, votes] of groupVotes) {
-      let bestPage = -1;
-      let bestCount = -1;
-      for (const [pageId, count] of votes) {
-        if (count > bestCount) {
-          bestCount = count;
-          bestPage = pageId;
-        }
-      }
-      documents.get(itemKey)!.group = pageIndex.get(bestPage) ?? 0;
+    /*
+     * Colour says which Claim this document distinctively carries.
+     *
+     * It used to say which Page the document contributed most Claims to, which
+     * worked while a Wiki had five or six Pages - and one of this system's own
+     * goals is to stop writers opening a Page per paper. Once that succeeded
+     * the library held a single topic Page, every node took group 0, and the
+     * colour channel collapsed to a constant. Fixing that by going back to a
+     * Page per paper would be fixing the wrong thing; the answer is to let
+     * colour describe the structure INSIDE the page. See wikiGraphGroups.
+     */
+    const grouped = assignDocumentGroups(
+      Array.from(documents.values(), (facts) => ({
+        itemKey: facts.itemKey,
+        claimIds: facts.claims.map((entry) => Number(entry.claim.claimId)),
+      })),
+    );
+    for (const [itemKey, group] of grouped) {
+      const facts = documents.get(itemKey);
+      if (facts) facts.group = group;
     }
   };
 

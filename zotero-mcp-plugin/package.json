@@ -1,7 +1,7 @@
 {
   "name": "zotero-mcp-plugin",
   "type": "module",
-  "version": "2.7.6",
+  "version": "2.7.7",
   "description": "Zotero MCP Plugin for Zotero 9.0.x with question-driven LLM Wiki memory, independent evidence-linked knowledge storage, cross-paper link candidates with auditable settlement, hybrid keyword/semantic/Wiki retrieval, cursor pagination, and MCP 2025-06-18 Streamable HTTP",
   "config": {
     "addonName": "Zotero MCP Plugin",
@@ -9,7 +9,7 @@
     "addonRef": "zotero-mcp-plugin",
     "addonInstance": "ZoteroMCP",
     "prefsPrefix": "extensions.zotero.zotero-mcp-plugin",
-    "addonVersion": "2.7.6"
+    "addonVersion": "2.7.7"
   },
   "repository": {
     "type": "git",
@@ -72,6 +72,7 @@
     "test:wiki-concepts": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-concepts.js",
     "test:wiki-concept-links": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-concept-links.js",
     "test:wiki-concept-edges": "node --experimental-strip-types scripts/test-wiki-concept-edges.js",
+    "test:wiki-graph-encoding": "node --experimental-strip-types scripts/test-wiki-graph-encoding.js",
     "test:wiki-link-scoring": "node --experimental-strip-types scripts/test-wiki-link-scoring.js",
     "test:wiki-link-store": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-link-store.js",
     "benchmark:wiki-links": "node --experimental-strip-types scripts/benchmark-wiki-links.js",
