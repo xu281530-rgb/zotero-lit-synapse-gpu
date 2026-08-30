@@ -29,7 +29,11 @@
  */
 
 /** 选择器版本。规则改动必须同时改这里，否则旧候选无法被识别为需要重算。 */
-export const REPRESENTATIVE_SELECTOR_VERSION = "repr-v1";
+export const REPRESENTATIVE_SELECTOR_VERSION = "repr-v2";
+// v2: v1's boilerplate patterns were anchored at the start of the chunk, so a
+// Markdown heading in front of them - which is what body extraction actually
+// produces - stopped every one of them matching. The filter had never removed
+// anything on a real library.
 
 /** 一次全库粗召回允许的 query chunk 上限，与 MAX_SIMILAR_QUERY_CHUNKS 一致。 */
 export const MAX_REPRESENTATIVE_CHUNKS = 20;
@@ -82,6 +86,26 @@ const BOILERPLATE_PATTERNS: RegExp[] = [
   /^\s*数据可用性/u,
 ];
 
+/**
+ * 去掉 Markdown 的装饰，只留下这一行说的话。
+ *
+ * 这些模式原本直接对着 chunk 开头匹配，于是只在「标题正好是段落第一个字」时才生效。
+ * 而正文抽取产出的是 Markdown：`## Declaration of Competing Interest`、
+ * `## 参考文献`、`### Data Availability`。`^\s*` 匹配不了 `##`，所以在整个库上
+ * **这个过滤器从来没有生效过**——实测中「无利益冲突声明」被选为代表性 chunk、
+ * 进而成为语义候选的锚点，读者不得不花一次驳回把它打掉。
+ */
+function stripMarkdownDecoration(line: string): string {
+  return String(line ?? "")
+    .replace(/^\s*>+\s*/u, "")
+    .replace(/^\s*#{1,6}\s*/u, "")
+    .replace(/^\s*[-*+]\s+/u, "")
+    .replace(/^\s*\d+[.)]\s+/u, "")
+    .replace(/^[*_~`\s]+/u, "")
+    .replace(/[*_~`\s]+$/u, "")
+    .trim();
+}
+
 /** 参考文献段落的形状：大量 [1] / (2019) / et al. 而几乎没有句子。 */
 function looksLikeReferenceList(text: string): boolean {
   const brackets = (text.match(/\[\d{1,3}\]/gu) ?? []).length;
@@ -94,6 +118,11 @@ function looksLikeReferenceList(text: string): boolean {
 export function isBoilerplateChunk(text: string): boolean {
   const trimmed = String(text ?? "").trim();
   if (!trimmed) return true;
+  // Against the chunk's opening LINE with its markdown stripped, not against
+  // the raw text: `## Acknowledgements` and `Acknowledgements` are the same
+  // section, and only the second one used to match.
+  const opening = stripMarkdownDecoration(trimmed.split("\n", 1)[0]);
+  if (BOILERPLATE_PATTERNS.some((pattern) => pattern.test(opening))) return true;
   if (BOILERPLATE_PATTERNS.some((pattern) => pattern.test(trimmed))) return true;
   return looksLikeReferenceList(trimmed);
 }

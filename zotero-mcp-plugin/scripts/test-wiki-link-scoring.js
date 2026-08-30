@@ -169,6 +169,41 @@ block("boilerplate is not used as a query vector", () => {
   assert.deepEqual(selection.chunkIds, [2]);
 });
 
+block("a Markdown heading does not hide a boilerplate section", () => {
+  // The filter was anchored at the start of the chunk, and body extraction
+  // produces Markdown - so `## Declaration of Competing Interest` never
+  // matched and the filter had removed NOTHING on a real library. Measured
+  // consequence: a competing-interest section was chosen as a representative
+  // chunk, became the anchor of a semantic candidate against another paper's
+  // competing-interest section, and the reader had to spend a rejection on it.
+  for (const text of [
+    "## Declaration of Competing Interest The authors declare none.",
+    "## Acknowledgements The work is financially supported by the NSFC.",
+    "### Data Availability The raw data cannot be shared at this time.",
+    "## References",
+    "**Acknowledgements** The work is supported by a grant.",
+    "> ## Funding This work was funded by the foundation.",
+    "## 参考文献 [1] 李杨, 抽拉速率对组织的影响",
+    "## 致谢 感谢实验室的支持",
+  ]) {
+    assert.ok(
+      isBoilerplateChunk(text),
+      `a heading must not hide it: ${JSON.stringify(text.slice(0, 46))}`,
+    );
+  }
+  // And a numbered body heading is still body.
+  for (const text of [
+    "## 4.2.2 DRX mechanisms at super-solvus temperature",
+    "## Results and Discussion The grain size decreased with strain rate.",
+    "## Introduction Columnar grains are common in directionally solidified alloys.",
+  ]) {
+    assert.ok(
+      !isBoilerplateChunk(text),
+      `real content must survive: ${JSON.stringify(text.slice(0, 46))}`,
+    );
+  }
+});
+
 block("a paper that is entirely boilerplate still yields something", () => {
   // Returning nothing would leave the paper permanently without candidates
   // and hide what is really a body-extraction failure.
@@ -293,7 +328,7 @@ block("an algorithm or model change produces a new fingerprint", () => {
     bChunkTextHash: "hash-b",
   };
   for (const changed of [
-    { algorithmVersion: "link-sem-v2" },
+    { algorithmVersion: "link-sem-next" },
     { sourceModel: "other-model" },
     { direction: "b_to_a" },
     { aChunkTextHash: "hash-a-reindexed" },

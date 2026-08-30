@@ -38,7 +38,12 @@
  */
 
 /** 打分算法版本。公式改动必须同时改这里，旧 signal 才能被认出需要重算。 */
-export const LINK_ALGORITHM_VERSION = "link-sem-v1";
+export const LINK_ALGORITHM_VERSION = "link-sem-v2";
+// v2: the representative selector's boilerplate filter never matched a
+// Markdown heading, so acknowledgements, competing-interest and reference
+// sections were being used as query vectors and became candidate anchors. The
+// signals that produced cannot be explained by the corrected selector, so they
+// are superseded rather than carried forward.
 
 /** 广度项权重，沿用现有 similarDocumentAggregation 的比例。 */
 export const DIRECTION_MEAN_WEIGHT = 0.75;
