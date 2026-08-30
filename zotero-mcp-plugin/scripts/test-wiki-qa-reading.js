@@ -2458,7 +2458,89 @@ block("a question-driven read establishes concepts without a whole-paper pass", 
     before.concepts + 1,
     "written once, not once per commit",
   );
-  assert.equal(again.result.conceptWriteUp, undefined);
+  assert.deepEqual(
+    again.result.conceptWriteUp?.papers ?? [],
+    [],
+    "staging was emptied, so the second commit writes no staged concept",
+  );
+});
+
+block("a concept the Evidence names attaches itself, with no call from the reader", async () => {
+  // Measured twice on the real library: a run that produced four cross-paper
+  // Claims and eleven verified excerpts called wiki_record_concepts ZERO
+  // times. Staging landing at commit does not help when nothing is staged.
+  // The design document's own conclusion applies to terminology too - a step
+  // that depends on the reader remembering is a step that does not happen.
+  //
+  // Nothing here is inferred. The excerpt is text prepareEvidence already
+  // verified against the live index; the concept already has a name somebody
+  // confirmed. That this paper's quoted passage contains that name is a fact
+  // about two stored strings.
+  const library = await store.concepts();
+  await library.record({
+    libraryID: 1,
+    entities: [
+      {
+        // The fixture chunk reads "PAPERONE passage N: the melt-pool depth at
+        // station N is reported under the imposed gradient ..." and evidenceFrom
+        // quotes only its first 60 characters. So "station" is inside the
+        // QUOTED text and "imposed gradient" is in the chunk but outside it -
+        // which is exactly the distinction being tested below.
+        primaryTerm: { zh: "测站", en: "station" },
+        sources: [{ libraryID: 1, itemKey: "PAPERTWO", excerpt: "", chunkIdSnapshot: null }],
+      },
+    ],
+  });
+  const before = await store.getStatus(1);
+
+  await readByQuestion("PAPERONE", [21], [
+    "The imposed gradient is described at station 21 (chunk 21).",
+  ]);
+  const committed = await writeUp({
+    title: "Imposed gradient along the traverse",
+    claimText: "The imposed gradient is reported station by station.",
+    evidence: [evidenceFrom("PAPERONE", 21)],
+  });
+
+  const attached = committed.result.conceptWriteUp?.autoAttached ?? [];
+  assert.ok(
+    attached.some(
+      (row) => row.itemKey === "PAPERONE" && /station/u.test(row.term),
+    ),
+    "the paper is recorded as a source of the concept its own quoted text names, " +
+      "without the reader calling wiki_record_concepts at all",
+  );
+  assert.ok(
+    !attached.some((row) => /gradient/u.test(row.term)),
+    "and only on what was actually QUOTED - 'imposed gradient' is in the chunk " +
+      "but outside the excerpt, so it establishes nothing",
+  );
+  const after = await store.getStatus(1);
+  assert.equal(after.concepts, before.concepts, "nothing was founded, renamed or merged");
+  assert.ok(
+    after.conceptTermSources > before.conceptTermSources,
+    "only a source row was added",
+  );
+  assert.ok(
+    after.conceptSourceOnlyWrites > before.conceptSourceOnlyWrites,
+    "and it is counted as the attach path, so wiki_status can show it happened",
+  );
+  assert.ok(
+    after.conceptsWithMultipleSources > before.conceptsWithMultipleSources,
+    "which is the whole point: the concept now connects two papers",
+  );
+
+  // Idempotent - the same passage committed again adds nothing.
+  const again = await writeUp({
+    title: "Imposed gradient, restated",
+    claimText: "The imposed gradient remains the controlling condition.",
+    evidence: [evidenceFrom("PAPERONE", 21)],
+  });
+  assert.deepEqual(
+    again.result.conceptWriteUp?.autoAttached ?? [],
+    [],
+    "the same passage twice adds one source, not one per commit",
+  );
 });
 
 block("a question-driven concept pass does not discharge the full-text gate", async () => {

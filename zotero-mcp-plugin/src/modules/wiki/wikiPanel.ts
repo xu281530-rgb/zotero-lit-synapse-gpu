@@ -1535,7 +1535,20 @@ async function renderWikiPanelContent(
 
   let graph: Graph3DController | null = null;
   let graphMode: GraphMode = "3d";
-  const linkStyles = new Set<GraphLinkStyle>(["solid", "dashed"]);
+  /*
+   * Seeded FROM the filter list, not from a second literal beside it.
+   *
+   * The two drifted the moment a third and fourth style were added: every
+   * filter button is built `is-on`, but this set still held only solid and
+   * dashed, so 共享概念 and 候选连接 rendered as enabled while
+   * setVisibleLinkStyles hid them. The first click then ADDED the style, which
+   * is why the lines appeared only after clicking a button that already
+   * claimed to be on. Deriving the set from the same list the buttons come
+   * from makes that class of drift impossible rather than fixed once.
+   */
+  const linkStyles = new Set<GraphLinkStyle>(
+    GRAPH_LINK_FILTERS.map((filter) => filter.style),
+  );
   let showIsolated = true;
   let documentGraph: Awaited<ReturnType<typeof store.getDocumentGraph>> | null =
     null;
@@ -1898,7 +1911,12 @@ async function renderWikiPanelContent(
     rotateButton.className = `zmp-wiki-command ${next ? "is-on" : "is-off"}`;
   });
   for (const filter of GRAPH_LINK_FILTERS) {
-    const toggle = button(doc, filter.label, filter.title, "is-on");
+    const toggle = button(
+      doc,
+      filter.label,
+      filter.title,
+      linkStyles.has(filter.style) ? "is-on" : "is-off",
+    );
     toggle.addEventListener("click", () => {
       if (linkStyles.has(filter.style)) linkStyles.delete(filter.style);
       else linkStyles.add(filter.style);

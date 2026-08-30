@@ -1942,6 +1942,7 @@ export class WikiService {
     const conceptWriteUp = await this.writeQuestionReadingConcepts(
       input.libraryID,
       citedKeys,
+      actions,
     );
 
     const questionReading = await this.settleQuestionReading(
@@ -2004,9 +2005,15 @@ export class WikiService {
   private async writeQuestionReadingConcepts(
     libraryID: number,
     citedKeys: ReadonlySet<string>,
+    actions: WikiCommitAction[],
   ): Promise<
     | {
         papers: Array<{ itemKey: string; concepts: number; sources: number }>;
+        autoAttached: Array<{
+          itemKey: string;
+          concept: string;
+          term: string;
+        }>;
         warnings: string[];
       }
     | undefined
@@ -2082,8 +2089,147 @@ export class WikiService {
         );
       }
     }
-    if (!papers.length && !warnings.length) return undefined;
-    return { papers, warnings };
+    const autoAttached = await this.attachConceptsFoundInEvidence(
+      libraryID,
+      actions,
+      warnings,
+    );
+    if (!papers.length && !autoAttached.length && !warnings.length) {
+      return undefined;
+    }
+    return { papers, autoAttached, warnings };
+  }
+
+  /**
+   * Record a paper as a source of every concept its own quoted Evidence names.
+   *
+   * Nothing here is inferred. The excerpt has already been verified against
+   * the live index by `prepareEvidence`, so it is text this paper really
+   * contains; the concept already exists with a name somebody confirmed. "This
+   * paper's quoted passage contains 动态再结晶, and 动态再结晶 is a concept this
+   * library defines" is a fact about two stored strings, not a judgement about
+   * meaning - which is exactly why the server may assert it and why it needs
+   * no confirmation.
+   *
+   * It exists because the alternative did not work. The tool catalogue has
+   * asked models to record terminology while answering questions since 2.5.0,
+   * `wiki_prepare_update` marks every duplicate candidate with
+   * `sourcedFromThisPaper`, and 2.7.2 made a staged concept land at commit.
+   * Measured after all three: a run that produced four cross-paper Claims and
+   * eleven verified excerpts called `wiki_record_concepts` zero times, so
+   * there was nothing staged to write. The design document's own conclusion
+   * applies to terminology as much as to connections - a step that depends on
+   * the reader remembering is a step that does not happen, and only something
+   * the server does itself is reliable.
+   *
+   * Strictly an ATTACH. It never founds, renames or merges a concept: naming
+   * is a judgement and stays with the model and its confirmation. What this
+   * removes is the clerical half - noticing that a paper you just quoted uses
+   * a term the library already holds.
+   */
+  private async attachConceptsFoundInEvidence(
+    libraryID: number,
+    actions: WikiCommitAction[],
+    warnings: string[],
+  ): Promise<Array<{ itemKey: string; concept: string; term: string }>> {
+    const attached: Array<{ itemKey: string; concept: string; term: string }> =
+      [];
+    try {
+      const library = await this.store.concepts();
+      const concepts = await library.list(libraryID);
+      if (!concepts.length) return attached;
+
+      // Longest term first, so 「不连续动态再结晶」 wins over 「动态再结晶」 when a
+      // passage contains both and the longer one is the more specific claim.
+      const terms: Array<{
+        conceptId: number;
+        display: string;
+        term: string;
+        normalized: string;
+        latin: boolean;
+      }> = [];
+      for (const concept of concepts) {
+        for (const record of [concept.primaryTerm, ...concept.aliasTerms]) {
+          for (const name of [record?.zh, record?.en, record?.abbr]) {
+            const value = String(name ?? "").trim();
+            // Two characters is the floor: a one-character "term" matches
+            // almost any Chinese passage and any English word containing it.
+            if (value.length < 2) continue;
+            const normalized = normalizeWikiName(value);
+            if (!normalized) continue;
+            terms.push({
+              conceptId: concept.conceptId,
+              display: concept.displayName ?? value,
+              term: value,
+              normalized,
+              latin: !/\p{Script=Han}/u.test(value),
+            });
+          }
+        }
+      }
+      terms.sort((left, right) => right.normalized.length - left.normalized.length);
+      if (!terms.length) return attached;
+
+      const sessions = await this.store.readingSessions();
+      const seen = new Set<string>();
+      for (const action of actions) {
+        for (const entry of (action as any).evidence ?? []) {
+          const itemKey = String(entry?.itemKey ?? "");
+          const excerpt = String(entry?.excerpt ?? "");
+          const chunkId = Number(entry?.chunkIdSnapshot);
+          if (!itemKey || !excerpt || !Number.isFinite(chunkId)) continue;
+          const haystack = normalizeWikiName(excerpt);
+
+          for (const term of terms) {
+            const key = `${term.conceptId}:${itemKey}`;
+            if (seen.has(key)) continue;
+            // A Latin term needs a boundary, or "at" matches "saturation" and
+            // "DRX" matches "DRXED". Han has no word boundaries, so
+            // containment is the only test available - and the two-character
+            // floor above is what keeps it from matching everything.
+            const found = term.latin
+              ? new RegExp(
+                  `(^|[^\\p{L}\\p{N}])${term.normalized.replace(
+                    /[.*+?^${}()|[\]\\]/gu,
+                    "\\$&",
+                  )}([^\\p{L}\\p{N}]|$)`,
+                  "u",
+                ).test(haystack)
+              : haystack.includes(term.normalized);
+            if (!found) continue;
+            // Only for a passage this paper was actually read on. The excerpt
+            // is verified text either way, but a source row asserts that
+            // somebody READ this paper using this term.
+            if (!(await sessions.hasReadChunkId(libraryID, itemKey, chunkId))) {
+              continue;
+            }
+            seen.add(key);
+            const outcome = await library.attachExistingSources({
+              libraryID,
+              conceptId: term.conceptId,
+              sources: [
+                { libraryID, itemKey, chunkIdSnapshot: chunkId, excerpt },
+              ],
+            });
+            if (outcome.added > 0) {
+              attached.push({
+                itemKey,
+                concept: outcome.displayName || term.display,
+                term: term.term,
+              });
+            }
+          }
+        }
+      }
+    } catch (error) {
+      ztoolkit.log("[wiki] could not auto-attach concept sources", error);
+      warnings.push(
+        `Concept sources could not be derived from this commit's Evidence: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    return attached;
   }
 
   /**
