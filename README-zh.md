@@ -5,7 +5,7 @@ _This README is also available in: [:gb: English](./README.md) | :cn: 简体中�
 [![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-2.6.1-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-2.7.0-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -726,7 +726,7 @@ targeted build 生命周期：正文只提取、切块一次，然后同时更�
 > 正文——那是全服务器唯一一条绕开检索漏斗的旁路。数据库维护能力保留在插件设置
 > 界面内部，不再对外暴露。
 
-### 四、LLM Wiki（16 个，可独立禁用）
+### 四、LLM Wiki（17 个，可独立禁用）
 
 Wiki 使用独立长期知识数据库，保存可复用的 Page、Claim、Concept、Relation 和可回溯
 Evidence，而不是再建一份论文摘要索引。普通研究采用“先检索、后受控提交”的流程；

@@ -38,6 +38,18 @@ declare namespace _ZoteroTypes {
       "wiki.minScore": string;
       "wiki.rrfWeight": string;
       "wiki.searchTimeoutMs": number;
+      "wiki.link.enabled": boolean;
+      "wiki.link.mandatorySettlement": boolean;
+      "wiki.link.topK": number;
+      "wiki.link.coarseCandidates": number;
+      "wiki.link.anchorsPerType": number;
+      "wiki.link.minSymmetricScore": string;
+      "wiki.link.minDirectionalScore": string;
+      "wiki.link.breadthChunkScore": string;
+      "wiki.link.breadthCapFraction": string;
+      "wiki.link.lexicalTermsPerPair": number;
+      "wiki.link.lexicalMaxDocumentFraction": string;
+      "wiki.link.scanTimeoutMs": number;
       "semantic.autoUpdate": boolean;
       "embedding.apiBase": string;
       "embedding.apiKey": string;

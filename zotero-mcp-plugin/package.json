@@ -1,15 +1,15 @@
 {
   "name": "zotero-mcp-plugin",
   "type": "module",
-  "version": "2.6.1",
-  "description": "Zotero MCP Plugin for Zotero 9.0.x with question-driven LLM Wiki memory, independent evidence-linked knowledge storage, hybrid keyword/semantic/Wiki retrieval, cursor pagination, and MCP 2025-06-18 Streamable HTTP",
+  "version": "2.7.0",
+  "description": "Zotero MCP Plugin for Zotero 9.0.x with question-driven LLM Wiki memory, independent evidence-linked knowledge storage, cross-paper link candidates with auditable settlement, hybrid keyword/semantic/Wiki retrieval, cursor pagination, and MCP 2025-06-18 Streamable HTTP",
   "config": {
     "addonName": "Zotero MCP Plugin",
     "addonID": "zotero-mcp-plugin@autoagent.my",
     "addonRef": "zotero-mcp-plugin",
     "addonInstance": "ZoteroMCP",
     "prefsPrefix": "extensions.zotero.zotero-mcp-plugin",
-    "addonVersion": "2.6.1"
+    "addonVersion": "2.7.0"
   },
   "repository": {
     "type": "git",
