@@ -55,9 +55,12 @@ const { breadthCap, WIKI_LINK_SETTING_DEFAULTS } = await import(
   "../src/modules/wiki/wikiLinkSettings.ts"
 );
 
-const { lexicalScore, sharedRareTerms, termChunkIndex } = await import(
-  "../src/modules/wiki/wikiLexicalSignals.ts"
-);
+const {
+  LEXICAL_SCORE_CEILING,
+  lexicalScore,
+  sharedRareTerms,
+  termChunkIndex,
+} = await import("../src/modules/wiki/wikiLexicalSignals.ts");
 
 const results = [];
 function block(name, fn) {
@@ -390,6 +393,48 @@ block("an unindexed term is not treated as maximally rare", () => {
     termsPerPair: 1,
   });
   assert.equal(hit.df, 2, "these two documents are its two known sources");
+});
+
+block("a df=0 term would be maximally rare, which is why absent must not mean 0", () => {
+  // Not a hypothetical. This is what shipped: `documentFrequencies` returned 0
+  // for a term it had no posting for, the "skip unknown" guard reads
+  // `=== undefined` and never fired, and `acknowledgements` scored the maximum.
+  const documentCount = 32;
+  const zero = lexicalScore(lexicalIdf(0, documentCount), documentCount);
+  const genuinelyRare = lexicalScore(lexicalIdf(2, documentCount), documentCount);
+  assert.ok(
+    zero > genuinelyRare,
+    "df=0 outscores a term two papers actually share - so a confident 0 is the " +
+      "worst possible answer to 'I have never seen this term'",
+  );
+  assert.ok(Math.abs(zero - LEXICAL_SCORE_CEILING) < 1e-9, "and it pegs the scale");
+
+  // With the contract fixed, a Map that OMITS the term skips it entirely.
+  const a = [{ chunkId: 1, text: "The work is financially supported by the Foundation." }];
+  const b = [{ chunkId: 2, text: "This work is financially supported by the Foundation." }];
+  const hits = sharedRareTerms(a, b, new Map(), {
+    documentCount,
+    maxDocumentFraction: 1,
+    termsPerPair: 5,
+    unknownFrequency: "skip",
+  });
+  assert.deepEqual(hits, [], "no frequency for any of them, so no signal at all");
+});
+
+block("the lexical scale sits below the semantic one", () => {
+  // Both types are compared directly - per-pair top-N truncation, the panel's
+  // ordering, the status counters. Lexical tops out at "this term is in only
+  // these two papers", which is cheap; semantic tops out at "the two papers'
+  // representative passages correspond", which measured max 0.888 on the real
+  // library. Letting lexical reach 1.000 pushed every semantic signal out of
+  // the panel - the observed failure.
+  const documentCount = 32;
+  const rarest = lexicalScore(lexicalIdf(1, documentCount), documentCount);
+  assert.ok(rarest <= LEXICAL_SCORE_CEILING);
+  assert.ok(
+    LEXICAL_SCORE_CEILING < 0.9,
+    "must stay under the semantic maximum observed in practice",
+  );
 });
 
 block("lexical scores share the semantic scale", () => {

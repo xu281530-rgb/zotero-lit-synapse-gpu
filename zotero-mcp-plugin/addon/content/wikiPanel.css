@@ -1080,6 +1080,31 @@
   color: var(--wiki-muted);
   font: 11.5px/1.6 var(--wiki-font-ui);
 }
+/* A quoted passage from one side of a candidate connection.
+   Block, not flex: this is 150-220 characters of running text and it needs the
+   full width of the rail. `.zmp-wiki-graph-stance` next door is a flex row for
+   a short chip plus a name, and putting a quotation in it collapsed the text to
+   one character per line. */
+.zmp-wiki-graph-quote {
+  display: block;
+  min-width: 0;
+  margin-top: 7px;
+  padding-left: 8px;
+  border-left: 2px solid var(--wiki-border);
+}
+.zmp-wiki-graph-quote-source {
+  color: var(--wiki-muted);
+  font: 11px/1.5 var(--wiki-font-ui);
+  margin-bottom: 2px;
+  overflow-wrap: anywhere;
+}
+.zmp-wiki-graph-quote-text {
+  margin: 0;
+  color: var(--wiki-ink);
+  font: 12px/1.65 var(--wiki-font-ui);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
 .zmp-wiki-graph-details {
   min-width: 0;
   min-height: 0;

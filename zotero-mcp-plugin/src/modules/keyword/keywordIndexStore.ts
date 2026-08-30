@@ -769,6 +769,10 @@ export class KeywordIndexStore {
    *
    * Terms are normalised here, exactly as `lookup` does: the index and the
    * query must agree on normalisation or every count is a coincidence.
+   *
+   * A term with no postings is OMITTED from the returned map rather than
+   * mapped to 0 - see the comment at the return. Callers must treat a missing
+   * key as "unknown", not as "rare".
    */
   async documentFrequencies(
     libraryID: number,
@@ -801,9 +805,16 @@ export class KeywordIndexStore {
         frequencies.set(String(row.term), Number(row.df ?? 0));
       }
     }
-    for (const term of wanted) {
-      if (!frequencies.has(term)) frequencies.set(term, 0);
-    }
+    // A term with no postings is ABSENT from the result, never present as 0.
+    //
+    // Filling misses with 0 was a real bug and an expensive one: df = 0 makes
+    // idf = log(N + 1), the maximum the scale allows, so every term the
+    // keyword index has never seen scored as the rarest thing in the library.
+    // The keyword indexer deliberately strips acknowledgements, funding and
+    // reference sections, so the terms it has never seen are exactly the
+    // boilerplate - and they came back rated 1.000, above every real finding.
+    // Absent means "rarity unknown"; the caller decides what to do with that,
+    // and cannot decide if it is handed a confident zero instead.
     return frequencies;
   }
 

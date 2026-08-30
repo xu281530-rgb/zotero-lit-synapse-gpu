@@ -37,6 +37,7 @@
  */
 
 import { getEmbeddingService } from "../semantic/embeddingService";
+import { isNonBodyChunk } from "../keyword/contentFilters";
 import { bodyIndexStateFromSourceKind } from "../semantic/bodyIndexState";
 import { getVectorStore } from "../semantic/vectorStore";
 import { getStoredChunkingSignature } from "../hybridSearchSettings";
@@ -173,6 +174,10 @@ export class WikiLinkService {
     let failed = 0;
     try {
       const links = await this.store.links();
+      // Clear out anything a superseded algorithm left pending before writing
+      // fresh signals, so a corrected formula does not have to compete for
+      // per-pair slots with the results of the formula it replaced.
+      await links.purgeSupersededSignals(this.currentAlgorithmVersions());
       for (let round = 0; round < limit; round += 1) {
         const next = await links.claimNextScan();
         if (!next) break;
@@ -202,6 +207,15 @@ export class WikiLinkService {
       this.draining = false;
     }
     return { scanned, failed };
+  }
+
+  /** The algorithm version each signal type is currently produced by. */
+  private currentAlgorithmVersions(): Record<string, string> {
+    return {
+      semantic: LINK_ALGORITHM_VERSION,
+      lexical: LEXICAL_ALGORITHM_VERSION,
+      concept: CONCEPT_ALGORITHM_VERSION,
+    };
   }
 
   /** Compute and store one paper's candidates. Throws; the queue catches. */
@@ -319,16 +333,36 @@ export class WikiLinkService {
     try {
       const keywordStore = getVectorStore().getKeywordIndexStore();
       const aIsFirst = a.itemKey < b.itemKey;
-      const first = aIsFirst ? a : b;
-      const second = aIsFirst ? b : a;
+      /*
+       * Tokenise only what the KEYWORD index would have tokenised.
+       *
+       * The two indexes disagreed, and the disagreement was the whole bug. The
+       * keyword indexer drops acknowledgements, funding statements, data
+       * availability and reference lists (`isNonBodyChunk`); the vector index
+       * keeps every chunk, because those passages are still part of the paper
+       * and a reader may legitimately search them. This pass reads the VECTOR
+       * chunks, so it was offering terms the keyword index had no frequency
+       * for - and rating them the rarest in the library.
+       *
+       * The unknown-rarity guard now catches those anyway. Filtering here as
+       * well is not belt-and-braces for its own sake: it stops two papers being
+       * paired on `financially` or `foundation` at all, rather than computing a
+       * pairing and then discarding it, and it keeps the excerpt a candidate
+       * shows drawn from the paper's argument rather than from its funding line.
+       */
+      const body = (chunks: ScanDocument["chunks"]) =>
+        chunks.filter((chunk) => !isNonBodyChunk(chunk.text));
+      const first = body(aIsFirst ? a.chunks : b.chunks);
+      const second = body(aIsFirst ? b.chunks : a.chunks);
+      if (!first.length || !second.length) return [];
       const liveDocuments =
         (await keywordStore.liveDocumentCount(libraryID)) || documentCount;
       // Shared terms are found first, then their frequencies looked up in one
       // batch: asking the index for every term of two papers would be a query
       // per token for a set that is mostly discarded.
       const provisional = sharedRareTerms(
-        first.chunks,
-        second.chunks,
+        first,
+        second,
         new Map(),
         {
           documentCount: liveDocuments,
@@ -344,7 +378,7 @@ export class WikiLinkService {
         libraryID,
         provisional.map((hit) => hit.term),
       );
-      const hits = sharedRareTerms(first.chunks, second.chunks, frequencies, {
+      const hits = sharedRareTerms(first, second, frequencies, {
         documentCount: liveDocuments,
         maxDocumentFraction: settings.lexicalMaxDocumentFraction,
         termsPerPair: settings.lexicalTermsPerPair,
@@ -355,12 +389,8 @@ export class WikiLinkService {
       });
       const signals: WikiLinkSignalInput[] = [];
       for (const hit of hits) {
-        const firstChunk = first.chunks.find(
-          (chunk) => chunk.chunkId === hit.aChunkId,
-        );
-        const secondChunk = second.chunks.find(
-          (chunk) => chunk.chunkId === hit.bChunkId,
-        );
+        const firstChunk = first.find((chunk) => chunk.chunkId === hit.aChunkId);
+        const secondChunk = second.find((chunk) => chunk.chunkId === hit.bChunkId);
         if (!firstChunk || !secondChunk) continue;
         signals.push({
           signalType: "lexical",
@@ -740,11 +770,7 @@ export class WikiLinkService {
         },
       },
       {
-        algorithmVersions: {
-          semantic: LINK_ALGORITHM_VERSION,
-          lexical: LEXICAL_ALGORITHM_VERSION,
-          concept: CONCEPT_ALGORITHM_VERSION,
-        },
+        algorithmVersions: this.currentAlgorithmVersions(),
         embeddingModel: String(getEmbeddingService().getConfig().model ?? ""),
       },
     );

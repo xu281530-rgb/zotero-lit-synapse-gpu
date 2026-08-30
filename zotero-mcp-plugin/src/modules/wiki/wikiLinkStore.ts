@@ -529,6 +529,53 @@ export class WikiLinkStore {
     return rows.map((row) => this.mapSignalWithPair(row));
   }
 
+  /**
+   * Every pending signal of the given pairs, grouped by pair.
+   *
+   * The graph needs this and cannot use `pendingSignalsForItem`: that one is
+   * scoped to a PAPER and capped, so a paper in fourteen pairs spent its whole
+   * budget on the top four and the pair sitting on the boundary kept only its
+   * highest-scoring rows. Since lexical scores skew above semantic ones, what
+   * survived was lexical-only - the panel showed 共享术语 for edges that had
+   * three semantic signals sitting right behind the cut.
+   *
+   * The cap belongs per pair, where it means "the three best reasons to think
+   * these two papers are related", not per paper, where it means "whichever
+   * pairs sorted first".
+   */
+  async pendingSignalsByLink(
+    linkIds: readonly number[],
+    perLink = 8,
+  ): Promise<Map<number, WikiLinkSignalWithPair[]>> {
+    const grouped = new Map<number, WikiLinkSignalWithPair[]>();
+    if (!linkIds.length) return grouped;
+    const BATCH = 200;
+    for (let start = 0; start < linkIds.length; start += BATCH) {
+      const slice = linkIds.slice(start, start + BATCH);
+      const placeholders = slice.map(() => "?").join(",");
+      const rows = await this.db.queryAsync(
+        `SELECT s.*, c.library_id, c.a_item_key, c.b_item_key,
+                c.score_ab, c.score_ba, c.score_symmetric,
+                c.status AS candidate_status
+           FROM wiki_link_signals s
+           JOIN wiki_link_candidates c ON c.link_id = s.link_id
+          WHERE s.link_id IN (${placeholders}) AND s.state = 'pending'
+          ORDER BY s.link_id, s.score DESC, s.signal_id`,
+        slice,
+      );
+      for (const row of rows) {
+        const signal = this.mapSignalWithPair(row);
+        const bucket =
+          grouped.get(signal.linkId) ??
+          grouped.set(signal.linkId, []).get(signal.linkId)!;
+        // Truncation happens per pair, and only after both types are in hand,
+        // so a pair always shows its strongest reasons whatever their type.
+        if (bucket.length < perLink) bucket.push(signal);
+      }
+    }
+    return grouped;
+  }
+
   /** Accept signals as part of a knowledge write. */
   async acceptSignals(signalIds: readonly number[]): Promise<number> {
     return this.settle(signalIds, "accepted", "");
@@ -804,6 +851,60 @@ export class WikiLinkStore {
       params,
     );
     return rows.map((row) => this.mapSignalWithPair(row));
+  }
+
+  /**
+   * Delete PENDING signals whose algorithm is no longer the current one.
+   *
+   * A pending signal is an unanswered question, and an unanswered question
+   * computed by a formula that has since been corrected is not worth asking:
+   * it cannot be settled honestly, and leaving it costs the reader a decision
+   * about a number nothing would produce today. The rescan that follows an
+   * algorithm change regenerates whatever is still true.
+   *
+   * Only pending rows. An accepted signal already produced a Claim and a
+   * resolution; a rejected one is a judgement somebody made. Both are history
+   * and history is not recomputed - deleting them would erase the audit trail
+   * that is half the reason these tables exist.
+   *
+   * This is what cleans up after the v1 lexical scorer, which rated every term
+   * the keyword index had never seen as the rarest in the library.
+   */
+  async purgeSupersededSignals(
+    currentVersions: Readonly<Record<string, string>>,
+    libraryID?: number,
+  ): Promise<number> {
+    let purged = 0;
+    const touched = new Set<number>();
+    for (const [signalType, version] of Object.entries(currentVersions)) {
+      const scope =
+        libraryID === undefined
+          ? ""
+          : ` AND s.link_id IN (SELECT link_id FROM wiki_link_candidates WHERE library_id = ?)`;
+      const params: unknown[] = [signalType, version];
+      if (libraryID !== undefined) params.push(libraryID);
+      const rows = await this.db.queryAsync(
+        `SELECT s.signal_id AS signal_id, s.link_id AS link_id
+           FROM wiki_link_signals s
+          WHERE s.state = 'pending' AND s.signal_type = ?
+            AND s.algorithm_version <> ?${scope}`,
+        params,
+      );
+      for (const row of rows) {
+        await this.db.queryAsync(
+          "DELETE FROM wiki_link_signals WHERE signal_id = ?",
+          [Number(rowColumn(row, "signal_id", "signalId"))],
+        );
+        touched.add(Number(rowColumn(row, "link_id", "linkId")));
+        purged += 1;
+      }
+    }
+    // A pair that just lost its last pending signal is no longer open.
+    for (const linkId of touched) await this.refreshStatus(linkId);
+    if (purged) {
+      ztoolkit.log(`[wiki] purged ${purged} superseded pending link signal(s)`);
+    }
+    return purged;
   }
 
   /** A paper left the library: its pairs stop being settleable debt. */

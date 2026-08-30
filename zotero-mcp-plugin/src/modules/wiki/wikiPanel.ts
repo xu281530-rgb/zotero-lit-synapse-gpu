@@ -1706,15 +1706,26 @@ async function renderWikiPanelContent(
           ),
         );
         card.append(head);
+        // Each side as its own block: source line, then the quotation under
+        // it. The first version reused `.zmp-wiki-graph-stance`, a flex ROW
+        // built for a short role chip beside a name - the title took `flex: 1`
+        // and the 200-character excerpt, having no class of its own, was
+        // squeezed into a one-character-wide column. Two sides then rendered as
+        // alternating titles and vertical letter-ribbons.
         for (const [side, text] of [
           [a?.title ?? facts.a, signal.thisExcerpt],
           [b?.title ?? facts.b, signal.otherExcerpt],
         ] as const) {
           if (!text) continue;
-          const quote = element(doc, "div", "zmp-wiki-graph-stance");
+          const quote = element(doc, "div", "zmp-wiki-graph-quote");
           quote.append(
-            element(doc, "span", "zmp-wiki-graph-stance-name", shorten(side, 18)),
-            element(doc, "span", "", text),
+            element(
+              doc,
+              "div",
+              "zmp-wiki-graph-quote-source",
+              shorten(side, 42),
+            ),
+            element(doc, "p", "zmp-wiki-graph-quote-text", text),
           );
           card.append(quote);
         }
@@ -1909,14 +1920,6 @@ async function renderWikiPanelContent(
   });
   graphToolbar.append(isolatedButton);
 
-  const ghostCount = (): number => {
-    let total = 0;
-    for (const facts of documents.values()) {
-      if (facts.shade === "ghost") total += 1;
-    }
-    return total;
-  };
-
   /**
    * Unsettled candidates, flattened for the canvas.
    *
@@ -1929,16 +1932,15 @@ async function renderWikiPanelContent(
     try {
       const links = await store.links();
       const candidates = await links.listCandidates(libraryID, ["open"]);
+      // One query for every pair's signals, grouped and capped PER PAIR. The
+      // previous version asked per paper with a shared budget, which silently
+      // dropped most pairs and reduced the rest to their top-scoring type.
+      const byLink = await links.pendingSignalsByLink(
+        candidates.map((candidate) => candidate.linkId),
+      );
       const flattened: GraphCandidate[] = [];
       for (const candidate of candidates) {
-        const signals = await links.pendingSignalsForItem({
-          libraryID,
-          itemKey: candidate.aItemKey,
-          limit: 20,
-        });
-        const mine = signals.filter(
-          (signal) => signal.linkId === candidate.linkId,
-        );
+        const mine = byLink.get(candidate.linkId) ?? [];
         if (!mine.length) continue;
         flattened.push({
           linkId: candidate.linkId,
@@ -1996,18 +1998,38 @@ async function renderWikiPanelContent(
       facts.shade =
         readDepths.get(facts.itemKey) === "paper_reviewed" ? "solid" : "half";
     }
+    /*
+     * Ghosts follow the candidates that will actually be DRAWN.
+     *
+     * Adding one per candidate pair was wrong: the edge pass then drops edges
+     * for three separate reasons - the per-document cap, the pair already
+     * having a stronger edge, an unlabelable candidate - and every ghost whose
+     * only edge was dropped became a node with no connections at all. A ghost
+     * is an invitation to read a paper BECAUSE something reaches it; one that
+     * nothing reaches is just an unexplained dot.
+     *
+     * So the set is capped first, then the edge pass is told which ghosts
+     * exist, and it refuses to draw an edge to a ghost that did not make the
+     * cut. The two now agree by construction rather than by coincidence.
+     */
     hiddenGhosts = 0;
-    const ghostCandidates = new Set<string>();
+    const reachable = new Map<string, number>();
     for (const candidate of graphCandidates) {
       for (const itemKey of [candidate.aItemKey, candidate.bItemKey]) {
-        if (!documents.has(itemKey)) ghostCandidates.add(itemKey);
+        if (documents.has(itemKey)) continue;
+        const best = reachable.get(itemKey) ?? 0;
+        reachable.set(
+          itemKey,
+          Math.max(best, candidate.scoreSymmetric ?? 0),
+        );
       }
     }
-    for (const itemKey of ghostCandidates) {
-      if (documents.size && ghostCount() >= GHOST_NODES) {
-        hiddenGhosts += 1;
-        continue;
-      }
+    // Strongest first, so the ghosts that survive the cap are the ones most
+    // worth reading rather than whichever the scan happened to write first.
+    const ranked = Array.from(reachable.entries()).sort(
+      (left, right) => right[1] - left[1],
+    );
+    for (const [itemKey] of ranked.slice(0, GHOST_NODES)) {
       documents.set(itemKey, {
         itemKey,
         title: itemKey,
@@ -2018,6 +2040,7 @@ async function renderWikiPanelContent(
         shade: "ghost",
       });
     }
+    hiddenGhosts = Math.max(0, ranked.length - GHOST_NODES);
     await nameDocuments();
     if (!graph) {
       graph = createGraph3D({

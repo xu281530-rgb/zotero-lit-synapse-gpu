@@ -29,7 +29,15 @@ import { normalize, tokenizeForIndex } from "../keyword/scientificTokenizer";
 import { lexicalIdf } from "./wikiLinkScoring";
 
 /** 词法信号的算法版本。切词、停用规则或打分改动都必须改这里。 */
-export const LEXICAL_ALGORITHM_VERSION = "link-lex-v1";
+export const LEXICAL_ALGORITHM_VERSION = "link-lex-v2";
+// v2: v1 scored every term the keyword index had never seen as maximally rare,
+// because `documentFrequencies` returned 0 for a miss instead of omitting it.
+// The terms it had never seen were the ones the keyword indexer strips -
+// acknowledgements, funding, data availability - so the worst possible terms
+// arrived rated 1.000 and buried the semantic signals. v2 skips unknown-rarity
+// terms, filters non-body chunks before tokenising, and caps the lexical scale
+// below the semantic one. Bumping the version is what lets the relinker
+// recognise every v1 signal as superseded rather than carrying it forward.
 
 export interface LexicalChunk {
   chunkId: number;
@@ -125,6 +133,10 @@ export function sharedRareTerms(
     const bChunk = bIndex.get(term);
     if (!bChunk) continue;
     const known = documentFrequencies.get(term);
+    // Absent = the keyword index has no posting for this term = rarity UNKNOWN.
+    // Not rare. This guard was dead for one release because
+    // `documentFrequencies` filled misses with 0, and the terms it let through
+    // were `acknowledgements`, `availability`, `funds` - each scored 1.000.
     if (known === undefined && options.unknownFrequency === "skip") continue;
     // 缺失时按 2 计——这两篇文献就是它已知的两个来源。记 0 会让 idf 虚高，把一个
     // 从未被索引的偶然字符串排到最前面。
@@ -160,5 +172,21 @@ export function sharedRareTerms(
 export function lexicalScore(idf: number, documentCount: number): number {
   const ceiling = Math.log(Math.max(1, documentCount) + 1);
   if (!(ceiling > 0)) return 0;
-  return Math.min(1, Math.max(0, idf / ceiling));
+  const normalized = Math.min(1, Math.max(0, idf / ceiling));
+  return normalized * LEXICAL_SCORE_CEILING;
 }
+
+/**
+ * 词法分的天花板，低于 1。
+ *
+ * 两种信号必须能放在一把尺子上比较——每对文献内部按分数取 top-3、`wiki_status`
+ * 的按类型统计、以及面板的排序，都在直接比大小。但它们的**上界性质不同**：词法分
+ * 的满分是「这个词只在这两篇里出现过」，一个只要 df 够小就能拿到的值；语义分的满分
+ * 是「两篇文献的代表段落几乎逐段对应」，实测极难超过 0.9。让词法能拿到 1.000，
+ * 等于让一个便宜的、只认字面的信号永远排在昂贵的、能发现换了说法的同一件事的信号
+ * 前面——实测就是这样：词法均值 0.82 对语义均值 0.61，面板上语义信号被整段挤掉。
+ *
+ * 0.85 让最稀有的词落在语义实测上界附近而不越过它。这是**调参不是修 bug**，
+ * 真实库校准后应当重新审视；它与 wiki.link.* 里那些阈值属于同一类未测量的数。
+ */
+export const LEXICAL_SCORE_CEILING = 0.85;

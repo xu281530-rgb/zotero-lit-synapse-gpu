@@ -527,6 +527,47 @@ await block("a failing scan backs off, then stops without vanishing", async () =
   );
 });
 
+await block("a superseded algorithm's pending signals are purged, its history is not", async () => {
+  const pairId = await links.upsertCandidate({
+    libraryID: 1, itemKeyA: "MMMM", itemKeyB: "NNNN",
+  });
+  await links.recordSignals({
+    linkId: pairId, cap: 5,
+    signals: [
+      // Two produced by an OLD lexical scorer, one already judged.
+      { signalType: "lexical", direction: "symmetric", algorithmVersion: "link-lex-v1",
+        score: 1.0, termSnapshot: "acknowledgements",
+        a: { chunkIdSnapshot: 1, chunkTextHash: "m-1", excerpt: "## Acknowledgements" },
+        b: { chunkIdSnapshot: 2, chunkTextHash: "n-1", excerpt: "## Acknowledgements" } },
+      { signalType: "lexical", direction: "symmetric", algorithmVersion: "link-lex-v1",
+        score: 1.0, termSnapshot: "funds",
+        a: { chunkIdSnapshot: 3, chunkTextHash: "m-2", excerpt: "Research Funds" },
+        b: { chunkIdSnapshot: 4, chunkTextHash: "n-2", excerpt: "Research Funds" } },
+      // And one from the current semantic scorer, which must survive.
+      { signalType: "semantic", direction: "a_to_b", algorithmVersion: LINK_ALGORITHM_VERSION,
+        score: 0.7,
+        a: { chunkIdSnapshot: 5, chunkTextHash: "m-3", excerpt: "机制" },
+        b: { chunkIdSnapshot: 6, chunkTextHash: "n-3", excerpt: "机制" } },
+    ],
+  });
+  const pending = await links.pendingSignalsForItem({ libraryID: 1, itemKey: "MMMM", limit: 10 });
+  const judged = pending.find((s) => s.termSnapshot === "funds");
+  await links.rejectSignals([judged.signalId], "Shared only a funding acknowledgement line, which every paper in this library carries.");
+
+  const purged = await links.purgeSupersededSignals(
+    { semantic: LINK_ALGORITHM_VERSION, lexical: "link-lex-v2", concept: "link-concept-v1" },
+    1,
+  );
+  assert.equal(purged, 1, "only the still-PENDING v1 signal");
+  assert.equal(
+    (await links.getSignal(judged.signalId)).state,
+    "rejected",
+    "a judgement somebody made is history and is never recomputed away",
+  );
+  const after = await links.pendingSignalsForItem({ libraryID: 1, itemKey: "MMMM", limit: 10 });
+  assert.deepEqual(after.map((s) => s.signalType), ["semantic"], "the current-algorithm signal survives");
+});
+
 // --- Reporting -------------------------------------------------------------
 
 await block("statistics separate the three discovery paths", async () => {

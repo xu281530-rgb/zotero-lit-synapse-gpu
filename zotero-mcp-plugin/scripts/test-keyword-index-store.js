@@ -122,6 +122,63 @@ test("an item's fields and body chunks become postings", async () => {
   assert.equal(result.lengths.body > 0, true);
 });
 
+test("a term with no postings is ABSENT from documentFrequencies, never 0", async () => {
+  // The bug this pins down shipped once and was expensive. `documentFrequencies`
+  // filled every miss with 0; df = 0 makes idf = log(N + 1), the maximum the
+  // scale allows, so every term the index had never seen scored as the rarest
+  // thing in the library. The terms it had never seen were precisely the ones
+  // writeItem strips - acknowledgements, funding, reference lists - so the
+  // worst possible terms arrived rated 1.000 and buried every real finding.
+  //
+  // The caller's guard for this reads `=== undefined`. A confident 0 walks
+  // straight past it, which is why "absent" is the contract and not a detail.
+  const { store } = freshStore();
+  await store.writeItem(PAPER_EN);
+
+  const frequencies = await store.documentFrequencies(LIBRARY, [
+    "superalloy",   // really in the body
+    "cambridge",    // only in the reference list, which writeItem skips
+    "zzznotaword",  // never anywhere
+  ]);
+
+  assert.equal(frequencies.get("superalloy"), 1, "a real term is counted");
+  assert.equal(
+    frequencies.has("cambridge"),
+    false,
+    "a term only in the stripped bibliography has NO posting, so it must be absent - " +
+      "reporting 0 would rate it the rarest term in the library",
+  );
+  assert.equal(frequencies.has("zzznotaword"), false);
+  assert.equal(
+    frequencies.get("zzznotaword"),
+    undefined,
+    "callers distinguish unknown from rare by exactly this",
+  );
+});
+
+test("document frequency counts documents, not occurrences", async () => {
+  const { store } = freshStore();
+  await store.writeItem(PAPER_EN);
+  await store.writeItem({ ...PAPER_EN, itemKey: "CCCC3333" });
+  const frequencies = await store.documentFrequencies(LIBRARY, ["superalloy"]);
+  assert.equal(
+    frequencies.get("superalloy"),
+    2,
+    "the same paper twice is two documents; the term repeats within each and must not inflate it",
+  );
+  assert.equal(await store.liveDocumentCount(LIBRARY), 2);
+});
+
+test("a deleted document stops inflating every term it contained", async () => {
+  const { store } = freshStore();
+  await store.writeItem(PAPER_EN);
+  await store.writeItem({ ...PAPER_EN, itemKey: "CCCC3333" });
+  await store.removeItem(LIBRARY, "CCCC3333");
+  const frequencies = await store.documentFrequencies(LIBRARY, ["superalloy"]);
+  assert.equal(frequencies.get("superalloy"), 1);
+  assert.equal(await store.liveDocumentCount(LIBRARY), 1);
+});
+
 test("the reference-list chunk is skipped, so its citations are unsearchable", async () => {
   const { store } = freshStore();
   const result = await store.writeItem(PAPER_EN);
