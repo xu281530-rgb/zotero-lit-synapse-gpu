@@ -210,6 +210,19 @@ async function commitWith(key, evidence, title) {
     ? (await sessions.pendingWikiChunks(open.sessionId)).map((c) => c.chunkId)
     : [];
   const cited = Number(evidence.chunkIdSnapshot);
+  // A question-driven write-up records terminology or declares it found none.
+  // These blocks are about Evidence quality, so they declare.
+  try {
+    await service.recordConcepts({
+      libraryID: 1,
+      itemKey: key,
+      concepts: [],
+      noConceptsReason:
+        `本轮读到的段落只用到库中已有的术语，没有引入新的领域概念，${key} 的既有条目已经覆盖这些说法。`,
+    });
+  } catch {
+    // Not a question-driven session; no declaration is owed.
+  }
   return service.commit({
     libraryID: 1,
     userInitiated: true,

@@ -99,6 +99,10 @@ const indexedChunks = new Map([
   ["HOLEPAPR", chunksFor("HOLEPAPR", SHORT, 6000)],
   ["AUDITPAP", chunksFor("AUDITPAP", 2, 7000)],
   ["QASUMMRY", chunksFor("QASUMMRY", 2, 8000)],
+  // Used by exactly one block, the terminology gate, because that gate is
+  // satisfied for good once a paper has any concept source or declaration -
+  // so a paper another block has already written up cannot test it.
+  ["TERMGATE", chunksFor("TERMGATE", SHORT, 9000)],
 ]);
 
 for (const key of indexedChunks.keys()) {
@@ -394,6 +398,28 @@ async function writeUp(options) {
   const skips = [];
   for (const key of settle) {
     skips.push(...(await settleRest(key)));
+  }
+  // A question-driven write-up must record terminology or declare that it
+  // introduced none - the same shape as settling a chunk with SKIP. These
+  // blocks are about other subjects, so they declare; the terminology gate
+  // has its own blocks below. `terminology: false` opts out, for the block
+  // that IS about the gate.
+  if (options.terminology !== false) {
+    for (const key of new Set(
+      (options.evidence ?? []).map((row) => row.itemKey),
+    )) {
+      try {
+        await service.recordConcepts({
+          libraryID: 1,
+          itemKey: key,
+          concepts: [],
+          noConceptsReason:
+            `本轮读到的段落只用到库中已有的术语（熔池深度、温度梯度），没有引入新的领域概念，${key} 的既有条目已经覆盖。`,
+        });
+      } catch {
+        // A paper whose session is not question-driven needs no declaration.
+      }
+    }
   }
   const result = await service.commit({
     libraryID: 1,
@@ -2541,6 +2567,67 @@ block("a concept the Evidence names attaches itself, with no call from the reade
     [],
     "the same passage twice adds one source, not one per commit",
   );
+});
+
+block("a question-driven write-up must record terminology or say it found none", async () => {
+  // The measured problem: across four runs on a real library the model called
+  // wiki_record_concepts on the question-driven path exactly zero times, while
+  // writing Claims whose own text was full of the terms. The full-text path,
+  // which HAS a gate, recorded terminology every single time. Three attempts
+  // to fix it by asking more clearly changed nothing.
+  await readByQuestion("TERMGATE", [2], [
+    "A station of the gate paper is read (chunk 2).",
+  ]);
+  await assert.rejects(
+    writeUp({
+      title: "Gate paper, ungated",
+      claimText: "The gate paper reports a traverse.",
+      evidence: [evidenceFrom("TERMGATE", 2)],
+      terminology: false,
+    }),
+    /recorded no terminology/u,
+    "silence is the one answer that must not be available",
+  );
+
+  // "It introduced nothing new" is a real answer, and has to argue.
+  await assert.rejects(
+    service.recordConcepts({
+      libraryID: 1,
+      itemKey: "TERMGATE",
+      concepts: [],
+      noConceptsReason: "无新内容",
+    }),
+    /asserts rather than argues/u,
+  );
+  await assert.rejects(
+    service.recordConcepts({
+      libraryID: 1,
+      itemKey: "TERMGATE",
+      concepts: [],
+      noConceptsReason: "术语已有",
+    }),
+    /at least/u,
+    "too short to be read back and checked later",
+  );
+
+  const declared = await service.recordConcepts({
+    libraryID: 1,
+    itemKey: "TERMGATE",
+    concepts: [],
+    noConceptsReason:
+      "这几段只用到熔池深度与温度梯度两个术语，库中已有对应概念并已登记本篇为来源，没有引入新的领域术语。",
+  });
+  assert.equal(declared.declared, true);
+  assert.equal(declared.written, false, "a declaration writes no concept");
+
+  // And now the same write-up goes through.
+  const committed = await writeUp({
+    title: "Gate paper, declared",
+    claimText: "The gate paper reports a traverse under an imposed gradient.",
+    evidence: [evidenceFrom("TERMGATE", 2)],
+    terminology: false,
+  });
+  assert.equal(committed.result.committed, true);
 });
 
 block("a question-driven concept pass does not discharge the full-text gate", async () => {

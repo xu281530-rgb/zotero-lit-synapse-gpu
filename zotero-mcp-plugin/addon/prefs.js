@@ -45,6 +45,14 @@ pref("wiki.shadowMode", true);
 pref("wiki.minScore", "0");
 pref("wiki.rrfWeight", "0");
 pref("wiki.searchTimeoutMs", 5000);
+// A question-driven write-up must record terminology or declare it found none,
+// the same shape as settling a chunk with SKIP. The full-text path has had this
+// gate since 2.4.4 and it works; the question-driven path had none, and across
+// four measured runs the model recorded terminology there zero times.
+pref("wiki.requireQuestionTerminology", true);
+// How close a reading must be to what a finished note already says before it
+// counts as a restatement rather than a new episode. Uncalibrated.
+pref("wiki.note.episodeSimilarity", "0.92");
 // Cross-paper link candidates. Computation is on: it produces suggestions and
 // changes nothing the Wiki asserts. `mandatorySettlement` is the one setting
 // that changes what the server REFUSES - it makes a candidate whose passages

@@ -8,7 +8,7 @@ import {
 } from "./wikiConceptTerms";
 import { rowColumn } from "./wikiRow";
 
-export const WIKI_SCHEMA_VERSION = 12;
+export const WIKI_SCHEMA_VERSION = 13;
 
 /**
  * Add a column an older database does not have yet.
@@ -351,6 +351,13 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
     // when a full-text read took it over. Zero for a paper nobody asked about
     // first, which is every session that predates 2.5.0.
     ["question_chunks_carried_over", "INTEGER NOT NULL DEFAULT 0"],
+    // Schema 13. A question-driven reading that genuinely introduced no term
+    // the library did not already hold, and why. The full-text path has had
+    // this since 2.4.4 as `concepts_recorded_at` plus a mandatory
+    // noConceptsReason; the question-driven path had no equivalent, which is
+    // why it had no way to be finished honestly either.
+    ["concepts_declared_at", "INTEGER"],
+    ["concepts_declared_reason", "TEXT NOT NULL DEFAULT ''"],
   ] as const) {
     await addColumnIfMissing(db, "wiki_reading_sessions", column, definition);
   }

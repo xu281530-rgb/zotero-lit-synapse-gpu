@@ -594,15 +594,50 @@ await block("statistics separate the three discovery paths", async () => {
   assert.equal(stats.linkScanFailed, 1);
 });
 
-await block("a Wiki reset removes the link layer too", async () => {
+await block("a Wiki reset keeps the scan work and drops only the settlements", async () => {
+  // This used to drop the whole link layer, which was wrong and expensive. A
+  // resolution says "Claim 317 was written because of signal 42" and cannot
+  // outlive the Claim. A candidate says "these two papers resemble each other,
+  // here are the passages" - derived from the vector index and the reading
+  // ledger, still true after the Wiki's knowledge is cleared. Dropping them
+  // threw away one full-library vector scan per paper and left the graph with
+  // no candidate edges until somebody ran wiki_scan_links by hand.
+  const before = await links.statistics(1);
+  assert.ok(before.linkCandidates > 0, "there is scan work to preserve");
+
   await store.clearAll();
-  const stats = await links.statistics(1);
-  assert.equal(stats.linkCandidates, 0);
-  assert.equal(stats.linkSignalsPending, 0);
+
+  const after = await links.statistics(1);
   assert.equal(
-    stats.linkScanQueued + stats.linkScanDone + stats.linkScanFailed,
+    after.linkCandidates,
+    before.linkCandidates,
+    "the pairs survive a knowledge reset",
+  );
+  assert.ok(
+    after.linkSignalsPending + after.linkSignalsStale > 0,
+    "and so do their signals",
+  );
+  assert.equal(
+    after.linkCandidatesResolved,
     0,
-    "candidates describe pairs of papers the Wiki no longer knows anything about",
+    "settlements pointed at Claims that no longer exist",
+  );
+  assert.equal(after.linkSignalsAccepted, 0);
+  assert.equal(
+    (await links.resolutionsFor(1)).length,
+    0,
+    "no resolution survives the Claims it referenced",
+  );
+  // A pair that had been settled is unanswered again rather than stuck.
+  assert.equal(
+    after.linkCandidatesDismissed + after.linkCandidatesResolved,
+    0,
+    "nothing is left claiming to be settled",
+  );
+  // The scan ledger survives too, so a reset does not re-run every scan.
+  assert.ok(
+    after.linkScanDone + after.linkScanFailed + after.linkScanQueued > 0,
+    "the scan queue records which papers have been scanned",
   );
 });
 

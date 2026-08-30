@@ -83,3 +83,20 @@ export function getWikiSettings(): WikiSettings {
 export function getWikiNoteEpisodeSimilarity(): number {
   return numeric("note.episodeSimilarity", 0.92, 0, 1);
 }
+
+/**
+ * 问答式写入是否必须记录术语。
+ *
+ * 全文阅读从 2.4.4 起就有这道闸门（concepts_recorded_at），实测有效：真实库里
+ * 每一个全文会话都记录了术语，因为不记就关不掉这篇论文。问答式路径没有对应的闸门，
+ * 同一个模型在同一个库上连续四次运行，一次都没有调用过 wiki_record_concepts——
+ * 而它写出的 Claim 正文里满是那些术语。三次「把提示说得更清楚」没有改变任何事。
+ *
+ * 这正是设计文档对跨文献连接早就得出的结论：靠读者自觉的步骤就是不会发生的步骤，
+ * 只有服务端能检查的欠账才可靠。
+ *
+ * 逃生口是「本次阅读确实没有引入新术语」加一条理由——和 SKIP 写销同一个形状。
+ */
+export function getWikiRequireQuestionTerminology(): boolean {
+  return read("requireQuestionTerminology") !== false;
+}

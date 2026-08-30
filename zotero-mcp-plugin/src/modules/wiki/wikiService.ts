@@ -88,7 +88,10 @@ import type {
   WikiTermInput,
   WikiTermSourceInput,
 } from "./wikiConceptTerms";
-import { getWikiNoteEpisodeSimilarity } from "./wikiSettings";
+import {
+  getWikiNoteEpisodeSimilarity,
+  getWikiRequireQuestionTerminology,
+} from "./wikiSettings";
 import { WikiLinkService } from "./wikiLinkService";
 import type { WikiLinkResolutionType } from "./wikiLinkTypes";
 import { WikiRetriever } from "./wikiRetriever";
@@ -1882,6 +1885,7 @@ export class WikiService {
       // must not clear a candidate, and a mandatory candidate this commit
       // ignores must not be able to slip past by being unmentioned.
       await this.assertLinkSignalsAnswered(input);
+      await this.assertQuestionTerminologyRecorded(input);
       const hydrated = await this.hydrateActions(
         input.actions,
         input.libraryID,
@@ -2317,6 +2321,72 @@ export class WikiService {
         "papers, a Page holding both as separate Claims, a MARK_CONFLICT, or a LINK_RELATION - each " +
         "carrying resolvesSignalIds - or a DISMISS_LINK_SIGNALS saying why the resemblance establishes " +
         "nothing. Nothing was written.",
+    );
+  }
+
+  /**
+   * A question-driven write-up records its terminology, or says why not.
+   *
+   * The full-text path has had this gate since 2.4.4 and it works: every
+   * full-text session in a real library shows `concepts_recorded_at` set,
+   * because the paper cannot be closed without it. The question-driven path
+   * had no equivalent, and across four measured runs on the same library the
+   * model called `wiki_record_concepts` there exactly zero times - while
+   * writing Claims whose own text was full of the terms. Three separate
+   * attempts to fix that by asking more clearly changed nothing, which is the
+   * conclusion the design document had already reached about connections:
+   * a step that depends on the reader remembering is a step that does not
+   * happen, and only a debt the server can check is reliable.
+   *
+   * Satisfied four ways, and only one of them is work:
+   *   - terminology was recorded for that paper (staged and drained, or
+   *     attached by conceptId);
+   *   - a concept was attached automatically from this commit's own Evidence,
+   *     which means the paper IS now recorded against the library's terms;
+   *   - the reading declared it introduced no new term, with a reason;
+   *   - the paper already has concept sources from an earlier reading.
+   *
+   * Off via `wiki.requireQuestionTerminology` for anyone who wants the old
+   * behaviour back.
+   */
+  private async assertQuestionTerminologyRecorded(
+    input: WikiCommitInput,
+  ): Promise<void> {
+    if (!getWikiRequireQuestionTerminology()) return;
+    const sessions = await this.store.readingSessions();
+    const library = await this.store.concepts();
+
+    const itemKeys = new Set<string>();
+    for (const action of input.actions) {
+      for (const entry of (action as any).evidence ?? []) {
+        if (entry?.itemKey) itemKeys.add(String(entry.itemKey));
+      }
+    }
+    const owing: string[] = [];
+    for (const itemKey of itemKeys) {
+      const open = await sessions.openForItem(input.libraryID, itemKey);
+      if (!open || open.mode !== "qa") continue;
+      if (open.conceptsDeclaredAt !== null) continue;
+      if (open.conceptsRecordedAt !== null) continue;
+      // Already tied to the library's terminology, by this reading or an
+      // earlier one. Nothing more is owed.
+      const sourced = await library.conceptIdsForItem(input.libraryID, itemKey);
+      if (sourced.length) continue;
+      // Something staged this turn will be written by this same commit.
+      const staged = await sessions.readStagedConcepts(open.sessionId);
+      if (staged.length) continue;
+      owing.push(itemKey);
+    }
+    if (!owing.length) return;
+    throw new Error(
+      `This reading of ${owing.join(", ")} has recorded no terminology. Before writing it up, call ` +
+        "wiki_record_concepts with that paper's itemKey and the terms these passages actually used - " +
+        "preferring concepts the library already holds, which is what turns a concept into an edge " +
+        "between papers. A term the library already has is submitted with its conceptId and one " +
+        "source (this paper's itemKey, the chunkIdSnapshot you read, an excerpt from that chunk). " +
+        "If this reading genuinely introduced no term the library does not hold, say so: call " +
+        "wiki_record_concepts with an empty concepts list and a noConceptsReason naming the terms " +
+        "and where they are already covered. Nothing was written.",
     );
   }
 
@@ -4645,6 +4715,53 @@ export class WikiService {
           attachments,
         )
       : null;
+
+    /*
+     * "This reading introduced no term the library did not already hold."
+     *
+     * The full-text path has been able to say this since 2.4.4, through
+     * `final: true` with a noConceptsReason. The question-driven path could
+     * not: `final` is refused there because coverage is incomplete, so there
+     * was no way to finish a reading honestly without terminology - and, with
+     * nothing requiring terminology either, the answer in practice was silence.
+     */
+    if (
+      options.final !== true &&
+      open &&
+      open.mode === "qa" &&
+      !entities.length &&
+      options.noConceptsReason?.trim()
+    ) {
+      const reason = options.noConceptsReason.trim();
+      if (VACUOUS_WRITE_OFF_REASON.test(reason)) {
+        throw new Error(
+          `That reason asserts rather than argues: "${reason}". "Nothing new" is what a reader who ` +
+            "looked at nothing would also say. Name the terms these passages used and which concepts " +
+            "in the library already cover them.",
+        );
+      }
+      if (reason.length < WIKI_WRITE_OFF_MIN_REASON_CHARS) {
+        throw new Error(
+          `A no-terminology declaration needs at least ${WIKI_WRITE_OFF_MIN_REASON_CHARS} characters. ` +
+            "Say which terms this reading used and where the library already holds them, so the " +
+            "judgement can be read back later.",
+        );
+      }
+      await sessions.declareNoConcepts(open.sessionId, reason);
+      return {
+        declared: true,
+        written: false,
+        staged: 0,
+        readingSession: {
+          sessionId: open.sessionId,
+          itemKey: open.itemKey,
+          conceptPassRecorded: false,
+        },
+        note:
+          "Recorded: this reading introduced no term the library did not already hold. " +
+          "The commit that writes it up will no longer ask for terminology.",
+      };
+    }
 
     // ---- Staging: no write, no prompt ------------------------------------
     if (options.final !== true && open) {

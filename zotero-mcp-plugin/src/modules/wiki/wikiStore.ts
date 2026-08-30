@@ -1733,11 +1733,23 @@ export class WikiStore {
     const deletedRows = countWikiPersistentRows(before);
     await this.db.executeTransaction(async () => {
       for (const table of [
-        // The link layer first: its rows reference nothing outside itself, but
-        // every one of them DESCRIBES a pair of papers, and leaving candidates
-        // behind after a reset would leave the graph drawing edges between
-        // documents the Wiki no longer knows anything about.
-        ...WikiLinkStore.TABLES,
+        /*
+         * Of the link layer, only the SETTLEMENTS.
+         *
+         * This used to drop the whole thing, and that was wrong. A resolution
+         * says "Claim 317 was written because of signal 42", so it cannot
+         * outlive the Claim - those go. But a candidate and its signals say
+         * "these two papers resemble each other, here are the passages", which
+         * is derived from the vector index and the reading ledger and is still
+         * true after the Wiki's knowledge is cleared. Dropping them threw away
+         * a full-library vector scan per paper and left the graph with no
+         * candidate edges at all until someone thought to run wiki_scan_links
+         * by hand - which is exactly what happened.
+         *
+         * refreshStatus below reopens the pairs whose settlements just went.
+         */
+        "wiki_link_resolution_signals",
+        "wiki_link_resolutions",
         "wiki_claim_embeddings",
         "wiki_concept_embeddings",
         "wiki_concept_embedding_queue",
@@ -1753,6 +1765,24 @@ export class WikiStore {
         await this.db.queryAsync(`DELETE FROM ${table}`);
       }
     });
+    /*
+     * A signal accepted because of a Claim is unanswered once that Claim is
+     * gone, so it goes back to pending. A REJECTED one stays rejected: that
+     * judgement was about the two passages - "these only share sample-prep
+     * wording" - and is as true after a knowledge reset as before it. Losing
+     * it would mean re-deciding every dismissal the next time the pair came up.
+     */
+    await this.db.queryAsync(
+      "UPDATE wiki_link_signals SET state = 'pending', settled_at = NULL WHERE state = 'accepted'",
+    );
+    const links = await this.links();
+    for (const candidate of await this.db.queryAsync(
+      "SELECT link_id FROM wiki_link_candidates WHERE status IN ('resolved','dismissed')",
+    )) {
+      await links.refreshStatus(
+        Number(rowValue(candidate, "link_id", "linkId")),
+      );
+    }
     const after = await this.getStatus();
     const remaining = countWikiPersistentRows(after);
     if (remaining !== 0) {

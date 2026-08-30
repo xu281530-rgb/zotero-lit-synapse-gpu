@@ -38,6 +38,8 @@ declare namespace _ZoteroTypes {
       "wiki.minScore": string;
       "wiki.rrfWeight": string;
       "wiki.searchTimeoutMs": number;
+      "wiki.requireQuestionTerminology": boolean;
+      "wiki.note.episodeSimilarity": string;
       "wiki.link.enabled": boolean;
       "wiki.link.mandatorySettlement": boolean;
       "wiki.link.topK": number;

@@ -126,7 +126,25 @@ export class WikiLinkService {
       });
     } catch (error) {
       ztoolkit.log("[wiki] could not queue a link scan", error);
+      return;
     }
+    /*
+     * Work the queue in the background, the way the embedding queue is worked.
+     *
+     * Enqueueing alone was not enough and the gap was invisible: after a Wiki
+     * reset the four papers a reading touched sat `queued` indefinitely,
+     * `wiki_status` reported linkCandidates 0, and nothing said why - the only
+     * thing that ever drained the queue was somebody calling wiki_scan_links.
+     * A candidate the reader has to ask for is a candidate that does not
+     * exist.
+     *
+     * Not awaited: a full-library vector pass must never be on the path of the
+     * reading call that triggered it. The drain is re-entrant-guarded, so
+     * several readings in one turn start one pass between them.
+     */
+    void this.pumpQueue().catch((error: unknown) => {
+      ztoolkit.log("[wiki] background link scan failed", error);
+    });
   }
 
   /** Queue every paper of a library that has been read but never scanned. */

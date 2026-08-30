@@ -174,6 +174,8 @@ export interface WikiReadingSessionRecord {
    * new concepts" is a real, and common, answer that leaves no rows behind.
    */
   conceptsRecordedAt: number | null;
+  /** A question-driven reading that declared it introduced no new term. */
+  conceptsDeclaredAt: number | null;
 
   /**
    * Concept candidates noticed part-way through, waiting for the whole-paper
@@ -334,6 +336,11 @@ function mapSession(row: any): WikiReadingSessionRecord {
     "concepts_recorded_at",
     "conceptsRecordedAt",
   );
+  const conceptsDeclaredAt = rowColumn(
+    row,
+    "concepts_declared_at",
+    "conceptsDeclaredAt",
+  );
   const wikiReviewAt = rowColumn(row, "wiki_review_at", "wikiReviewAt");
   return {
     sessionId: Number(rowColumn(row, "session_id", "sessionId")),
@@ -369,6 +376,8 @@ function mapSession(row: any): WikiReadingSessionRecord {
       finalSynthesisAt == null ? null : Number(finalSynthesisAt),
     conceptsRecordedAt:
       conceptsRecordedAt == null ? null : Number(conceptsRecordedAt),
+    conceptsDeclaredAt:
+      conceptsDeclaredAt == null ? null : Number(conceptsDeclaredAt),
     stagedConcepts: parseStagedConcepts(
       rowColumn(row, "staged_concepts", "stagedConcepts"),
     ),
@@ -1096,6 +1105,24 @@ export class WikiReadingSessions {
   async readStagedConcepts(sessionId: number): Promise<unknown[]> {
     const session = await this.get(sessionId);
     return session?.stagedConcepts ?? [];
+  }
+
+  /**
+   * Record that this reading introduced no terminology, and why.
+   *
+   * The question-driven counterpart of wiki_record_concepts final:true with a
+   * noConceptsReason. "This paper used only terms the library already holds"
+   * is a real answer and has to be sayable; what must not be available is
+   * saying nothing at all, which is what this path allowed before.
+   */
+  async declareNoConcepts(sessionId: number, reason: string): Promise<void> {
+    const now = Date.now();
+    await this.db.queryAsync(
+      `UPDATE wiki_reading_sessions
+       SET concepts_declared_at = ?, concepts_declared_reason = ?, updated_at = ?
+       WHERE session_id = ?`,
+      [now, reason, now, sessionId],
+    );
   }
 
   /**
