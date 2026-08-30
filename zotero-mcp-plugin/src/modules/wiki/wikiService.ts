@@ -88,6 +88,7 @@ import type {
   WikiTermInput,
   WikiTermSourceInput,
 } from "./wikiConceptTerms";
+import { getWikiNoteEpisodeSimilarity } from "./wikiSettings";
 import { WikiLinkService } from "./wikiLinkService";
 import type { WikiLinkResolutionType } from "./wikiLinkTypes";
 import { WikiRetriever } from "./wikiRetriever";
@@ -2361,6 +2362,7 @@ export class WikiService {
     const settledId = (
       raw: unknown,
       ref: unknown,
+      fromAction: number | null | undefined,
     ): number | null => {
       const direct = Number(raw);
       if (Number.isInteger(direct) && direct > 0) return direct;
@@ -2369,10 +2371,17 @@ export class WikiService {
         const resolved = result.refs[key];
         if (Number.isInteger(resolved) && resolved > 0) return resolved;
       }
-      return null;
+      // What the store actually wrote for this action. The two lookups above
+      // both depend on the caller having named something; this one does not,
+      // and it is why a commit whose ADD_CLAIM carried no `ref` still records
+      // which Claim settled the signal.
+      return Number.isInteger(fromAction) && (fromAction as number) > 0
+        ? (fromAction as number)
+        : null;
     };
 
-    for (const action of actions) {
+    for (let index = 0; index < actions.length; index += 1) {
+      const action = actions[index];
       if (action.action === "DISMISS_LINK_SIGNALS") {
         settlements.push({
           signalIds: ((action as any).signalIds ?? []).map((id: unknown) =>
@@ -2387,8 +2396,16 @@ export class WikiService {
         (id: unknown) => Number(id),
       );
       if (!signalIds.length) continue;
-      const claimId = settledId((action as any).claimId, (action as any).ref);
-      const pageId = settledId((action as any).pageId, (action as any).ref);
+      const claimId = settledId(
+        (action as any).claimId,
+        (action as any).ref,
+        result.actionClaimIds[index],
+      );
+      const pageId = settledId(
+        (action as any).pageId,
+        (action as any).ref,
+        result.actionPageIds[index],
+      );
       switch (action.action) {
         case "ADD_CLAIM":
         case "ATTACH_EVIDENCE":
@@ -3386,7 +3403,15 @@ export class WikiService {
       );
     }
 
-    const previousBody = (await this.readNoteBody(item)) ?? "";
+    /*
+     * A concluded note is left alone and this episode starts a new one.
+     *
+     * The note ends with 全文总结, which synthesises every record above it, so
+     * nothing may follow it. Before this, a question about a paper that had
+     * been read through was simply refused - which meant the papers you know
+     * best were the ones whose later reading could never be recorded.
+     */
+    const previousBody = (await this.readNoteBody(item, session)) ?? "";
     const unchanged = options.unchanged === true;
     const reason = String(options.unchangedReason ?? "").trim();
     if (unchanged && !reason) {
@@ -3445,10 +3470,42 @@ export class WikiService {
         options.synthesisAudit ?? [],
       );
     }
-    const body = appendReadingRecord(previousBody, {
-      chunkIds: options.readChunkIds,
-      content: record,
-    });
+    // Decided here rather than earlier, because the test is what this turn
+    // SAYS and the record only exists once it has passed validation.
+    const route = await this.routeReadingRecord(
+      item,
+      session,
+      options.readChunkIds,
+      record,
+    );
+    /*
+     * Append onto whichever note is taking this record.
+     *
+     * `previousBody` already holds the session's current note, so it is reused
+     * unless the record is going somewhere else. Re-reading unconditionally
+     * would be harmless right up until the read failed, and a failed read here
+     * would look like an empty note and overwrite it.
+     */
+    let targetBody = previousBody;
+    if (route.startNewEpisode) {
+      targetBody = "";
+    } else if (route.attachment && route.attachment.key !== session.noteKey) {
+      const raw = await this.notes.read(route.attachment);
+      if (raw === null) {
+        throw new Error(
+          `The reading note this record belongs in could not be read (${String(
+            route.attachment.key ?? "unknown",
+          )}). Nothing was recorded; retry once Zotero can open its attachments.`,
+        );
+      }
+      targetBody = parseReadingNote(raw).body;
+    }
+    const body = route.write
+      ? appendReadingRecord(targetBody, {
+          chunkIds: options.readChunkIds,
+          content: record,
+        })
+      : "";
 
     // THE ORDER HERE IS THE POINT, and it used to be the other way round.
     //
@@ -3466,7 +3523,22 @@ export class WikiService {
     // ledger does not credit, so the chunk is offered again and the model
     // rewrites a note that already covers it. That is wasted work. Ledger
     // first OVER-counts, which is silent, permanent data loss.
-    const written = await this.writeNote(item, session, body, "reading");
+    const written = route.write
+      ? await this.writeNote(item, session, body, "reading", {
+          startNewEpisode: route.startNewEpisode,
+          attachment: route.attachment,
+        })
+      : {
+          // The reading still reaches the ledger - see below - so the Evidence
+          // gate and the cross-paper mustResolve check both see it. What it
+          // does not get is a note of its own, because it said nothing the
+          // note does not already say.
+          attachmentKey: session.noteKey ?? "",
+          status: "reading" as WikiReadingNoteStatus,
+          bodyChars: 0,
+          skipped: route.reason,
+          similarity: route.similarity,
+        };
 
     // Durable. Only now is the reading real.
     const booked = await sessions.recordReadChunkIds(
@@ -3694,11 +3766,264 @@ export class WikiService {
   }
 
   /** The model's half of the existing note, or null when there is none. */
-  private async readNoteBody(item: any): Promise<string | null> {
-    const attachment = await this.notes.findAttachment(item);
+  /**
+   * The body of the note this reading is writing into.
+   *
+   * A session that already owns a note stays with it even after a later
+   * episode has been opened; without that, two readings running against the
+   * same paper would each append to whichever note happened to be newest.
+   * Falling back to the item's latest is right for a session that has not
+   * written yet, and for every caller that just wants "the current note".
+   */
+  private async readNoteBody(
+    item: any,
+    session?: WikiReadingSessionRecord,
+  ): Promise<string | null> {
+    const attachment =
+      (session?.noteKey
+        ? await this.notes.getByKey(session.libraryID, session.noteKey)
+        : null) ?? (await this.notes.findAttachment(item));
     if (!attachment) return null;
     const raw = await this.notes.read(attachment);
     return raw === null ? null : parseReadingNote(raw).body;
+  }
+
+  /**
+   * Where does this turn's reading record go?
+   *
+   * Three destinations, and the order between them is the rule:
+   *
+   *   1. The EARLIEST note that is still open and does not already cover these
+   *      passages. Filling a note toward the whole paper is the point - a note
+   *      that opened on every new chunk would never accumulate enough reading
+   *      to be worth summarising, which is the completeness the notes exist to
+   *      hold. A concluded note is skipped whatever it lacks: 全文总结
+   *      synthesises every record above it and nothing may follow.
+   *   2. A NEW note, when every eligible note already covers these passages and
+   *      what this turn says differs from what they already say.
+   *   3. No note at all, when it does not differ - the reading still reaches
+   *      the ledger, so the Evidence gate and the cross-paper mustResolve check
+   *      both see it; it simply earns no record of its own.
+   *
+   * The similarity threshold sits high on purpose, and the errors are not
+   * symmetric: judging two readings the same costs a lost reading, silently,
+   * while judging them different costs one mostly-redundant note that a reader
+   * can see and ignore. So anything short of near-restatement opens a note, and
+   * every failure - no prior discussion, no embedding service, any error at
+   * all - opens one too.
+   */
+  private async routeReadingRecord(
+    item: any,
+    session: WikiReadingSessionRecord,
+    chunkIds: readonly number[],
+    record: string,
+  ): Promise<{
+    attachment: any | null;
+    startNewEpisode: boolean;
+    write: boolean;
+    similarity: number | null;
+    reason: string;
+  }> {
+    const skip = (reason: string, similarity: number | null = null) => ({
+      attachment: null,
+      startNewEpisode: false,
+      write: false,
+      similarity,
+      reason,
+    });
+    const fresh = (reason: string, similarity: number | null = null) => ({
+      attachment: null,
+      startNewEpisode: true,
+      write: true,
+      similarity,
+      reason,
+    });
+
+    const wanted = new Set(chunkIds.map(Number));
+    let notes: any[] = [];
+    try {
+      notes = await this.notes.listAttachments(item);
+    } catch (error) {
+      ztoolkit.log("[wiki] could not list reading notes", error);
+      return fresh("the note list could not be read");
+    }
+    if (!notes.length) {
+      return {
+        attachment: null,
+        startNewEpisode: false,
+        write: true,
+        similarity: null,
+        reason: "first note for this paper",
+      };
+    }
+
+    const parsedNotes: Array<{
+      attachment: any;
+      concluded: boolean;
+      chunkIds: Set<number>;
+      related: string;
+    }> = [];
+    /*
+     * A note that exists but cannot be READ is the one case that must never
+     * reach the "start a new episode" branch.
+     *
+     * Treating it as absent looks harmless and is not: the new episode would
+     * be written from an empty body, and the records already in that file
+     * would be replaced by a single one. The append-only guarantee would be
+     * broken by the very code meant to preserve it, and silently. So an
+     * unreadable note falls back to the ordinary append path, where the
+     * existing note/ledger consistency check can refuse the write loudly.
+     */
+    let unreadable = false;
+    for (const attachment of notes) {
+      let body = "";
+      try {
+        const raw = await this.notes.read(attachment);
+        if (raw === null) {
+          unreadable = true;
+          break;
+        }
+        body = parseReadingNote(raw).body;
+      } catch {
+        unreadable = true;
+        break;
+      }
+      const parsed = parseAppendOnlyReadingNote(body);
+      const covered = new Set<number>();
+      const related: string[] = [];
+      for (const entry of parsed.records) {
+        let touches = false;
+        for (const id of entry.chunkIds) {
+          covered.add(id);
+          if (wanted.has(id)) touches = true;
+        }
+        if (touches) related.push(entry.content);
+      }
+      parsedNotes.push({
+        attachment,
+        concluded: parsed.macroSummary !== null,
+        chunkIds: covered,
+        related: related.join("\n\n").trim(),
+      });
+    }
+
+    if (unreadable) {
+      return {
+        attachment: null,
+        startNewEpisode: false,
+        write: true,
+        similarity: null,
+        reason: "a note could not be read; appending to the current one",
+      };
+    }
+
+    // 1. The earliest open note that has not seen all of these passages.
+    for (const note of parsedNotes) {
+      if (note.concluded) continue;
+      const missing = [...wanted].filter((id) => !note.chunkIds.has(id));
+      if (!missing.length) continue;
+      return {
+        attachment: note.attachment,
+        startNewEpisode: false,
+        write: true,
+        similarity: null,
+        reason: `note covers neither chunk ${missing.slice(0, 4).join(", ")}`,
+      };
+    }
+
+    /*
+     * 2. An open note that has already seen these passages still takes the
+     *    record.
+     *
+     * Re-reading a passage and saying something further about it is ordinary,
+     * and the note is not finished, so there is nothing to protect: append.
+     * Only a CONCLUDED note forces the question below, because only a
+     * concluded note cannot be appended to. Leaving this case out sent every
+     * re-read down the similarity branch and opened a new note for it.
+     */
+    const open = parsedNotes.find((note) => !note.concluded);
+    if (open) {
+      return {
+        attachment: open.attachment,
+        startNewEpisode: false,
+        write: true,
+        similarity: null,
+        reason: "appended to the open note",
+      };
+    }
+
+    /*
+     * 3/4. Every note is concluded, so nothing can be appended. Does this turn
+     * say anything they do not?
+     *
+     * Compared note by note, and a new note opens only when the reading
+     * differs from EVERY one of them. Concatenating their discussions into one
+     * text and comparing once would dilute the case that matters most: a
+     * reading that restates note #2 exactly would still look different once
+     * note #1's unrelated prose was mixed in, and would open a note it had no
+     * business opening. The test is the CLOSEST existing account, not the
+     * average one.
+     */
+    const candidates = parsedNotes.filter((note) => note.related);
+    if (!candidates.length) return fresh("no note discusses these passages");
+    try {
+      const embeddingService = getEmbeddingService();
+      const freshResult = await embeddingService.embed(record);
+      const left = freshResult?.embedding;
+      if (!left?.length) return fresh("no comparable embedding");
+      const cosine = (right: Float32Array): number | null => {
+        if (!right?.length || right.length !== left.length) return null;
+        let dot = 0;
+        let leftNorm = 0;
+        let rightNorm = 0;
+        for (let index = 0; index < left.length; index += 1) {
+          dot += left[index] * right[index];
+          leftNorm += left[index] * left[index];
+          rightNorm += right[index] * right[index];
+        }
+        const denominator = Math.sqrt(leftNorm) * Math.sqrt(rightNorm);
+        return denominator > 0 ? dot / denominator : 0;
+      };
+      let closest: number | null = null;
+      for (const note of candidates) {
+        const priorResult = await embeddingService.embed(note.related);
+        const similarity = priorResult?.embedding
+          ? cosine(priorResult.embedding)
+          : null;
+        if (similarity === null) continue;
+        if (closest === null || similarity > closest) closest = similarity;
+      }
+      if (closest === null) return fresh("no comparable embedding");
+      const threshold = getWikiNoteEpisodeSimilarity();
+      return closest >= threshold
+        ? skip(
+            `restates what a note already records (closest ${closest.toFixed(3)} >= ${threshold})`,
+            closest,
+          )
+        : fresh(
+            `differs from every note's account of these passages (closest ${closest.toFixed(3)} < ${threshold})`,
+            closest,
+          );
+    } catch (error) {
+      ztoolkit.log("[wiki] could not compare this reading to the notes", error);
+      return fresh("the comparison failed");
+    }
+  }
+
+  /**
+   * Is the note this reading would append to already concluded?
+   *
+   * A note ends with 全文总结, the synthesis of every record above it, and
+   * nothing may be appended after that. So a new reading episode starts a new
+   * note rather than being refused - see readingNoteAttachmentTitle.
+   */
+  private async noteIsConcluded(
+    item: any,
+    session?: WikiReadingSessionRecord,
+  ): Promise<boolean> {
+    const body = await this.readNoteBody(item, session);
+    if (!body) return false;
+    return parseAppendOnlyReadingNote(body).macroSummary !== null;
   }
 
   /**
@@ -3713,6 +4038,7 @@ export class WikiService {
     session: WikiReadingSessionRecord,
     body: string,
     status: WikiReadingNoteStatus,
+    options: { startNewEpisode?: boolean; attachment?: any | null } = {},
   ): Promise<{
     attachmentKey: string;
     status: WikiReadingNoteStatus;
@@ -3748,7 +4074,17 @@ export class WikiService {
       updatedAt: new Date().toISOString(),
     };
     const markdown = renderReadingNote(metadata, body);
-    const attachment = await this.notes.ensureAttachment(item, markdown);
+    // A session that already owns a note keeps writing to it; only the first
+    // write of an episode that follows a concluded note opens a new file.
+    // Default unchanged: the paper's current note, created if absent. Only a
+    // caller that has explicitly routed this record elsewhere overrides it —
+    // consulting session.noteKey here instead would have redirected every
+    // full-text write too, and those must keep landing where they always did.
+    const attachment =
+      options.attachment ??
+      (options.startNewEpisode
+        ? await this.notes.createNextAttachment(item, markdown)
+        : await this.notes.ensureAttachment(item, markdown));
     await this.notes.write(attachment, markdown);
     if (attachment?.key && attachment.key !== session.noteKey) {
       await sessions.setNoteKey(session.sessionId, String(attachment.key));

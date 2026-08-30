@@ -742,21 +742,46 @@ export class WikiReadingSessions {
     }
     if (newIndexes.length || alreadyRead.length) {
       const now = Date.now();
+      // Chunks of this paper that a FINISHED reading already put into the Wiki.
+      //
+      // "New to this session" is not the same as "new to the Wiki". A question
+      // about a paper that was read through last week opens a fresh session,
+      // where every chunk looks new, and charging them would open debt for
+      // passages already written up - so answering a question about a paper you
+      // know well would demand you write it up again. The ledger still records
+      // that the passage was read now; only the debt is withheld.
+      const settledElsewhere = new Set<number>(
+        (
+          await this.db.queryAsync(
+            `SELECT DISTINCT c.chunk_id AS chunk_id
+               FROM wiki_reading_chunks c
+               JOIN wiki_reading_sessions s ON s.session_id = c.session_id
+              WHERE s.item_key = (SELECT item_key FROM wiki_reading_sessions
+                                   WHERE session_id = ?)
+                AND s.library_id = (SELECT library_id FROM wiki_reading_sessions
+                                     WHERE session_id = ?)
+                AND s.session_id <> ?
+                AND (s.state = 'committed' OR c.settled_at IS NOT NULL)`,
+            [sessionId, sessionId, sessionId],
+          )
+        ).map((row: any) => Number(rowColumn(row, "chunk_id", "chunkId"))),
+      );
       for (const index of newIndexes) {
         const chunk = documentChunks[index];
         // A NEW chunk owes the Wiki. Re-reading one already read does not:
         // checking a passage against the source before quoting it is not new
         // knowledge, and charging it would mean a paper could never be quoted
         // from twice without a Claim in between.
+        const owes = settledElsewhere.has(Number(chunk.chunkId)) ? 0 : 1;
         await this.db.queryAsync(
           `INSERT INTO wiki_reading_chunks
              (session_id, chunk_index, chunk_id, delivered_at, owes_wiki)
-           VALUES (?, ?, ?, ?, 1)
+           VALUES (?, ?, ?, ?, ?)
            ON CONFLICT(session_id, chunk_index) DO UPDATE SET
              chunk_id = excluded.chunk_id,
              delivered_at = excluded.delivered_at,
-             owes_wiki = 1`,
-          [sessionId, index, Number(chunk.chunkId), now],
+             owes_wiki = excluded.owes_wiki`,
+          [sessionId, index, Number(chunk.chunkId), now, owes],
         );
       }
       for (const index of alreadyRead) {

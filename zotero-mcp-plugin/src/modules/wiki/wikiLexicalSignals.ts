@@ -29,7 +29,12 @@ import { normalize, tokenizeForIndex } from "../keyword/scientificTokenizer";
 import { lexicalIdf } from "./wikiLinkScoring";
 
 /** 词法信号的算法版本。切词、停用规则或打分改动都必须改这里。 */
-export const LEXICAL_ALGORITHM_VERSION = "link-lex-v3";
+export const LEXICAL_ALGORITHM_VERSION = "link-lex-v4";
+// v4: v3 left the PDF pipeline's own residue — LaTeX command names (mathtt,
+// colon, bullet) and units the tokeniser had joined (mmmin from mm/min, which
+// UNIT_SHAPED only caught in its slashed form). Both are genuinely rare and
+// neither is a term of the field.
+//
 // v3: v2 stopped the boilerplate but left the tokeniser's own artefacts -
 // sliding Han bigrams (高为, 除裂, 金状), unit fragments (c/min, cmin) and bare
 // labels (d1, 300, phi) - all genuinely rare and all useless as an edge label.
@@ -102,6 +107,23 @@ const MEASUREMENT_UNITS = new Set([
   "mms", "nms", "ums", "kjmol", "jmol", "wmk",
 ]);
 
+/**
+ * LaTeX / Markdown 命令名。PDF 抽取的残留，不是论文的词。
+ *
+ * 实测浮到词法信号最前面的有 mathtt、colon、bullet —— 它们 df 很小（只有少数
+ * 文献的抽取留下了这些命令），所以稀有度看起来很高，但「两篇文献共享 \colon」
+ * 说明的是抽取管线的行为，不是这两篇论文的关系。
+ */
+const MARKUP_COMMANDS = new Set([
+  "mathtt", "mathrm", "mathbf", "mathit", "mathcal", "mathbb", "mathsf",
+  "textbf", "textit", "textrm", "texttt", "emph",
+  "colon", "bullet", "cdot", "times", "quad", "qquad", "hspace", "vspace",
+  "begin", "end", "item", "label", "caption", "footnote",
+  "frac", "sqrt", "sum", "int", "lim", "log", "exp",
+  "left", "right", "overline", "underline", "widehat", "tilde",
+  "rightarrow", "leftarrow", "approx", "leq", "geq", "neq", "pm",
+]);
+
 /** 希腊字母的拉丁拼写。它们是符号名，不是术语。 */
 const GREEK_SYMBOL_NAMES = new Set([
   "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
@@ -111,6 +133,15 @@ const GREEK_SYMBOL_NAMES = new Set([
 
 /** 单位/速率的形状：字母（可带斜杠或短横）后面跟单位，如 c/min、k/s、mm/s。 */
 const UNIT_SHAPED = /^[a-z]{1,3}[/·-][a-z]{1,4}[0-9]*$/u;
+
+/**
+ * 单位被 tokenizer 拼接后的形状：mm/min → mmmin、°C/min → cmin、K/s → ks。
+ *
+ * tokenizer 对含斜杠的词同时产出原形和去掉分隔符的变体，所以 UNIT_SHAPED 只挡住
+ * 前者，后者会漏过去——实测 mmmin 就是这样进来的。这里匹配「短前缀 + 时间/长度
+ * 单位」的拼接形状，同时把 min/sec 这些本身就是单位的短词一并挡掉。
+ */
+const JOINED_UNIT = /^[a-z]{0,3}(min|sec|hr|hrs|mpa|gpa|kpa|mol|rpm)$/u;
 
 export function isUsableLexicalTerm(term: string): boolean {
   const value = String(term ?? "").trim();
@@ -132,6 +163,8 @@ export function isUsableLexicalTerm(term: string): boolean {
   const lower = latin.toLowerCase();
   if (MEASUREMENT_UNITS.has(lower)) return false;
   if (GREEK_SYMBOL_NAMES.has(lower)) return false;
+  if (MARKUP_COMMANDS.has(lower)) return false;
+  if (JOINED_UNIT.test(lower)) return false;
   if (UNIT_SHAPED.test(value.toLowerCase())) return false; // c/min, k/s
   return true;
 }

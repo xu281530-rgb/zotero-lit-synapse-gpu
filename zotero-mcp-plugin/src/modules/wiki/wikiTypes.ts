@@ -206,6 +206,17 @@ export interface WikiCommitResult {
   linkedRelations: number;
   refs: Record<string, number>;
   affectedClaimIds: number[];
+  /**
+   * The Claim and Page each action created or touched, by action position.
+   *
+   * `refs` only answers this when the caller thought to name a `ref`, and a
+   * caller that did not still produced a Claim. Link resolutions were reading
+   * `action.claimId` and getting NaN for every ADD_CLAIM, so the audit trail
+   * said "settled by a shared Claim" without being able to name it. Position
+   * is the one key that always exists.
+   */
+  actionClaimIds: Array<number | null>;
+  actionPageIds: Array<number | null>;
 }
 
 export interface WikiEvidenceRecord {

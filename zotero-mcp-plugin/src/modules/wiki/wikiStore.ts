@@ -740,12 +740,15 @@ export class WikiStore {
       linkedRelations: 0,
       refs: {},
       affectedClaimIds: [],
+      actionClaimIds: input.actions.map(() => null),
+      actionPageIds: input.actions.map(() => null),
     };
     const affectedPageIds = new Set<number>();
     const evidenceChangedClaimIds = new Set<number>();
 
     await this.db.executeTransaction(async () => {
-      for (const action of input.actions) {
+      for (let actionIndex = 0; actionIndex < input.actions.length; actionIndex += 1) {
+        const action = input.actions[actionIndex];
         if (action.action === "SKIP") continue;
         // Settled by WikiService once the transaction is durable, because the
         // link tables record what a write PRODUCED - and a resolution written
@@ -857,6 +860,7 @@ export class WikiStore {
           );
           const pageId = await this.lastInsertId();
           this.assignRef(action.ref, pageId, result.refs);
+          result.actionPageIds[actionIndex] = pageId;
           affectedPageIds.add(pageId);
           result.createdPages += 1;
           continue;
@@ -909,6 +913,7 @@ export class WikiStore {
               action.evidence,
             );
             this.assignRef(action.ref, existingClaimId, result.refs);
+            result.actionClaimIds[actionIndex] = existingClaimId;
             result.reusedClaims += 1;
             result.attachedEvidence += await this.attachEvidence(
               existingClaimId,
@@ -950,6 +955,7 @@ export class WikiStore {
           );
           const claimId = await this.lastInsertId();
           this.assignRef(action.ref, claimId, result.refs);
+          result.actionClaimIds[actionIndex] = claimId;
           result.createdClaims += 1;
           result.affectedClaimIds.push(claimId);
           result.attachedEvidence += await this.attachEvidence(

@@ -834,12 +834,49 @@ function isWikiReadingNoteDeletionCandidate(attachment: any): boolean {
   }
 }
 
-export function readingNoteAttachmentTitle(itemKey: string): string {
-  return `${WIKI_READING_NOTE_TITLE_PREFIX} (${itemKey}).md`;
+/**
+ * One note per READING EPISODE, not one per paper.
+ *
+ * The note is append-only and ends with 全文总结, which is the synthesis of
+ * every record above it - so once that summary is written, no further record
+ * may be added. That rule is right and it had a consequence nobody designed
+ * for: a paper read through once could never record question-driven reading
+ * again, because every such call landed on the refusal. Measured across three
+ * runs on four papers, not one question-driven read was ever recorded.
+ *
+ * The direction was backwards. The papers you have read through are exactly
+ * the ones you go on to ask questions of, so the lock fell hardest on the
+ * reading most worth keeping, and the note froze on the day of the full-text
+ * pass.
+ *
+ * A finished note is therefore left exactly as it is - byte for byte, which
+ * this module already goes to some length to guarantee - and the next episode
+ * opens a new note beside it, in the same format. Episode 1 keeps the original
+ * name so nothing on disk has to be migrated.
+ */
+export function readingNoteAttachmentTitle(
+  itemKey: string,
+  episode = 1,
+): string {
+  const suffix = episode > 1 ? ` #${episode}` : "";
+  return `${WIKI_READING_NOTE_TITLE_PREFIX} (${itemKey})${suffix}.md`;
 }
 
-export function readingNoteFileName(itemKey: string): string {
-  return `${WIKI_READING_NOTE_FILENAME_PREFIX}${itemKey}.md`;
+export function readingNoteFileName(itemKey: string, episode = 1): string {
+  const suffix = episode > 1 ? `-${episode}` : "";
+  return `${WIKI_READING_NOTE_FILENAME_PREFIX}${itemKey}${suffix}.md`;
+}
+
+/** Which episode an attachment's title names. 1 when it carries no number. */
+export function readingNoteEpisode(attachment: any): number {
+  try {
+    const title = String(attachment?.getField?.("title") ?? "");
+    const match = /#(\d+)\s*\.md\s*$/u.exec(title);
+    const episode = match ? Number(match[1]) : 1;
+    return Number.isInteger(episode) && episode > 0 ? episode : 1;
+  } catch {
+    return 1;
+  }
 }
 
 /**
@@ -904,20 +941,36 @@ export class WikiReadingNoteStore {
     return { removed, failed };
   }
 
-  /** The note attachment on this item, by identity rather than by key. */
-  async findAttachment(item: any): Promise<any | null> {
+  /** Every reading note on this item, oldest episode first. */
+  async listAttachments(item: any): Promise<any[]> {
     const ids: number[] = item?.getAttachments?.() ?? [];
+    const notes: any[] = [];
     for (const id of ids) {
       try {
         const attachment = await Zotero.Items.getAsync(id);
         if (attachment && isWikiReadingNoteAttachment(attachment)) {
-          return attachment;
+          notes.push(attachment);
         }
       } catch {
         // A broken child attachment is not a reason to lose the note.
       }
     }
-    return null;
+    return notes.sort(
+      (left, right) => readingNoteEpisode(left) - readingNoteEpisode(right),
+    );
+  }
+
+  /**
+   * The note a reading would write to now: the LATEST episode.
+   *
+   * It used to return whichever matching attachment came first, which was the
+   * same thing while there could only be one. With several it has to be the
+   * newest, or a second episode would be written into the first one's file and
+   * the append-only guarantee would be broken from the outside.
+   */
+  async findAttachment(item: any): Promise<any | null> {
+    const notes = await this.listAttachments(item);
+    return notes.length ? notes[notes.length - 1] : null;
   }
 
   async getByKey(
@@ -1005,6 +1058,32 @@ export class WikiReadingNoteStore {
   async ensureAttachment(item: any, initialMarkdown: string): Promise<any> {
     const existing = await this.findAttachment(item);
     if (existing) return existing;
+    return this.createAttachment(item, initialMarkdown, 1);
+  }
+
+  /**
+   * Open the next episode beside the finished ones.
+   *
+   * Deliberately separate from `ensureAttachment`: that one means "the note
+   * for this paper, creating it if absent", and silently making it able to
+   * create a SECOND note would turn every failed lookup into a new file.
+   */
+  async createNextAttachment(
+    item: any,
+    initialMarkdown: string,
+  ): Promise<any> {
+    const notes = await this.listAttachments(item);
+    const next = notes.length
+      ? readingNoteEpisode(notes[notes.length - 1]) + 1
+      : 1;
+    return this.createAttachment(item, initialMarkdown, next);
+  }
+
+  private async createAttachment(
+    item: any,
+    initialMarkdown: string,
+    episode: number,
+  ): Promise<any> {
     const stagingDir = PathUtils.join(
       Zotero.DataDirectory.dir,
       "zotero-mcp",
@@ -1016,7 +1095,7 @@ export class WikiReadingNoteStore {
     });
     const stagingPath = PathUtils.join(
       stagingDir,
-      readingNoteFileName(item.key),
+      readingNoteFileName(item.key, episode),
     );
     await IOUtils.writeUTF8(stagingPath, initialMarkdown, {
       tmpPath: `${stagingPath}.tmp`,
@@ -1024,7 +1103,7 @@ export class WikiReadingNoteStore {
     const imported = await Zotero.Attachments.importFromFile({
       file: stagingPath,
       parentItemID: item.id,
-      title: readingNoteAttachmentTitle(item.key),
+      title: readingNoteAttachmentTitle(item.key, episode),
       contentType: "text/markdown",
       charset: "utf-8",
     });

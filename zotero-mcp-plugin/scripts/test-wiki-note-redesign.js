@@ -9,6 +9,9 @@ const {
   appendMacroSummary,
   appendReadingRecord,
   parseAppendOnlyReadingNote,
+  readingNoteAttachmentTitle,
+  readingNoteEpisode,
+  readingNoteFileName,
   WikiReadingNoteStore,
 } = await import("../src/modules/wiki/wikiReadingNote.ts");
 
@@ -16,6 +19,75 @@ const tests = [];
 function test(name, fn) {
   tests.push([name, fn]);
 }
+
+test("a concluded note stays closed, so a later episode needs its own file", () => {
+  // The invariant: 全文总结 synthesises every record above it, so no record
+  // may follow. That is right, and it is also why a paper read through once
+  // could never record question-driven reading again - measured across three
+  // real runs on four papers, not one such read was ever recorded. The fix is
+  // a second note, NOT a relaxation of this rule, so the rule must still hold.
+  const first = appendReadingRecord("", {
+    chunkIds: [3],
+    content: "- The traverse begins at station 3 (chunk 3).",
+  });
+  const concluded = appendMacroSummary(first, "The paper reports a traverse.");
+  assert.throws(
+    () =>
+      appendReadingRecord(concluded, {
+        chunkIds: [4],
+        content: "- A later question reaches station 4 (chunk 4).",
+      }),
+    /already has a macro summary/u,
+    "appending after the summary would make it describe records it never saw",
+  );
+  // And the second note is an ordinary note: same format, numbered from one.
+  const second = appendReadingRecord("", {
+    chunkIds: [4],
+    content: "- A later question reaches station 4 (chunk 4).",
+  });
+  const parsed = parseAppendOnlyReadingNote(second);
+  assert.equal(parsed.records.length, 1);
+  assert.equal(parsed.records[0].number, 1, "a new episode counts from one");
+  assert.deepEqual(parsed.records[0].chunkIds, [4]);
+  assert.equal(parsed.macroSummary, null);
+});
+
+test("episode one keeps the original name; later ones are numbered", () => {
+  // Episode 1 must not be renamed, or every note already on disk would have
+  // to be migrated to keep being found.
+  assert.equal(
+    readingNoteAttachmentTitle("ABCD1234"),
+    "Wiki Reading Note (ABCD1234).md",
+  );
+  assert.equal(
+    readingNoteAttachmentTitle("ABCD1234", 1),
+    "Wiki Reading Note (ABCD1234).md",
+  );
+  assert.equal(
+    readingNoteAttachmentTitle("ABCD1234", 2),
+    "Wiki Reading Note (ABCD1234) #2.md",
+  );
+  assert.notEqual(
+    readingNoteFileName("ABCD1234", 2),
+    readingNoteFileName("ABCD1234", 1),
+    "two episodes cannot share a staging filename",
+  );
+
+  const titled = (title) => ({ getField: () => title });
+  assert.equal(readingNoteEpisode(titled("Wiki Reading Note (ABCD1234).md")), 1);
+  assert.equal(
+    readingNoteEpisode(titled("Wiki Reading Note (ABCD1234) #2.md")),
+    2,
+  );
+  assert.equal(
+    readingNoteEpisode(titled("Wiki Reading Note (ABCD1234) #11.md")),
+    11,
+  );
+  // Anything unparseable is episode 1, never a crash and never a higher
+  // number that would push a real note out of last place.
+  assert.equal(readingNoteEpisode({}), 1);
+  assert.equal(readingNoteEpisode(titled("")), 1);
+});
 
 test("reading records are server-numbered and append-only", () => {
   const first = appendReadingRecord("", {
