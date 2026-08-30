@@ -1936,7 +1936,13 @@ export class WikiService {
     // once the Claim exists. Failures here are logged rather than thrown - the
     // Wiki write is permanent, and turning a successful commit into an error
     // because an audit row could not be added would be the wrong trade.
-    const linkSettlement = await this.settleLinkSignals(input, actions);
+    const linkSettlement = await this.settleLinkSignals(input, actions, result);
+
+    // Terminology, written where the question-driven path can actually reach it.
+    const conceptWriteUp = await this.writeQuestionReadingConcepts(
+      input.libraryID,
+      citedKeys,
+    );
 
     const questionReading = await this.settleQuestionReading(
       input.libraryID,
@@ -1968,7 +1974,116 @@ export class WikiService {
       ...(readingSession ? { readingSession } : {}),
       ...(questionReading ? { questionReading } : {}),
       ...(linkSettlement ? { linkSettlement } : {}),
+      ...(conceptWriteUp ? { conceptWriteUp } : {}),
     };
+  }
+
+  /**
+   * Write the terminology a question-driven reading staged.
+   *
+   * Staging exists so a full-text read can note candidate terms page by page
+   * and write them ONCE, at the whole-paper pass, for one confirmation instead
+   * of one per batch. That reasoning does not transfer to question-driven
+   * reading, and the difference had teeth: a `qa` session never reaches a
+   * whole-paper pass, its `final: true` is refused by design because coverage
+   * is incomplete, and the session is never closed. So every concept a
+   * question read recognised was staged into a session that would hold it
+   * forever. On a fresh library the concept library could not bootstrap AT
+   * ALL - measured: four cross-paper Claims written, zero concepts, and the
+   * terms were sitting in the Claim text.
+   *
+   * The commit is the question-driven equivalent of the whole-paper pass: it
+   * is the moment this turn's reading becomes knowledge, and the moment the
+   * user is already approving a write. So the concepts land here, inside that
+   * approval, rather than costing a second prompt of their own.
+   *
+   * Best-effort by construction. The Wiki write is already durable when this
+   * runs; terminology that cannot be written is reported and stays staged for
+   * the next commit rather than turning a successful commit into an error.
+   */
+  private async writeQuestionReadingConcepts(
+    libraryID: number,
+    citedKeys: ReadonlySet<string>,
+  ): Promise<
+    | {
+        papers: Array<{ itemKey: string; concepts: number; sources: number }>;
+        warnings: string[];
+      }
+    | undefined
+  > {
+    if (!citedKeys.size) return undefined;
+    const sessions = await this.store.readingSessions();
+    const papers: Array<{
+      itemKey: string;
+      concepts: number;
+      sources: number;
+    }> = [];
+    const warnings: string[] = [];
+
+    for (const itemKey of citedKeys) {
+      try {
+        const open = await sessions.openForItem(libraryID, itemKey);
+        // Only the question-driven path. A full-text read keeps its own
+        // terminology pass, which is a review of the whole paper and a
+        // stronger thing than this.
+        if (!open || open.mode !== "qa") continue;
+        const staged = (await sessions.readStagedConcepts(
+          open.sessionId,
+        )) as Array<WikiConceptEntityInput & { itemKey?: string }>;
+        if (!staged.length) continue;
+
+        const preparation = await this.prepareConceptEntities(
+          libraryID,
+          staged,
+          itemKey,
+        );
+        if (preparation.sourceValidationFailures.length) {
+          warnings.push(
+            `Staged terminology for ${itemKey} was not written: ${preparation.sourceValidationFailures.join(" ")}`,
+          );
+          continue;
+        }
+        const prepared = preparation.prepared.filter((entity) => {
+          const sources = [
+            ...(entity.sources ?? []),
+            ...(entity.primaryTerm?.sources ?? []),
+            ...(entity.terms ?? []).flatMap((term) => term.sources ?? []),
+          ];
+          return sources.length > 0;
+        });
+        if (!prepared.length) continue;
+
+        const library = await this.store.concepts();
+        const result = await library.record({ libraryID, entities: prepared });
+        // Cleared only after the write landed, and only if nothing was staged
+        // in between - otherwise the next commit picks up the fuller list.
+        const cleared = await sessions.clearStagedConcepts(
+          open.sessionId,
+          staged,
+        );
+        if (!cleared) {
+          warnings.push(
+            `Terminology for ${itemKey} was written, but more was staged while it was being written; the rest follows on the next commit.`,
+          );
+        }
+        papers.push({
+          itemKey,
+          concepts:
+            (result.createdConcepts ?? 0) + (result.updatedConcepts ?? 0),
+          sources: result.addedSources ?? 0,
+        });
+        warnings.push(...(result.warnings ?? []));
+      } catch (error) {
+        ztoolkit.log("[wiki] could not write question-driven concepts", error);
+        warnings.push(
+          `Terminology for ${itemKey} could not be written: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+    if (!papers.length && !warnings.length) return undefined;
+    return { papers, warnings };
   }
 
   /**
@@ -2070,6 +2185,7 @@ export class WikiService {
   private async settleLinkSignals(
     input: WikiCommitInput,
     actions: WikiCommitAction[],
+    result: WikiCommitResult,
   ): Promise<
     | { settledSignals: number; resolutions: number; dismissed: number }
     | undefined
@@ -2078,8 +2194,38 @@ export class WikiService {
       signalIds: number[];
       resolutionType: WikiLinkResolutionType;
       claimId?: number | null;
+      pageId?: number | null;
       note: string;
     }> = [];
+    /*
+     * Which row did this action actually create or touch?
+     *
+     * Three shapes reach here and only one of them carries a plain number.
+     * ATTACH_EVIDENCE and MARK_CONFLICT name an existing `claimId`, but it may
+     * be a REF string from earlier in the same commit rather than an id.
+     * ADD_CLAIM and CREATE_PAGE carry no id at all - the store assigns one and
+     * returns it through `refs`, keyed by the action's own `ref`.
+     *
+     * Reading `action.claimId` alone, which is what shipped, produced NaN for
+     * every ADD_CLAIM and wrote a resolution saying "settled by a shared Claim"
+     * that could not say which Claim. The audit trail is half the reason these
+     * tables exist, so a settlement that cannot be followed back is not much
+     * better than none.
+     */
+    const settledId = (
+      raw: unknown,
+      ref: unknown,
+    ): number | null => {
+      const direct = Number(raw);
+      if (Number.isInteger(direct) && direct > 0) return direct;
+      for (const key of [raw, ref]) {
+        if (typeof key !== "string" || !key) continue;
+        const resolved = result.refs[key];
+        if (Number.isInteger(resolved) && resolved > 0) return resolved;
+      }
+      return null;
+    };
+
     for (const action of actions) {
       if (action.action === "DISMISS_LINK_SIGNALS") {
         settlements.push({
@@ -2095,8 +2241,8 @@ export class WikiService {
         (id: unknown) => Number(id),
       );
       if (!signalIds.length) continue;
-      const rawClaimId = Number((action as any).claimId);
-      const claimId = Number.isFinite(rawClaimId) ? rawClaimId : null;
+      const claimId = settledId((action as any).claimId, (action as any).ref);
+      const pageId = settledId((action as any).pageId, (action as any).ref);
       switch (action.action) {
         case "ADD_CLAIM":
         case "ATTACH_EVIDENCE":
@@ -2127,6 +2273,7 @@ export class WikiService {
           settlements.push({
             signalIds,
             resolutionType: "same_page",
+            pageId,
             note: "Settled by placing both papers under one knowledge entry.",
           });
           break;
@@ -2152,6 +2299,7 @@ export class WikiService {
           signalIds: settlement.signalIds,
           resolutionType: settlement.resolutionType,
           claimId: settlement.claimId,
+          pageId: settlement.pageId,
           note: settlement.note,
         });
         settledSignals += outcome.settled;
@@ -4064,8 +4212,13 @@ export class WikiService {
             ? `${attachmentResult.added} source(s) were recorded immediately against ${attachmentResult.attachedConcepts.length} existing concept(s) — those are not staged, because a question-driven read never reaches the whole-paper pass. `
             : "") +
           (stagedEntities.length
-            ? "The rest is held for the whole-paper pass. Call wiki_record_concepts with final true " +
-              "after the paper has been read to write these, plus anything else you found, in one go."
+            ? open.mode === "qa"
+              ? "The rest is staged for this reading and is written by the next wiki_commit that " +
+                "cites this paper: a question-driven read has no whole-paper pass, so the commit " +
+                "is where its terminology lands. You do not need to call this again with final."
+              : "The rest is held for the whole-paper pass. Call wiki_record_concepts with final " +
+                "true after the paper has been read to write these, plus anything else you found, " +
+                "in one go."
             : "Nothing new was staged by this call."),
       };
     }

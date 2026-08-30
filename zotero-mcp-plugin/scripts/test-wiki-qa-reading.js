@@ -2382,6 +2382,122 @@ block("the three whole-paper passes are checked where committed is written", asy
 
 // --- Runner ---------------------------------------------------------------
 
+// =========================================================================
+// N. Terminology reaches the concept library from question-driven reading
+// =========================================================================
+
+block("a question-driven read establishes concepts without a whole-paper pass", async () => {
+  // The failure this pins down was measured on a real library: four
+  // cross-paper Claims written, ZERO concepts, and the terms were sitting in
+  // the Claim text. Staging exists so a FULL-TEXT read can note candidates
+  // page by page and write them once at the whole-paper pass. A `qa` session
+  // never reaches one - `final: true` is refused because coverage is
+  // incomplete, and the session is never closed - so everything a question
+  // read recognised was staged into a session that would hold it forever. On
+  // a fresh library the concept library could not bootstrap at all.
+  const before = await store.getStatus(1);
+
+  await readByQuestion(
+    "PAPERONE",
+    [11, 12],
+    [
+      "The traverse shows a clear melt-pool response at station 11 (chunk 11).",
+      "The response is confirmed at station 12 (chunk 12).",
+    ],
+  );
+
+  // Staged, exactly as the tool catalogue instructs for question-driven
+  // reading: one call per paper, carrying that paper's itemKey, no final flag.
+  const staged = await service.recordConcepts({
+    libraryID: 1,
+    itemKey: "PAPERONE",
+    concepts: [
+      {
+        primaryTerm: { zh: "熔池深度", en: "melt pool depth", abbr: "MPD" },
+        sources: [{ itemKey: "PAPERONE", chunkIdSnapshot: chunkId("PAPERONE", 11) }],
+      },
+    ],
+  });
+  assert.equal(staged.written, false, "still staged at this point");
+  assert.equal(
+    (await store.getStatus(1)).concepts,
+    before.concepts,
+    "and nothing has reached the concept tables yet",
+  );
+
+  // The commit is the question-driven equivalent of the whole-paper pass: the
+  // moment this turn's reading becomes knowledge, and the moment the user is
+  // already approving a write.
+  const committed = await writeUp({
+    title: "Melt-pool depth along the traverse",
+    claimText: "Melt-pool depth responds measurably along the early traverse.",
+    evidence: [evidenceFrom("PAPERONE", 11)],
+  });
+
+  const after = await store.getStatus(1);
+  assert.equal(
+    after.concepts,
+    before.concepts + 1,
+    "the staged term is written by the commit, with no second confirmation and no final pass",
+  );
+  assert.ok(
+    committed.result.conceptWriteUp?.papers?.some(
+      (row) => row.itemKey === "PAPERONE",
+    ),
+    "and the commit reports what it wrote",
+  );
+
+  // Staging is emptied, so the next commit does not write it a second time.
+  const again = await writeUp({
+    title: "Melt-pool depth, second look",
+    claimText: "The flattening of melt-pool depth persists later in the traverse.",
+    evidence: [evidenceFrom("PAPERONE", 12)],
+  });
+  assert.equal(
+    (await store.getStatus(1)).concepts,
+    before.concepts + 1,
+    "written once, not once per commit",
+  );
+  assert.equal(again.result.conceptWriteUp, undefined);
+});
+
+block("a question-driven concept pass does not discharge the full-text gate", async () => {
+  // `concepts_recorded_at` is the gate a FULL-TEXT read must pass before it may
+  // be called finished. Stamping it from a question-driven commit would
+  // discharge that gate for a paper nobody has read through - and a `qa`
+  // session can later be promoted to `fulltext`, so the wrong stamp would
+  // survive into exactly the read it exists to gate.
+  await readByQuestion("PAPERTWO", [3], [
+    "A single station on the second paper's traverse is read (chunk 3).",
+  ]);
+  await service.recordConcepts({
+    libraryID: 1,
+    itemKey: "PAPERTWO",
+    concepts: [
+      {
+        primaryTerm: { zh: "凝固前沿", en: "solidification front" },
+        sources: [{ itemKey: "PAPERTWO", chunkIdSnapshot: chunkId("PAPERTWO", 3) }],
+      },
+    ],
+  });
+  await writeUp({
+    title: "Solidification front position",
+    claimText: "The solidification front advances measurably along the traverse.",
+    evidence: [evidenceFrom("PAPERTWO", 3)],
+  });
+
+  const sessions = await store.readingSessions();
+  const session = await sessions.openForItem(1, "PAPERTWO");
+  assert.ok(session, "the question-driven session is still open");
+  assert.equal(session.mode, "qa");
+  assert.equal(
+    session.conceptsRecordedAt,
+    null,
+    "the whole-paper terminology pass is still owed if this paper is ever read in full",
+  );
+});
+
+
 let passed = 0;
 const failures = [];
 for (const [name, fn] of tests) {

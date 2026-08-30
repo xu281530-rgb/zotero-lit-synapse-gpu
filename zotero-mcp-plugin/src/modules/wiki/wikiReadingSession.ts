@@ -1073,6 +1073,38 @@ export class WikiReadingSessions {
     return session?.stagedConcepts ?? [];
   }
 
+  /**
+   * Consume staged concepts WITHOUT recording a whole-paper terminology pass.
+   *
+   * The question-driven equivalent of the final pass, and deliberately not the
+   * same call. `completeConceptSubmission` also stamps `concepts_recorded_at`,
+   * which is the gate a FULL-TEXT read must pass before it may be called
+   * finished. A question-driven session that stamped it would discharge that
+   * gate for a paper nobody has read through - and a `qa` session can later be
+   * promoted to `fulltext`, so the wrong stamp would survive into exactly the
+   * read it was meant to gate.
+   *
+   * Same optimistic check as the final pass: if anything was staged between
+   * the read and this write, nothing is cleared and the caller retries with
+   * the fuller list rather than silently dropping it.
+   */
+  async clearStagedConcepts(
+    sessionId: number,
+    expected: unknown[],
+  ): Promise<boolean> {
+    const now = Date.now();
+    const expectedStaged = expected.length ? JSON.stringify(expected) : "";
+    await this.db.queryAsync(
+      `UPDATE wiki_reading_sessions
+       SET staged_concepts = '', updated_at = ?
+       WHERE session_id = ? AND COALESCE(staged_concepts, '') = ?`,
+      [now, sessionId, expectedStaged],
+    );
+    return (
+      Number((await this.db.valueQueryAsync("SELECT changes()")) ?? 0) === 1
+    );
+  }
+
   /** Consume staged concepts and record the final pass in one database write. */
   async completeConceptSubmission(
     sessionId: number,

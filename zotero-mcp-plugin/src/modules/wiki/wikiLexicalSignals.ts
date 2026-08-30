@@ -29,7 +29,12 @@ import { normalize, tokenizeForIndex } from "../keyword/scientificTokenizer";
 import { lexicalIdf } from "./wikiLinkScoring";
 
 /** 词法信号的算法版本。切词、停用规则或打分改动都必须改这里。 */
-export const LEXICAL_ALGORITHM_VERSION = "link-lex-v2";
+export const LEXICAL_ALGORITHM_VERSION = "link-lex-v3";
+// v3: v2 stopped the boilerplate but left the tokeniser's own artefacts -
+// sliding Han bigrams (高为, 除裂, 金状), unit fragments (c/min, cmin) and bare
+// labels (d1, 300, phi) - all genuinely rare and all useless as an edge label.
+// v3 adds isUsableLexicalTerm, which is a LABEL-quality gate, not a rarity one.
+//
 // v2: v1 scored every term the keyword index had never seen as maximally rare,
 // because `documentFrequencies` returned 0 for a miss instead of omitting it.
 // The terms it had never seen were the ones the keyword indexer strips -
@@ -53,6 +58,82 @@ export interface LexicalTermHit {
   aExcerpt: string;
   bChunkId: number;
   bExcerpt: string;
+}
+
+/**
+ * 这个词能不能当边上的标签？
+ *
+ * 这是**标签质量**过滤，不是稀有度过滤——两者是不同的问题，而且一个词完全可能既
+ * 真的稀有、又完全不能当标签。实测跑出来的最高分词法信号是：
+ *
+ *     tial  c/min  cmin  d1  phi  300  β
+ *     高效  高弹  高化  高为  除裂  金状
+ *
+ * 每一个的 df 都很小，所以稀有度是对的；但「两篇文献共享『高为』」不构成任何信息，
+ * 读者对它做不了任何事。词法通道存在的理由就是它天生带一个可读的标签；标签不可读，
+ * 这条信号的全部价值就没了。
+ *
+ * ## 为什么整类丢掉汉字
+ *
+ * tokenizer 对中文没有分词器，它在每个偏移上滑一个两字窗口：
+ *
+ *     柱状晶高温合金 → 柱状 | 状晶 | 晶高 | 高温 | 温合 | 合金
+ *
+ * 真词（柱状、高温、合金）和跨词边界的切片（状晶、晶高、温合）混在一起，且**无法
+ * 区分**。这对检索是对的——查「高温」能命中——但当标签就是掷骰子。所以汉字二元组
+ * 整类不进词法信号。
+ *
+ * 这不损失中文术语：中文术语通过**概念通道**进入图谱，那里存的是术语库里真正的
+ * 中文全称，由人确认过，而不是滑窗切出来的。两条通道各自做自己擅长的事。
+ *
+ * ## 拉丁词的门槛
+ *
+ * 至少 3 个字母，**或者** 2 个字母配 3 位以上数字。后半条是为合金牌号留的：
+ * `gh4169`、`fgh4096`、`ti6al4v` 是这个库里最好的词法信号之一，只按字母数卡会把
+ * `gh4169` 一起丢掉，而 `d1`（1 字母 1 数字）、`x2` 仍然挡得住。
+ *
+ * 计量单位与希腊字母名单列：它们字母数够，但共享一个单位只说明两篇论文用同一套
+ * 量纲，共享一个 `phi`/`beta` 只说明两篇论文都用希腊字母做变量名——都不是发现。
+ */
+const MEASUREMENT_UNITS = new Set([
+  "min", "sec", "hrs", "hour", "hours", "mpa", "gpa", "kpa", "kgf",
+  "mol", "wt", "vol", "rpm", "kev", "mev", "khz", "mhz",
+  "mmin", "cmin", "kmin", "ksec", "msec", "umin",
+  "mms", "nms", "ums", "kjmol", "jmol", "wmk",
+]);
+
+/** 希腊字母的拉丁拼写。它们是符号名，不是术语。 */
+const GREEK_SYMBOL_NAMES = new Set([
+  "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+  "iota", "kappa", "lambda", "mu", "nu", "xi", "omicron", "pi", "rho",
+  "sigma", "tau", "upsilon", "phi", "chi", "psi", "omega",
+]);
+
+/** 单位/速率的形状：字母（可带斜杠或短横）后面跟单位，如 c/min、k/s、mm/s。 */
+const UNIT_SHAPED = /^[a-z]{1,3}[/·-][a-z]{1,4}[0-9]*$/u;
+
+export function isUsableLexicalTerm(term: string): boolean {
+  const value = String(term ?? "").trim();
+  if (!value) return false;
+
+  const letters = (value.match(/\p{L}/gu) ?? []).length;
+  if (letters === 0) return false; // 300, 1100, 数字与符号
+
+  const han = (value.match(/\p{Script=Han}/gu) ?? []).length;
+  if (han > 0) {
+    // 滑窗二元组，无法与真词区分。见上。
+    return false;
+  }
+
+  const latin = value.replace(/[^\p{L}]/gu, "");
+  const digits = (value.match(/[0-9]/gu) ?? []).length;
+  // 3 个字母，或 2 个字母配一串数字（合金牌号）。挡住 d1、x2、β。
+  if (latin.length < 3 && !(latin.length >= 2 && digits >= 3)) return false;
+  const lower = latin.toLowerCase();
+  if (MEASUREMENT_UNITS.has(lower)) return false;
+  if (GREEK_SYMBOL_NAMES.has(lower)) return false;
+  if (UNIT_SHAPED.test(value.toLowerCase())) return false; // c/min, k/s
+  return true;
 }
 
 /** 摘录：包含该词的一句话，而不是整段。 */
@@ -132,6 +213,8 @@ export function sharedRareTerms(
   for (const [term, aChunk] of aIndex) {
     const bChunk = bIndex.get(term);
     if (!bChunk) continue;
+    // 标签质量先于稀有度：一个不能当标签的词，再稀有也没有价值。
+    if (!isUsableLexicalTerm(term)) continue;
     const known = documentFrequencies.get(term);
     // Absent = the keyword index has no posting for this term = rarity UNKNOWN.
     // Not rare. This guard was dead for one release because
