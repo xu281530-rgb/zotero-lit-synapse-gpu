@@ -23,6 +23,7 @@ import {
   hasEffectiveAnnotationSearchFilter,
   SmartAnnotationExtractor,
 } from './smartAnnotationExtractor';
+import { buildReadingLedgerHint } from './readingLedgerHint';
 import {
   filterToolCatalog,
   projectDoctrineResources,
@@ -3869,26 +3870,8 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
   private attachReadingLedgerHint(result: any, itemKey: string): any {
     if (!result || typeof result !== 'object') return result;
     if (!getWikiSettings().enabled) return result;
-    const chunkIds = Array.isArray(result.chunks)
-      ? result.chunks
-          .map((chunk: any) => chunk?.chunkId)
-          .filter((id: any) => Number.isInteger(id))
-      : [];
-    if (!chunkIds.length) return result;
-    return {
-      ...result,
-      readingLedger: {
-        itemKey,
-        deliveredChunkIds: chunkIds,
-        recorded: false,
-        nextStep:
-          `Answer the user first. Then, if you USED any of these passages, call ` +
-          `wiki_update_reading_note with itemKey "${itemKey}", readChunkIds set to just the ` +
-          `ones you used, the domain and expertRole you searched with, and one readingRecord ` +
-          `of what this turn established. Retrieval is not reading: a passage you skimmed ` +
-          `past does not go in. If you used none of them, record nothing.`,
-      },
-    };
+    const readingLedger = buildReadingLedgerHint(result, itemKey);
+    return readingLedger ? { ...result, readingLedger } : result;
   }
 
   private async callSearchFulltext(args: any): Promise<any> {

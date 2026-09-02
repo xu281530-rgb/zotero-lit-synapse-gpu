@@ -138,7 +138,8 @@
     "test:batch-preflight-errors": "node scripts/test-batch-preflight-errors.js",
     "test:write-note-empty-content": "node scripts/test-write-note-empty-content.js",
     "test:write-metadata-validation": "node scripts/test-write-metadata-validation.js",
-    "update-deps": "npm update --save"
+    "update-deps": "npm update --save",
+    "test:reading-ledger-hint": "node --experimental-strip-types scripts/test-reading-ledger-hint.js"
   },
   "dependencies": {
     "zotero-plugin-toolkit": "^5.2.0"
