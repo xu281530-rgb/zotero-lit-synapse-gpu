@@ -352,6 +352,92 @@ test("the /capabilities projection cannot drift from the catalog", () => {
   assert.equal(attachment.parameters.itemKey.required, true);
 });
 
+/**
+ * The record template is enforced for `session.mode === "fulltext"` only —
+ * see the two mode guards in `WikiService.updateReadingNote`. The description
+ * used to say "FIXED AND ENFORCED" without saying where, so a model paid for
+ * six headings on a three-passage question read and the server checked none of
+ * them. These pin the two halves together: the catalog must say which shape
+ * belongs to which mode, and must not tell a question read to emit headings.
+ */
+test("the reading-note templates are advertised as the full-text shape", () => {
+  const tools = buildToolCatalog();
+  const note = tools.find((t) => t.name === "wiki_update_reading_note");
+
+  // The per-turn record template.
+  assert.match(
+    note.description,
+    /THE RECORD TEMPLATE IS THE FULL-TEXT SHAPE, AND IT IS ENFORCED ONLY THERE/,
+    "the record template must be advertised as full-text only",
+  );
+  assert.match(
+    note.description,
+    /A QUESTION-DRIVEN RECORD IS NOT HELD TO THOSE SIX SECTIONS/,
+    "the question-driven exemption must be stated, not left to be discovered",
+  );
+  // The six labels are still named, so a full-text read still knows the shape.
+  for (const label of [
+    "阅读总结",
+    "方法",
+    "结果与结论",
+    "概念与术语",
+    "本批覆盖",
+    "存疑与未交代",
+  ]) {
+    assert.ok(
+      note.description.includes(label),
+      `the full-text record template must still name ${label}`,
+    );
+  }
+  // ...and the count claimed matches the count listed. It said "Five".
+  assert.ok(
+    !/Five sections, each a line of its own/.test(note.description),
+    "the record template lists six sections and must not claim five",
+  );
+
+  // The whole-paper summary template, under the same guard.
+  assert.match(
+    note.description,
+    /THE MACRO SUMMARY TEMPLATE IS THE FULL-TEXT SHAPE AND IS ENFORCED ONLY THERE/,
+    "the macro summary template must be advertised as full-text only",
+  );
+
+  // The four checks that DO apply in both modes must stay advertised, because
+  // they are the quality floor the exemption is safe to sit on.
+  for (const promise of [/readChunkIds/, /80%/, /citation/i, /audit/i]) {
+    assert.match(
+      note.description,
+      promise,
+      `the mode-independent guarantee ${promise} must stay advertised`,
+    );
+  }
+});
+
+test("wiki_commit says a question is charged only for what it declared", () => {
+  const commit = buildToolCatalog().find((t) => t.name === "wiki_commit");
+  // `recordDelivery` books every delivered chunk with owes_wiki = 1;
+  // `recordReadChunkIds` books only the ids the caller declared. The
+  // description used to flatten the two into "a full-text page exactly as
+  // much as a passage a question retrieved", which invited a SKIP action for
+  // passages that were never on the ledger.
+  assert.ok(
+    !/a full-text page exactly as much as a passage a question retrieved/.test(
+      commit.description,
+    ),
+    "wiki_commit must not claim a retrieved passage owes what a delivered one does",
+  );
+  assert.match(
+    commit.description,
+    /charges every chunk it DELIVERED/,
+    "the full-text charging rule must be stated",
+  );
+  assert.match(
+    commit.description,
+    /charges only the chunks you DECLARED in readChunkIds/,
+    "the question charging rule must be stated",
+  );
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
   try {

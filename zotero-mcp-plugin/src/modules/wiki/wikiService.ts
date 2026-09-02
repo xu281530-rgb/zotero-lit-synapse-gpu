@@ -3379,13 +3379,19 @@ export class WikiService {
           totalChunks: coverage.totalChunks,
         });
         assertBlockCitations(record);
-        // The five-section template belongs to a full-text pass, where one
+        // The six-section template belongs to a full-text pass, where one
         // record answers for a whole page and the slots are what stop the
         // data sections being eaten by the summarising one. A question-driven
         // turn reads two or three passages for a specific purpose; holding it
-        // to seven headings would be ceremony, and the two rules that matter
-        // everywhere - account for what you read, keep the numbers - apply to
-        // it just the same.
+        // to six headings would be ceremony, and the rules that matter
+        // everywhere - account for what you read, keep the numbers, cite every
+        // sentence - apply to it just the same.
+        //
+        // This guard has been here since the mode split, but the tool
+        // description told every caller the template was "FIXED AND ENFORCED"
+        // without saying where. Models therefore paid for six headings on a
+        // three-passage read and got nothing back for them; toolCatalog now
+        // says which shape belongs to which mode.
         if (session.mode === "fulltext") {
           assertTemplateSections(record, WIKI_RECORD_SECTIONS, "阅读记录");
           // Only the narrative slots. 概念与术语 is a glossary and 本批覆盖 is
@@ -3468,7 +3474,15 @@ export class WikiService {
             "phenomenon measured under different conditions. That relating is the job. Re-reading any " +
             "chunk while you write is free.\n" +
             "正文用中文，提炼核心论述、核心方法和核心结论。" +
-            renderTemplateGuide(WIKI_MACRO_SECTIONS) +
+            // The seven headings are asserted for a full-text pass only (see
+            // the mode guard on assertTemplateSections above), so shipping the
+            // guide to a question-driven session asked it to write six
+            // headings nothing would ever check - and every one of those
+            // headings is output the caller pays for.
+            (session.mode === "fulltext"
+              ? renderTemplateGuide(WIKI_MACRO_SECTIONS)
+              : "问答阅读的全文总结不套固定小节：写成连贯的中文段落即可，" +
+                "每句引用它依据的 chunk。检查的是引用能否落到读过的 chunk 上，不是小节齐不齐。") +
             "\n" +
             "Do NOT paste the records end to end - more than 60% verbatim is refused. It adds nothing, " +
             "since those records sit directly above it in the same file. Do not reproduce full parameter " +
