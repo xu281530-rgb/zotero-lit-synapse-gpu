@@ -25,6 +25,9 @@ import {
 } from './smartAnnotationExtractor';
 import {
   filterToolCatalog,
+  projectDoctrineResources,
+  projectToolsForList,
+  renderToolDoctrine,
   REMOVED_TOOL_REPLACEMENTS,
   WIKI_TOOL_NAMES,
   type ToolDefinition,
@@ -921,6 +924,9 @@ export class StreamableMCPServer {
         case 'resources/list':
           return this.handleResourcesList(request);
 
+        case 'resources/read':
+          return this.handleResourcesRead(request);
+
         case 'prompts/list':
           return this.handlePromptsList(request);
 
@@ -1044,9 +1050,34 @@ Nothing in this server returns a whole document in one response. Every reading t
     });
   }
 
+  /**
+   * One resource per tool that has a method worth reading.
+   *
+   * Gated by the same preferences tools/list is gated by, so a method is never
+   * listed for a tool this build will refuse to run.
+   */
   private handleResourcesList(request: MCPRequest): MCPResponse {
-    // Return empty resources list - we don't currently support resources
-    return this.createResponse(request.id ?? null, { resources: [] });
+    return this.createResponse(request.id ?? null, {
+      resources: projectDoctrineResources(this.getAvailableTools()),
+    });
+  }
+
+  private handleResourcesRead(request: MCPRequest): MCPResponse {
+    const uri = String(request.params?.uri ?? '');
+    const text = renderToolDoctrine(this.getAvailableTools(), uri);
+    if (text === null) {
+      // -32002 is the MCP "resource not found" code. Naming the listing is
+      // more useful than the URI that failed: a stale URI and a tool disabled
+      // by preferences look identical from here.
+      return this.createError(
+        request.id ?? null,
+        -32002,
+        `No such resource: ${uri || '(none given)'}. Call resources/list for the methods this build serves.`,
+      );
+    }
+    return this.createResponse(request.id ?? null, {
+      contents: [{ uri, mimeType: 'text/markdown', text }],
+    });
   }
 
   private handlePromptsList(request: MCPRequest): MCPResponse {
@@ -1073,8 +1104,12 @@ Nothing in this server returns a whole document in one response. Every reading t
   }
 
   private handleToolsList(request: MCPRequest): MCPResponse {
+    // The contract only. Each tool's METHOD - the query-construction
+    // procedure, the worked examples, the reading-note rules - is served from
+    // zotero://tool/<name> instead, because tools/list is re-sent on every
+    // turn and a procedure only has to be read once.
     return this.createResponse(request.id ?? null, {
-      tools: this.getAvailableTools(),
+      tools: projectToolsForList(this.getAvailableTools()),
     });
   }
 

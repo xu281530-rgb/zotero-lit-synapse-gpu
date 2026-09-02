@@ -37,7 +37,30 @@ export interface ToolDefinition {
   name: string;
   /** Grouping shown by /capabilities. Not part of the MCP tool contract. */
   category: ToolCategory;
+  /**
+   * The operational contract: what this tool does, when to reach for it, and
+   * what comes back. Short on purpose — every byte here is re-sent on EVERY
+   * turn of every conversation, for all 48 tools, whether or not the tool is
+   * ever called.
+   */
   description: string;
+  /**
+   * The method this tool expects its caller to follow, when that method is
+   * long enough to be worth paying for separately.
+   *
+   * These descriptions used to carry both halves. That put ~42k tokens of
+   * procedure into every request — the retrieval discipline, the worked
+   * examples, the reading-note rules — most of it teaching, and teaching only
+   * has to be read once. `tools/list` now serves `description` alone and this
+   * half is fetched on demand from `zotero://tool/<name>`, so a session pays
+   * for the procedure of the tools it actually uses.
+   *
+   * NOTHING IS REWRITTEN WHEN A PARAGRAPH MOVES HERE. `assertNoDoctrineLost`
+   * in the catalog tests pins that: the two halves together must still contain
+   * every line the single description had, because a "summary" of a rule the
+   * server enforces is a different rule.
+   */
+  doctrine?: string;
   inputSchema: Record<string, any>;
 }
 
@@ -111,46 +134,39 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'The keyword branch reads the metadata of the whole library (title, abstract, creators, publication title, tags, extra) AND the body text of every document in the plugin\'s keyword index. The semantic branch reads the indexed passages. Neither branch scans Zotero\'s full-text cache or opens a PDF on the fly, so body coverage on both sides is exactly what has been indexed — metadata.bodyKeywords reports the keyword index\'s share, and each row\'s fullText field reports the semantic index\'s.',
       '',
-      'The library is bilingual, so every call must retrieve Chinese AND English literature, no matter which language the user asked in. Do NOT translate the question into a single language and do NOT restrict the search to the language of the question. You (the calling AI) are responsible for the query rewrite: this tool never calls an LLM of its own.',
-      '',
-      'BEFORE writing any argument, run this analysis on the user question — it is the difference between a good and a useless search, and no part of it happens server-side:',
-      'A. Classify the question: which discipline, and which specific sub-field or research direction inside it?',
-      'B. Adopt that expert role for the rest of this call — reason as a specialist in that sub-field would, using the vocabulary of its literature.',
-      'C. Determine the real research intent: which mechanism, property, process, material system or quantitative relationship is actually being asked about, including what the user implied but did not say.',
-      'D. Only then derive query and keywords FROM that domain analysis, not from the surface wording of the question.',
-      '',
-      'Build the arguments like this:',
-      '1. query — one complete natural-language sentence expressing the real information need as an expert in that field would state it, used verbatim as the embedding input for cross-lingual semantic search. Do not reduce it to loose tokens. Writing it as an English phrasing followed by " / " and the Chinese phrasing is recommended, so the embedding sees both surface forms.',
-      `2. keywords — the terms a specialist in that sub-field would actually search on, covering BOTH Chinese and English: the core concepts, the mechanism and governing variables behind the question, standard technical translations, accepted synonyms and variant phrasings, the field's abbreviations, and closely coupled concepts with a clear professional link to the intent. For best results, providing about 5-12 relevant Chinese and/or English keywords is recommended; this is guidance, not a constraint — any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted. All of them are matched in a single pass over the candidate records (title, abstract, creator, publication title, tags), then scored by term specificity, field weight and how many distinct keywords each record matched, so short exact terms work far better than long sentences.`,
-      '3. Do NOT pad the list. Every keyword must be defensible as a term of art tied to the research intent; generic, weakly related or category-level words dilute keyword-coverage scoring and push the right papers down the ranking.',
-      '',
-      'Worked example — user asks "温度梯度如何影响定向凝固中的柱状晶转变？":',
-      '  A/B/C: materials science → solidification / microstructure formation; reasoning as a solidification specialist, the real intent is how the thermal gradient G, together with the growth rate R, governs the columnar-to-equiaxed transition — i.e. G-R processing maps and nucleation ahead of the growth front.',
-      '  query: "Effects of temperature gradient on columnar-to-equiaxed transition during directional solidification / 温度梯度对定向凝固柱状晶-等轴晶转变的影响"',
-      '  keywords: ["温度梯度", "定向凝固", "柱状晶", "等轴晶", "柱状晶-等轴晶转变", "凝固速率", "temperature gradient", "directional solidification", "columnar grain", "equiaxed grain", "columnar-to-equiaxed transition", "CET", "growth rate"]',
-      '  Note what came from domain knowledge rather than from the question: the CET abbreviation, growth rate / 凝固速率 as the co-governing variable, and the columnar/equiaxed grain pair. Note also what was left out: "材料", "实验", "influence factors" — true of the question but too generic to discriminate between papers.',
-      '',
       'If you do not pass keywords - or pass an array that is empty after blank entries are trimmed - the server falls back to mechanically tokenizing the query, returns keywordSource "fallback", a keywordFallbackReason naming which of the two happened, and a warning stating the keywords were NOT produced by domain-expert analysis. That path exists only so the call still runs, and it does return a real ranking. Redo the search ONCE with proper keywords; if you have already retried, keep the results rather than calling a third time.',
       '',
       'Leave language at its "all" default so retrieval stays genuinely cross-lingual; the other language values only narrow recall.',
-      '',
-      'SCORING - read this before you interpret any number in the response. The two branches are never compared against each other. Each is filtered on its OWN scale: the keyword branch on normalised BM25F, the semantic branch on cosine similarity, each against its own user-configured threshold. The survivors are UNIONED - clearing either threshold on its own is enough to appear, and a branch can admit a document but can never veto one, so a paper the keyword branch never found is still returned if the semantic branch rates it, and vice versa. The ranking is then weighted Reciprocal Rank Fusion over where each document placed WITHIN each branch that admitted it: score = keywordWeight/(rrfK + keywordRank) + semanticWeight/(rrfK + semanticRank), with an absent branch contributing nothing rather than a penalty. A document both branches admit therefore collects two contributions and outranks single-branch documents at comparable ranks.',
       '',
       'CONSEQUENCE FOR HOW YOU READ THE ROWS: `score` is that RRF value. It is a POSITION, not a relevance - it is a small number (a document first in both branches lands near 0.033 at the default k=60) and comparing it against 0.6, or against a score from another search, or against a score from keyword_search or semantic_search, is meaningless. When you need to know how relevant a document actually is, read normalizedKeywordScore and normalizedSemanticScore, which are real 0-1 relevances on their own branch scale and are exactly what the thresholds were applied to. A MISSING one means that branch did not admit the document - not that it scored zero, and not that the document is weak. Do not re-sort the list by anything else: re-sorting a rank fusion undoes the fusion. And at most the user-configured number of documents is returned, which is an upper bound and NOT a target: a weakly related paper is never added to make the list longer.',
       '',
       'WHAT YOU GET BACK: a LIGHTWEIGHT candidate row per surviving document — itemKey, title, creators, year, venue, the language it is written in, the RRF score plus each branch\'s own relevance, which of your keywords matched which fields, and a short snippet from its best-matching passages. A document the keyword branch matched in its BODY also carries bodyEvidence: the passages that contained your terms, with their chunkIds. Read it whenever matchedFields is just ["body"] — that row has nothing in its title or abstract to judge it by, and the passage is the whole reason it is here. That is a shortlist to triage, not a reading pile.',
       '',
       'ABSTRACTS ARE NOT RETURNED, on purpose. They are still indexed, still searched by the keyword branch, and still part of what produced this ranking — they are simply not shipped back, because most candidates never need to be read in full. Judge each row from its title, score, matched keywords and snippet. Only for a paper you are seriously considering going deeper on, call get_item_abstract with that one itemKey. Reading every candidate\'s abstract is the exact behaviour this design removes: 20 candidates does not mean 20 abstracts.',
-      '',
+    ].join('\n'),
+    doctrine: [
+      'The library is bilingual, so every call must retrieve Chinese AND English literature, no matter which language the user asked in. Do NOT translate the question into a single language and do NOT restrict the search to the language of the question. You (the calling AI) are responsible for the query rewrite: this tool never calls an LLM of its own.',
+      'BEFORE writing any argument, run this analysis on the user question — it is the difference between a good and a useless search, and no part of it happens server-side:',
+      'A. Classify the question: which discipline, and which specific sub-field or research direction inside it?',
+      'B. Adopt that expert role for the rest of this call — reason as a specialist in that sub-field would, using the vocabulary of its literature.',
+      'C. Determine the real research intent: which mechanism, property, process, material system or quantitative relationship is actually being asked about, including what the user implied but did not say.',
+      'D. Only then derive query and keywords FROM that domain analysis, not from the surface wording of the question.',
+      'Build the arguments like this:',
+      '1. query — one complete natural-language sentence expressing the real information need as an expert in that field would state it, used verbatim as the embedding input for cross-lingual semantic search. Do not reduce it to loose tokens. Writing it as an English phrasing followed by " / " and the Chinese phrasing is recommended, so the embedding sees both surface forms.',
+      `2. keywords — the terms a specialist in that sub-field would actually search on, covering BOTH Chinese and English: the core concepts, the mechanism and governing variables behind the question, standard technical translations, accepted synonyms and variant phrasings, the field's abbreviations, and closely coupled concepts with a clear professional link to the intent. For best results, providing about 5-12 relevant Chinese and/or English keywords is recommended; this is guidance, not a constraint — any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted. All of them are matched in a single pass over the candidate records (title, abstract, creator, publication title, tags), then scored by term specificity, field weight and how many distinct keywords each record matched, so short exact terms work far better than long sentences.`,
+      '3. Do NOT pad the list. Every keyword must be defensible as a term of art tied to the research intent; generic, weakly related or category-level words dilute keyword-coverage scoring and push the right papers down the ranking.',
+      'Worked example — user asks "温度梯度如何影响定向凝固中的柱状晶转变？":',
+      '  A/B/C: materials science → solidification / microstructure formation; reasoning as a solidification specialist, the real intent is how the thermal gradient G, together with the growth rate R, governs the columnar-to-equiaxed transition — i.e. G-R processing maps and nucleation ahead of the growth front.',
+      '  query: "Effects of temperature gradient on columnar-to-equiaxed transition during directional solidification / 温度梯度对定向凝固柱状晶-等轴晶转变的影响"',
+      '  keywords: ["温度梯度", "定向凝固", "柱状晶", "等轴晶", "柱状晶-等轴晶转变", "凝固速率", "temperature gradient", "directional solidification", "columnar grain", "equiaxed grain", "columnar-to-equiaxed transition", "CET", "growth rate"]',
+      '  Note what came from domain knowledge rather than from the question: the CET abbreviation, growth rate / 凝固速率 as the co-governing variable, and the columnar/equiaxed grain pair. Note also what was left out: "材料", "实验", "influence factors" — true of the question but too generic to discriminate between papers.',
       'SCOPE: by default this searches the entire library. When the user question is clearly confined to part of their collection, call get_collections FIRST, read the real folder names, and pass the relevant ones as collectionKeys — the scope is applied before scoring, so it cuts the work rather than filtering the results afterwards. Judge each collection by what it plainly is: include what the user named, include what obviously relates, exclude only what obviously does not, and INCLUDE anything you cannot classify. Personal folder names carry no subject information — "待读", "综述", "课题资料", "论文写作" — yet often hold exactly the papers that matter, so uncertainty means include, never exclude. When most of the structure is opaque to you, or the question spans several fields, skip collectionKeys and search everything: a scope that misses a paper is a worse outcome than a scan that costs a little more.',
-      '',
       'PAGING: topK is the size of ONE page, not the depth of the search. The response carries a pagination block: appliedKeywordMinScore and appliedSemanticMinScore (the two floors these results were gated by), totalRelevant (how many documents at least one branch admitted — often more than one page), returned, hasMore and nextCursor. Gating happens BEFORE paging, so a later page can never contain a document both branches rejected, and a short last page is never padded out. To read further, call hybrid_search again with cursor set to nextCursor and everything else unchanged; that returns the next window of the SAME ranking rather than a fresh search. Page on when the bottom of a page is still relevant, or when the user asked for a comprehensive sweep or a literature review — not by reflex. Never lower either floor to make more results appear.',
-      '',
       'THEN: having read one paper\'s abstract, redo the expert analysis for THAT paper — re-fit domain and expertRole to what it actually studies, write a query and keywords out of its own subject matter, in the language that paper is written in — and call search_fulltext with its single itemKey. Answer from the stage-1 rows alone when the user only asks which literature is relevant.',
-      '',
       'AFTER YOU ANSWER, RECORD WHAT YOU READ. For every paper whose passages you genuinely read and used, call wiki_update_reading_note with that itemKey, the chunkIds you used, the domain and expertRole you searched it with, and one readingRecord containing only what this turn established. The server audits and appends it without changing earlier records. Then update the Wiki from those records with wiki_prepare_update and wiki_commit. Skip both only when the turn genuinely read nothing new.',
-      '',
       'AND RECORD THE TERMS THOSE PASSAGES USED, with wiki_record_concepts - one call per paper, carrying that paper\'s itemKey, no final flag. Question-driven reading is where this gets forgotten, and it is where it matters most: you read three passages of five different papers in a turn, and every one of them is a chance to record that this paper too uses a term the library already defines. A term with one source document connects nothing; the same term with three source documents is an edge between three papers, and that edge is what stops the Wiki being a pile of unrelated summaries. Prefer the terms the library already holds: attaching this paper to a concept that exists is what turns that concept into an edge, while founding a brand-new one off a few retrieved passages is the weaker move - a few paragraphs rarely establish that an unfamiliar word is a term of the field. When in doubt leave it out; a full-text read with wiki_build_from_paper is what decides that.',
+      '',
+      'SCORING - read this before you interpret any number in the response. The two branches are never compared against each other. Each is filtered on its OWN scale: the keyword branch on normalised BM25F, the semantic branch on cosine similarity, each against its own user-configured threshold. The survivors are UNIONED - clearing either threshold on its own is enough to appear, and a branch can admit a document but can never veto one, so a paper the keyword branch never found is still returned if the semantic branch rates it, and vice versa. The ranking is then weighted Reciprocal Rank Fusion over where each document placed WITHIN each branch that admitted it: score = keywordWeight/(rrfK + keywordRank) + semanticWeight/(rrfK + semanticRank), with an absent branch contributing nothing rather than a penalty. A document both branches admit therefore collects two contributions and outranks single-branch documents at comparable ranks.',
     ].join('\n'),
     inputSchema: {
       type: 'object',
@@ -447,11 +463,12 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'STANDALONE ATTACHMENTS. A PDF or other attachment with no parent item is still readable: pass that standalone attachment key directly as itemKey. No parent document needs to be created, and attachmentKey may be omitted because the item is the attachment being selected.',
       '',
-      'WHERE THE TEXT CAME FROM. Every response names its source in textSource.method, because the same PDF yields materially different text depending on which path produced it. Best structure first: doc2x (Doc2X Markdown), mineru_cache (a MinerU/Doc2X Markdown that already existed — no parsing), mineru_attachment (a Markdown file an earlier MinerU parse left on the item), mineru (parsed by MinerU during this call), markdown_attachment (a Markdown or text file attached to the item directly), zotero_fulltext_cache (Zotero\'s own extracted text index — flat, no layout), pdf_processor (the bundled PDF worker, used when no Markdown path produced text — also flat), html_parsing, text_reading. When no text could be produced, method says why: pdf_processor_timeout, mineru_disabled, mineru_on_demand_disabled, mineru_failed, mineru_error, no_text. Never present zotero_fulltext_cache or pdf_processor output as though it preserved tables or headings.',
-      '',
       'PAGING. Text is returned in character windows, never all at once. The response carries totalChars, offset, returnedChars, hasMore and nextOffset; pass nextOffset back as offset to continue. Windows are cut at a paragraph or sentence boundary where one is nearby, so a window does not end mid-word. Read on only while the text is still answering the question.',
       '',
       'For ordered reading of a paper\'s BODY as the semantic index stored it — with stable chunk numbers you can hand to search_fulltext or find_similar — prefer get_document_chunks. Use this tool when you need the attachment as it was extracted, or when the attachment is not in the semantic index at all.',
+    ].join('\n'),
+    doctrine: [
+      'WHERE THE TEXT CAME FROM. Every response names its source in textSource.method, because the same PDF yields materially different text depending on which path produced it. Best structure first: doc2x (Doc2X Markdown), mineru_cache (a MinerU/Doc2X Markdown that already existed — no parsing), mineru_attachment (a Markdown file an earlier MinerU parse left on the item), mineru (parsed by MinerU during this call), markdown_attachment (a Markdown or text file attached to the item directly), zotero_fulltext_cache (Zotero\'s own extracted text index — flat, no layout), pdf_processor (the bundled PDF worker, used when no Markdown path produced text — also flat), html_parsing, text_reading. When no text could be produced, method says why: pdf_processor_timeout, mineru_disabled, mineru_on_demand_disabled, mineru_failed, mineru_error, no_text. Never present zotero_fulltext_cache or pdf_processor output as though it preserved tables or headings.',
     ].join('\n'),
     inputSchema: {
       type: 'object',
@@ -542,8 +559,6 @@ export function buildToolCatalog(): ToolDefinition[] {
     description: [
       'BROWSE THE LIBRARY ONE LEVEL AT A TIME, like opening folders in a file manager. Each call shows you the subfolders of where you are, plus the documents filed directly at that level — never the whole tree.',
       '',
-      'START AT THE TOP by calling with no collectionKey and no path: you get the library root, its top-level collections, and any documents sitting outside every collection. Then descend by passing the collectionKey of the subfolder you want to open. Every response repeats the current location (libraryID, collectionKey, name, path) and the parent you came from, so you can always walk back up.',
-      '',
       'READING THE SUBFOLDER ROWS. Each subcollection carries collectionKey, name, directItemCount (documents filed at that level), totalItemCount (that level plus everything nested below it) and hasChildren. Those three numbers are how you decide where to descend without opening anything: a folder whose directItemCount is 0 but whose totalItemCount is 300 is a container, not a dead end. Descending is one call per level, on purpose — the old habit of pulling the whole nested tree in one response is what this replaces.',
       '',
       'THE DOCUMENT ROWS ARE DELIBERATELY THIN: itemKey, title, creators, year, publication title, DOI, item type. No abstracts, no notes, no annotations, no attachment text, no chunks. This is a directory listing, so it must stay cheap enough to walk. When a document looks worth pursuing, take its itemKey to get_item_details, get_item_abstract or search_fulltext.',
@@ -553,6 +568,9 @@ export function buildToolCatalog(): ToolDefinition[] {
       'PAGING applies to the documents at the current level (subfolders are always returned in full, since a level has few of them). itemPagination carries total, offset, limit, hasMore and nextOffset. A large folder is several pages.',
       '',
       'THIS IS NAVIGATION, NOT SEARCH. If the user is looking for literature ON A TOPIC, use hybrid_search — optionally scoped with collectionKeys, which is what get_collections is for. Browse when the question is about the SHAPE of the library: what is in this folder, how is this project organised, which folders exist.',
+    ].join('\n'),
+    doctrine: [
+      'START AT THE TOP by calling with no collectionKey and no path: you get the library root, its top-level collections, and any documents sitting outside every collection. Then descend by passing the collectionKey of the subfolder you want to open. Every response repeats the current location (libraryID, collectionKey, name, path) and the parent you came from, so you can always walk back up.',
     ].join('\n'),
     inputSchema: {
       type: 'object',
@@ -783,6 +801,15 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       "Call it once per document, with that document's own itemKey.",
       '',
+      'CONTEXT EXPANSION is a SEPARATE call, not a later stage of this one. Ranking ends at the RRF list above; nothing is expanded automatically. Read the returned passages first and stop when the evidence is sufficient. Only when a passage is clearly missing its cause, its consequence, its experimental conditions or its mechanism context, call this tool AGAIN with chunkIds set to the chunkId(s) of that passage - that call performs no retrieval and no ranking at all, it just returns those passages plus their immediate neighbours in reading order, within the radius the user allows. The decision to expand is yours; never request neighbours by default and never ask for the whole document.',
+      '',
+      "SCORING follows the same RULE as hybrid_search, one level down, on a scale of its own. Each branch is gated separately against the SAME two user settings hybrid_search uses, and the survivors are UNIONED — a passage only has to clear ONE of the two to be returned, so a passage your keywords miss still comes back when the embedding rates it, and a passage the embedding rates low still comes back when it literally carries your terms. Ranking is then weighted Reciprocal Rank Fusion over each passage's rank within each branch that admitted it.",
+      '',
+      "`score` is the RRF value: a position, not a relevance, and not comparable across tools or across searches. Read normalizedKeywordScore and normalizedSemanticScore for how relevant a passage actually is; a MISSING one means that branch did not admit the passage, not that it scored zero.",
+      '',
+      "Result counts are capped by the user's preferences and both floors are floors you cannot lower. The cap is a ceiling, not a quota, so a document with only one good passage returns one passage.",
+    ].join('\n'),
+    doctrine: [
       'BEFORE you write the arguments, redo the expert analysis FOR THIS PAPER. Do not reuse the library-level query and keywords: they were written for the user question in general, and they will retrieve the same generic passages from every paper.',
       'A. Get this paper\'s abstract first, with get_item_abstract on its itemKey — hybrid_search does not return abstracts. Read it together with the hit evidence hybrid_search gave you for this paper.',
       "B. Re-judge the field from \"user question + this paper's title + its abstract + its evidence\", and adopt the expert role that THIS paper belongs to. Expect it to be narrower or simply different from the stage-1 pair, and pass the re-fitted values in domain and expertRole.",
@@ -790,15 +817,7 @@ export function buildToolCatalog(): ToolDefinition[] {
       'D. Write query and keywords out of THAT: a natural-language sentence about what you need from this paper, and probes in this paper\'s own vocabulary and terms of art.',
       'E. Write those keywords in the LANGUAGE THIS PAPER IS WRITTEN IN — one language, not both. Library-wide search is bilingual because the library is; this search is not, because a single document is not. Chinese probes cannot match an English paper\'s passages and vice versa: they match nothing and only dilute keyword coverage. hybrid_search reports each candidate\'s language, and the abstract confirms it. Only a genuinely mixed-language document takes mixed probes.',
       '',
-      'CONTEXT EXPANSION is a SEPARATE call, not a later stage of this one. Ranking ends at the RRF list above; nothing is expanded automatically. Read the returned passages first and stop when the evidence is sufficient. Only when a passage is clearly missing its cause, its consequence, its experimental conditions or its mechanism context, call this tool AGAIN with chunkIds set to the chunkId(s) of that passage - that call performs no retrieval and no ranking at all, it just returns those passages plus their immediate neighbours in reading order, within the radius the user allows. The decision to expand is yours; never request neighbours by default and never ask for the whole document.',
-      '',
-      "SCORING follows the same RULE as hybrid_search, one level down, on a scale of its own. Each branch is gated separately against the SAME two user settings hybrid_search uses, and the survivors are UNIONED — a passage only has to clear ONE of the two to be returned, so a passage your keywords miss still comes back when the embedding rates it, and a passage the embedding rates low still comes back when it literally carries your terms. Ranking is then weighted Reciprocal Rank Fusion over each passage's rank within each branch that admitted it.",
-      '',
       "What differs from hybrid_search is what the keyword number MEANS. At library level the keyword branch is BM25F over a document's fields; inside one paper every candidate is a single passage with one field, so it is scored by term specificity across THIS paper's own passages, field weight, how many distinct keywords the passage covers, and saturating repeat counts, then mapped into 0-1. Term specificity is therefore computed over a handful of chunks rather than a whole library, which compresses it towards the middle of its range. Treat a chunk-level keyword score as comparable to other chunks of the same paper, not to a document-level score from hybrid_search or keyword_search.",
-      '',
-      "`score` is the RRF value: a position, not a relevance, and not comparable across tools or across searches. Read normalizedKeywordScore and normalizedSemanticScore for how relevant a passage actually is; a MISSING one means that branch did not admit the passage, not that it scored zero.",
-      '',
-      "Result counts are capped by the user's preferences and both floors are floors you cannot lower. The cap is a ceiling, not a quota, so a document with only one good passage returns one passage.",
     ].join('\n'),
     inputSchema: {
       type: 'object',
@@ -899,17 +918,16 @@ export function buildToolCatalog(): ToolDefinition[] {
       '2. COARSE FILTER before a fine search. Run keyword_search to reduce the library to a defensible shortlist, take the itemKeys it returned, and pass them to semantic_search as itemKeys. The semantic pass then scores only that shortlist. This is the cheap way to ask a conceptual question of a precisely delimited subset.',
       'For ordinary literature discovery, hybrid_search is still the default first step - it runs this branch AND the semantic branch, gates each on its own threshold and rank-fuses the union, so calling both separately is strictly more work for a worse ranking.',
       '',
+      'WHAT YOU GET BACK. The same lightweight candidate row hybrid_search returns - itemKey, title, creators, year, venue, language, score, which keywords matched which fields, whether an abstract exists, and fullText (whether that document has indexed body text) - plus bodyEvidence on any row that matched in the body. Here, and ONLY here among the retrieval tools, score is a real 0-1 relevance: one branch means there is nothing to fuse, so the number is this document\'s normalised BM25F score and is exactly what the threshold was applied to. (hybrid_search and search_fulltext report a rank-fusion score instead, which is a position, not a relevance - do not carry a number from one tool to the other.) Abstracts are not shipped back; fetch one with get_item_abstract for a paper worth pursuing.',
+      '',
+      'PAGING. topK is the page size, not the depth of the search. Use pagination.nextCursor with every other argument unchanged to window further down the SAME ranking.',
+    ].join('\n'),
+    doctrine: [
       `KEYWORDS ARE THE WHOLE INPUT. Pass the terms a specialist in the sub-field would actually search on, covering BOTH Chinese and English: core concepts, mechanism and governing variables, standard technical translations, accepted synonyms, the abbreviations of the field. The library is bilingual and this tool searches all of it, so restricting yourself to the language the user typed in silently halves recall. Around 5-12 keywords is the recommendation; 1 to ${MAX_HYBRID_KEYWORDS} is accepted. Do not pad the list - every keyword must be defensible as a term of art, because generic words dilute the coverage score and push the right papers down.`,
       '',
       'SCORING. BM25F over the fields above, with body as one of those fields. Every keyword is matched in one pass; each field has its own weight and its own length normalisation, so a term in a title counts for more than the same term buried in a long body, and repeating one term saturates instead of accumulating without limit. On top of that, matching several DISTINCT keywords beats matching one keyword many times. The raw score is unbounded, so it is mapped into 0-1 by a saturating curve.',
-      '',
       'The floor applied here is the user\'s KEYWORD relevance threshold - the same setting, on the same normalised BM25F scale, that gates hybrid_search\'s keyword branch. It is not shared with the semantic threshold: the two scales are different and are never compared. Filtering happens before paging, so no page can contain a document below the floor and a short final page is never padded.',
-      '',
-      'WHAT YOU GET BACK. The same lightweight candidate row hybrid_search returns - itemKey, title, creators, year, venue, language, score, which keywords matched which fields, whether an abstract exists, and fullText (whether that document has indexed body text) - plus bodyEvidence on any row that matched in the body. Here, and ONLY here among the retrieval tools, score is a real 0-1 relevance: one branch means there is nothing to fuse, so the number is this document\'s normalised BM25F score and is exactly what the threshold was applied to. (hybrid_search and search_fulltext report a rank-fusion score instead, which is a position, not a relevance - do not carry a number from one tool to the other.) Abstracts are not shipped back; fetch one with get_item_abstract for a paper worth pursuing.',
-      '',
       'bodyEvidence entries carry chunkId, which of your keywords that passage contained, how many times, and the passage text. occurrences is evidence strength for YOU to read - it takes no part in ranking. To read around one of those passages, pass its chunkId to search_fulltext.',
-      '',
-      'PAGING. topK is the page size, not the depth of the search. Use pagination.nextCursor with every other argument unchanged to window further down the SAME ranking.',
     ].join('\n'),
     inputSchema: {
       type: 'object',
@@ -976,11 +994,12 @@ export function buildToolCatalog(): ToolDefinition[] {
       '2. FINE SEARCH after a coarse filter. Run keyword_search first, take its itemKeys, pass them here, and the semantic pass scores only that shortlist.',
       '3. The user explicitly asked for semantic-only retrieval.',
       '',
+      'WHAT YOU GET BACK. The same lightweight candidate row hybrid_search returns, including fullText - whether that document actually has indexed body text, or whether it was indexed from title and abstract alone. Read fullText before you read the evidence snippets: for a document that is not "indexed", the snippets ARE its title and abstract, not passages from the paper. Abstracts are not shipped back; fetch one with get_item_abstract only for a candidate worth pursuing.',
+    ].join('\n'),
+    doctrine: [
       'THE QUERY IS THE WHOLE INPUT. Write ONE complete natural-language sentence stating the real research intent as an expert in that sub-field would state it. It is embedded verbatim, so do not reduce it to loose tokens. Writing an English phrasing followed by " / " and the Chinese phrasing is recommended, so the embedding sees both surface forms - retrieval is cross-lingual and the library is bilingual.',
       '',
       'SCORING AND PAGING. Passage similarities are aggregated to ONE cosine score per document, and the floor applied is the user\'s SEMANTIC relevance threshold - the same setting, on the same cosine scale, that gates hybrid_search\'s semantic branch. It is not shared with the keyword threshold; the two scales are different and are never compared. Because there is only one branch here there is nothing to fuse, so score is a real 0-1 relevance and is exactly what the threshold was applied to - unlike hybrid_search and search_fulltext, whose score is a rank-fusion position. Never carry a number between the two kinds of tool. Filtering happens BEFORE paging, so no page can contain a document below the floor and a short final page is never padded; topK is the size of one page. The response carries appliedMinScore, totalRelevant, returned, hasMore and nextCursor - pass nextCursor back as cursor with everything else unchanged to window the SAME ranking rather than searching again.',
-      '',
-      'WHAT YOU GET BACK. The same lightweight candidate row hybrid_search returns, including fullText - whether that document actually has indexed body text, or whether it was indexed from title and abstract alone. Read fullText before you read the evidence snippets: for a document that is not "indexed", the snippets ARE its title and abstract, not passages from the paper. Abstracts are not shipped back; fetch one with get_item_abstract only for a candidate worth pursuing.',
     ].join('\n'),
     inputSchema: {
       type: 'object',
@@ -1040,18 +1059,19 @@ export function buildToolCatalog(): ToolDefinition[] {
     description: [
       'Find DOCUMENTS in the library that are semantically similar to ONE paper you already have, using several of that paper\'s own passages as the query. Purely semantic: no keywords are involved at any point.',
       '',
+      'PAGING: ordered best first, one page at a time. The page size is the user\'s configured MAXIMUM NUMBER OF DOCUMENTS - there is no fixed count here, and topK can only lower it. That cap bounds one page, never how many documents qualify, which is unlimited. When hasMore is true, call again with cursor set to nextCursor and nothing else changed; that replays the stored ranking instead of re-scanning the library. Decide as you page whether to keep going or to stop and dig into a promising candidate with get_item_abstract and search_fulltext.',
+      '',
+      'WHAT COMES BACK: identity, score, the chunkIds that carried the score, and fullText — whether that document has body text in the index, one of: indexed, parse_failed, no_source, not_indexed, unknown. No passage text. To read a candidate, call search_fulltext on its itemKey; a row whose fullText is "parse_failed", "no_source" or "not_indexed" holds only title and abstract and will be refused there, and one that is "unknown" predates the record so its passages are unverified.',
+      '',
+      'Pass chunks from ONE document only. chunkIds are numbered within their own document, so ids from another paper either fail to resolve or would silently mean different passages.',
+    ].join('\n'),
+    doctrine: [
       'THE CALL CHAIN, in order. You must do step 1 yourself; this tool does 2-5.',
       '1. YOU pick the representative chunks. Run search_fulltext on the paper you are expanding from and read the passages it returns. Choose the ones that actually characterise the paper for YOUR task — its method, its mechanism, its material system, its findings, or whichever facets matter — and note their chunkId values. This tool does not and cannot judge which passages are representative; that judgement is the part only you can make, and it decides the quality of everything below.',
       '2. Full-index semantic scan with every chunk you passed, as separate query vectors. Their stored vectors are reused directly, so nothing is re-embedded.',
       '3. The query paper itself is excluded from its own results.',
       '4. DOCUMENT-LEVEL aggregation. Chunk scores are folded into ONE score per candidate document: for each of your query chunks, the candidate\'s two best-matching passages are averaged, then those per-chunk-query scores are combined (mostly their mean, plus a smaller weight on the strongest one). A paper therefore scores high by relating to SEVERAL of the facets you supplied, not by owning one lucky passage. The result is a 0-1 cosine relevance on the same scale as semantic_search, and the floor applied to it is the user\'s SEMANTIC relevance threshold. It is NOT comparable to hybrid_search\'s or search_fulltext\'s score, which is a rank-fusion position rather than a relevance.',
       '5. The user\'s relevance threshold is applied to those document scores, and EVERY document above it is ranked and paged - there is no cap on how many papers may qualify.',
-      '',
-      'PAGING: ordered best first, one page at a time. The page size is the user\'s configured MAXIMUM NUMBER OF DOCUMENTS - there is no fixed count here, and topK can only lower it. That cap bounds one page, never how many documents qualify, which is unlimited. When hasMore is true, call again with cursor set to nextCursor and nothing else changed; that replays the stored ranking instead of re-scanning the library. Decide as you page whether to keep going or to stop and dig into a promising candidate with get_item_abstract and search_fulltext.',
-      '',
-      'WHAT COMES BACK: identity, score, the chunkIds that carried the score, and fullText — whether that document has body text in the index, one of: indexed, parse_failed, no_source, not_indexed, unknown. No passage text. To read a candidate, call search_fulltext on its itemKey; a row whose fullText is "parse_failed", "no_source" or "not_indexed" holds only title and abstract and will be refused there, and one that is "unknown" predates the record so its passages are unverified.',
-      '',
-      'Pass chunks from ONE document only. chunkIds are numbered within their own document, so ids from another paper either fail to resolve or would silently mean different passages.',
     ].join('\n'),
     inputSchema: {
       type: 'object',
@@ -1177,13 +1197,11 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'THE RESPONSE CARRIES wikiSkeleton, AND IT IS NOT THE WHOLE WIKI. pages is complete - every Page title with its Claim count - and pagesToExtend is the shortlist of existing pages whose Claims are nearest this paper, which is the list to answer "which pages does this paper belong on" with. The concept side is a NEIGHBOURHOOD computed around this paper: duplicateCandidates (existing Concepts your proposed titles may already be, matched by name AND by meaning, so a near-synonym under another name is caught), paperConcepts (what this paper recorded), nearbyConcepts (nearest by meaning), relatedConcepts (already one relation away), hubConcepts (the most-connected entries in the library), and relations among those, written as "挤压铸造 --suppresses--> 非平衡共晶相". READ IT BEFORE YOU WRITE. The rest of this response is query-driven recall, which answers "has this been said before" and cannot answer "how does this paper sit against the thirty already in here" - you do not know what to search for until you can see what is there. Thirty-one papers written up without any of it produced zero relations between them: not one was refused, none was ever offered.',
 
-      '',
+    ].join('\n'),
+    doctrine: [
       'ONE PAGE PER PAPER IS THE FAILURE MODE, NOT THE DEFAULT. A Page is a SUBJECT; a paper is EVIDENCE about several subjects. The normal outcome of writing up one paper is that its Claims land on SEVERAL DIFFERENT PAGES that already exist - its mechanism on one, its process window on another, its characterisation method on a third. Creating a page that holds this paper and nothing else is allowed ONLY when the paper genuinely touches nothing already in the Wiki, and that is rare in a collection the user assembled around one subject. It is not a style preference: thirty papers were written up with the full page list visible in every response and produced thirty pages, each backed by exactly one paper, zero shared Claims and zero shared Concepts - a Wiki of thirty islands, which is the same information as thirty separate summaries and none of the value of a Wiki. pagesToExtend ranks the existing pages whose own Claims sit closest to this paper; read it before you propose any title. If you do create a page, say in the commit why none of the listed pages could hold this Claim.',
-      '',
       'WHAT THE NEIGHBOURHOOD CANNOT SHOW YOU: a link to a concept that is far away in meaning and not yet connected to anything you touched. hubConcepts is the cheap guard against that and is not a guarantee. If you suspect a connection to a part of the Wiki that is not in front of you, wiki_list_concepts enumerates the library and wiki_get_page opens any page. conceptCount tells you how much is out there that this response did not show.',
-      '',
       'EVERY duplicateCandidate CARRIES sourceDocuments AND sourcedFromThisPaper. A candidate with sourcedFromThisPaper false is a concept the library already defines and this paper also uses, with this paper NOT yet recorded as one of its sources. That is not "already covered, skip it" - it is the single commonest way this Wiki ends up as a set of islands. Fix it in the same turn, with wiki_record_concepts: pass that candidate\'s conceptId, one source carrying this paper\'s itemKey, the chunkIdSnapshot of a passage you actually read, and an excerpt quoted from THAT chunk - and no naming fields at all. It is written immediately rather than staged, which matters because a question-driven read never drains its staging. (Re-submitting the whole concept by its terms also works and is what a full-text read does at its final pass.) The server adds a source to the existing concept; it does not create a second one. sourceDocuments is how many papers that term currently connects, and a term sitting at 1 connects nothing.',
-      '',
       'SO, WITH THE NEIGHBOURHOOD IN VIEW: does this paper extend a Page that exists rather than deserving a parallel one? Do its Concepts already exist under another name, so that this paper should be added to them as a source rather than founding a parallel entry? And what does it let you assert BETWEEN concepts — that one process suppresses a phenomenon another paper described, that one theory incorporates another\'s mechanism? Propose those relations in the commit. "本篇与现有条目无关联，因为…" is a real answer and sometimes the right one; silence is not.'
     ].join('\n'),
     inputSchema: {
@@ -1273,9 +1291,9 @@ export function buildToolCatalog(): ToolDefinition[] {
       'ZOTERO NOTE STATUS IS SEPARATE. A commit that completes an open full-text reading session also tries to mark its Markdown reading note completed. That small Zotero write uses the Zotero write permission and confirmation; if it is not authorized, the Wiki commit and session close still succeed and noteStatusWrite reports not_authorized.',
       '',
       'SETTLING WHAT WAS READ. A chunk owes the Wiki something until this call accounts for it, ONE BY ONE. WHICH chunks owe differs by how they were read: a full-text page charges every chunk it DELIVERED, because a page you were handed and did not account for is a page you skipped; a question charges only the chunks you DECLARED in readChunkIds, so a passage retrieval returned and you did not use was never charged and needs no SKIP. Do not write SKIP actions to dismiss passages a search merely surfaced — they are not on the ledger, and a reason filed against text nobody read is worse than none. A chunk is settled by an Evidence excerpt quoting it, or by a SKIP action naming it with a reason; citing one chunk of the twenty a page delivered settles that one only. Whatever is left unsettled keeps the paper OPEN: the Claims you did write are committed and permanent, but the paper is not finished and does not release the reading slot. wiki_prepare_update lists exactly which chunk ids are outstanding.',
-      '',
+    ].join('\n'),
+    doctrine: [
       'ONE SKIP CAN NAME MANY CHUNKS, and for a whole-paper read most of them will be settled that way — a derivation, a bibliography, a run of routine measurements. Give it one reason that argues rather than asserts: say what those passages establish and what the Wiki already holds that covers it. Name chunks by chunkId, the id the index assigned, not by the position a note citation uses. A paper read end to end used to produce four Claims resting on four of its 186 chunks with nothing anywhere asking what became of the other 182; this is the call that asks.',
-      '',
       'A SKIP that carries itemKey, chunkIds and reason is how you record that read text established nothing the Wiki did not already hold — a restated definition, a caption confirming a known number, a paragraph of related work. That is a legitimate and common outcome, and a whole turn may be settled this way. What it is not is a formality: the reason must say what those passages actually establish and which Page, Claim, Concept or relation already covers it. "Nothing new" is refused, because it is exactly what a reader who checked nothing would also write. One reason may cover a group of chunks; you are never asked to explain each chunk separately. Every reason is kept in the reading ledger permanently.'
     ].join('\n'),
     inputSchema: {
@@ -1535,27 +1553,20 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'WHEN TO CALL. Calls WITHOUT final are STAGED on the open reading session: they are checked and held, nothing is written, and the user is not asked to confirm anything. Use them to note candidates as you read. Then call ONCE with final true after the whole paper has been delivered and synthesised; that call writes everything you staged plus everything you pass to it, in a single database write and a single confirmation. Read the paper, understand it, decide which terms are genuinely concepts of the field, then write. wiki_prepare_update refuses to start the write-up until the final pass has happened. A paper that introduced nothing new is answered with an empty concepts list and noConceptsReason.',
       '',
-      'A CONCEPT IS A TERM OF THE FIELD, NOT A DESCRIPTION OF THIS PAPER. The test is whether ANOTHER paper in the collection could use the same name for the same thing. 动态再结晶, 定向凝固, 柱状晶, CET, 界面换热系数 pass; every one of them is a term a dozen papers share. 「柱状晶无再结晶HIP与热处理窗口准则」, 「以柱状晶长度为调控目标的连铸二冷工艺逆向优化与偏析控制技术」 and 「Ni-Co-W柱晶合金加载矢量与动态再结晶各向异性调控」 do not - they are this paper title rewritten, one clause at a time, and no second paper will ever record them, so they can never be shared, related or reused. A run of thirty papers produced 119 concepts of which ZERO were used by more than one paper; that is what this rule exists to prevent. Concretely: strip the alloy designation, the process parameters and the …技术 / …工艺 / …调控 tail, and record what is left - then let the CLAIM carry what this particular paper did with it. If a compound really is a term the field itself uses (Lomer-Cottrell 位错锁, 不连续动态再结晶), keep it; length is not the test, shareability is.',
-      '',
-      'ONE CONCEPT, MANY TERMS. A concept entity has one primary term and any number of alias terms, and EVERY term has the same three fields: zh (Chinese full name), en (English full name), abbr (abbreviation). Put every name for the same thing in ONE entity - the server decides which is primary and files the rest as aliases. Do not submit "动态再结晶" and "Dynamic Recrystallization" as two concepts.',
-      '',
-      'THE ONE HARD RULE: abbr may never be the only field. A term needs zh or en. If you cannot confirm which full name an abbreviation expands to, leave abbr out - the term is stored incomplete and can be completed by a later paper. Guessing is worse than missing.',
-      '',
-      'YOU MAY COMPLETE A TERM FROM YOUR OWN KNOWLEDGE, and you must say so. If a paper writes only "Dynamic Recrystallization" and you are confident of the standard Chinese term and abbreviation, submit zh 动态再结晶, en Dynamic Recrystallization, abbr DRX - and mark origins accordingly: literature for what the paper itself states, ai for what you supplied. The default for an unmarked field is ai, never literature. Only mark a field literature when the text you read actually contains it. If you are not confident, leave the field empty; a later paper can fill it. A field you marked ai is later upgraded to literature when a paper confirms it, and REPLACED when a paper contradicts it - so an honest ai mark costs nothing and a false literature mark is permanent.',
-      '',
-      'NAMES ARE NEVER OVERWRITTEN AWAY. If the library holds 动态再结晶 / Dynamic Recrystallization and this paper writes Dynamic Recrystallisation, both spellings are kept as two term rows of the same concept. Submit what the paper actually says; do not normalise it to what the library already has.',
-      '',
-      'DEDUPLICATION happens on the server, on FULL names only. A term whose Chinese or English full name the library already knows joins that concept instead of founding a second one, and its sources are added rather than replacing anything. A shared abbreviation alone never merges two concepts, because the same letters mean different things in different subfields.',
-      '',
-      'TO SAY TWO EXISTING CONCEPTS ARE ONE, put both names in the SAME term - zh 晶粒长大 and en grain growth in one term group. That is a claim about one term and it fuses them. Listing them as two separate terms of one entity does NOT: aliases of a concept differ from one another all the time, so that grouping is too weak to act on, and both concepts are left standing with a warning. A fusion is also refused when the two contradict each other anywhere, or when both already own a knowledge page.',
-      '',
       'SOURCES. itemKey is required and must be a real Zotero document; it defaults to the paper currently open for reading. excerpt and chunkIdSnapshot are optional, and are verified against the live index when given - an excerpt that cannot be found is dropped with a warning while the document link is kept. Recording a concept from a second paper ADDS a source to the existing concept; it never duplicates it.',
       '',
-      'A CONCEPT THIS PAPER USES BUT DID NOT INVENT STILL HAS TO BE SUBMITTED. Finding a term already in the library is not a reason to leave it out - it is the reason to put it in. Submit it again, unchanged, with this paper\'s itemKey and an excerpt from this paper, and the server files this paper as an additional source of the concept that already exists. It does not create a second entry and it does not overwrite anything; addedSources in the response counts what actually landed.',
-      '',
-      'WHY THIS IS NOT BOOKKEEPING. A term sourced from ONE document cannot connect two documents to each other, and connecting documents is what the concept library is for. Five papers were written up where every one of them discussed 不连续动态再结晶; three of them said so in their Claims; the term ended with a single source document and the knowledge graph drew five isolated nodes with no edge between any of them, because nothing in the database recorded that more than one paper had used it. wiki_prepare_update marks every duplicate candidate with sourceDocuments and sourcedFromThisPaper for exactly this reason: sourcedFromThisPaper false on a concept this paper genuinely uses is an omission to fix in this call, not a duplicate to avoid.',
-      '',
       'IN QUESTION-DRIVEN READING (no full-text session open), record the terms the retrieved passages actually used, and prefer the ones the library ALREADY holds - those are the whole reason to call this here, because attaching this paper to an existing concept is what turns that concept into an edge between papers. Founding a BRAND-NEW concept off a handful of retrieved passages is the weaker move and usually the wrong one: a few paragraphs can show that this paper uses a term, and rarely establish that an unfamiliar word is a term of the field at all. When in doubt leave it out and let a full-text read with wiki_build_from_paper decide.'
+    ].join('\n'),
+    doctrine: [
+      'A CONCEPT IS A TERM OF THE FIELD, NOT A DESCRIPTION OF THIS PAPER. The test is whether ANOTHER paper in the collection could use the same name for the same thing. 动态再结晶, 定向凝固, 柱状晶, CET, 界面换热系数 pass; every one of them is a term a dozen papers share. 「柱状晶无再结晶HIP与热处理窗口准则」, 「以柱状晶长度为调控目标的连铸二冷工艺逆向优化与偏析控制技术」 and 「Ni-Co-W柱晶合金加载矢量与动态再结晶各向异性调控」 do not - they are this paper title rewritten, one clause at a time, and no second paper will ever record them, so they can never be shared, related or reused. A run of thirty papers produced 119 concepts of which ZERO were used by more than one paper; that is what this rule exists to prevent. Concretely: strip the alloy designation, the process parameters and the …技术 / …工艺 / …调控 tail, and record what is left - then let the CLAIM carry what this particular paper did with it. If a compound really is a term the field itself uses (Lomer-Cottrell 位错锁, 不连续动态再结晶), keep it; length is not the test, shareability is.',
+      'ONE CONCEPT, MANY TERMS. A concept entity has one primary term and any number of alias terms, and EVERY term has the same three fields: zh (Chinese full name), en (English full name), abbr (abbreviation). Put every name for the same thing in ONE entity - the server decides which is primary and files the rest as aliases. Do not submit "动态再结晶" and "Dynamic Recrystallization" as two concepts.',
+      'THE ONE HARD RULE: abbr may never be the only field. A term needs zh or en. If you cannot confirm which full name an abbreviation expands to, leave abbr out - the term is stored incomplete and can be completed by a later paper. Guessing is worse than missing.',
+      'YOU MAY COMPLETE A TERM FROM YOUR OWN KNOWLEDGE, and you must say so. If a paper writes only "Dynamic Recrystallization" and you are confident of the standard Chinese term and abbreviation, submit zh 动态再结晶, en Dynamic Recrystallization, abbr DRX - and mark origins accordingly: literature for what the paper itself states, ai for what you supplied. The default for an unmarked field is ai, never literature. Only mark a field literature when the text you read actually contains it. If you are not confident, leave the field empty; a later paper can fill it. A field you marked ai is later upgraded to literature when a paper confirms it, and REPLACED when a paper contradicts it - so an honest ai mark costs nothing and a false literature mark is permanent.',
+      'NAMES ARE NEVER OVERWRITTEN AWAY. If the library holds 动态再结晶 / Dynamic Recrystallization and this paper writes Dynamic Recrystallisation, both spellings are kept as two term rows of the same concept. Submit what the paper actually says; do not normalise it to what the library already has.',
+      'DEDUPLICATION happens on the server, on FULL names only. A term whose Chinese or English full name the library already knows joins that concept instead of founding a second one, and its sources are added rather than replacing anything. A shared abbreviation alone never merges two concepts, because the same letters mean different things in different subfields.',
+      'TO SAY TWO EXISTING CONCEPTS ARE ONE, put both names in the SAME term - zh 晶粒长大 and en grain growth in one term group. That is a claim about one term and it fuses them. Listing them as two separate terms of one entity does NOT: aliases of a concept differ from one another all the time, so that grouping is too weak to act on, and both concepts are left standing with a warning. A fusion is also refused when the two contradict each other anywhere, or when both already own a knowledge page.',
+      'A CONCEPT THIS PAPER USES BUT DID NOT INVENT STILL HAS TO BE SUBMITTED. Finding a term already in the library is not a reason to leave it out - it is the reason to put it in. Submit it again, unchanged, with this paper\'s itemKey and an excerpt from this paper, and the server files this paper as an additional source of the concept that already exists. It does not create a second entry and it does not overwrite anything; addedSources in the response counts what actually landed.',
+      'WHY THIS IS NOT BOOKKEEPING. A term sourced from ONE document cannot connect two documents to each other, and connecting documents is what the concept library is for. Five papers were written up where every one of them discussed 不连续动态再结晶; three of them said so in their Claims; the term ended with a single source document and the knowledge graph drew five isolated nodes with no edge between any of them, because nothing in the database recorded that more than one paper had used it. wiki_prepare_update marks every duplicate candidate with sourceDocuments and sourcedFromThisPaper for exactly this reason: sourcedFromThisPaper false on a concept this paper genuinely uses is an omission to fix in this call, not a duplicate to avoid.',
     ].join('\n'),
     inputSchema: {
       type: 'object',
@@ -1697,20 +1708,17 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'PAGING. Once the expert exists, each call returns one page of chunks and the reading note as it currently stands. Pass cursor set to pagination.nextCursor from the previous response and change nothing else. pagination reports totalChunks, the range just returned, deliveredChunks / remainingChunks, readChunkRanges and unreadChunkRanges, a coverageMap drawn as filled and hollow squares, and coverageComplete once every chunk has been delivered.',
       '',
-      'IT CONTINUES WHATEVER QUESTIONS ALREADY READ. If the user has been asking about this paper, part of it is already read and it already has a reading note. This does not start over: the same session, chunk ledger and append-only records carry forward, and paging walks the chunks NOBODY HAS READ rather than the paper front to back. A page can therefore be discontinuous — 41-44 then 46-60, with 45 left out because a question already read it. Read pagination.deliveredChunkIndexes, not the range, when you attribute an excerpt to a chunk; pagination.skippedAlreadyReadChunkIndexes names what was left out, and its content is already captured in an immutable reading record. To see a skipped chunk again, ask for it by offset. carriedOverFromQuestionAnswering says how much was inherited. The one thing still asked for is a deliberate expert profile: the reader a question assembled on the fly is provisional, and a whole-paper macro summary deserves a considered one.',
-      '',
-      'INTEGRATION GATE. After each page, call wiki_update_reading_note with ONE readingRecord describing only what that page established - distilling its argument, its values and its conclusions, and citing every chunk the page delivered. The server numbers it, attaches the page chunk ids, audits it immediately against those chunks, and appends it without changing earlier records.',
-      '',
-      'THE PAGE SIZE IS YOURS, AND IT IS NOT FREE. Ask for as many chunks as you want to see at once - a wider page is how a connection across a whole section gets noticed, and nothing here prefers small pages. What scales with the page is the OBLIGATION: the record must account for every chunk on it and land every measurement in it, both enforced. A large page buys a wider view and owes a longer record. If later text corrects an earlier record, say "Correction to record N" in a new record; never edit the old one. A page with no new content still gets a record using unchanged: true and unchangedReason, with no limit on consecutive empty records. At most one delivered batch may be outstanding. Re-reading a chunk already delivered is free and never counts against the gate.',
-      '',
       'ONE PAPER AT A TIME. Starting a different full-text paper while this one is unfinished is refused. Finish the open one first through the fixed chain: read it out; reset any provisional expert from metadata and abstract; append macroSummary with finalSynthesis true; call wiki_record_concepts with final true; call wiki_prepare_update with the five-axis Wiki Review and one verdict per source-backed Claim; then wiki_commit, settling EVERY chunk this reading was delivered — each one quoted into a Claim or named in a SKIP with a reason, which is what finally closes the paper. Or use wiki_finish_reading with outcome "skipped" to close it without a Wiki write.',
       '',
+      'THIS IS NOT THE TOOL FOR ANSWERING A QUESTION. It reads one paper end to end, on explicit user request, and takes the library\'s single reading slot while it does. To answer a question, use hybrid_search then search_fulltext, and record what you actually read with wiki_update_reading_note and readChunkIds — that path takes no slot, works across several papers at once, and feeds this same note.',
+    ].join('\n'),
+    doctrine: [
+      'INTEGRATION GATE. After each page, call wiki_update_reading_note with ONE readingRecord describing only what that page established - distilling its argument, its values and its conclusions, and citing every chunk the page delivered. The server numbers it, attaches the page chunk ids, audits it immediately against those chunks, and appends it without changing earlier records.',
+      'THE PAGE SIZE IS YOURS, AND IT IS NOT FREE. Ask for as many chunks as you want to see at once - a wider page is how a connection across a whole section gets noticed, and nothing here prefers small pages. What scales with the page is the OBLIGATION: the record must account for every chunk on it and land every measurement in it, both enforced. A large page buys a wider view and owes a longer record. If later text corrects an earlier record, say "Correction to record N" in a new record; never edit the old one. A page with no new content still gets a record using unchanged: true and unchangedReason, with no limit on consecutive empty records. At most one delivered batch may be outstanding. Re-reading a chunk already delivered is free and never counts against the gate.',
       'READ DEPTH. Evidence submitted with read_depth paper_reviewed or cross_paper is stored at section_read unless BOTH pagination.coverageComplete is true for a full-text reading AND its macro summary has been recorded. A question-driven reading may append a macro summary at 100% coverage after resetting its expert, but its Evidence remains capped at section_read.',
       '',
-      'THIS IS NOT THE TOOL FOR ANSWERING A QUESTION. It reads one paper end to end, on explicit user request, and takes the library\'s single reading slot while it does. To answer a question, use hybrid_search then search_fulltext, and record what you actually read with wiki_update_reading_note and readChunkIds — that path takes no slot, works across several papers at once, and feeds this same note.',
-      '',
+      'IT CONTINUES WHATEVER QUESTIONS ALREADY READ. If the user has been asking about this paper, part of it is already read and it already has a reading note. This does not start over: the same session, chunk ledger and append-only records carry forward, and paging walks the chunks NOBODY HAS READ rather than the paper front to back. A page can therefore be discontinuous — 41-44 then 46-60, with 45 left out because a question already read it. Read pagination.deliveredChunkIndexes, not the range, when you attribute an excerpt to a chunk; pagination.skippedAlreadyReadChunkIndexes names what was left out, and its content is already captured in an immutable reading record. To see a skipped chunk again, ask for it by offset. carriedOverFromQuestionAnswering says how much was inherited. The one thing still asked for is a deliberate expert profile: the reader a question assembled on the fly is provisional, and a whole-paper macro summary deserves a considered one.',
       'RESUMING. The reading note lives as a Markdown attachment on the Zotero item, so a restart, a dropped connection or a context compaction loses nothing. Call this tool without a cursor (or wiki_get_reading_note) and it hands back the note, the expert and the chunk to resume at.',
-      '',
       'includeAllChunks has been removed. It returned an entire paper in one response and made long papers unreadable; calling with it now returns an error explaining the paged replacement.'
     ].join('\n'),
     inputSchema: {
@@ -1781,8 +1789,13 @@ export function buildToolCatalog(): ToolDefinition[] {
     description: [
       'Append to a paper\'s persistent reading note. Each ordinary call adds ONE immutable reading record for this turn; once every chunk is covered, one final call appends the whole-paper macro summary after all records. This is used both while paging with wiki_build_from_paper and after answering from retrieved passages.',
       '',
-      'WHAT A RECORD IS. It DISTILS the argument the delivered chunks carry; it does not COMPRESS them. Summarising is the wrong verb and produces the wrong document: what the record owes is the core reasoning, the key data and the conclusions this turn actually established. A record that reads like an abstract has failed, because the abstract is what the paper already came with. Neither length nor brevity is the target - the test is whether someone holding only this record could reconstruct what these chunks said.',
+      'A QUESTION-DRIVEN RECORD IS NOT HELD TO THOSE SIX SECTIONS, and writing them anyway buys nothing. The six slots answer for a whole page of twenty chunks; a question reads two or three passages for one purpose, and filling 方法 or 概念与术语 out of three passages produces sentences written to occupy a heading. Do NOT emit the headings when the reading was question-driven. What IS checked, and is checked identically in both modes, is the part that carries the value: every chunk you listed in readChunkIds is named somewhere in the record, every sentence carries its own chunk citation, at least 80% of the measured values in those chunks land with their units and conditions, and every sentence is audited against the chunk it cites. Write connected prose that satisfies those four and stop; a question-driven record that does is complete, however short it is.',
       '',
+      'ORDINARY CALLS: send readingRecord containing only what this turn established. The server appends and numbers it; earlier prose and records are immutable. If new text corrects an old record, append "Correction to record N" with the new chunk citation. Never resubmit existing content.',
+      '',
+      'AFTER ANSWERING A QUESTION FROM A PAPER, call this once for EVERY paper whose passages you genuinely read and used. Send itemKey, readChunkIds, readingRecord, and the domain and expertRole used by search_fulltext. Three papers read means three calls. Retrieval is not reading: do not list passages merely returned or skimmed past.',
+    ].join('\n'),
+    doctrine: [
       'THE RECORD TEMPLATE IS THE FULL-TEXT SHAPE, AND IT IS ENFORCED ONLY THERE. Write in Chinese, keeping terms, formulae, numbers and units in their original form. Six sections, each a line of its own reading `**标签**`, each non-empty:',
       '  **阅读总结** - 本批读到的内容，通俗、连贯地讲清楚。这是唯一允许压缩的地方。句末注明本批范围，例如「（chunk 0-7）」：这一栏按定义是跨 chunk 的概括，没有引用会被逐块引用检查拦下。',
       '  **方法** - 本批涉及的做法：实验流程、设备、软件、表征手段，以及理论推导路径与模型、判据的建立方式——理论文章的推导过程同样是方法。参数落值、带单位、带条件；工艺参数表整表转写。写成连贯段落。',
@@ -1791,44 +1804,24 @@ export function buildToolCatalog(): ToolDefinition[] {
       '  **本批覆盖** - 逐 chunk 点名只在这里做，按内容分组，三五行：「chunk 56-59 建立形核过冷度模型；chunk 60-63 推导生长速率与稳定性判据；chunk 3、16 为元数据与装置示意图，无独立数据」。',
       '  **存疑与未交代** - 本批说不清楚、看似矛盾、或被推迟到后文的东西。没有写「无」。三种情形必须写：同一个量出现两个不同的数（两个都记，各自注明出处，不要替论文挑一个），表格里量级明显反常的值（照抄原值并注明可疑），论文自己说「后文讨论」的。',
       'The first section exists so that the urge to be brief has somewhere legitimate to go; without it that urge spends itself on the sections holding the data, which is how a chunk stating "a decrease by 63% from 273 µm to 101 µm at 100 MPa" becomes "grains were refined with increasing pressure".',
-      '',
-      'A QUESTION-DRIVEN RECORD IS NOT HELD TO THOSE SIX SECTIONS, and writing them anyway buys nothing. The six slots answer for a whole page of twenty chunks; a question reads two or three passages for one purpose, and filling 方法 or 概念与术语 out of three passages produces sentences written to occupy a heading. Do NOT emit the headings when the reading was question-driven. What IS checked, and is checked identically in both modes, is the part that carries the value: every chunk you listed in readChunkIds is named somewhere in the record, every sentence carries its own chunk citation, at least 80% of the measured values in those chunks land with their units and conditions, and every sentence is audited against the chunk it cites. Write connected prose that satisfies those four and stop; a question-driven record that does is complete, however short it is.',
-      '',
       'A SENTENCE MAY CHAIN SEVERAL CHUNKS, as long as each clause carries its own citation: 加压抬高了相变自由能差（chunk 46），因而形核激活能随之下降（chunk 53）。 That is a chain of attributed facts and is NOT a fusion. Only citations piled behind one assertion - "A and B jointly cause C (chunk 46, chunk 53)" - are, because neither chunk states that on its own. This is what makes connected prose affordable; writing one fact per sentence was never the requirement, only the cheapest way to avoid a rule that no longer applies.',
-      '',
       'WRITE PARAGRAPHS - NOT LINES, AND NOT NUMBERED POINTS. BOTH ARE CHECKED. A narrative slot refuses `1.` `2.` and `- ` outright: an enumeration hands the reader a set of facts and leaves the relations between them to be guessed, and those relations are the only thing this slot adds to the paper. Every sentence still carries its own chunk citation; what changes is that related sentences go in the SAME paragraph, joined by cause and contrast - which one is the mechanism behind another, which are the same phenomenon measured under different conditions, which one bounds the one before it. A section that comes back as one fact per line is refused as a list. Keeping a citation on every sentence is also what makes a paragraph safe: a sentence with no citation of its own inherits the whole block and is then read as a cross-chunk assertion. So it is one citation per SENTENCE and several sentences per PARAGRAPH, never one sentence per line. Pure data may go in a Markdown table, which is not prose and is not held to this.',
-      '',
-      'COVER EVERY DELIVERED CHUNK - THIS IS CHECKED, AND IT IS CHECKED IN 本批覆盖. That slot exists so the accounting has somewhere of its own to live: when it did not, the first content slot turned into a chunk index - one line per delivered chunk, in ascending order, each saying what that chunk was ABOUT while the findings slot stayed four lines long. Group the chunks by what they contain, three to five lines, and leave the other slots free to be prose. Consecutive chunks may share one citation, written "（chunk 44-47）" or "（chunk 44、45、46）". A chunk that genuinely holds nothing is still named with what it held, in words that say so - 「chunk 44-47 是公式推导的中间步骤，无独立数据」 - because a sentence carrying 无独立数据 / 无新内容 / 与前文重复 is read as accounting rather than as a finding, and the macro summary is then not obliged to repeat it. A record that accounts for eight of the twenty chunks it was handed is refused by chunk number.',
-      '',
       'PAGE SIZE IS YOURS TO CHOOSE, AND IT IS NOT FREE. There is no small-page rule: ask for as many chunks as you want to see at once, because seeing more at once is how connections across a section get noticed. What scales with the page is the OBLIGATION - twenty chunks means twenty chunks to account for and every measurement in all twenty to land. Take a large page and owe a long record; take a small page and owe a short one. Choose the trade deliberately rather than always asking for the maximum.',
-      '',
-      'TRANSCRIBE VALUES, NEVER CHARACTERISE THEM - THIS IS CHECKED. The server extracts every measured value from the batch\'s chunks and refuses a record that landed fewer than 80% of them, listing the missing ones by chunk number. Every number the delivered chunks carry belongs in the record with its unit AND the condition it was measured under: alloy composition in wt%, temperature, pressure, power, heating and withdrawal rates, hold times, grain size, strength, elongation, hardness, volume fractions. A composition table, a process-parameter table or a property table is transcribed in full, not described. Placeholder wording standing in for a value that is present in the source - "selected pressures", "certain temperatures", "various conditions", "across a range of powers" - deletes the only part of the sentence the reader needed. Write "0.1-125 MPa", not "selected pressures"; write "1750 +- 7.4 K at 21.6 kW", not "under the stated power".',
-      '',
       'CARRYING THE CONDITION IS THE CHEAP PATH, NOT THE EXPENSIVE ONE. The audit does not flag numbers; it flags a number whose conditions were dropped. A value written together with the condition it was measured under is not flagged at all, so a dense, fully conditioned record passes more easily than a vague one. Writing around a value to stay safe is the one strategy that fails both the audit and this note.',
-      '',
-      'ORDINARY CALLS: send readingRecord containing only what this turn established. The server appends and numbers it; earlier prose and records are immutable. If new text corrects an old record, append "Correction to record N" with the new chunk citation. Never resubmit existing content.',
-      '',
-      'AFTER ANSWERING A QUESTION FROM A PAPER, call this once for EVERY paper whose passages you genuinely read and used. Send itemKey, readChunkIds, readingRecord, and the domain and expertRole used by search_fulltext. Three papers read means three calls. Retrieval is not reading: do not list passages merely returned or skimmed past.',
-      '',
-      'NO-NEW-CONTENT RECORDS: use unchanged: true with unchangedReason to record references, acknowledgements or repeated material. This may be used any number of consecutive times. The server still appends a numbered record with the chunks read and "no new content"; nothing needs to be invented.',
-      '',
-      'CITE CHUNKS IN THE RECORD TEXT. Every factual paragraph or bullet names the chunk carrying it, for example "melt-pool depth reaches 1.2 mm at a 240 mm/min scan speed (chunk 42)". The citation is a pointer, not a substitute for the content: a block that names a chunk and then says only what the chunk was ABOUT - "tensile properties were measured (chunk 181)", "fracture morphologies were investigated (chunk 41)" - has recorded a table of contents, not a reading. Say what the chunk FOUND. For a question-driven call, every citation must belong to readChunkIds from this turn. Each newly submitted record is audited immediately against those chunks before it is written.',
-      '',
-      'KEEP THE PAPER\'S STRENGTH. Do not turn may into will, difficult into impossible, preliminary into complete, or a conditional number into an unconditional one. A sentence citing several chunks is allowed only when each cited chunk carries the sentence on its own. If the audit flags a sentence, either weaken it to the source\'s wording or provide synthesisAudit with verbatim support from every cited chunk.',
-      '',
-      'THE WHOLE-PAPER SUMMARY (written under the heading 全文总结): once coverage reaches 100%, call with finalSynthesis: true and macroSummary. WRITE IT FROM THE WHOLE PAPER AT ONCE, not from the page in front of you - that vantage point is the requirement, and it used to be smuggled into the heading itself, which only made the summary float upwards until no detail survived. The last page of the paper hands the whole note back to you with every reading record in it - read them together first and work out how they RELATE: which record explains another\'s mechanism, which corrects an earlier judgement, which are the same phenomenon measured under different conditions. That relating is the whole job; a summary that does not do it has nothing to add.',
-      '',
       'THE MACRO SUMMARY TEMPLATE IS THE FULL-TEXT SHAPE AND IS ENFORCED ONLY THERE — a question-driven summary is held to the citation and audit rules alone, so do not emit these headings for one. Seven sections, each `## 标签`, each non-empty, in Chinese: **本篇讲了什么**（3-5 句通俗话，每句引用它依据的 chunk，跨多处可用范围如「（chunk 88-89）」）; **研究对象与材料**（理解结论所需的对象与材料特征）; **核心方法**（研究设计、关键工艺路线与分析思路）; **主要结果**（核心发现、趋势与比较）; **机理解释**（论文自己的因果链，按它自己的强度）; **结论**（凝练核心结论）; **边界与局限**（适用范围、缺的对照、作者自陈不足）.',
-      '',
-      'IT MUST REACH EVERY RECORD, AND THAT IS CHECKED BY CITATION, NEVER BY WORDING: each substantive reading record needs at least one of its chunks cited somewhere in the summary, so a stretch of the paper somebody read cannot drop out of the whole-paper view. Saying it in completely different words always passes - which is what the next rule asks for, so the two never pull against each other. A record that recorded nothing is not asked for.',
-      '',
-      'IT IS NOT A CONCATENATION OF THE RECORDS - a summary more than 60% verbatim from them is refused. Extract the core content and core methods instead. Do not reproduce full parameter tables or preserve numbers mechanically; keep a value only when it is necessary to express a core finding or distinguish an important condition. The complete details remain in the records directly above it. Re-reading any chunk while you write is free.',
-      '',
       'CORE SYNTHESIS IS SELECTIVE: values are optional, not a coverage target. Keep one when the core conclusion depends on its magnitude or when an important condition would otherwise be ambiguous; leave supporting measurements and parameter tables in the immutable records. The summary is still audited sentence by sentence against cited chunks before being written. Both full-text and question-driven readings may do this; a question-driven reading must first replace its provisional expert from metadata and abstract, and still cannot claim paper_reviewed depth.',
-      '',
       'AFTER THE MACRO SUMMARY, the response places every reading record beside every Wiki Claim whose Evidence cites this paper. Run wiki_record_concepts final true, then wiki_prepare_update with one claimVerdict per listed Claim. An overstated verdict requires UPDATE_CLAIM with the reviewed replacement; a contradiction requires MARK_CONFLICT and becomes disputed for human review.',
+      'ORDER IS FIXED: note first, Wiki second. The note is reading memory, never Evidence. Claims still need excerpts quoted from the paper\'s own chunks, and wiki_commit refuses an excerpt from a chunk that was never recorded as read. A paper whose newest question-reading record has not reached the Wiki refuses another question-reading turn.',
       '',
-      'ORDER IS FIXED: note first, Wiki second. The note is reading memory, never Evidence. Claims still need excerpts quoted from the paper\'s own chunks, and wiki_commit refuses an excerpt from a chunk that was never recorded as read. A paper whose newest question-reading record has not reached the Wiki refuses another question-reading turn.'
+      'WHAT A RECORD IS. It DISTILS the argument the delivered chunks carry; it does not COMPRESS them. Summarising is the wrong verb and produces the wrong document: what the record owes is the core reasoning, the key data and the conclusions this turn actually established. A record that reads like an abstract has failed, because the abstract is what the paper already came with. Neither length nor brevity is the target - the test is whether someone holding only this record could reconstruct what these chunks said.',
+      'COVER EVERY DELIVERED CHUNK - THIS IS CHECKED, AND IT IS CHECKED IN 本批覆盖. That slot exists so the accounting has somewhere of its own to live: when it did not, the first content slot turned into a chunk index - one line per delivered chunk, in ascending order, each saying what that chunk was ABOUT while the findings slot stayed four lines long. Group the chunks by what they contain, three to five lines, and leave the other slots free to be prose. Consecutive chunks may share one citation, written "（chunk 44-47）" or "（chunk 44、45、46）". A chunk that genuinely holds nothing is still named with what it held, in words that say so - 「chunk 44-47 是公式推导的中间步骤，无独立数据」 - because a sentence carrying 无独立数据 / 无新内容 / 与前文重复 is read as accounting rather than as a finding, and the macro summary is then not obliged to repeat it. A record that accounts for eight of the twenty chunks it was handed is refused by chunk number.',
+      'TRANSCRIBE VALUES, NEVER CHARACTERISE THEM - THIS IS CHECKED. The server extracts every measured value from the batch\'s chunks and refuses a record that landed fewer than 80% of them, listing the missing ones by chunk number. Every number the delivered chunks carry belongs in the record with its unit AND the condition it was measured under: alloy composition in wt%, temperature, pressure, power, heating and withdrawal rates, hold times, grain size, strength, elongation, hardness, volume fractions. A composition table, a process-parameter table or a property table is transcribed in full, not described. Placeholder wording standing in for a value that is present in the source - "selected pressures", "certain temperatures", "various conditions", "across a range of powers" - deletes the only part of the sentence the reader needed. Write "0.1-125 MPa", not "selected pressures"; write "1750 +- 7.4 K at 21.6 kW", not "under the stated power".',
+      'NO-NEW-CONTENT RECORDS: use unchanged: true with unchangedReason to record references, acknowledgements or repeated material. This may be used any number of consecutive times. The server still appends a numbered record with the chunks read and "no new content"; nothing needs to be invented.',
+      'CITE CHUNKS IN THE RECORD TEXT. Every factual paragraph or bullet names the chunk carrying it, for example "melt-pool depth reaches 1.2 mm at a 240 mm/min scan speed (chunk 42)". The citation is a pointer, not a substitute for the content: a block that names a chunk and then says only what the chunk was ABOUT - "tensile properties were measured (chunk 181)", "fracture morphologies were investigated (chunk 41)" - has recorded a table of contents, not a reading. Say what the chunk FOUND. For a question-driven call, every citation must belong to readChunkIds from this turn. Each newly submitted record is audited immediately against those chunks before it is written.',
+      'KEEP THE PAPER\'S STRENGTH. Do not turn may into will, difficult into impossible, preliminary into complete, or a conditional number into an unconditional one. A sentence citing several chunks is allowed only when each cited chunk carries the sentence on its own. If the audit flags a sentence, either weaken it to the source\'s wording or provide synthesisAudit with verbatim support from every cited chunk.',
+      'THE WHOLE-PAPER SUMMARY (written under the heading 全文总结): once coverage reaches 100%, call with finalSynthesis: true and macroSummary. WRITE IT FROM THE WHOLE PAPER AT ONCE, not from the page in front of you - that vantage point is the requirement, and it used to be smuggled into the heading itself, which only made the summary float upwards until no detail survived. The last page of the paper hands the whole note back to you with every reading record in it - read them together first and work out how they RELATE: which record explains another\'s mechanism, which corrects an earlier judgement, which are the same phenomenon measured under different conditions. That relating is the whole job; a summary that does not do it has nothing to add.',
+      'IT MUST REACH EVERY RECORD, AND THAT IS CHECKED BY CITATION, NEVER BY WORDING: each substantive reading record needs at least one of its chunks cited somewhere in the summary, so a stretch of the paper somebody read cannot drop out of the whole-paper view. Saying it in completely different words always passes - which is what the next rule asks for, so the two never pull against each other. A record that recorded nothing is not asked for.',
+      'IT IS NOT A CONCATENATION OF THE RECORDS - a summary more than 60% verbatim from them is refused. Extract the core content and core methods instead. Do not reproduce full parameter tables or preserve numbers mechanically; keep a value only when it is necessary to express a core finding or distinguish an important condition. The complete details remain in the records directly above it. Re-reading any chunk while you write is free.',
     ].join('\n'),
     inputSchema: {
       type: 'object',
@@ -2128,6 +2121,77 @@ export function buildToolCatalog(): ToolDefinition[] {
  * The catalog after the feature and Zotero-write gates, which is exactly what
  * `tools/list` serves and exactly what `/capabilities` advertises.
  */
+/** The URI a tool's method is served under. */
+export function toolDoctrineUri(toolName: string): string {
+  return `zotero://tool/${toolName}`;
+}
+
+/**
+ * One line, appended to the description of every tool that has a method.
+ *
+ * It has to be an instruction rather than a note. A pointer the model reads as
+ * optional is a pointer to text nobody fetches, and the arguments these tools
+ * take are not guessable from the schema alone: `hybrid_search` without its
+ * keyword procedure still runs, and returns a materially worse ranking while
+ * reporting `keywordSource: "fallback"`.
+ */
+export function doctrinePointer(toolName: string): string {
+  return (
+    `METHOD: read the resource ${toolDoctrineUri(toolName)} before your first ` +
+    `${toolName} call in a session. It carries the procedure for writing this ` +
+    `tool's arguments and for reading its response, and this tool is materially ` +
+    `worse without it. Once read it holds for the whole session — do not fetch ` +
+    `it again.`
+  );
+}
+
+/**
+ * What `tools/list` serves: the MCP tool contract and nothing else.
+ *
+ * `category` is ours, for /capabilities grouping, and `doctrine` is fetched
+ * separately; neither belongs in a payload repeated on every turn.
+ */
+export function projectToolsForList(
+  tools: readonly ToolDefinition[],
+): Array<{ name: string; description: string; inputSchema: Record<string, any> }> {
+  return tools.map((tool) => ({
+    name: tool.name,
+    description: tool.doctrine
+      ? `${tool.description}\n\n${doctrinePointer(tool.name)}`
+      : tool.description,
+    inputSchema: tool.inputSchema,
+  }));
+}
+
+/** The MCP resource descriptors for every tool method in this build. */
+export function projectDoctrineResources(
+  tools: readonly ToolDefinition[],
+): Array<{ uri: string; name: string; description: string; mimeType: string }> {
+  return tools
+    .filter((tool) => tool.doctrine)
+    .map((tool) => ({
+      uri: toolDoctrineUri(tool.name),
+      name: `${tool.name} — method`,
+      description: `How to write ${tool.name}'s arguments and read its response.`,
+      mimeType: "text/markdown",
+    }));
+}
+
+/**
+ * The full text for one tool: contract first, then method.
+ *
+ * Served verbatim, so a caller that fetches this is reading exactly what the
+ * single description used to say.
+ */
+export function renderToolDoctrine(
+  tools: readonly ToolDefinition[],
+  uri: string,
+): string | null {
+  const tool = tools.find((entry) => toolDoctrineUri(entry.name) === uri);
+  if (!tool?.doctrine) return null;
+  return `# ${tool.name}\n\n${tool.description}\n\n${tool.doctrine}`;
+}
+
 export function filterToolCatalog(options: {
   wikiEnabled?: boolean;
   writeEnabled: boolean;

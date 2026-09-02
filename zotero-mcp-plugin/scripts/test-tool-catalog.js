@@ -26,6 +26,10 @@ register("./ts-ext-hooks.mjs", import.meta.url);
 const {
   buildToolCatalog,
   filterToolCatalog,
+  projectDoctrineResources,
+  projectToolsForList,
+  renderToolDoctrine,
+  toolDoctrineUri,
   REMOVED_TOOL_REPLACEMENTS,
   WIKI_TOOL_NAMES,
 } = await import("../src/modules/toolCatalog.ts");
@@ -45,6 +49,16 @@ const MUTATING = new Set([
   "wiki_set_reading_expert",
   "wiki_update_reading_note",
 ]);
+
+/**
+ * Everything a caller can read about a tool.
+ *
+ * `description` is served on every turn by tools/list; `doctrine` is served
+ * from zotero://tool/<name> on demand. Both reach the model, so an assertion
+ * about what a tool SAYS belongs here. Only an assertion about per-turn COST
+ * should look at `description` alone.
+ */
+const served = (tool) => `${tool.description}\n${tool.doctrine ?? ""}`;
 
 const tests = [];
 function test(name, fn) {
@@ -178,9 +192,9 @@ test("reading-note updates advertise append-only inputs", () => {
   assert.equal(properties.readingRecord.type, "string");
   assert.equal(properties.macroSummary.type, "string");
   assert.equal(properties.markdown.deprecated, true);
-  assert.match(tool.description, /record is audited immediately/iu);
-  assert.match(tool.description, /appends? .*record/isu);
-  assert.doesNotMatch(tool.description, /rewrite the whole|whole note rewritten/iu);
+  assert.match(served(tool), /record is audited immediately/iu);
+  assert.match(served(tool), /appends? .*record/isu);
+  assert.doesNotMatch(served(tool), /rewrite the whole|whole note rewritten/iu);
 });
 
 test("get_item_details advertises no content-bearing parameter", () => {
@@ -366,12 +380,12 @@ test("the reading-note templates are advertised as the full-text shape", () => {
 
   // The per-turn record template.
   assert.match(
-    note.description,
+    served(note),
     /THE RECORD TEMPLATE IS THE FULL-TEXT SHAPE, AND IT IS ENFORCED ONLY THERE/,
     "the record template must be advertised as full-text only",
   );
   assert.match(
-    note.description,
+    served(note),
     /A QUESTION-DRIVEN RECORD IS NOT HELD TO THOSE SIX SECTIONS/,
     "the question-driven exemption must be stated, not left to be discovered",
   );
@@ -385,19 +399,19 @@ test("the reading-note templates are advertised as the full-text shape", () => {
     "存疑与未交代",
   ]) {
     assert.ok(
-      note.description.includes(label),
+      served(note).includes(label),
       `the full-text record template must still name ${label}`,
     );
   }
   // ...and the count claimed matches the count listed. It said "Five".
   assert.ok(
-    !/Five sections, each a line of its own/.test(note.description),
+    !/Five sections, each a line of its own/.test(served(note)),
     "the record template lists six sections and must not claim five",
   );
 
   // The whole-paper summary template, under the same guard.
   assert.match(
-    note.description,
+    served(note),
     /THE MACRO SUMMARY TEMPLATE IS THE FULL-TEXT SHAPE AND IS ENFORCED ONLY THERE/,
     "the macro summary template must be advertised as full-text only",
   );
@@ -406,7 +420,7 @@ test("the reading-note templates are advertised as the full-text shape", () => {
   // they are the quality floor the exemption is safe to sit on.
   for (const promise of [/readChunkIds/, /80%/, /citation/i, /audit/i]) {
     assert.match(
-      note.description,
+      served(note),
       promise,
       `the mode-independent guarantee ${promise} must stay advertised`,
     );
@@ -422,19 +436,132 @@ test("wiki_commit says a question is charged only for what it declared", () => {
   // passages that were never on the ledger.
   assert.ok(
     !/a full-text page exactly as much as a passage a question retrieved/.test(
-      commit.description,
+      served(commit),
     ),
     "wiki_commit must not claim a retrieved passage owes what a delivered one does",
   );
   assert.match(
-    commit.description,
+    served(commit),
     /charges every chunk it DELIVERED/,
     "the full-text charging rule must be stated",
   );
   assert.match(
-    commit.description,
+    served(commit),
     /charges only the chunks you DECLARED in readChunkIds/,
     "the question charging rule must be stated",
+  );
+});
+
+/**
+ * The per-turn payload is the thing being protected here.
+ *
+ * `tools/list` is re-sent on every turn of every conversation. It used to carry
+ * every tool's METHOD as well as its contract - the query-construction
+ * procedure, the worked examples, the six-section reading-note template - about
+ * 42k tokens of it, most of it teaching, and teaching only has to be read once.
+ * Splitting `doctrine` out and serving it from zotero://tool/<name> is what
+ * bought that back. These tests keep it bought.
+ */
+test("tools/list carries the contract only, never the method", () => {
+  const listed = projectToolsForList(buildToolCatalog());
+  for (const tool of listed) {
+    assert.deepEqual(
+      Object.keys(tool).sort(),
+      ["description", "inputSchema", "name"],
+      `${tool.name} leaked a field into the per-turn payload`,
+    );
+  }
+  // Whatever moved out must really be out: no tool's list entry may still
+  // contain a line that now lives in its doctrine.
+  const byName = new Map(buildToolCatalog().map((t) => [t.name, t]));
+  for (const entry of listed) {
+    const doctrine = byName.get(entry.name).doctrine;
+    if (!doctrine) continue;
+    const longest = doctrine
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 80)
+      .sort((a, b) => b.length - a.length)[0];
+    if (!longest) continue;
+    assert.ok(
+      !entry.description.includes(longest),
+      `${entry.name} still ships a doctrine paragraph in tools/list`,
+    );
+  }
+});
+
+test("every tool with a method advertises where to read it", () => {
+  const byName = new Map(buildToolCatalog().map((t) => [t.name, t]));
+  for (const entry of projectToolsForList(buildToolCatalog())) {
+    const tool = byName.get(entry.name);
+    if (!tool.doctrine) {
+      assert.doesNotMatch(
+        entry.description,
+        /METHOD: read the resource/,
+        `${entry.name} points at a method it does not have`,
+      );
+      continue;
+    }
+    // A method nobody is told to read is a method nobody reads.
+    assert.ok(
+      entry.description.includes(toolDoctrineUri(entry.name)),
+      `${entry.name} has a method but never names its URI`,
+    );
+  }
+});
+
+test("the method resources round-trip, and are gated like the tools", () => {
+  const all = buildToolCatalog();
+  const resources = projectDoctrineResources(all);
+  assert.ok(resources.length > 0, "no tool methods are served at all");
+
+  for (const resource of resources) {
+    const text = renderToolDoctrine(all, resource.uri);
+    assert.ok(text, `${resource.uri} lists but does not resolve`);
+    const tool = all.find((t) => toolDoctrineUri(t.name) === resource.uri);
+    // Served verbatim: a caller reading this gets exactly what the single
+    // description used to say, contract first and then method.
+    assert.ok(text.includes(tool.description), `${resource.uri} dropped the contract`);
+    assert.ok(text.includes(tool.doctrine), `${resource.uri} dropped the method`);
+  }
+
+  assert.equal(renderToolDoctrine(all, "zotero://tool/nope"), null);
+  assert.equal(renderToolDoctrine(all, ""), null);
+
+  // A method must never be offered for a tool this build refuses to run: with
+  // the Wiki off, resources/list may not advertise a Wiki procedure.
+  const withoutWiki = filterToolCatalog({
+    wikiEnabled: false,
+    writeEnabled: true,
+    mutatingToolNames: MUTATING,
+  });
+  for (const resource of projectDoctrineResources(withoutWiki)) {
+    assert.ok(
+      !resource.uri.includes("zotero://tool/wiki_"),
+      `${resource.uri} survived the Wiki being disabled`,
+    );
+  }
+});
+
+test("the per-turn tool payload stays inside its budget", () => {
+  // Measured in characters, because a token count depends on a tokenizer this
+  // repo does not ship. ~3.5 chars/token is the ratio for this mixed
+  // English/Chinese text, so the ceiling below is roughly 36k tokens.
+  const CEILING = 126_000;
+  const listed = filterToolCatalog({
+    wikiEnabled: true,
+    writeEnabled: true,
+    mutatingToolNames: MUTATING,
+  });
+  const size = JSON.stringify(projectToolsForList(listed)).length;
+  assert.ok(
+    size <= CEILING,
+    `tools/list is ${size} chars, over the ${CEILING} ceiling. This payload is ` +
+      `re-sent on EVERY turn, so growth here is multiplied by the length of ` +
+      `every conversation. Before raising the ceiling, check whether the new ` +
+      `text is a CONTRACT (what the tool does, how to read its response) or a ` +
+      `METHOD (how to do it well) - a method belongs in \`doctrine\`, which is ` +
+      `served on demand from zotero://tool/<name> and costs nothing until read.`,
   );
 });
 
