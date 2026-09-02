@@ -28,7 +28,18 @@ import { register } from "node:module";
 register("./ts-ext-hooks.mjs", import.meta.url);
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const read = (p) => fs.readFileSync(path.join(rootDir, p), "utf8");
+/**
+ * Source text, with line endings normalised to LF.
+ *
+ * These blocks assert on the SHAPE of the source, and several of them do it
+ * with plain substring searches containing "\n". The repository stores LF and
+ * `core.autocrlf` is on, so a Windows working copy hands back CRLF and every
+ * one of those searches silently finds nothing - which reads as "the method is
+ * gone" rather than "this checkout uses different line endings". Normalising
+ * here keeps the assertions about the code instead of about the checkout.
+ */
+const read = (p) =>
+  fs.readFileSync(path.join(rootDir, p), "utf8").replace(/\r\n/g, "\n");
 
 const prefs = new Map();
 globalThis.Zotero = {
@@ -460,9 +471,14 @@ assert.match(
   serviceSource,
   /const mustClearStaleBody =\s*\r?\n?\s*bodyState === 'metadata-only' && storedBodyState !== 'metadata-only';/,
 );
+// Written to allow FURTHER conjuncts - the guard has since grown a
+// `!chunkRulesChanged` term, and pinning the exact condition list made this
+// fail for a reason that had nothing to do with what it is guarding. What has
+// to hold is that `mustClearStaleBody` is one of the conditions on the
+// shortcut, so a stale body can never survive it.
 assert.match(
   serviceSource,
-  /if \(!needsIndex && !mustClearStaleBody\) \{/,
+  /if \(!needsIndex && !mustClearStaleBody(?: && ![A-Za-z]+)*\) \{/,
   "the shortcut must be skipped when stale body vectors could survive it",
 );
 // ...and the long way round really does clear them, atomically.

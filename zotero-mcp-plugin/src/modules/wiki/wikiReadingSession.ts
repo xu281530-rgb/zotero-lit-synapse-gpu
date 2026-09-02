@@ -77,6 +77,7 @@ export const WIKI_READING_STATES = [
   "reading",
   "prepared",
   "committed",
+  "answered",
   "skipped",
   "failed",
 ] as const;
@@ -116,7 +117,7 @@ export const WIKI_OPEN_READING_STATES: readonly WikiReadingState[] = [
 
 export type WikiReadingOutcome = Extract<
   WikiReadingState,
-  "committed" | "skipped" | "failed"
+  "committed" | "answered" | "skipped" | "failed"
 >;
 
 /**
@@ -126,6 +127,16 @@ export type WikiReadingOutcome = Extract<
  * whose paper was fully delivered, so it cannot be asserted from outside - that
  * keeps "committed means the whole paper was read" true of the service, not
  * merely of the MCP handler that happens to validate the argument today.
+ *
+ * `answered` is not one of them either, for the same reason from the other
+ * end. It means "a round of questions read this paper, and everything it read
+ * has been accounted for", which is a fact about the chunk ledger that the
+ * commit checks; a caller asserting it could close a session that still owed
+ * the Wiki several passages. It is the honest ending a `qa` session was
+ * missing: `committed` overstates what a question did - it never delivers a
+ * whole paper - and `skipped` says the reading was abandoned when it was
+ * actually used. Six sessions in a real library stayed open forever because
+ * neither word fit.
  *
  * `failed` means the paper cannot be read at all - a missing attachment, a
  * corrupt index, a user giving up on it. It is NOT for a transient paging,
@@ -429,18 +440,55 @@ export class WikiReadingSessions {
     return rows[0] ? mapSession(rows[0]) : null;
   }
 
-  /** The open session for one paper, in whichever mode it is reading. */
+  /**
+   * The session for one paper that is still live: open, or `answered`.
+   *
+   * `answered` is included, and that is the whole reason it can exist as a
+   * state. It does not mean "this paper is finished" - a question-driven
+   * reading of a paper is open-ended by nature - it means "everything this
+   * reading has read so far is accounted for in the Wiki", which a commit can
+   * establish and the next question immediately un-establishes.
+   *
+   * Excluding it here would make the close destructive rather than a
+   * bookmark. The session owns three things nothing else holds: which chunks
+   * have been DELIVERED, which the note's citations are checked against - so a
+   * note citing chunk 7 would be refused by the very reading that wrote it -
+   * the integration ledger its record count is reconciled against, and the
+   * promotion path, where `wiki_build_from_paper` continues what the questions
+   * read instead of starting the paper over.
+   *
+   * What the closed state DOES change is everything scoped by
+   * `OPEN_STATE_SQL`: the full-text slot, `listOpen`, `listPendingWiki` and
+   * the one-open-session-per-paper index all see it as finished, which is what
+   * makes "which papers did this round of questions consult" answerable at
+   * all.
+   *
+   * Every other terminal state stays terminal. `committed` means the paper was
+   * delivered in full; `skipped` and `failed` were deliberate abandonments.
+   * Re-entering any of those would reopen a decision somebody made.
+   */
   async openForItem(
     libraryID: number,
     itemKey: string,
   ): Promise<WikiReadingSessionRecord | null> {
     const rows = await this.db.queryAsync(
       `SELECT * FROM wiki_reading_sessions
-       WHERE library_id = ? AND item_key = ? AND ${OPEN_STATE_SQL}
+       WHERE library_id = ? AND item_key = ?
+         AND (${OPEN_STATE_SQL} OR state = 'answered')
        ORDER BY session_id DESC LIMIT 1`,
       [libraryID, itemKey],
     );
     return rows[0] ? mapSession(rows[0]) : null;
+  }
+
+  /** Bring an `answered` session back to `reading` for a further question. */
+  async reopenAnswered(sessionId: number): Promise<void> {
+    await this.db.queryAsync(
+      `UPDATE wiki_reading_sessions
+          SET state = 'reading', closed_at = NULL, updated_at = ?
+        WHERE session_id = ? AND state = 'answered'`,
+      [Date.now(), sessionId],
+    );
   }
 
   /** Every open session in the library, both modes. Newest first. */
@@ -490,6 +538,40 @@ export class WikiReadingSessions {
     return pending;
   }
 
+  /**
+   * Open question-driven sessions that owe the Wiki nothing.
+   *
+   * The complement of `listPendingWiki`, and the half that had nowhere to go.
+   * A round of questions leaves a `qa` session open per paper it consulted;
+   * the ones that still owe passages are reported and block further reading of
+   * that paper, and the ones that owe nothing used to just... stay open. Six
+   * of them, in a real library, with their notes written and their chunks read
+   * and no record anywhere that those papers had been consulted at all - two
+   * of them produced no Evidence, so they appeared in no ledger of any kind.
+   *
+   * `fulltext` is excluded deliberately. A full-text session ends by finishing
+   * the paper or by being closed on purpose; auto-closing one because a commit
+   * happened to settle its outstanding chunks would release the library's
+   * reading slot mid-paper, which is the batch-run failure the slot exists to
+   * prevent.
+   */
+  async listSettledQuestionSessions(
+    libraryID: number,
+  ): Promise<WikiReadingSessionRecord[]> {
+    const rows = await this.db.queryAsync(
+      `SELECT s.* FROM wiki_reading_sessions s
+       WHERE s.library_id = ? AND s.mode = 'qa' AND s.${OPEN_STATE_SQL}
+         AND NOT EXISTS (
+           SELECT 1 FROM wiki_reading_chunks c
+           WHERE c.session_id = s.session_id
+             AND c.owes_wiki = 1 AND c.settled_at IS NULL
+         )
+       ORDER BY s.session_id`,
+      [libraryID],
+    );
+    return rows.map(mapSession);
+  }
+
   async get(sessionId: number): Promise<WikiReadingSessionRecord | null> {
     const rows = await this.db.queryAsync(
       "SELECT * FROM wiki_reading_sessions WHERE session_id = ?",
@@ -527,6 +609,13 @@ export class WikiReadingSessions {
     const mode: WikiReadingMode = options.mode ?? "fulltext";
     const existing = await this.openForItem(options.libraryID, options.itemKey);
     if (existing) {
+      // A session a commit closed as `answered` is re-entered rather than
+      // replaced; see `openForItem` for what a replacement would lose.
+      if (existing.state === "answered") {
+        await this.reopenAnswered(existing.sessionId);
+        existing.state = "reading";
+        existing.closedAt = null;
+      }
       // Promotion is one-way. A full-text read subsumes whatever a question
       // read, so `qa` -> `fulltext` carries everything over; the reverse would
       // silently downgrade a paper under review and is never done.
@@ -759,6 +848,14 @@ export class WikiReadingSessions {
       // passages already written up - so answering a question about a paper you
       // know well would demand you write it up again. The ledger still records
       // that the passage was read now; only the debt is withheld.
+      //
+      // `answered` counts alongside `committed` here, and has to. It is how a
+      // question-driven session ends once everything it read is accounted for,
+      // so a closed round of questions carries exactly the same "this paper's
+      // passages are already in the Wiki" weight a finished full-text read
+      // does. Leave it out and closing a session would silently re-open the
+      // debt for every chunk it had read, which is the memory these sessions
+      // exist to keep.
       const settledElsewhere = new Set<number>(
         (
           await this.db.queryAsync(
@@ -770,7 +867,8 @@ export class WikiReadingSessions {
                 AND s.library_id = (SELECT library_id FROM wiki_reading_sessions
                                      WHERE session_id = ?)
                 AND s.session_id <> ?
-                AND (s.state = 'committed' OR c.settled_at IS NOT NULL)`,
+                AND (s.state IN ('committed','answered')
+                     OR c.settled_at IS NOT NULL)`,
             [sessionId, sessionId, sessionId],
           )
         ).map((row: any) => Number(rowColumn(row, "chunk_id", "chunkId"))),

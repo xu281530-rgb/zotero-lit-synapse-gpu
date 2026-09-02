@@ -36,6 +36,7 @@ function buildStore() {
   const semanticWrites = [];
   const keywordWrites = [];
   const semanticHashes = new Map();
+  const chunkSignatures = new Map();
   let keywordFails = true;
 
   return {
@@ -44,6 +45,7 @@ function buildStore() {
     sessions,
     semanticWrites,
     keywordWrites,
+    chunkSignatures,
     allowKeywordWrites() {
       keywordFails = false;
     },
@@ -65,6 +67,15 @@ function buildStore() {
         `${options.libraryID}:${options.itemKey}`,
         options.contentHash,
       );
+    },
+    // Called by indexItem BETWEEN the vector write and the keyword write, to
+    // stamp the chunking rules the stored chunks were made under. It is not
+    // what this suite is about, and it has to be here anyway: a double missing
+    // a method the real store has does not make the caller skip it, it makes
+    // the caller throw - which looked exactly like "the keyword write was
+    // never attempted", the failure this suite exists to detect.
+    async setChunkSignature(itemKey, signature, libraryID) {
+      chunkSignatures.set(`${libraryID}:${itemKey}`, signature);
     },
     async writeKeywordIndex(options) {
       keywordWrites.push(options);

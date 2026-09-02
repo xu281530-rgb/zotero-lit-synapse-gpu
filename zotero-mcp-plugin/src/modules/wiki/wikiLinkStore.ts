@@ -79,6 +79,8 @@ function mapCandidate(row: any): WikiLinkCandidateRecord {
     status: text(row, "status", "status") as WikiLinkStatus,
     computedAt: Number(rowColumn(row, "computed_at", "computedAt") ?? 0),
     reviewedAt: numberOrNull(row, "reviewed_at", "reviewedAt"),
+    reopenedAt: numberOrNull(row, "reopened_at", "reopenedAt"),
+    reopenedReason: text(row, "reopened_reason", "reopenedReason"),
     a: {
       contentHash: text(row, "a_content_hash", "aContentHash"),
       chunkSignature: text(row, "a_chunk_signature", "aChunkSignature"),
@@ -146,6 +148,7 @@ function mapSignal(row: any): WikiLinkSignalRecord {
     },
     state: text(row, "state", "state") as any,
     rejectedReason: text(row, "rejected_reason", "rejectedReason"),
+    priorRejection: text(row, "prior_rejection", "priorRejection"),
     createdAt: Number(rowColumn(row, "created_at", "createdAt") ?? 0),
     settledAt: numberOrNull(row, "settled_at", "settledAt"),
   };
@@ -581,18 +584,34 @@ export class WikiLinkStore {
     return this.settle(signalIds, "accepted", "");
   }
 
-  /** Reject signals, each keeping the reason permanently. */
+  /**
+   * Reject signals, each keeping ITS OWN reason permanently.
+   *
+   * `reasonBySignal` is how a batch stays honest. One dismissal used to carry
+   * one sentence, which was then copied onto every signal in the batch, and
+   * batches are not homogeneous: a measured run archived a signal about
+   * misorientation profiles under "both sides are the journal's standard
+   * competing-interest declaration", and another archived six signals across
+   * six different chunk pairs under a reason that named one specific pair.
+   * An archive that describes a different passage from the one it is filed
+   * against is worse than an empty one, because the next reader believes it.
+   *
+   * `reason` remains the fallback for the callers that genuinely settle one
+   * thing - `acceptSignals` has no per-signal sentence to give.
+   */
   async rejectSignals(
     signalIds: readonly number[],
     reason: string,
+    reasonBySignal?: ReadonlyMap<number, string>,
   ): Promise<number> {
-    return this.settle(signalIds, "rejected", reason);
+    return this.settle(signalIds, "rejected", reason, reasonBySignal);
   }
 
   private async settle(
     signalIds: readonly number[],
     state: "accepted" | "rejected",
     reason: string,
+    reasonBySignal?: ReadonlyMap<number, string>,
   ): Promise<number> {
     let settled = 0;
     const links = new Set<number>();
@@ -607,13 +626,95 @@ export class WikiLinkStore {
         `UPDATE wiki_link_signals
             SET state = ?, rejected_reason = ?, settled_at = ?
           WHERE signal_id = ? AND state = 'pending'`,
-        [state, reason, Date.now(), signalId],
+        [state, reasonBySignal?.get(signalId) ?? reason, Date.now(), signalId],
       );
       links.add(Number(linkId));
       settled += 1;
     }
     for (const linkId of links) await this.refreshStatus(linkId);
     return settled;
+  }
+
+  /**
+   * Put a settled pair's rejections back in the queue, keeping what was said.
+   *
+   * A rejection is a judgement made at a moment, and two things can invalidate
+   * the moment without touching the two passages it was about:
+   *
+   *   - A Wiki data reset. `clearAll` deletes every Page, Claim and
+   *     resolution, and a dismissal whose reason was "this is already covered
+   *     by the page's Claim" has just had its subject deleted. The reset used
+   *     to keep such rejections on the argument that a judgement about two
+   *     excerpts survives a reset - true of "both sides are boilerplate",
+   *     false of anything that cited the Wiki's own state, and unreadable
+   *     apart by the server.
+   *   - A later commit whose Claim cites BOTH papers. That IS the shared
+   *     Claim the dismissal said could not exist.
+   *
+   * The rejection is not rewritten. It moves to `prior_rejection`, the pair
+   * records WHY it is being asked again, and `refreshStatus` reopens it.
+   */
+  async reopenRejected(linkId: number, reason: string): Promise<number> {
+    const rejected = await this.db.queryAsync(
+      "SELECT signal_id FROM wiki_link_signals WHERE link_id = ? AND state = 'rejected'",
+      [linkId],
+    );
+    if (!rejected.length) return 0;
+    await this.db.queryAsync(
+      `UPDATE wiki_link_signals
+          SET state = 'pending',
+              settled_at = NULL,
+              prior_rejection = CASE
+                WHEN rejected_reason IS NULL OR rejected_reason = ''
+                  THEN prior_rejection
+                ELSE rejected_reason
+              END,
+              rejected_reason = NULL
+        WHERE link_id = ? AND state = 'rejected'`,
+      [linkId],
+    );
+    await this.db.queryAsync(
+      `UPDATE wiki_link_candidates SET reopened_at = ?, reopened_reason = ?
+        WHERE link_id = ?`,
+      [Date.now(), reason, linkId],
+    );
+    await this.refreshStatus(linkId);
+    return rejected.length;
+  }
+
+  /**
+   * Pairs whose only settlement was a dismissal, for the contradiction sweep.
+   *
+   * Not `status = 'dismissed'`, which would miss almost all of them. A
+   * `no_action` writes a resolution row, and `refreshStatus` calls any pair
+   * with a resolution `resolved` - so a pair dismissed the normal way reads as
+   * `resolved`, and only one whose resolution was later deleted (by a Wiki
+   * reset) reads as `dismissed`. The cached status answers "has this pair been
+   * dealt with", which is a different question.
+   *
+   * So it is asked of the signals: something was rejected here, and nothing
+   * was accepted. A pair that already carries an accepted settlement has its
+   * connection recorded; reopening the boilerplate rejections beside it would
+   * be noise.
+   */
+  async pairsSettledOnlyByRejection(
+    libraryID: number,
+  ): Promise<Array<{ linkId: number; aItemKey: string; bItemKey: string }>> {
+    const rows = await this.db.queryAsync(
+      `SELECT c.link_id, c.a_item_key, c.b_item_key
+         FROM wiki_link_candidates c
+        WHERE c.library_id = ?
+          AND EXISTS (SELECT 1 FROM wiki_link_signals s
+                       WHERE s.link_id = c.link_id AND s.state = 'rejected')
+          AND NOT EXISTS (SELECT 1 FROM wiki_link_signals s
+                           WHERE s.link_id = c.link_id AND s.state = 'accepted')`,
+      [libraryID],
+    );
+    return rows.map((row) => ({
+      linkId: Number(rowColumn(row, "link_id", "linkId")),
+      aItemKey: text(row, "a_item_key", "aItemKey"),
+      bItemKey: text(row, "b_item_key", "bItemKey"),
+    }));
   }
 
   // ---- Resolutions --------------------------------------------------------
@@ -634,6 +735,8 @@ export class WikiLinkStore {
     pageId?: number | null;
     relationId?: number | null;
     note: string;
+    /** One reason per signal, for a `no_action` covering several findings. */
+    reasonBySignal?: ReadonlyMap<number, string>;
   }): Promise<number> {
     await this.db.queryAsync(
       `INSERT INTO wiki_link_resolutions
@@ -664,7 +767,11 @@ export class WikiLinkStore {
     // both places because the audit reads resolutions and the debt reads
     // signals, and neither should have to join to answer its own question.
     if (options.resolutionType === "no_action") {
-      await this.rejectSignals(options.signalIds, options.note);
+      await this.rejectSignals(
+        options.signalIds,
+        options.note,
+        options.reasonBySignal,
+      );
     } else {
       await this.acceptSignals(options.signalIds);
     }

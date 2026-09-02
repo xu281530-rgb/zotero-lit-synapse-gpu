@@ -95,7 +95,10 @@ import {
   getWikiNoteEpisodeSimilarity,
   getWikiRequireQuestionTerminology,
 } from "./wikiSettings";
-import { WikiLinkService } from "./wikiLinkService";
+import {
+  WikiLinkService,
+  normalizeLinkDismissals,
+} from "./wikiLinkService";
 import type { WikiLinkResolutionType } from "./wikiLinkTypes";
 import { WikiRetriever } from "./wikiRetriever";
 import type {
@@ -692,8 +695,14 @@ export class WikiService {
               "允许的结论有五种：共同支撑同一条 Claim（两侧都要写 Evidence）、" +
               "属于同一个主题 Page 但应保持为不同 Claim、在条件相当时给出矛盾结论、" +
               "能形成 concept↔concept 的可证关系、以及「只是套话或条件不可比」。" +
-              "最后一种用 DISMISS_LINK_SIGNALS，理由不少于 40 字并结合两侧原文；" +
-              "其余四种在对应的写入动作上带 resolvesSignalIds。",
+              "最后一种用 DISMISS_LINK_SIGNALS，并且**每一条 signal 各写各的理由**：" +
+              'dismissals: [{ signalId, reason }, ...]，每条理由不少于 40 字并结合该 signal 自己的两段原文。' +
+              "一条理由套一整批是不行的——同一批里的 signal 指向的是不同段落对，" +
+              "一句话描述不了它们，存进去的判断就会挂在它没引用过的段落上。" +
+              "其余四种在对应的写入动作上带 resolvesSignalIds。" +
+              "若某一对带有 reopenedReason，说明它以前被结算过、而当时的依据已经不成立" +
+              "（Wiki 被重置过，或者后来出现了同时引用两篇的 Claim）：" +
+              "priorDismissals 里是上一位读者的原话，请针对它作判断，不要原样重复一遍。",
           }
         : {}),
       ...(pendingWiki.length
@@ -1946,6 +1955,39 @@ export class WikiService {
     // because an audit row could not be added would be the wrong trade.
     const linkSettlement = await this.settleLinkSignals(input, actions, result);
 
+    /*
+     * A Claim citing both papers of a dismissed pair contradicts that
+     * dismissal, and the Claim is the one with quoted passages behind it.
+     *
+     * Run AFTER the settlement above, deliberately: a commit that both
+     * dismisses a pair and writes a Claim citing both its papers has just
+     * contradicted itself, and the Claim is what stands. Failures are logged
+     * rather than thrown for the same reason the settlement's are - the Wiki
+     * write is permanent, and a bookkeeping sweep may not turn it into an
+     * error.
+     */
+    let reopenedLinks: Array<{
+      linkId: number;
+      aItemKey: string;
+      bItemKey: string;
+      claimId: number;
+    }> = [];
+    try {
+      reopenedLinks = await this.links.reopenContradictedDismissals({
+        libraryID: input.libraryID,
+        // Both sets: a Claim written here, and a Claim that merely GAINED
+        // Evidence here. The second is the case the sweep exists for - a
+        // second paper's excerpt arriving on a Claim that already existed is
+        // precisely when a pair somebody dismissed turns out to share one.
+        claimIds: [
+          ...result.affectedClaimIds,
+          ...result.evidenceChangedClaimIds,
+        ],
+      });
+    } catch (error) {
+      ztoolkit.log("[wiki] could not sweep contradicted dismissals", error);
+    }
+
     // Terminology, written where the question-driven path can actually reach it.
     const conceptWriteUp = await this.writeQuestionReadingConcepts(
       input.libraryID,
@@ -1983,6 +2025,19 @@ export class WikiService {
       ...(readingSession ? { readingSession } : {}),
       ...(questionReading ? { questionReading } : {}),
       ...(linkSettlement ? { linkSettlement } : {}),
+      ...(reopenedLinks.length
+        ? {
+            reopenedLinks: {
+              pairs: reopenedLinks,
+              note:
+                `${reopenedLinks.length} cross-paper pair(s) that had been dismissed are back in the ` +
+                "queue: a Claim written by this commit cites BOTH papers as Evidence, which is the " +
+                "shared Claim the dismissal said could not exist. The earlier reasoning is kept on " +
+                "each signal as its prior rejection and the original settlement row is untouched - " +
+                "the pair simply needs deciding again against the Claim that now exists.",
+            },
+          }
+        : {}),
       ...(conceptWriteUp ? { conceptWriteUp } : {}),
     };
   }
@@ -2264,35 +2319,13 @@ export class WikiService {
         settled.add(Number(raw));
       }
       if (action.action !== "DISMISS_LINK_SIGNALS") continue;
-      const signalIds = Array.isArray((action as any).signalIds)
-        ? (action as any).signalIds.map((id: unknown) => Number(id))
-        : [];
-      const reason = String((action as any).reason ?? "").trim();
-      if (!signalIds.length) {
-        throw new Error(
-          "DISMISS_LINK_SIGNALS needs the signalIds it dismisses. They come from " +
-            "pendingLinkSignals in wiki_prepare_update.",
-        );
+      // Shape, reflex and length are all checked per signal by
+      // `normalizeLinkDismissals`, which is also what the settlement below
+      // reads - so what is validated here and what is written there cannot
+      // drift apart.
+      for (const dismissal of normalizeLinkDismissals(action as any)) {
+        settled.add(dismissal.signalId);
       }
-      // Shape before size, exactly as SKIP does: both refuse the same answer,
-      // but naming the reflex tells the caller what is wanted where a length
-      // complaint only invites padding.
-      if (VACUOUS_WRITE_OFF_REASON.test(reason)) {
-        throw new Error(
-          `A link dismissal asserts rather than argues: "${reason}". "Not related" is exactly what a ` +
-            "reader who compared nothing would also say. Quote what each side actually claims, and say " +
-            "why they cannot support one Claim, sit under one Page, contradict each other, or form a " +
-            "concept relation.",
-        );
-      }
-      if (reason.length < WIKI_WRITE_OFF_MIN_REASON_CHARS) {
-        throw new Error(
-          `DISMISS_LINK_SIGNALS needs a reason of at least ${WIKI_WRITE_OFF_MIN_REASON_CHARS} ` +
-            "characters, argued from the quoted text on both sides. This judgement is kept permanently " +
-            "and is what stops the same pair being offered again, so it has to be readable later.",
-        );
-      }
-      for (const signalId of signalIds) settled.add(signalId);
     }
 
     const itemKeys = new Set<string>();
@@ -2416,6 +2449,7 @@ export class WikiService {
       claimId?: number | null;
       pageId?: number | null;
       note: string;
+      reasonBySignal?: ReadonlyMap<number, string>;
     }> = [];
     /*
      * Which row did this action actually create or touch?
@@ -2456,12 +2490,31 @@ export class WikiService {
     for (let index = 0; index < actions.length; index += 1) {
       const action = actions[index];
       if (action.action === "DISMISS_LINK_SIGNALS") {
+        // Defensive, though `assertLinkSignalsAnswered` has already normalized
+        // every one of these before the transaction opened. This code runs
+        // AFTER the durable write, where an exception would report a commit
+        // that actually landed as a failure - the same reason the settlement
+        // loop below logs rather than throws.
+        let dismissals: ReturnType<typeof normalizeLinkDismissals>;
+        try {
+          dismissals = normalizeLinkDismissals(action as any);
+        } catch (error) {
+          ztoolkit.log("[wiki] could not read a link dismissal", error);
+          continue;
+        }
         settlements.push({
-          signalIds: ((action as any).signalIds ?? []).map((id: unknown) =>
-            Number(id),
-          ),
+          signalIds: dismissals.map((entry) => entry.signalId),
           resolutionType: "no_action",
-          note: String((action as any).reason ?? ""),
+          // The settlement row carries every reason it settled, labelled by
+          // signal. One sentence used to stand for the whole batch here AND on
+          // each signal, which is how a signal about misorientation profiles
+          // came to be archived as a competing-interest declaration.
+          note: dismissals
+            .map((entry) => `signal ${entry.signalId}: ${entry.reason}`)
+            .join("\n"),
+          reasonBySignal: new Map(
+            dismissals.map((entry) => [entry.signalId, entry.reason]),
+          ),
         });
         continue;
       }
@@ -2537,6 +2590,7 @@ export class WikiService {
           claimId: settlement.claimId,
           pageId: settlement.pageId,
           note: settlement.note,
+          reasonBySignal: settlement.reasonBySignal,
         });
         settledSignals += outcome.settled;
         resolutions += outcome.resolutionIds.length;
@@ -2601,13 +2655,18 @@ export class WikiService {
           pendingChunkIds: number[];
           pendingChunks: number;
         }>;
+        consulted: Array<{
+          itemKey: string;
+          chunksRead: number;
+          totalChunks: number;
+          noteKey: string;
+        }>;
         note?: string;
       }
     | undefined
   > {
     const sessions = await this.store.readingSessions();
     const pending = await sessions.listPendingWiki(libraryID);
-    if (!pending.length) return undefined;
 
     const byItem = new Map(
       pending.map((entry) => [entry.session.itemKey, entry]),
@@ -2670,27 +2729,101 @@ export class WikiService {
       });
     }
 
+    /*
+     * Close the question-driven sessions that owe nothing, and say which
+     * papers this round of questions consulted.
+     *
+     * This runs LAST so it sees the settlements above: a paper cleared by this
+     * very commit is closed by it too, rather than waiting for the next one.
+     *
+     * The sessions closed here are not in debt - that is the whole condition -
+     * so nothing is being waved through. What was missing was an ending. A
+     * `qa` session cannot be `committed`, because a question never delivers a
+     * whole paper, and calling it `skipped` would report a reading that was
+     * used as one that was abandoned. So they stayed open, and the papers a
+     * round of questions had read left no trace unless they happened to
+     * produce Evidence: in the measured run, four of six papers appeared in
+     * the ledger and the two that produced nothing appeared nowhere at all.
+     *
+     * The reading NOTE is deliberately not touched. Its status still says
+     * `reading` because that is still true - the note stays open and the next
+     * question about this paper appends to it - and stamping it would cost a
+     * Zotero write and a user approval to record something that has not
+     * happened.
+     */
+    const consulted: Array<{
+      itemKey: string;
+      chunksRead: number;
+      totalChunks: number;
+      noteKey: string;
+    }> = [];
+    for (const session of await sessions.listSettledQuestionSessions(
+      libraryID,
+    )) {
+      const coverage = await sessions.coverage(session.sessionId);
+      await sessions.close(
+        session.sessionId,
+        "answered",
+        `Closed by a Wiki commit: ${coverage.deliveredChunks} chunk(s) of this paper were read to ` +
+          "answer questions, and every one of them is accounted for in the Wiki.",
+      );
+      consulted.push({
+        itemKey: session.itemKey,
+        chunksRead: coverage.deliveredChunks,
+        totalChunks: coverage.totalChunks,
+        noteKey: session.noteKey ?? "",
+      });
+    }
+
+    if (
+      !pending.length &&
+      !consulted.length &&
+      !settledByEvidence.length &&
+      !settledAsNoUpdate.length
+    ) {
+      return undefined;
+    }
+
     return {
       settledByEvidence,
       settledAsNoUpdate,
       clearedPapers,
       stillPending,
-      ...(stillPending.length
+      consulted,
+      ...(stillPending.length || consulted.length
         ? {
-            note:
-              `This commit settled ${clearedPapers.length ? clearedPapers.join(", ") : "no paper"} in full. ` +
-              "Reading that has still not reached the Wiki: " +
-              stillPending
-                .map(
-                  (row) =>
-                    `${row.itemKey} chunk(s) ${row.pendingChunkIds.join(", ")}`,
-                )
-                .join("; ") +
-              ". Each of those chunks needs either Evidence quoting it in a Claim, or a SKIP action " +
-              "naming it and saying what it established that the Wiki already holds - a real reason, " +
-              'not "nothing new". Until then those papers refuse another question\'s reading. If a ' +
-              "paper's reading is not worth writing up at all, close it with wiki_finish_reading and " +
-              'outcome "skipped".',
+            note: [
+              stillPending.length
+                ? `This commit settled ${clearedPapers.length ? clearedPapers.join(", ") : "no paper"} in full. ` +
+                  "Reading that has still not reached the Wiki: " +
+                  stillPending
+                    .map(
+                      (row) =>
+                        `${row.itemKey} chunk(s) ${row.pendingChunkIds.join(", ")}`,
+                    )
+                    .join("; ") +
+                  ". Each of those chunks needs either Evidence quoting it in a Claim, or a SKIP " +
+                  "action naming it and saying what it established that the Wiki already holds - a " +
+                  'real reason, not "nothing new". Until then those papers refuse another ' +
+                  "question's reading. If a paper's reading is not worth writing up at all, close " +
+                  'it with wiki_finish_reading and outcome "skipped".'
+                : "",
+              consulted.length
+                ? "Question-driven reading closed as answered: " +
+                  consulted
+                    .map(
+                      (row) =>
+                        `${row.itemKey} (${row.chunksRead}/${row.totalChunks} chunk(s))`,
+                    )
+                    .join("; ") +
+                  ". Those papers owed the Wiki nothing, so their sessions are finished and the " +
+                  "record of what this round of questions consulted is kept. Their notes stay open: " +
+                  "the next question about one of them appends to the same note and will not be " +
+                  "handed passages it has already read."
+                : "",
+            ]
+              .filter(Boolean)
+              .join(" "),
           }
         : {}),
     };

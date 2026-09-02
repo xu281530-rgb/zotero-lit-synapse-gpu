@@ -33,10 +33,13 @@ const {
 const { runHybridSearch } = await import("../src/modules/hybridSearch.ts");
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const vectorStoreSource = fs.readFileSync(
-  path.join(root, "src/modules/semantic/vectorStore.ts"),
-  "utf8",
-);
+// Line endings normalised to LF: the markers below are multi-line literals
+// written with "\n", the repository stores LF, and `core.autocrlf` hands a
+// Windows working copy CRLF - so without this the substring searches find
+// nothing and report the throw as missing when it is right there.
+const vectorStoreSource = fs
+  .readFileSync(path.join(root, "src/modules/semantic/vectorStore.ts"), "utf8")
+  .replace(/\r\n/g, "\n");
 const gpuServiceSource = fs.readFileSync(
   path.join(root, "src/modules/semantic/gpuVectorService.ts"),
   "utf8",

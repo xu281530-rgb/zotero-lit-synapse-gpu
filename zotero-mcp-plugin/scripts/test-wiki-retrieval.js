@@ -217,7 +217,12 @@ assert.equal(
   committed.refs["claim:gradient"],
 );
 assert.ok(lowConfidenceDirect.claims[0].normalizedWikiScore > 0.8);
-assert.equal(lowConfidenceDirect.claims[0].evidenceConfidence, 0.35);
+// Derived, not asserted by the writer: one supporting paper read chunk-local
+// is 0.6 by `deriveClaimConfidence`. This used to read 0.35 because the commit
+// below said so, which is exactly the field that turned out to be a constant
+// in a real library. The point of the block is unchanged - relevance and
+// reliability are separate scales, checked two lines down.
+assert.equal(lowConfidenceDirect.claims[0].evidenceConfidence, 0.6);
 assert.equal(lowConfidenceDirect.claims[0].readDepth, "chunk_local");
 assert.ok(
   lowConfidenceDirect.claims[0].normalizedWikiScore >

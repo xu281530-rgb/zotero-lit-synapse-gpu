@@ -2667,6 +2667,157 @@ block("a question-driven concept pass does not discharge the full-text gate", as
 });
 
 
+// =========================================================================
+// 8. A round of questions ends, and the ledger says which papers it read
+//
+// Six `qa` sessions in a real library sat in `prepared`/`reading` forever.
+// They owed the Wiki nothing - every chunk they had read was already settled
+// by an earlier full-text pass - so `listPendingWiki` never returned them, the
+// "reading that has still not reached the Wiki" warning never fired once, and
+// two of the six papers produced no Evidence and therefore appeared in no
+// ledger at all. The reading happened and nothing recorded that it had.
+// =========================================================================
+
+function sessionRow(itemKey) {
+  return sqlite
+    .prepare(
+      `SELECT session_id, state, mode, closed_at FROM wiki_reading_sessions
+       WHERE library_id = 1 AND item_key = ? ORDER BY session_id DESC LIMIT 1`,
+    )
+    .get(itemKey);
+}
+
+block("a question-driven session that owes nothing is closed as answered", async () => {
+  await readByQuestion(
+    "PAPERTWO",
+    [72, 73],
+    [
+      "Station 72 sits on the flattened stretch of the traverse (chunk 72).",
+      "Station 73 repeats the reading at the same depth (chunk 73).",
+    ],
+  );
+  const openBefore = sessionRow("PAPERTWO");
+  assert.ok(
+    ["reading", "prepared"].includes(openBefore.state),
+    "the paper is being read when the commit starts",
+  );
+
+  const { result } = await writeUp({
+    title: "Flattened traverse",
+    claimText: "The traverse flattens and holds depth over the late stations.",
+    evidence: [evidenceFrom("PAPERTWO", 72)],
+  });
+
+  const consulted = result.questionReading?.consulted ?? [];
+  const paperTwo = consulted.find((row) => row.itemKey === "PAPERTWO");
+  assert.ok(
+    paperTwo,
+    "the commit has to say which papers this round of questions consulted",
+  );
+  assert.ok(paperTwo.chunksRead > 0);
+  assert.equal(paperTwo.totalChunks, LONG);
+  assert.match(result.questionReading.note, /closed as answered/iu);
+
+  const after = sessionRow("PAPERTWO");
+  assert.equal(after.session_id, openBefore.session_id, "same session, ended");
+  assert.equal(after.state, "answered");
+  assert.ok(Number(after.closed_at) > 0, "a closed session records when");
+});
+
+block("closing does not forget what the paper has already read", async () => {
+  // The property that makes the close a bookmark rather than a deletion: the
+  // next question continues the SAME session, so its note may cite passages
+  // read before the close and the chunks behind them are not handed over or
+  // charged again.
+  const closed = sessionRow("PAPERTWO");
+  assert.equal(closed.state, "answered", "starting from a closed session");
+
+  const resumed = await readByQuestion(
+    "PAPERTWO",
+    [74],
+    [
+      "Station 74 continues the flattened stretch (chunk 74).",
+      "It reads at the depth stations 72 and 73 already showed (chunk 72, chunk 73).",
+    ],
+  );
+  assert.deepEqual(
+    resumed.reading.newChunks,
+    [74],
+    "chunks read before the close are not delivered again",
+  );
+
+  const reopened = sessionRow("PAPERTWO");
+  assert.equal(
+    reopened.session_id,
+    closed.session_id,
+    "a further question re-enters the closed session rather than starting over",
+  );
+  assert.equal(reopened.state, "reading");
+  assert.equal(reopened.closed_at, null);
+
+  const stillOwed = Number(
+    sqlite
+      .prepare(
+        `SELECT COUNT(*) AS n FROM wiki_reading_chunks
+         WHERE session_id = ? AND chunk_index IN (72, 73)
+           AND owes_wiki = 1 AND settled_at IS NULL`,
+      )
+      .get(reopened.session_id).n,
+  );
+  assert.equal(stillOwed, 0, "settled reading is not re-opened as debt");
+});
+
+block("a paper that still owes the Wiki is not closed", async () => {
+  // Clear what the previous block's question left owing, so this block starts
+  // from a settled paper and the debt it is about is the one it creates.
+  await writeUp({
+    title: "Late plateau",
+    claimText: "The late stations hold the plateau depth.",
+    evidence: [evidenceFrom("PAPERTWO", 74)],
+  });
+  await readByQuestion(
+    "PAPERTWO",
+    [76, 77],
+    [
+      "Station 76 turns over at the end of the traverse (chunk 76).",
+      "Station 77 confirms the turnover at the same depth (chunk 77).",
+    ],
+  );
+  // Cite a different paper, and do not settle PAPERTWO: its chunks 74, 76 and
+  // 77 are still owed, so this commit may not declare it finished.
+  const { result } = await writeUp({
+    title: "Traverse turnover",
+    claimText: "The traverse turns over once the plateau ends.",
+    evidence: [evidenceFrom("PAPERONE", 30)],
+    settle: ["PAPERONE"],
+  });
+  assert.ok(
+    pendingFor(result, "PAPERTWO").length,
+    "the paper still owes the Wiki",
+  );
+  assert.deepEqual(
+    (result.questionReading?.consulted ?? []).filter(
+      (row) => row.itemKey === "PAPERTWO",
+    ),
+    [],
+    "a paper in debt is reported, not quietly closed",
+  );
+  assert.equal(sessionRow("PAPERTWO").state, "reading");
+
+  // And once the debt is settled, the same paper does close.
+  const settled = await writeUp({
+    title: "Turnover depth",
+    claimText: "Depth at the turnover matches the plateau value.",
+    evidence: [evidenceFrom("PAPERTWO", 76)],
+  });
+  assert.ok(
+    (settled.result.questionReading?.consulted ?? []).some(
+      (row) => row.itemKey === "PAPERTWO",
+    ),
+  );
+  assert.equal(sessionRow("PAPERTWO").state, "answered");
+});
+
 let passed = 0;
 const failures = [];
 for (const [name, fn] of tests) {

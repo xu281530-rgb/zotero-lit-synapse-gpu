@@ -73,6 +73,132 @@ const SCAN_MAX_ATTEMPTS = 4;
 /** The concept algorithm has no parameters, but it still needs a version. */
 export const CONCEPT_ALGORITHM_VERSION = "link-concept-v1";
 
+/**
+ * How long a dismissal has to argue for, per signal.
+ *
+ * The same floor SKIP uses, and kept here rather than imported from
+ * `wikiService` because this module is the one that decides what a dismissal
+ * is; the service applies the rule, it does not own it.
+ */
+export const WIKI_LINK_DISMISSAL_MIN_REASON_CHARS = 40;
+
+/**
+ * Reasons that assert rather than argue, matched against the whole sentence.
+ *
+ * Deliberately short: it catches the reflex answer, and the length floor
+ * catches the rest.
+ */
+const VACUOUS_DISMISSAL_REASON =
+  /^(?:no(?:thing)?\s+new(?:\s+knowledge)?|nothing\s+to\s+add|not\s+relevant|irrelevant|n\/?a|none|already\s+known|duplicate)[\s.。!！]*$|^(?:无|没有)?(?:新知识|新内容|新信息|可补充内容)[\s.。!！]*$|^已知(?:内容)?[\s.。!！]*$|^重复内容[\s.。!！]*$|^不相关[\s.。!！]*$/iu;
+
+/** One signal, and the sentence that dismisses THAT signal. */
+export interface WikiLinkDismissal {
+  signalId: number;
+  reason: string;
+}
+
+/**
+ * Read a DISMISS_LINK_SIGNALS action as one reason per signal.
+ *
+ * The action used to carry `signalIds` plus a single `reason`, and the reason
+ * was copied onto every signal in the batch. A batch is not homogeneous. One
+ * measured dismissal covered three signals - a competing-interest declaration,
+ * a lexical hit on the word "played", and a semantic pair about misorientation
+ * profiles - under "both sides are the journal's standard competing-interest
+ * declaration", which was true of the first and false of the other two.
+ * Another covered six signals across six different chunk pairs under a reason
+ * that named chunk 43 and chunk 40, true of exactly one of them.
+ *
+ * The reasons are kept permanently and are what a later reviewer reads when
+ * asking whether a connection was rightly dropped. A reason filed against a
+ * passage it does not describe is worse than no reason at all, because it will
+ * be believed.
+ *
+ * So a batch says what it dismisses, one sentence each. `signalIds` + `reason`
+ * survives for the case it was always honest about - a single signal - and is
+ * refused beyond that, with the shape to use instead.
+ */
+export function normalizeLinkDismissals(action: {
+  signalIds?: unknown;
+  reason?: unknown;
+  dismissals?: unknown;
+}): WikiLinkDismissal[] {
+  const raw: Array<{ signalId: unknown; reason: unknown }> = [];
+  if (Array.isArray(action.dismissals)) {
+    for (const entry of action.dismissals) {
+      raw.push({
+        signalId: (entry as any)?.signalId,
+        reason: (entry as any)?.reason,
+      });
+    }
+  } else {
+    const signalIds = Array.isArray(action.signalIds) ? action.signalIds : [];
+    if (signalIds.length > 1) {
+      throw new Error(
+        `DISMISS_LINK_SIGNALS carried one reason for ${signalIds.length} signals. Each signal is a ` +
+          "different pair of passages, so one sentence cannot describe all of them and the archive " +
+          "ends up filed against text it does not quote. Send one reason per signal: " +
+          '"dismissals": [{"signalId": ..., "reason": "..."}, ...]. Use signalIds + reason only when ' +
+          "it names a single signal.",
+      );
+    }
+    for (const signalId of signalIds) {
+      raw.push({ signalId, reason: action.reason });
+    }
+  }
+  if (!raw.length) {
+    throw new Error(
+      "DISMISS_LINK_SIGNALS needs the signals it dismisses, each with its own reason: " +
+        '"dismissals": [{"signalId": ..., "reason": "..."}, ...]. The ids come from ' +
+        "pendingLinkSignals in wiki_prepare_update.",
+    );
+  }
+  const seen = new Set<number>();
+  const dismissals: WikiLinkDismissal[] = [];
+  for (const entry of raw) {
+    const signalId = Number(entry.signalId);
+    if (!Number.isInteger(signalId) || signalId <= 0) {
+      throw new Error(
+        `DISMISS_LINK_SIGNALS got "${String(entry.signalId)}" where a signalId was expected. The ids ` +
+          "come from pendingLinkSignals in wiki_prepare_update.",
+      );
+    }
+    if (seen.has(signalId)) {
+      throw new Error(
+        `DISMISS_LINK_SIGNALS names signal ${signalId} twice. A signal is settled once, with one ` +
+          "reason; two entries would record two conclusions about one finding.",
+      );
+    }
+    seen.add(signalId);
+    const reason = String(entry.reason ?? "").trim();
+    if (!reason) {
+      throw new Error(
+        `DISMISS_LINK_SIGNALS gave no reason for signal ${signalId}. Every dismissed signal keeps its ` +
+          "own reason permanently, because that is what stops the same pair being offered again.",
+      );
+    }
+    // Shape before size, exactly as SKIP does: naming the reflex tells the
+    // caller what is wanted, where a length complaint only invites padding.
+    if (VACUOUS_DISMISSAL_REASON.test(reason)) {
+      throw new Error(
+        `Signal ${signalId} is dismissed by assertion rather than argument: "${reason}". "Not related" ` +
+          "is exactly what a reader who compared nothing would also say. Quote what each side actually " +
+          "claims, and say why they cannot support one Claim, sit under one Page, contradict each " +
+          "other, or form a concept relation.",
+      );
+    }
+    if (reason.length < WIKI_LINK_DISMISSAL_MIN_REASON_CHARS) {
+      throw new Error(
+        `Signal ${signalId} needs a reason of at least ${WIKI_LINK_DISMISSAL_MIN_REASON_CHARS} ` +
+          "characters, argued from the quoted text on both sides. This judgement is kept permanently " +
+          "and is what stops the same pair being offered again, so it has to be readable later.",
+      );
+    }
+    dismissals.push({ signalId, reason });
+  }
+  return dismissals;
+}
+
 export interface PendingLinkSignalView {
   linkId: number;
   signalIds: number[];
@@ -87,6 +213,18 @@ export interface PendingLinkSignalView {
   mustResolve: boolean;
   fingerprintState: "valid" | "stale";
   suggestedLabels: string[];
+  /**
+   * Why this pair is being asked AGAIN, when it has been settled before.
+   *
+   * A reopened pair that looks identical to a fresh one gets the same answer
+   * as last time - which is the whole problem, since it is being asked again
+   * precisely because that answer no longer holds. `reopenedReason` says what
+   * changed (a Wiki reset, or a Claim that cites both papers) and
+   * `priorDismissals` carries what the earlier reader concluded, so the second
+   * judgement argues with the first instead of reproducing it.
+   */
+  reopenedReason?: string;
+  priorDismissals?: Array<{ signalId: number; reason: string }>;
 }
 
 export class WikiLinkService {
@@ -583,6 +721,16 @@ export class WikiLinkService {
       if (!view.signalTypes.includes(signal.signalType)) {
         view.signalTypes.push(signal.signalType);
       }
+      if (signal.priorRejection) {
+        (view.priorDismissals ??= []).push({
+          signalId: signal.signalId,
+          reason: signal.priorRejection,
+        });
+        if (view.reopenedReason === undefined) {
+          const candidate = await links.getCandidate(signal.linkId);
+          view.reopenedReason = candidate?.reopenedReason || "";
+        }
+      }
       if (signal.termSnapshot && !view.suggestedLabels.includes(signal.termSnapshot)) {
         view.suggestedLabels.push(signal.termSnapshot);
       }
@@ -683,6 +831,12 @@ export class WikiLinkService {
     pageId?: number | null;
     relationId?: number | null;
     note: string;
+    /**
+     * One reason per signal, for a `no_action` covering several findings.
+     * Absent for every other resolution type: those settle a batch by writing
+     * one thing, so one sentence describes all of them truthfully.
+     */
+    reasonBySignal?: ReadonlyMap<number, string>;
   }): Promise<{ resolutionIds: number[]; settled: number }> {
     const links = await this.store.links();
     const byLink = new Map<number, number[]>();
@@ -724,11 +878,99 @@ export class WikiLinkService {
           pageId: options.pageId,
           relationId: options.relationId,
           note: options.note,
+          reasonBySignal: options.reasonBySignal,
         }),
       );
       settled += signalIds.length;
     }
     return { resolutionIds, settled };
+  }
+
+  /**
+   * Reopen dismissed pairs that this commit's Claims have just contradicted.
+   *
+   * A dismissal says "these two papers cannot support one Claim". A Claim
+   * whose Evidence cites both of them is that Claim. The two cannot both
+   * stand, and the Claim is the one backed by quoted passages, so the
+   * dismissal is the one that goes back in the queue.
+   *
+   * This is a sweep after the fact rather than a check at dismissal time
+   * because the contradiction usually is not available yet when the dismissal
+   * is made - in the run that produced this, the dismissal came first and the
+   * Claim thirty minutes later, with a Wiki reset in between. The pair is
+   * REOPENED and flagged, not silently re-settled: the earlier reader's
+   * sentence stays on the signal as its prior rejection and the `no_action`
+   * resolution row is left exactly as written, because rewriting an audit
+   * trail to agree with a later conclusion is how an audit trail stops being
+   * worth keeping.
+   */
+  async reopenContradictedDismissals(options: {
+    libraryID: number;
+    claimIds: readonly number[];
+  }): Promise<
+    Array<{
+      linkId: number;
+      aItemKey: string;
+      bItemKey: string;
+      claimId: number;
+    }>
+  > {
+    const claimIds = Array.from(
+      new Set(options.claimIds.map((id) => Number(id))),
+    ).filter((id) => Number.isInteger(id) && id > 0);
+    if (!claimIds.length) return [];
+    const links = await this.store.links();
+    const dismissed = await links.pairsSettledOnlyByRejection(options.libraryID);
+    if (!dismissed.length) return [];
+
+    // Keyed on the pair, so one lookup answers "does any Claim in this commit
+    // cite both of these?" for every dismissed pair at once.
+    const byPair = new Map<string, { linkId: number; a: string; b: string }>();
+    for (const pair of dismissed) {
+      byPair.set(`${pair.aItemKey} ${pair.bItemKey}`, {
+        linkId: pair.linkId,
+        a: pair.aItemKey,
+        b: pair.bItemKey,
+      });
+    }
+
+    const reopened: Array<{
+      linkId: number;
+      aItemKey: string;
+      bItemKey: string;
+      claimId: number;
+    }> = [];
+    const done = new Set<number>();
+    for (const claimId of claimIds) {
+      const sources = await this.store.claimEvidenceSources(
+        claimId,
+        options.libraryID,
+      );
+      if (sources.length < 2) continue;
+      const ordered = sources.slice().sort();
+      for (let left = 0; left < ordered.length; left += 1) {
+        for (let right = left + 1; right < ordered.length; right += 1) {
+          const pair = byPair.get(`${ordered[left]} ${ordered[right]}`);
+          if (!pair || done.has(pair.linkId)) continue;
+          const moved = await links.reopenRejected(
+            pair.linkId,
+            `Claim ${claimId} cites both ${pair.a} and ${pair.b} as Evidence, which is the shared ` +
+              "Claim this pair was dismissed for not being able to support. The dismissal is kept as " +
+              "each signal's prior rejection; the pair needs deciding again against the Claim that " +
+              "now exists.",
+          );
+          if (!moved) continue;
+          done.add(pair.linkId);
+          reopened.push({
+            linkId: pair.linkId,
+            aItemKey: pair.a,
+            bItemKey: pair.b,
+            claimId,
+          });
+        }
+      }
+    }
+    return reopened;
   }
 
   /** Mandatory signals this commit left unanswered, for the blocking check. */

@@ -46,6 +46,78 @@ function numberInRange(value: number, label: string): number {
 }
 
 /**
+ * How far a Claim's support goes, on the same evidence that decides its status.
+ *
+ * This used to be a number the model wrote down, and in a real library it was
+ * 0.95 every single time - seven Claims, two Pages, several runs, one value.
+ * That is not surprising in hindsight: the tool schema published a bare
+ * `{type:'number', minimum:0, maximum:1}` with no description and no check,
+ * while the two fields beside it - `epistemicStatus` and `coverageLevel` -
+ * both carry enumerations AND a server-side test against the evidence. The
+ * model had nothing to reason from, so it reported a number that looked
+ * respectable, and the field stopped carrying information.
+ *
+ * It was not, however, unread. `refreshPageSummary` chooses a Page's
+ * representative Claims with `ORDER BY confidence DESC, updated_at DESC`, so a
+ * constant silently turned that into "the five most recently touched" - the
+ * summary showed the newest Claims rather than the best-supported ones. Wiki
+ * search also hands the number to the model as a reliability field beside
+ * relevance, where a constant is worse than nothing because it reads as an
+ * assessment.
+ *
+ * So it is derived. Three inputs, all of them already in the ledger:
+ *
+ *   - the epistemic status, which `recomputeDerivedClaimFields` has just
+ *     recomputed from the evidence roles, so a contradiction is already
+ *     priced in;
+ *   - how many DISTINCT papers support it, because two papers agreeing is the
+ *     thing cross-paper reading exists to find;
+ *   - how deeply those papers were read, because a claim resting on one chunk
+ *     of a paper is not the claim resting on the whole of it.
+ *
+ * The numbers are deliberately coarse. They are meant to separate a Claim
+ * three papers support after full reads from one chunk of one paper, not to
+ * express a probability nobody could defend.
+ */
+export function deriveClaimConfidence(input: {
+  epistemicStatus: string;
+  coverageLevel: string;
+  supportingSourceCount: number;
+}): number {
+  const base: Record<string, number> = {
+    unsupported: 0.15,
+    provisional: 0.35,
+    // Below `provisional` on purpose: "another paper says otherwise" is a
+    // worse position for a Claim than "nobody has checked it yet".
+    disputed: 0.3,
+    supported: 0.6,
+    corroborated: 0.75,
+  };
+  const depth: Record<string, number> = {
+    chunk_local: 0,
+    section_read: 0.03,
+    paper_reviewed: 0.06,
+    cross_paper: 0.09,
+    // The two honest admissions of an unfinished write-up cost a little.
+    partial: -0.03,
+    incomplete: -0.06,
+  };
+  const sources = Math.max(
+    0,
+    Math.floor(Number(input.supportingSourceCount) || 0),
+  );
+  // Capped at four sources: the step from one paper to two is the whole point,
+  // the step from four to forty says more about the library than the Claim.
+  const breadth = Math.min(Math.max(sources - 1, 0), 3) * 0.05;
+  const raw =
+    (base[input.epistemicStatus] ?? base.provisional) +
+    breadth +
+    (depth[input.coverageLevel] ?? 0);
+  const clamped = Math.min(0.95, Math.max(0.05, raw));
+  return Math.round(clamped * 100) / 100;
+}
+
+/**
  * How many ids one verification statement may bind.
  *
  * SQLite refuses a statement with more than 32766 bound parameters, and a
@@ -707,7 +779,7 @@ export class WikiStore {
       params,
     );
     for (const row of rows) {
-      await this.recomputeClaimStatus(
+      await this.recomputeDerivedClaimFields(
         Number(rowValue(row, "claim_id", "claimId")),
       );
     }
@@ -740,6 +812,7 @@ export class WikiStore {
       linkedRelations: 0,
       refs: {},
       affectedClaimIds: [],
+      evidenceChangedClaimIds: [],
       actionClaimIds: input.actions.map(() => null),
       actionPageIds: input.actions.map(() => null),
     };
@@ -906,7 +979,6 @@ export class WikiStore {
                 "An equivalent Claim already exists in this Wiki library",
               );
             }
-            numberInRange(action.confidence, "claim confidence");
             this.assertCoverageSupported(action.coverageLevel, action.evidence);
             this.assertEpistemicStatusSupported(
               action.epistemicStatus,
@@ -928,13 +1000,25 @@ export class WikiStore {
             }
             continue;
           }
-          numberInRange(action.confidence, "claim confidence");
           this.assertCoverageSupported(action.coverageLevel, action.evidence);
           this.assertEpistemicStatusSupported(
             action.epistemicStatus,
             action.evidence,
           );
           const now = Date.now();
+          // Seeded from the action's own evidence so the row is never briefly
+          // wrong; `recomputeDerivedClaimFields` re-derives it from the stored
+          // evidence at the end of the commit, which is what makes a later
+          // ATTACH_EVIDENCE move the number too.
+          const seedConfidence = deriveClaimConfidence({
+            epistemicStatus: action.epistemicStatus,
+            coverageLevel: action.coverageLevel,
+            supportingSourceCount: new Set(
+              action.evidence
+                .filter((entry) => entry.evidenceRole === "SUPPORTS")
+                .map((entry) => `${entry.libraryID}:${entry.itemKey}`),
+            ).size,
+          });
           await this.db.queryAsync(
             `INSERT INTO wiki_claims
              (page_id, claim_text, normalized_claim_text, claim_type,
@@ -948,7 +1032,7 @@ export class WikiStore {
               action.claimType,
               action.epistemicStatus,
               action.coverageLevel,
-              action.confidence,
+              seedConfidence,
               now,
               now,
             ],
@@ -1019,8 +1103,6 @@ export class WikiStore {
             (action.claimType !== undefined &&
               action.claimType !==
                 rowValue(existing, "claim_type", "claimType"));
-          const confidence = action.confidence ?? Number(existing.confidence);
-          numberInRange(confidence, "claim confidence");
           const currentCoverage = String(
             rowValue(existing, "coverage_level", "coverageLevel"),
           );
@@ -1084,10 +1166,14 @@ export class WikiStore {
               "UPDATE_CLAIM would duplicate an existing Wiki Claim",
             );
           }
+          // `confidence` is absent on purpose: it is derived from the evidence
+          // by `recomputeDerivedClaimFields` after every action in this commit
+          // has run, so writing it here would only be overwritten - and a
+          // coverage change made in this very statement is one of its inputs.
           await this.db.queryAsync(
             `UPDATE wiki_claims SET claim_text = ?, normalized_claim_text = ?,
              claim_type = ?, epistemic_status = ?, coverage_level = ?,
-             confidence = ?, updated_at = ?, version = version + 1
+             updated_at = ?, version = version + 1
              WHERE claim_id = ? AND version = ?`,
             [
               claimText,
@@ -1097,13 +1183,16 @@ export class WikiStore {
                 rowValue(existing, "epistemic_status", "epistemicStatus"),
               action.coverageLevel ??
                 rowValue(existing, "coverage_level", "coverageLevel"),
-              confidence,
               Date.now(),
               claimId,
               action.expectedVersion,
             ],
           );
           result.updatedClaims += 1;
+          // An UPDATE_CLAIM that carries no evidence can still change coverage,
+          // which is one of the three inputs to the derived number, so it has
+          // to be recomputed either way.
+          evidenceChangedClaimIds.add(claimId);
           if (!result.affectedClaimIds.includes(claimId)) {
             result.affectedClaimIds.push(claimId);
           }
@@ -1157,8 +1246,9 @@ export class WikiStore {
       }
 
       for (const claimId of evidenceChangedClaimIds) {
-        await this.recomputeClaimStatus(claimId);
+        await this.recomputeDerivedClaimFields(claimId);
       }
+      result.evidenceChangedClaimIds = Array.from(evidenceChangedClaimIds);
       for (const pageId of affectedPageIds) {
         await this.refreshPageSummary(pageId);
       }
@@ -1185,6 +1275,28 @@ export class WikiStore {
 
   private mapEvidence(row: any): WikiEvidenceRecord {
     return mapWikiEvidenceRow(row);
+  }
+
+  /**
+   * The distinct papers a Claim actually rests on.
+   *
+   * `source_deleted` counts alongside `valid`, the same way it does for the
+   * epistemic status: the paper is gone from the library but the Claim was
+   * genuinely written from it, and pretending otherwise would quietly demote
+   * every Claim whose source somebody removed.
+   */
+  async claimEvidenceSources(
+    claimId: number,
+    libraryID: number,
+  ): Promise<string[]> {
+    await this.initialize();
+    const rows = await this.db.queryAsync(
+      `SELECT DISTINCT item_key FROM wiki_evidence
+        WHERE claim_id = ? AND library_id = ?
+          AND link_state IN ('valid', 'source_deleted')`,
+      [claimId, libraryID],
+    );
+    return rows.map((row) => String(rowValue(row, "item_key", "itemKey")));
   }
 
   async getClaim(claimId: number): Promise<WikiClaimRecord | null> {
@@ -1766,16 +1878,61 @@ export class WikiStore {
       }
     });
     /*
-     * A signal accepted because of a Claim is unanswered once that Claim is
-     * gone, so it goes back to pending. A REJECTED one stays rejected: that
-     * judgement was about the two passages - "these only share sample-prep
-     * wording" - and is as true after a knowledge reset as before it. Losing
-     * it would mean re-deciding every dismissal the next time the pair came up.
+     * EVERY settlement goes back to pending, rejections included.
+     *
+     * Accepted was always obvious: a signal accepted because of a Claim is
+     * unanswered once that Claim is gone. Rejected used to be kept, on the
+     * argument that "these two only share sample-prep wording" is a judgement
+     * about the two passages and survives a knowledge reset. That argument is
+     * sound for the reasons it describes and wrong for the ones it does not,
+     * and the difference is not visible from here.
+     *
+     * A measured run has the counterexample. A pair was dismissed with "the
+     * mechanisms here are already covered by this page's continuous-
+     * recrystallisation Claim" - a judgement about what the WIKI held, true
+     * when written. The reset deleted that Claim half an hour later and kept
+     * the dismissal. The rebuilt Wiki then wrote two Claims that both papers
+     * support, and the pair - carrying the two highest-scoring semantic
+     * signals in the library - stayed dismissed, unaskable, invisible.
+     *
+     * Nothing here can read a sentence and tell which kind it is, and the
+     * asymmetry is not close: keeping a stale dismissal loses a real
+     * connection permanently and silently, while dropping a good one costs one
+     * re-judgement the next time the pair comes up. So they all come back, and
+     * `prior_rejection` carries what was said, so the second reader argues
+     * with the first rather than starting over.
      */
-    await this.db.queryAsync(
-      "UPDATE wiki_link_signals SET state = 'pending', settled_at = NULL WHERE state = 'accepted'",
-    );
     const links = await this.links();
+    const settled = await this.db.queryAsync(
+      "SELECT DISTINCT link_id FROM wiki_link_signals WHERE state IN ('accepted','rejected')",
+    );
+    await this.db.queryAsync(
+      `UPDATE wiki_link_signals
+          SET state = 'pending',
+              settled_at = NULL,
+              prior_rejection = CASE
+                WHEN rejected_reason IS NULL OR rejected_reason = ''
+                  THEN prior_rejection
+                ELSE rejected_reason
+              END,
+              rejected_reason = NULL
+        WHERE state IN ('accepted','rejected')`,
+    );
+    const wikiResetAt = Date.now();
+    for (const row of settled) {
+      const linkId = Number(rowValue(row, "link_id", "linkId"));
+      await this.db.queryAsync(
+        `UPDATE wiki_link_candidates SET reopened_at = ?, reopened_reason = ?
+          WHERE link_id = ?`,
+        [
+          wikiResetAt,
+          "A Wiki data reset removed the Pages, Claims and settlements this pair " +
+            "was judged against, so the judgement is being asked again. What was " +
+            "concluded last time is kept on each signal as its prior rejection.",
+          linkId,
+        ],
+      );
+    }
     for (const candidate of await this.db.queryAsync(
       "SELECT link_id FROM wiki_link_candidates WHERE status IN ('resolved','dismissed')",
     )) {
@@ -3422,7 +3579,16 @@ export class WikiStore {
     );
   }
 
-  private async recomputeClaimStatus(claimId: number): Promise<void> {
+  /**
+   * Recompute everything about a Claim that the evidence decides.
+   *
+   * Two fields, and they are computed together because they are two readings
+   * of one fact. `epistemic_status` says WHAT the evidence amounts to - one
+   * paper, several agreeing, something contradicting. `confidence` says how
+   * far that goes as a number, which is what the Page summary sorts on and
+   * what Wiki search hands back as a reliability field.
+   */
+  private async recomputeDerivedClaimFields(claimId: number): Promise<void> {
     const rows = await this.db.queryAsync(
       `SELECT evidence_role, library_id, item_key
        FROM wiki_evidence
@@ -3455,10 +3621,43 @@ export class WikiStore {
             : supportingSources.size === 1
               ? "supported"
               : "provisional";
+    const coverageLevel = String(
+      (await this.db.valueQueryAsync(
+        "SELECT coverage_level FROM wiki_claims WHERE claim_id = ?",
+        [claimId],
+      )) ?? "chunk_local",
+    );
+    const nextConfidence = deriveClaimConfidence({
+      epistemicStatus: nextStatus,
+      coverageLevel,
+      supportingSourceCount: supportingSources.size,
+    });
+    /*
+     * Guarded on BOTH derived fields, and it does not touch `version`.
+     *
+     * `version` is the optimistic-concurrency token: a caller reads a Claim,
+     * sends `expectedVersion`, and the write is refused if somebody else moved
+     * it meanwhile. This runs INSIDE that caller's own commit, over the
+     * evidence that caller just wrote - it is not a competing edit, and
+     * counting it as one made the token unusable in two ways. A caller that
+     * correctly read version N and wrote with `expectedVersion: N` found N+2
+     * afterwards, and a commit that updated one Claim twice conflicted with
+     * itself between the two actions. `updated_at` still moves, because the
+     * row genuinely did.
+     */
     await this.db.queryAsync(
-      `UPDATE wiki_claims SET epistemic_status = ?, updated_at = ?, version = version + 1
-       WHERE claim_id = ? AND epistemic_status != ?`,
-      [nextStatus, Date.now(), claimId, nextStatus],
+      `UPDATE wiki_claims
+          SET epistemic_status = ?, confidence = ?, updated_at = ?
+        WHERE claim_id = ?
+          AND (epistemic_status != ? OR confidence != ?)`,
+      [
+        nextStatus,
+        nextConfidence,
+        Date.now(),
+        claimId,
+        nextStatus,
+        nextConfidence,
+      ],
     );
   }
 

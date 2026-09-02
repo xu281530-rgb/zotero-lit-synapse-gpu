@@ -125,7 +125,15 @@ export type WikiCommitAction =
       claimType: WikiClaimType;
       epistemicStatus: WikiEpistemicStatus;
       coverageLevel: WikiCoverageLevel;
-      confidence: number;
+      /**
+       * No `confidence` here on purpose.
+       *
+       * It is derived from the evidence by `deriveClaimConfidence`, because
+       * every Claim in a real library carried 0.95 for as long as the model
+       * was asked for it. A `confidence` that arrives anyway is ignored rather
+       * than refused - an older caller should not fail, it should just stop
+       * being believed.
+       */
       evidence: WikiEvidenceInput[];
       /**
        * Cross-paper candidate signals this write settles.
@@ -151,7 +159,6 @@ export type WikiCommitAction =
       claimType?: WikiClaimType;
       epistemicStatus?: WikiEpistemicStatus;
       coverageLevel?: WikiCoverageLevel;
-      confidence?: number;
       /** Required when changing Claim text or promoting coverage/status. */
       evidence?: WikiEvidenceInput[];
       resolvesSignalIds?: number[];
@@ -172,9 +179,21 @@ export type WikiCommitAction =
     }
   | {
       action: "DISMISS_LINK_SIGNALS";
-      signalIds: number[];
+      /**
+       * One signal, one reason.
+       *
+       * The pair below - `signalIds` plus a single `reason` - is the older
+       * shape and is accepted only when it names ONE signal. A batch used to
+       * carry one sentence that was then copied onto every signal in it, and
+       * signals in a batch are not alike: a measured run archived a semantic
+       * pair about misorientation profiles under "both sides are the journal's
+       * standard competing-interest declaration". Kept permanently, read back
+       * by whoever later asks whether a connection was rightly dropped.
+       */
+      dismissals?: Array<{ signalId: number; reason: string }>;
+      signalIds?: number[];
       /** At least 40 characters, arguing from both sides' quoted text. */
-      reason: string;
+      reason?: string;
     };
 
 export interface WikiCommitInput {
@@ -206,6 +225,18 @@ export interface WikiCommitResult {
   linkedRelations: number;
   refs: Record<string, number>;
   affectedClaimIds: number[];
+  /**
+   * Claims whose EVIDENCE this commit changed.
+   *
+   * Not the same set as `affectedClaimIds`, and deliberately separate from it.
+   * An ATTACH_EVIDENCE changes what a Claim rests on - its derived status, its
+   * derived confidence, and which pairs of papers now share it - without
+   * changing a word of its text, so it belongs here and not in the set that
+   * drives re-embedding. The contradicted-dismissal sweep reads both, because
+   * a second paper's Evidence arriving on an existing Claim is exactly the
+   * case where a pair somebody dismissed turns out to share one.
+   */
+  evidenceChangedClaimIds: number[];
   /**
    * The Claim and Page each action created or touched, by action position.
    *

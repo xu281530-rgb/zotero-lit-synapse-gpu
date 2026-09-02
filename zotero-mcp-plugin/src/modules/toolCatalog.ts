@@ -1312,10 +1312,23 @@ export function buildToolCatalog(): ToolDefinition[] {
                 items: { type: 'integer', minimum: 1 },
                 description: 'Cross-paper candidate signals this write settles, from pendingLinkSignals in wiki_prepare_update. Put them on the action that ACTUALLY settles them: ADD_CLAIM or ATTACH_EVIDENCE when both papers now support one Claim, CREATE_PAGE when they belong under one entry as separate Claims, MARK_CONFLICT when they disagree under comparable conditions, LINK_RELATION when the shared concepts form a provable relation. The server reads the resolution type off the action rather than trusting a label, because the action is what happened. A signal is settled once; settling it twice is refused.'
               },
+              dismissals: {
+                type: 'array',
+                minItems: 1,
+                description: 'DISMISS_LINK_SIGNALS: the candidate signals that establish nothing, each with its OWN reason. Every signal is a different pair of passages, so one sentence cannot describe several of them — a reason filed against text it does not quote is worse than no reason at all, because the next reviewer believes it. Use signalIds + reason only when dismissing a single signal.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    signalId: { type: 'integer', minimum: 1 },
+                    reason: { type: 'string' }
+                  },
+                  required: ['signalId', 'reason']
+                }
+              },
               signalIds: {
                 type: 'array',
                 items: { type: 'integer', minimum: 1 },
-                description: 'DISMISS_LINK_SIGNALS only: the candidate signals that establish nothing.'
+                description: 'DISMISS_LINK_SIGNALS only, and only for ONE signal: the candidate signal that establishes nothing, dismissed by the sibling reason field. Two or more ids here are refused — use dismissals instead.'
               },
               chunkIds: {
                 type: 'array',
@@ -1324,7 +1337,7 @@ export function buildToolCatalog(): ToolDefinition[] {
               },
               reason: {
                 type: 'string',
-                description: 'SKIP (with chunkIds) or DISMISS_LINK_SIGNALS. For SKIP: what those passages establish, and which existing Page, Claim, Concept or relation already holds it. For DISMISS_LINK_SIGNALS: what each side actually claims, and why they cannot support one Claim, sit under one Page, contradict each other or form a concept relation — argued from the two excerpts the signal carries. At least 40 characters either way, and it must argue rather than assert: "nothing new", "not related" and their equivalents are refused. One reason covers the whole group, and it is kept permanently.'
+                description: 'SKIP (with chunkIds) or DISMISS_LINK_SIGNALS. For SKIP: what those passages establish, and which existing Page, Claim, Concept or relation already holds it. For DISMISS_LINK_SIGNALS: what each side actually claims, and why they cannot support one Claim, sit under one Page, contradict each other or form a concept relation — argued from the two excerpts the signal carries. At least 40 characters either way, and it must argue rather than assert: "nothing new", "not related" and their equivalents are refused. For SKIP one reason covers the chunkIds it names; for DISMISS_LINK_SIGNALS it covers exactly ONE signal, and a batch sends dismissals instead. Kept permanently either way.'
               },
               pageId: {},
               claimId: {},
@@ -1366,7 +1379,6 @@ export function buildToolCatalog(): ToolDefinition[] {
                   'incomplete'
                 ]
               },
-              confidence: { type: 'number', minimum: 0, maximum: 1 },
               evidence: {
                 type: 'array',
                 minItems: 1,

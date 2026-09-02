@@ -8,7 +8,7 @@ import {
 } from "./wikiConceptTerms";
 import { rowColumn } from "./wikiRow";
 
-export const WIKI_SCHEMA_VERSION = 13;
+export const WIKI_SCHEMA_VERSION = 14;
 
 /**
  * Add a column an older database does not have yet.
@@ -39,6 +39,126 @@ async function addColumnIfMissing(
     `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`,
   );
   return true;
+}
+
+/**
+ * Schema 14. Teach `wiki_reading_sessions.state` the `answered` outcome.
+ *
+ * A question-driven session that owes the Wiki nothing had no way to end. It
+ * could not be `committed` - that word means the whole paper was delivered,
+ * which a `qa` session can never do - and calling it `skipped` would say the
+ * reading was abandoned when it was in fact used to answer something. So six
+ * sessions in a real library sat open forever: notes written, chunks read,
+ * nothing owed, and no record anywhere of which papers a round of questions
+ * had consulted.
+ *
+ * SQLite cannot alter a CHECK constraint, so the table is rebuilt. Two things
+ * make that dangerous and are handled here rather than hoped about:
+ *
+ *   - `wiki_reading_chunks` has an ON DELETE CASCADE onto this table, and
+ *     DROP TABLE with foreign keys enabled runs the cascade. Dropping the
+ *     parent would take every chunk ledger row in the library with it. Hence
+ *     the pragma, which SQLite ignores inside a transaction and so must be set
+ *     around it.
+ *   - A crash mid-rebuild must not leave a half-built table behind, hence the
+ *     leading DROP of any leftover and the rename as the last step.
+ */
+async function migrateReadingSessionStates(db: WikiDatabase): Promise<void> {
+  const existing = String(
+    (await db.valueQueryAsync(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'wiki_reading_sessions'",
+    )) ?? "",
+  );
+  if (!existing || existing.includes("'answered'")) return;
+
+  const columns = [
+    "session_id",
+    "library_id",
+    "item_key",
+    "title",
+    "total_chunks",
+    "state",
+    "started_at",
+    "updated_at",
+    "closed_at",
+    "note",
+    "expert",
+    "note_key",
+    "delivered_batches",
+    "integrated_batches",
+    "integrated_chunks",
+    "last_integration_unchanged",
+    "final_synthesis_at",
+    "concepts_recorded_at",
+    "staged_concepts",
+    "mode",
+    "pending_wiki_chunks",
+    "pending_wiki_since",
+    "wiki_review_at",
+    "wiki_review",
+    "question_chunks_carried_over",
+    "concepts_declared_at",
+    "concepts_declared_reason",
+  ].join(", ");
+
+  await db.queryAsync("PRAGMA foreign_keys = OFF");
+  try {
+    await db.executeTransaction(async () => {
+      await db.queryAsync("DROP TABLE IF EXISTS wiki_reading_sessions_rebuild");
+      await db.queryAsync(`
+        CREATE TABLE wiki_reading_sessions_rebuild (
+          session_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          library_id INTEGER NOT NULL,
+          item_key TEXT NOT NULL,
+          title TEXT NOT NULL DEFAULT '',
+          total_chunks INTEGER NOT NULL,
+          state TEXT NOT NULL
+            CHECK(state IN ('reading','prepared','committed','answered','skipped','failed')),
+          started_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          closed_at INTEGER,
+          note TEXT NOT NULL DEFAULT '',
+          expert TEXT NOT NULL DEFAULT '',
+          note_key TEXT NOT NULL DEFAULT '',
+          delivered_batches INTEGER NOT NULL DEFAULT 0,
+          integrated_batches INTEGER NOT NULL DEFAULT 0,
+          integrated_chunks INTEGER NOT NULL DEFAULT 0,
+          last_integration_unchanged INTEGER NOT NULL DEFAULT 0,
+          final_synthesis_at INTEGER,
+          concepts_recorded_at INTEGER,
+          staged_concepts TEXT NOT NULL DEFAULT '',
+          mode TEXT NOT NULL DEFAULT 'fulltext',
+          pending_wiki_chunks INTEGER NOT NULL DEFAULT 0,
+          pending_wiki_since INTEGER,
+          wiki_review_at INTEGER,
+          wiki_review TEXT NOT NULL DEFAULT '',
+          question_chunks_carried_over INTEGER NOT NULL DEFAULT 0,
+          concepts_declared_at INTEGER,
+          concepts_declared_reason TEXT NOT NULL DEFAULT ''
+        )
+      `);
+      await db.queryAsync(
+        `INSERT INTO wiki_reading_sessions_rebuild (${columns})
+         SELECT ${columns} FROM wiki_reading_sessions`,
+      );
+      await db.queryAsync("DROP TABLE wiki_reading_sessions");
+      await db.queryAsync(
+        "ALTER TABLE wiki_reading_sessions_rebuild RENAME TO wiki_reading_sessions",
+      );
+    });
+  } finally {
+    await db.queryAsync("PRAGMA foreign_keys = ON");
+  }
+  // AUTOINCREMENT keeps its high-water mark in sqlite_sequence, which the copy
+  // above preserves for every id it wrote - but a library whose last sessions
+  // were deleted would restart the counter and hand a new session an id a
+  // closed one already used. Cheap to be sure.
+  await db.queryAsync(
+    `INSERT INTO sqlite_sequence (name, seq)
+     SELECT 'wiki_reading_sessions', (SELECT MAX(session_id) FROM wiki_reading_sessions)
+      WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'wiki_reading_sessions')
+        AND (SELECT MAX(session_id) FROM wiki_reading_sessions) IS NOT NULL`,
+  );
 }
 
 export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
@@ -287,7 +407,8 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
       item_key TEXT NOT NULL,
       title TEXT NOT NULL DEFAULT '',
       total_chunks INTEGER NOT NULL,
-      state TEXT NOT NULL CHECK(state IN ('reading','prepared','committed','skipped','failed')),
+      state TEXT NOT NULL
+        CHECK(state IN ('reading','prepared','committed','answered','skipped','failed')),
       started_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       closed_at INTEGER,
@@ -361,6 +482,7 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
   ] as const) {
     await addColumnIfMissing(db, "wiki_reading_sessions", column, definition);
   }
+  await migrateReadingSessionStates(db);
   await db.queryAsync(`
     CREATE TABLE IF NOT EXISTS wiki_reading_chunks (
       session_id INTEGER NOT NULL REFERENCES wiki_reading_sessions(session_id) ON DELETE CASCADE,
@@ -411,12 +533,19 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
   // Schema 7. Which chunks owe the Wiki something, and how each one was
   // settled.
   //
-  // `owes_wiki` is set only on chunks a QUESTION read: those are the ones the
-  // "note first, Wiki second" rule is about. Chunks delivered by a full-text
-  // read are 0, because that path has its own gates - a note rewrite per page,
-  // then synthesis, terminology and the whole-Wiki review at the end - and
-  // making it settle page by page would destroy both the mid-read checkpoint
-  // and the ability to read a long paper at all.
+  // `owes_wiki` is set on chunks BOTH paths deliver, and this comment used to
+  // say the opposite - that only a question's reading owed anything, because
+  // the full-text path had its own gates. That was true of schema 7 and was
+  // changed in `recordDelivery`, which now writes 1 for every newly delivered
+  // chunk; the reasoning is in the comment above that INSERT. Leaving the two
+  // contradicting each other cost real analysis time: a reader who trusted
+  // this sentence concluded that six question-driven sessions were carrying an
+  // unpaid debt, when their chunks owed nothing at all.
+  //
+  // What actually zeroes `owes_wiki` is `recordReadChunkIds`: a chunk of this
+  // paper that a FINISHED reading already put into the Wiki is recorded as
+  // read again without being charged again, so asking a question about a paper
+  // you read last week does not demand that you write it up twice.
   //
   // `settled_kind` records WHICH of the two honest outcomes happened. A chunk
   // that produced Evidence is settled by that Evidence. A chunk that genuinely
@@ -578,10 +707,28 @@ async function ensureLinkSchema(db: WikiDatabase): Promise<void> {
       semantic_algorithm_version TEXT,
       semantic_selector_version  TEXT,
 
+      reopened_at          INTEGER,
+      reopened_reason      TEXT NOT NULL DEFAULT '',
+
       UNIQUE(library_id, a_item_key, b_item_key),
       CHECK(a_item_key < b_item_key)
     )
   `);
+  // Schema 14. Why a settled pair is being asked again.
+  //
+  // Two things reopen a pair, and both of them are somebody discovering that a
+  // dismissal was decided against facts that have since changed: a Wiki reset,
+  // which deletes the Claims a dismissal may have cited, and a commit whose
+  // Claim turns out to cite BOTH papers of a pair somebody dismissed. Neither
+  // is a scan result, so neither belongs in `computed_at`, and neither is a
+  // settlement, so neither belongs in `reviewed_at`. NULL is the right
+  // carried-over value: a pair from 2.7.7 has never been reopened.
+  for (const [column, definition] of [
+    ["reopened_at", "INTEGER"],
+    ["reopened_reason", "TEXT NOT NULL DEFAULT ''"],
+  ] as const) {
+    await addColumnIfMissing(db, "wiki_link_candidates", column, definition);
+  }
   await db.queryAsync(`
     CREATE TABLE IF NOT EXISTS wiki_link_signals (
       signal_id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -616,6 +763,7 @@ async function ensureLinkSchema(db: WikiDatabase): Promise<void> {
       state                  TEXT NOT NULL
         CHECK(state IN ('pending','accepted','rejected','stale')),
       rejected_reason        TEXT,
+      prior_rejection        TEXT NOT NULL DEFAULT '',
 
       created_at             INTEGER NOT NULL,
       settled_at             INTEGER,
@@ -623,6 +771,21 @@ async function ensureLinkSchema(db: WikiDatabase): Promise<void> {
       UNIQUE(link_id, signal_fingerprint)
     )
   `);
+  // Schema 14. What a reader concluded LAST time, on a signal that is pending
+  // again.
+  //
+  // `rejected_reason` has to be empty on a pending signal or the two contradict
+  // each other, but throwing the sentence away would make every reopening a
+  // re-derivation from scratch - the second reader would not know that the
+  // first one had already compared these two passages and said why. So the
+  // superseded reason moves here, and the pair comes back with its history
+  // attached instead of pretending to be new.
+  await addColumnIfMissing(
+    db,
+    "wiki_link_signals",
+    "prior_rejection",
+    "TEXT NOT NULL DEFAULT ''",
+  );
   await db.queryAsync(`
     CREATE TABLE IF NOT EXISTS wiki_link_resolutions (
       resolution_id       INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -318,9 +318,14 @@ assert.equal(isBodyRetryCandidate(null), false);
     /ALTER TABLE index_status ADD COLUMN body_retry_signature TEXT/,
     "existing databases must be migrated, not just new ones",
   );
+  // The whole column list used to be pinned here, which made this fail the
+  // day `chunk_signature` was appended to it - a change that has nothing to do
+  // with the retry backoff. What has to hold is narrower and is the actual
+  // point: the query getIndexStatus runs selects `body_retry_signature`, so
+  // the decision below is made on a column that was actually read.
   assert.match(
     vectorStoreSource,
-    /SELECT item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified, content_length, source_kind, body_retry_signature FROM index_status/,
+    /SELECT [^`]*\bbody_retry_signature\b[^`]*FROM index_status WHERE item_key = \?/,
     "getIndexStatus must read the column it decides on",
   );
   assert.match(

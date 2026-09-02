@@ -82,6 +82,9 @@ export interface WikiLinkCandidateRecord {
   status: WikiLinkStatus;
   computedAt: number;
   reviewedAt: number | null;
+  /** When a settled pair was put back in the queue, and why. */
+  reopenedAt: number | null;
+  reopenedReason: string;
   a: WikiLinkSourceFingerprint;
   b: WikiLinkSourceFingerprint;
   semanticModel: string;
@@ -117,6 +120,11 @@ export interface WikiLinkSignalRecord {
   b: WikiLinkSignalSide;
   state: WikiLinkSignalState;
   rejectedReason: string;
+  /**
+   * What an earlier reader concluded about this signal, if it was dismissed
+   * and later reopened. Empty for a signal nobody has judged yet.
+   */
+  priorRejection: string;
   createdAt: number;
   settledAt: number | null;
 }
