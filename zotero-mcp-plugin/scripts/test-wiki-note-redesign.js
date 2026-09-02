@@ -87,6 +87,26 @@ test("episode one keeps the original name; later ones are numbered", () => {
   // number that would push a real note out of last place.
   assert.equal(readingNoteEpisode({}), 1);
   assert.equal(readingNoteEpisode(titled("")), 1);
+
+  // A user who renames the attachment in Zotero must not renumber the note.
+  // The title is the half people edit; the filename is the durable one, and
+  // reading the number off it is what stops a renamed episode 3 reporting as
+  // episode 1 - which would make the next note collide with a file that
+  // already exists.
+  const renamed = {
+    getField: (field) => (field === "title" ? "my notes on the twinning paper" : ""),
+    attachmentFilename: "wiki-reading-note-ABCD1234-3.md",
+  };
+  assert.equal(readingNoteEpisode(renamed), 3, "the filename still names the episode");
+
+  // Episode 1's filename carries no suffix, and must not be read as one.
+  assert.equal(
+    readingNoteEpisode({
+      getField: () => "renamed too",
+      attachmentFilename: "wiki-reading-note-ABCD1234.md",
+    }),
+    1,
+  );
 });
 
 test("reading records are server-numbered and append-only", () => {

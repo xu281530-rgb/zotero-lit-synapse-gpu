@@ -41,12 +41,20 @@ import {
   formatCoverageMap,
   parseAppendOnlyReadingNote,
   parseReadingNote,
+  readingNoteEpisode,
   renderReadingNote,
   stripMachineBlock,
   type WikiReadingExpert,
   type WikiReadingNoteMetadata,
   type WikiReadingNoteStatus,
 } from "./wikiReadingNote";
+import {
+  routeBySimilarity,
+  routeFallback,
+  routeWithoutSimilarity,
+  type NoteRoute,
+  type RoutableNote,
+} from "./wikiNoteRouting";
 import {
   WIKI_SYNTHESIS_MIN_QUOTE_CHARS,
   WIKI_EVIDENCE_MIN_EXCERPT_CHARS,
@@ -3758,6 +3766,16 @@ export class WikiService {
           bodyChars: 0,
           skipped: route.reason,
           similarity: route.similarity,
+          // Said in a sentence, not left to be inferred from `bodyChars: 0`.
+          // A caller that does not notice this believes it recorded something
+          // it did not, and the chunks ARE booked as read either way, so the
+          // difference never shows up as a missing obligation later.
+          discarded:
+            "This record was NOT written to any note: it restates what a " +
+            "concluded note already says about these passages. The chunks are " +
+            "booked as read. Nothing needs retrying - write a record only if " +
+            "you have something the existing notes do not say, and read them " +
+            "first (see `paper.episodes` from wiki_get_reading_note).",
         };
 
     // Durable. Only now is the reading real.
@@ -3922,6 +3940,7 @@ export class WikiService {
       },
       expert: session.expert,
       progress: this.noteProgress(session, coverage, delivered),
+      paper: await this.paperReadingSummary(item, session, coverage.totalChunks),
       readingNote: {
         exists: Boolean(attachment),
         attachmentKey: attachment?.key ?? session.noteKey ?? "",
@@ -3930,6 +3949,89 @@ export class WikiService {
         ...(options.includeMarkdown === false ? {} : { markdown: parsed.body }),
       },
       nextStep: this.resumeInstruction(session, coverage),
+    };
+  }
+
+  /**
+   * What is true of the PAPER, as against the episode currently being written.
+   *
+   * `progress` describes one episode, and that was the whole truth until a
+   * concluded note could be followed by a second one. After that it became
+   * actively misleading: a paper read cover to cover in episode 1 answered
+   * "14 of 67 read, resume at chunk 0", the full-text macro summary sat in a
+   * file this response never mentioned, and the only sane readings of that were
+   * "read it again" - re-delivering 53 chunks somebody had already paid to
+   * read - or "this paper is barely known".
+   *
+   * Deliberately compact. This rides on every call, so it carries the ranges
+   * and the episode index rather than a second coverage map, and it never
+   * carries a second copy of any note's text.
+   */
+  private async paperReadingSummary(
+    item: any,
+    session: WikiReadingSessionRecord,
+    totalChunks: number,
+  ): Promise<Record<string, unknown> | undefined> {
+    if (!item) return undefined;
+    let attachments: any[] = [];
+    try {
+      attachments = await this.notes.listAttachments(item);
+    } catch (error) {
+      ztoolkit.log("[wiki] could not list reading notes for the paper view", error);
+      return undefined;
+    }
+    // One episode and nothing else is the ordinary case, and it has nothing to
+    // add over `progress`. Staying silent there is what keeps this cheap.
+    if (attachments.length <= 1) return undefined;
+
+    const sessions = await this.store.readingSessions();
+    const paperCoverage = await sessions.paperCoverage(
+      session.libraryID,
+      session.itemKey,
+      totalChunks,
+    );
+    const delivered = await sessions.paperDeliveredIndexes(
+      session.libraryID,
+      session.itemKey,
+    );
+    const episodes: Array<Record<string, unknown>> = [];
+    for (const attachment of attachments) {
+      let concluded: boolean | null = null;
+      let records: number | null = null;
+      try {
+        const raw = await this.notes.read(attachment);
+        if (raw !== null) {
+          const parsed = parseAppendOnlyReadingNote(parseReadingNote(raw).body);
+          concluded = parsed.macroSummary !== null;
+          records = parsed.records.length;
+        }
+      } catch {
+        // An unreadable note is reported as one, not omitted: a caller that
+        // cannot see it would conclude the reading it holds never happened.
+      }
+      episodes.push({
+        episode: readingNoteEpisode(attachment),
+        attachmentKey: String(attachment?.key ?? ""),
+        current: String(attachment?.key ?? "") === String(session.noteKey ?? ""),
+        concluded,
+        records,
+      });
+    }
+
+    return {
+      episodes,
+      readChunkRanges: formatChunkRanges(delivered),
+      deliveredChunks: paperCoverage.deliveredChunks,
+      totalChunks: paperCoverage.totalChunks,
+      readThrough: paperCoverage.complete,
+      note:
+        `This paper has ${episodes.length} reading notes. \`progress\` above describes only the ` +
+        `current one; these are the figures for the paper. A concluded note cannot be appended to, ` +
+        `so later reading opens a new one beside it - read the earlier notes before writing, ` +
+        `because what they already establish is not in the note you are extending.` +
+        (paperCoverage.complete
+          ? " Every chunk of this paper has already been read by some episode: do not read it through again unless the user asks, and pass an explicit offset when you need one passage back."
+          : ""),
     };
   }
 
@@ -4037,65 +4139,21 @@ export class WikiService {
     session: WikiReadingSessionRecord,
     chunkIds: readonly number[],
     record: string,
-  ): Promise<{
-    attachment: any | null;
-    startNewEpisode: boolean;
-    write: boolean;
-    similarity: number | null;
-    reason: string;
-  }> {
-    const skip = (reason: string, similarity: number | null = null) => ({
-      attachment: null,
-      startNewEpisode: false,
-      write: false,
-      similarity,
-      reason,
-    });
-    const fresh = (reason: string, similarity: number | null = null) => ({
-      attachment: null,
-      startNewEpisode: true,
-      write: true,
-      similarity,
-      reason,
-    });
-
-    const wanted = new Set(chunkIds.map(Number));
-    let notes: any[] = [];
+  ): Promise<NoteRoute<any>> {
+    // I/O only. Every branch is decided in wikiNoteRouting, which is where the
+    // rules can be asserted without a Zotero and without an embedding service.
+    let attachments: any[] = [];
     try {
-      notes = await this.notes.listAttachments(item);
+      attachments = await this.notes.listAttachments(item);
     } catch (error) {
       ztoolkit.log("[wiki] could not list reading notes", error);
-      return fresh("the note list could not be read");
-    }
-    if (!notes.length) {
-      return {
-        attachment: null,
-        startNewEpisode: false,
-        write: true,
-        similarity: null,
-        reason: "first note for this paper",
-      };
+      return routeFallback("the note list could not be read");
     }
 
-    const parsedNotes: Array<{
-      attachment: any;
-      concluded: boolean;
-      chunkIds: Set<number>;
-      related: string;
-    }> = [];
-    /*
-     * A note that exists but cannot be READ is the one case that must never
-     * reach the "start a new episode" branch.
-     *
-     * Treating it as absent looks harmless and is not: the new episode would
-     * be written from an empty body, and the records already in that file
-     * would be replaced by a single one. The append-only guarantee would be
-     * broken by the very code meant to preserve it, and silently. So an
-     * unreadable note falls back to the ordinary append path, where the
-     * existing note/ledger consistency check can refuse the write loudly.
-     */
+    const wanted = new Set(chunkIds.map(Number));
+    const notes: RoutableNote<any>[] = [];
     let unreadable = false;
-    for (const attachment of notes) {
+    for (const attachment of attachments) {
       let body = "";
       try {
         const raw = await this.notes.read(attachment);
@@ -4119,7 +4177,7 @@ export class WikiService {
         }
         if (touches) related.push(entry.content);
       }
-      parsedNotes.push({
+      notes.push({
         attachment,
         concluded: parsed.macroSummary !== null,
         chunkIds: covered,
@@ -4127,70 +4185,17 @@ export class WikiService {
       });
     }
 
-    if (unreadable) {
-      return {
-        attachment: null,
-        startNewEpisode: false,
-        write: true,
-        similarity: null,
-        reason: "a note could not be read; appending to the current one",
-      };
-    }
+    const decided = routeWithoutSimilarity(notes, wanted, { unreadable });
+    if (decided) return decided;
 
-    // 1. The earliest open note that has not seen all of these passages.
-    for (const note of parsedNotes) {
-      if (note.concluded) continue;
-      const missing = [...wanted].filter((id) => !note.chunkIds.has(id));
-      if (!missing.length) continue;
-      return {
-        attachment: note.attachment,
-        startNewEpisode: false,
-        write: true,
-        similarity: null,
-        reason: `note covers neither chunk ${missing.slice(0, 4).join(", ")}`,
-      };
-    }
-
-    /*
-     * 2. An open note that has already seen these passages still takes the
-     *    record.
-     *
-     * Re-reading a passage and saying something further about it is ordinary,
-     * and the note is not finished, so there is nothing to protect: append.
-     * Only a CONCLUDED note forces the question below, because only a
-     * concluded note cannot be appended to. Leaving this case out sent every
-     * re-read down the similarity branch and opened a new note for it.
-     */
-    const open = parsedNotes.find((note) => !note.concluded);
-    if (open) {
-      return {
-        attachment: open.attachment,
-        startNewEpisode: false,
-        write: true,
-        similarity: null,
-        reason: "appended to the open note",
-      };
-    }
-
-    /*
-     * 3/4. Every note is concluded, so nothing can be appended. Does this turn
-     * say anything they do not?
-     *
-     * Compared note by note, and a new note opens only when the reading
-     * differs from EVERY one of them. Concatenating their discussions into one
-     * text and comparing once would dilute the case that matters most: a
-     * reading that restates note #2 exactly would still look different once
-     * note #1's unrelated prose was mixed in, and would open a note it had no
-     * business opening. The test is the CLOSEST existing account, not the
-     * average one.
-     */
-    const candidates = parsedNotes.filter((note) => note.related);
-    if (!candidates.length) return fresh("no note discusses these passages");
+    // Only the "every note is concluded and one of them discusses these
+    // passages" case gets this far, so the embedding cost is paid only where
+    // the answer actually depends on it.
     try {
       const embeddingService = getEmbeddingService();
       const freshResult = await embeddingService.embed(record);
       const left = freshResult?.embedding;
-      if (!left?.length) return fresh("no comparable embedding");
+      if (!left?.length) return routeFallback("no comparable embedding");
       const cosine = (right: Float32Array): number | null => {
         if (!right?.length || right.length !== left.length) return null;
         let dot = 0;
@@ -4205,28 +4210,29 @@ export class WikiService {
         return denominator > 0 ? dot / denominator : 0;
       };
       let closest: number | null = null;
-      for (const note of candidates) {
-        const priorResult = await embeddingService.embed(note.related);
-        const similarity = priorResult?.embedding
-          ? cosine(priorResult.embedding)
-          : null;
+      // Two notes that quote the same passages often carry the same text, and
+      // an identical account needs no embedding to be recognised as identical.
+      const embedded = new Map<string, Float32Array | null>();
+      for (const note of notes) {
+        if (!note.related) continue;
+        if (note.related === record) {
+          closest = 1;
+          break;
+        }
+        let prior = embedded.get(note.related);
+        if (prior === undefined) {
+          const priorResult = await embeddingService.embed(note.related);
+          prior = priorResult?.embedding ?? null;
+          embedded.set(note.related, prior);
+        }
+        const similarity = prior ? cosine(prior) : null;
         if (similarity === null) continue;
         if (closest === null || similarity > closest) closest = similarity;
       }
-      if (closest === null) return fresh("no comparable embedding");
-      const threshold = getWikiNoteEpisodeSimilarity();
-      return closest >= threshold
-        ? skip(
-            `restates what a note already records (closest ${closest.toFixed(3)} >= ${threshold})`,
-            closest,
-          )
-        : fresh(
-            `differs from every note's account of these passages (closest ${closest.toFixed(3)} < ${threshold})`,
-            closest,
-          );
+      return routeBySimilarity(closest, getWikiNoteEpisodeSimilarity());
     } catch (error) {
       ztoolkit.log("[wiki] could not compare this reading to the notes", error);
-      return fresh("the comparison failed");
+      return routeFallback("the comparison failed");
     }
   }
 

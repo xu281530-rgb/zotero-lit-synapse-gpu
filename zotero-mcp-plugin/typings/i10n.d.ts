@@ -421,6 +421,8 @@ export type FluentMessageId =
   | 'pref-wiki-desc'
   | 'pref-wiki-enabled-sub'
   | 'pref-wiki-enabled-text'
+  | 'pref-wiki-episode-similarity-hint'
+  | 'pref-wiki-episode-similarity-label'
   | 'pref-wiki-min-score-hint'
   | 'pref-wiki-min-score-label'
   | 'pref-wiki-permission-note'

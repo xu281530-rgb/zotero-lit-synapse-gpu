@@ -751,6 +751,7 @@ export class WikiReadingSessions {
     const newChunks = chunks.filter(
       (chunk) => !known.has(Number(chunk.chunkIndex)),
     ).length;
+    const settledElsewhere = await this.settledChunkIdsElsewhere(sessionId);
     const now = Date.now();
     for (const chunk of chunks) {
       // A chunk delivered by a full-text page owes the Wiki exactly as one
@@ -766,6 +767,19 @@ export class WikiReadingSessions {
       // Only a NEW row owes. The conflict path leaves owes_wiki and settled_at
       // untouched, so re-reading a chunk to check a quotation stays free and a
       // chunk already settled is not charged again.
+      //
+      // AND IT DOES NOT CONSULT `settledChunkIdsElsewhere`, WHICH IS THE ONE
+      // THING THAT LOOKS LIKE A BUG HERE AND IS NOT. The question path forgives
+      // a chunk another session already settled; this path deliberately does
+      // not, and the difference is who chose to read it. A question is HANDED
+      // its passages by retrieval - charging them would mean that asking about
+      // a paper you know well demands you write it up again, which is the
+      // overhead that forgiveness exists to remove. A full-text pass is asked
+      // for: someone said "read this paper end to end" about a paper that had
+      // already been read, and the per-chunk debt is what makes that second
+      // pass produce something rather than close silently having re-read 186
+      // chunks and written nothing. `test-wiki-qa-reading.js` pins it at
+      // "the three whole-paper passes are checked where committed is written".
       await this.db.queryAsync(
         `INSERT INTO wiki_reading_chunks
            (session_id, chunk_index, chunk_id, delivered_at, owes_wiki)
@@ -856,23 +870,7 @@ export class WikiReadingSessions {
       // does. Leave it out and closing a session would silently re-open the
       // debt for every chunk it had read, which is the memory these sessions
       // exist to keep.
-      const settledElsewhere = new Set<number>(
-        (
-          await this.db.queryAsync(
-            `SELECT DISTINCT c.chunk_id AS chunk_id
-               FROM wiki_reading_chunks c
-               JOIN wiki_reading_sessions s ON s.session_id = c.session_id
-              WHERE s.item_key = (SELECT item_key FROM wiki_reading_sessions
-                                   WHERE session_id = ?)
-                AND s.library_id = (SELECT library_id FROM wiki_reading_sessions
-                                     WHERE session_id = ?)
-                AND s.session_id <> ?
-                AND (s.state IN ('committed','answered')
-                     OR c.settled_at IS NOT NULL)`,
-            [sessionId, sessionId, sessionId],
-          )
-        ).map((row: any) => Number(rowColumn(row, "chunk_id", "chunkId"))),
-      );
+      const settledElsewhere = await this.settledChunkIdsElsewhere(sessionId);
       for (const index of newIndexes) {
         const chunk = documentChunks[index];
         // A NEW chunk owes the Wiki. Re-reading one already read does not:
@@ -1322,6 +1320,100 @@ export class WikiReadingSessions {
       if (!delivered.has(index)) return index;
     }
     return null;
+  }
+
+  /**
+   * Every chunk index anyone has read of this paper, across ALL its sessions.
+   *
+   * `deliveredIndexes` answers for ONE session, which was the whole truth until
+   * a concluded note could be followed by a second episode. After that it
+   * stopped being: a paper read cover to cover in episode 1 has a fresh session
+   * behind episode 2 whose ledger starts almost empty, so the session view says
+   * "14 of 67 read, resume at chunk 0" about a paper nobody needs to read
+   * again. Everything that decides WHAT TO HAND OVER has to ask this instead -
+   * re-delivering text that has already been read is the most expensive
+   * mistake this server can make, because the caller pays for it twice.
+   *
+   * What must NOT use this is the coverage that gates a macro summary: an
+   * episode may only conclude on what IT read, or opening a second episode on
+   * a finished paper would let it be concluded without reading a line.
+   */
+  /**
+   * Chunks of this paper that a DIFFERENT session already put into the Wiki.
+   *
+   * "New to this session" is not the same as "new to the Wiki". A question
+   * about a paper read through last week opens a fresh session where every
+   * chunk looks new, and charging them would open debt for passages already
+   * written up - so answering a question about a paper you know well would
+   * demand you write it up again.
+   *
+   * Shared by both reading paths on purpose. It used to live inside
+   * `recordReadChunkIds` alone, so the question path forgave settled chunks and
+   * the full-text path did not: `recordDelivery` wrote `owes_wiki = 1` flat,
+   * and its "a chunk already settled is not charged again" only ever meant the
+   * ON CONFLICT within one session. Episodes made that visible - a second
+   * episode re-reading a concluded paper was charged for every chunk episode 1
+   * had already settled - but the asymmetry was there before them.
+   */
+  private async settledChunkIdsElsewhere(
+    sessionId: number,
+  ): Promise<Set<number>> {
+    const rows = await this.db.queryAsync(
+      `SELECT DISTINCT c.chunk_id AS chunk_id
+         FROM wiki_reading_chunks c
+         JOIN wiki_reading_sessions s ON s.session_id = c.session_id
+        WHERE s.item_key = (SELECT item_key FROM wiki_reading_sessions
+                             WHERE session_id = ?)
+          AND s.library_id = (SELECT library_id FROM wiki_reading_sessions
+                               WHERE session_id = ?)
+          AND s.session_id <> ?
+          AND (s.state IN ('committed','answered')
+               OR c.settled_at IS NOT NULL)`,
+      [sessionId, sessionId, sessionId],
+    );
+    return new Set<number>(
+      rows.map((row: any) => Number(rowColumn(row, "chunk_id", "chunkId"))),
+    );
+  }
+
+  async paperDeliveredIndexes(
+    libraryID: number,
+    itemKey: string,
+  ): Promise<number[]> {
+    const rows = await this.db.queryAsync(
+      `SELECT DISTINCT c.chunk_index AS chunk_index
+         FROM wiki_reading_chunks c
+         JOIN wiki_reading_sessions s ON s.session_id = c.session_id
+        WHERE s.library_id = ? AND s.item_key = ?
+        ORDER BY c.chunk_index`,
+      [libraryID, itemKey],
+    );
+    return rows.map((row) => Number(rowColumn(row, "chunk_index", "chunkIndex")));
+  }
+
+  /** {@link coverage}, but for the paper rather than one episode of it. */
+  async paperCoverage(
+    libraryID: number,
+    itemKey: string,
+    totalChunks: number,
+  ): Promise<WikiReadingCoverage> {
+    const delivered = new Set(
+      await this.paperDeliveredIndexes(libraryID, itemKey),
+    );
+    let firstMissingIndex: number | null = null;
+    for (let index = 0; index < totalChunks; index += 1) {
+      if (!delivered.has(index)) {
+        firstMissingIndex = index;
+        break;
+      }
+    }
+    return {
+      totalChunks,
+      deliveredChunks: delivered.size,
+      remainingChunks: Math.max(0, totalChunks - delivered.size),
+      complete: totalChunks > 0 && delivered.size >= totalChunks,
+      firstMissingIndex,
+    };
   }
 
   /** The newest session for a paper, open or closed. */

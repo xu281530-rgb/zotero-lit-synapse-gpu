@@ -45,6 +45,7 @@
     <preference id="extensions.zotero.__addonRef__.wiki.shadowMode" name="extensions.zotero.__addonRef__.wiki.shadowMode" type="bool" />
     <preference id="extensions.zotero.__addonRef__.wiki.minScore" name="extensions.zotero.__addonRef__.wiki.minScore" type="string" />
     <preference id="extensions.zotero.__addonRef__.wiki.rrfWeight" name="extensions.zotero.__addonRef__.wiki.rrfWeight" type="string" />
+    <preference id="extensions.zotero.__addonRef__.wiki.note.episodeSimilarity" name="extensions.zotero.__addonRef__.wiki.note.episodeSimilarity" type="string" />
     <preference id="extensions.zotero.__addonRef__.wiki.searchTimeoutMs" name="extensions.zotero.__addonRef__.wiki.searchTimeoutMs" type="int" />
     <!-- MinerU high-precision PDF parsing -->
     <preference id="extensions.zotero.__addonRef__.mineru.mode" name="extensions.zotero.__addonRef__.mineru.mode" type="string" />
@@ -1776,6 +1777,29 @@
             max="10"
             step="0.1"
             placeholder="0"
+          />
+        </html:div>
+
+        <html:div class="zmp-sw zmp-nrow">
+          <html:div>
+            <html:div
+              class="zmp-sw-text"
+              data-l10n-id="pref-wiki-episode-similarity-label"
+            ></html:div>
+            <html:div
+              class="zmp-sw-sub"
+              data-l10n-id="pref-wiki-episode-similarity-hint"
+            ></html:div>
+          </html:div>
+          <html:input
+            type="number"
+            class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-wiki-episode-similarity"
+            preference="extensions.zotero.__addonRef__.wiki.note.episodeSimilarity"
+            min="0"
+            max="1"
+            step="0.01"
+            placeholder="0.92"
           />
         </html:div>
 

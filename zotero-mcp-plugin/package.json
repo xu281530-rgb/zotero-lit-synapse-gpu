@@ -139,7 +139,8 @@
     "test:write-note-empty-content": "node scripts/test-write-note-empty-content.js",
     "test:write-metadata-validation": "node scripts/test-write-metadata-validation.js",
     "update-deps": "npm update --save",
-    "test:reading-ledger-hint": "node --experimental-strip-types scripts/test-reading-ledger-hint.js"
+    "test:reading-ledger-hint": "node --experimental-strip-types scripts/test-reading-ledger-hint.js",
+    "test:wiki-note-routing": "node --experimental-strip-types scripts/test-wiki-note-routing.js"
   },
   "dependencies": {
     "zotero-plugin-toolkit": "^5.2.0"

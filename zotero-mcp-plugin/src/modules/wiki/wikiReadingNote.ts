@@ -867,13 +867,36 @@ export function readingNoteFileName(itemKey: string, episode = 1): string {
   return `${WIKI_READING_NOTE_FILENAME_PREFIX}${itemKey}${suffix}.md`;
 }
 
-/** Which episode an attachment's title names. 1 when it carries no number. */
+/**
+ * Which episode an attachment is. 1 when nothing names a number.
+ *
+ * The title is what a user sees and therefore what a user renames, and a
+ * renamed title used to take the episode number with it - every note collapsing
+ * to episode 1, and the next one created on top of a file that already existed.
+ * The filename is the durable half, so it is consulted whenever the title says
+ * nothing. Both spellings are accepted: ` #2.md` in a title, `-2.md` in a file
+ * name, which are what `readingNoteAttachmentTitle` and `readingNoteFileName`
+ * produce.
+ */
 export function readingNoteEpisode(attachment: any): number {
+  const parse = (value: string, pattern: RegExp): number | null => {
+    const match = pattern.exec(value);
+    if (!match) return null;
+    const episode = Number(match[1]);
+    return Number.isInteger(episode) && episode > 0 ? episode : null;
+  };
   try {
     const title = String(attachment?.getField?.("title") ?? "");
-    const match = /#(\d+)\s*\.md\s*$/u.exec(title);
-    const episode = match ? Number(match[1]) : 1;
-    return Number.isInteger(episode) && episode > 0 ? episode : 1;
+    const fromTitle = parse(title, /#(\d+)\s*\.md\s*$/u);
+    if (fromTitle !== null) return fromTitle;
+    const filename = String(
+      attachment?.attachmentFilename ??
+        attachment?.getField?.("filename") ??
+        "",
+    );
+    const fromFile = parse(filename, /-(\d+)\.md\s*$/u);
+    if (fromFile !== null) return fromFile;
+    return 1;
   } catch {
     return 1;
   }
@@ -1073,8 +1096,14 @@ export class WikiReadingNoteStore {
     initialMarkdown: string,
   ): Promise<any> {
     const notes = await this.listAttachments(item);
+    // The HIGHEST episode plus one, not the last one in the list plus one.
+    // The list is sorted by parsed episode number, so the two agree right up
+    // until a number cannot be parsed - a renamed attachment reads as episode
+    // 1 and sorts first, and "last + 1" then hands back a number that already
+    // exists. Two notes sharing a filename is the one outcome here that loses
+    // reading, so this takes the max and cannot collide.
     const next = notes.length
-      ? readingNoteEpisode(notes[notes.length - 1]) + 1
+      ? notes.reduce((highest, note) => Math.max(highest, readingNoteEpisode(note)), 0) + 1
       : 1;
     return this.createAttachment(item, initialMarkdown, next);
   }
