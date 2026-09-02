@@ -3319,7 +3319,13 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
     );
 
     try {
-      return await readDocumentChunks(args ?? {}, deps, defaultLibraryID);
+      const read = await readDocumentChunks(args ?? {}, deps, defaultLibraryID);
+      // A cursor call carries no itemKey of its own; the response names the
+      // document it continued.
+      return this.attachReadingLedgerHint(
+        read,
+        String((read as any)?.itemKey ?? args?.itemKey ?? ''),
+      );
     } catch (error) {
       if (error instanceof DocumentChunksError) {
         throw new Error(error.message);
@@ -3842,15 +3848,61 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
    * primitives as hybrid_search: there is no second retrieval stack here, only
    * a different candidate set (this paper's chunks instead of the library).
    */
+  /**
+   * The reminder to record what was just read, attached to the passages.
+   *
+   * This obligation used to live only in static text: the tail of
+   * hybrid_search's description and STAGE 4 of the server instructions, both
+   * loaded once at connection time and both dozens of tool calls behind by the
+   * moment a model finishes reading. search_fulltext - the tool that actually
+   * hands over the passages, and the last one called before an answer is
+   * written - said nothing about it at all, and neither did any response. So
+   * the commonest outcome was an answer, no record, and a Wiki that stayed at
+   * one page however many questions were asked of the library.
+   *
+   * Putting it on the response is what makes it arrive at the moment it is
+   * actionable, and it costs ~40 tokens on the calls that deliver passages
+   * rather than thousands on every turn. It names the chunk ids because those
+   * are exactly what `readChunkIds` wants: the caller does not have to go back
+   * through the rows to assemble them.
+   */
+  private attachReadingLedgerHint(result: any, itemKey: string): any {
+    if (!result || typeof result !== 'object') return result;
+    if (!getWikiSettings().enabled) return result;
+    const chunkIds = Array.isArray(result.chunks)
+      ? result.chunks
+          .map((chunk: any) => chunk?.chunkId)
+          .filter((id: any) => Number.isInteger(id))
+      : [];
+    if (!chunkIds.length) return result;
+    return {
+      ...result,
+      readingLedger: {
+        itemKey,
+        deliveredChunkIds: chunkIds,
+        recorded: false,
+        nextStep:
+          `Answer the user first. Then, if you USED any of these passages, call ` +
+          `wiki_update_reading_note with itemKey "${itemKey}", readChunkIds set to just the ` +
+          `ones you used, the domain and expertRole you searched with, and one readingRecord ` +
+          `of what this turn established. Retrieval is not reading: a passage you skimmed ` +
+          `past does not go in. If you used none of them, record nothing.`,
+      },
+    };
+  }
+
   private async callSearchFulltext(args: any): Promise<any> {
     // Context-expansion mode: no query, no ranking, just neighbours.
     if (Array.isArray(args?.chunkIds) && args.chunkIds.length > 0) {
-      return expandChunkContext({
-        itemKey: args.itemKey,
-        libraryID: args.libraryID,
-        chunkIds: args.chunkIds,
-        radius: args.neighborRadius,
-      });
+      return this.attachReadingLedgerHint(
+        await expandChunkContext({
+          itemKey: args.itemKey,
+          libraryID: args.libraryID,
+          chunkIds: args.chunkIds,
+          radius: args.neighborRadius,
+        }),
+        args.itemKey,
+      );
     }
 
     if (typeof args?.query !== 'string' || !args.query.trim()) {
@@ -3866,17 +3918,20 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
       }
     }
 
-    return runDocumentDeepDive({
-      itemKey: args.itemKey,
-      libraryID: args.libraryID,
-      query: args.query,
-      keywords: args.keywords,
-      domain: args.domain,
-      expertRole: args.expertRole,
-      maxChunks: args.maxChunks,
-      minKeywordScore: args.minKeywordScore,
-      minSemanticScore: args.minSemanticScore,
-    });
+    return this.attachReadingLedgerHint(
+      await runDocumentDeepDive({
+        itemKey: args.itemKey,
+        libraryID: args.libraryID,
+        query: args.query,
+        keywords: args.keywords,
+        domain: args.domain,
+        expertRole: args.expertRole,
+        maxChunks: args.maxChunks,
+        minKeywordScore: args.minKeywordScore,
+        minSemanticScore: args.minSemanticScore,
+      }),
+      args.itemKey,
+    );
   }
 
   private async callGetItemAbstract(args: any): Promise<any> {

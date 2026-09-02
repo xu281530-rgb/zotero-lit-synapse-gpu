@@ -543,6 +543,114 @@ test("the method resources round-trip, and are gated like the tools", () => {
   }
 });
 
+/**
+ * hybrid_search fuses THREE routes, not two.
+ *
+ * `runHybridSearch` adds wikiWeight/(rrfK + wikiRank) whenever the Wiki route
+ * has a non-zero weight, and `metadata.fusionNote` prints that three-term
+ * formula back - while the description stated a two-term one and told the
+ * caller that a missing branch score means "that branch did not admit it". A
+ * Wiki-only row has BOTH text scores missing, which under the old description
+ * was a state that could not exist.
+ */
+test("hybrid_search describes the Wiki route it can actually fuse", () => {
+  const hybrid = buildToolCatalog().find((t) => t.name === "hybrid_search");
+  const text = served(hybrid);
+
+  assert.match(text, /THERE IS A THIRD ROUTE/, "the Wiki route is undocumented");
+  assert.match(
+    text,
+    /wikiWeight\/\(rrfK \+ wikiRank\)/,
+    "the fusion formula must include the term the server adds",
+  );
+  // Off by default, so the two-branch reading stays correct for most users and
+  // the third route is not made to sound like something they have to manage.
+  assert.match(text, /OFF by default|shadow mode/i);
+  // The row shape that used to be impossible.
+  assert.match(
+    text,
+    /BOTH normalizedKeywordScore and normalizedSemanticScore missing/,
+    "the Wiki-only row must be described, or it reads as malformed",
+  );
+
+  // The server reads args.wikiMinScore in callHybridSearch; a parameter that
+  // is accepted but absent from the schema cannot be used and cannot be seen.
+  assert.ok(
+    "wikiMinScore" in hybrid.inputSchema.properties,
+    "wikiMinScore is accepted by the server but missing from the schema",
+  );
+});
+
+/**
+ * Paging state is not durable, and the description told callers to page.
+ *
+ * PAGE_STATE_TTL_MS is 15 minutes and MAX_PAGE_STATES is 5, so the literature
+ * review the description explicitly recommends paging for - fan out into
+ * sub-questions, come back for page 2 - is the exact shape that loses its
+ * cursor.
+ */
+test("the paged search tools admit their cursors expire", () => {
+  const hybrid = buildToolCatalog().find((t) => t.name === "hybrid_search");
+  const text = served(hybrid);
+  assert.match(text, /15 MINUTES|15 minutes/, "the cursor TTL is undocumented");
+  assert.match(
+    text,
+    /5 MOST RECENT|5 most recent/,
+    "the eviction limit is undocumented",
+  );
+});
+
+/**
+ * "One of these two" has one spelling in this catalog.
+ *
+ * hybrid_search says it with anyOf; get_document_chunks used to say it only in
+ * an English sentence inside a parameter description, so a client validating
+ * against the schema saw a tool that required nothing.
+ */
+test("itemKey-or-cursor is expressed in the schema, not only in prose", () => {
+  for (const name of ["hybrid_search", "get_document_chunks"]) {
+    const schema = buildToolCatalog().find((t) => t.name === name).inputSchema;
+    assert.ok(
+      Array.isArray(schema.anyOf) && schema.anyOf.length === 2,
+      `${name} does not express its either/or requirement in the schema`,
+    );
+    const required = schema.anyOf.flatMap((branch) => branch.required ?? []);
+    assert.ok(
+      required.includes("cursor"),
+      `${name}'s anyOf does not offer the cursor branch`,
+    );
+    for (const key of required) {
+      assert.ok(
+        key in (schema.properties ?? {}),
+        `${name}'s anyOf requires "${key}", which it does not define`,
+      );
+    }
+  }
+});
+
+/**
+ * A stage must name the stage after it, in the half that is always loaded.
+ *
+ * Moving procedure into `doctrine` moved the "THEN: call search_fulltext"
+ * paragraph with it, and a funnel whose entry point never mentions the next
+ * step is a funnel that ends at its entry point - answers assembled out of
+ * titles and snippets, which is what the whole design exists to prevent. The
+ * METHOD resource may hold HOW to do the next stage; WHICH stage is next has
+ * to survive without it.
+ */
+test("the funnel's entry point names the next stage in its contract", () => {
+  const hybrid = buildToolCatalog().find((t) => t.name === "hybrid_search");
+  for (const next of ["get_item_abstract", "search_fulltext"]) {
+    assert.ok(
+      hybrid.description.includes(next),
+      `hybrid_search's per-turn description does not name ${next}, so the funnel ` +
+        "stops here whenever the method resource is not fetched",
+    );
+  }
+  // And it has to say why, or "answer from the rows" stays the cheaper option.
+  assert.match(hybrid.description, /THIS CALL DOES NOT FINISH THE JOB/);
+});
+
 test("the per-turn tool payload stays inside its budget", () => {
   // Measured in characters, because a token count depends on a tokenizer this
   // repo does not ship. ~3.5 chars/token is the ratio for this mixed
