@@ -109,6 +109,103 @@ for (let index = 0; index < 100; index += 1) {
   assert.equal(response.headers["Mcp-Session-Id"], undefined);
 }
 
+// ---------------------------------------------------------------------------
+// Resources. `instructions` lands in the client's system prompt, so it is paid
+// for on every turn exactly like tools/list is. The five stages moved out of it
+// into zotero://guide/workflow; what stays has to be short enough to be worth
+// that placement AND still name the road out, or the guide is text nobody
+// fetches.
+// ---------------------------------------------------------------------------
+const initialized = bodyOf(
+  await server.handleMCPRequest(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 900,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", clientInfo: { name: "t", version: "1" } },
+    }),
+  ),
+).result;
+
+assert.ok(
+  initialized.instructions.length < 2000,
+  `instructions is ${initialized.instructions.length} chars and is re-sent every turn; ` +
+    "stage-by-stage procedure belongs in zotero://guide/workflow",
+);
+for (const pointer of ["zotero://guide/workflow", "zotero://tool/"]) {
+  assert.ok(
+    initialized.instructions.includes(pointer),
+    `instructions must name ${pointer}, or the detail it points at is never read`,
+  );
+}
+assert.ok(
+  initialized.capabilities.resources,
+  "resources must be declared, now that they carry the workflow and the methods",
+);
+
+const resources = bodyOf(
+  await server.handleMCPRequest(
+    JSON.stringify({ jsonrpc: "2.0", id: 901, method: "resources/list" }),
+  ),
+).result.resources;
+assert.ok(resources.length > 1, "resources/list still returns (almost) nothing");
+assert.ok(
+  resources.some((entry) => entry.uri === "zotero://guide/workflow"),
+  "the workflow guide is not listed",
+);
+
+// Every listed resource must resolve; a listing that points at nothing is
+// worse than an empty listing, because the caller spends a round trip finding
+// out. This is what the old handler did - it declared the capability and
+// returned [] - and resources/read was not routed at all.
+for (const entry of resources) {
+  const read = bodyOf(
+    await server.handleMCPRequest(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 902,
+        method: "resources/read",
+        params: { uri: entry.uri },
+      }),
+    ),
+  );
+  assert.ok(read.result, `${entry.uri} listed but did not resolve`);
+  assert.equal(read.result.contents[0].uri, entry.uri);
+  assert.ok(
+    read.result.contents[0].text.length > 100,
+    `${entry.uri} resolved to nothing worth fetching`,
+  );
+}
+
+const workflow = bodyOf(
+  await server.handleMCPRequest(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 903,
+      method: "resources/read",
+      params: { uri: "zotero://guide/workflow" },
+    }),
+  ),
+).result.contents[0].text;
+// Moved verbatim: all five stages, and the closing rule that no tool returns a
+// whole document, have to still be there.
+for (const stage of ["STAGE 0", "STAGE 1", "STAGE 2", "STAGE 3", "STAGE 4"]) {
+  assert.ok(workflow.includes(stage), `${stage} was lost moving the guide out`);
+}
+assert.ok(workflow.includes("BEYOND THE FUNNEL"));
+
+const missing = bodyOf(
+  await server.handleMCPRequest(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 904,
+      method: "resources/read",
+      params: { uri: "zotero://guide/nope" },
+    }),
+  ),
+);
+assert.equal(missing.error.code, -32002);
+
 assert.equal(
   Object.prototype.hasOwnProperty.call(server, "clientSessions"),
   false,
