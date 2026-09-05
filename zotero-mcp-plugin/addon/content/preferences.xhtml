@@ -343,6 +343,16 @@
        two labels side by side. */
     .zmp-p2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
     .zmp-p2 > .zmp-sw { margin-bottom: 0; min-width: 0; }
+    /* A paired row has half a row's width, and the name is what gets squeezed
+       out of it and onto a second line. Hand the name the row's own slack: a
+       tighter box, a tighter gap before the control, and a dropdown carrying
+       less padding than it needs. The control ends up further right, which is
+       the point — nothing here forbids the wrap, it just stops being needed. */
+    .zmp-p2 > .zmp-sw { gap: 8px; padding-inline: 10px 8px; }
+    .zmp-p2 select.zmp-nb { padding-inline: 7px 5px; }
+    /* An even split is not always the right one. Where the right-hand setting
+       has the longer name, it gets the wider half. */
+    .zmp-p2-wide-right { grid-template-columns: 0.85fr 1.15fr; }
     .zmp-p2:last-child, .zmp-p2.zmp-last { margin-bottom: 0; }
     @media (max-width: 620px) { .zmp-p2 { grid-template-columns: 1fr; } }
 
@@ -1944,7 +1954,7 @@
           <html:span data-l10n-id="pref-wiki-group-record"></html:span>
         </html:div>
 
-        <html:div class="zmp-p2">
+        <html:div class="zmp-p2 zmp-p2-wide-right">
           <html:div class="zmp-sw">
             <html:div class="zmp-sw-h">
               <html:span class="zmp-sw-text" data-l10n-id="pref-wiki-auto-write-text"></html:span>
