@@ -160,11 +160,26 @@ export interface WikiLinkResolutionRecord {
   linkId: number;
   resolutionType: WikiLinkResolutionType;
   claimId: number | null;
+  claimIds: number[];
   pageId: number | null;
   relationId: number | null;
   resolutionNote: string;
   createdAt: number;
   signalIds: number[];
+}
+
+export interface WikiLinkSettlementResult {
+  settledSignals: number;
+  resolutions: number;
+  dismissed: number;
+  decisions: Array<{
+    signalId: number;
+    resolutionType: WikiLinkResolutionType;
+    claimId?: number | null;
+    claimIds?: number[];
+    pageId?: number | null;
+    relationId?: number | null;
+  }>;
 }
 
 export interface WikiLinkScanRecord {

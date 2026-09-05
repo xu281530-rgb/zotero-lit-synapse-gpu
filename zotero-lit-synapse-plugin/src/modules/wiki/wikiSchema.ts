@@ -8,7 +8,7 @@ import {
 } from "./wikiConceptTerms";
 import { rowColumn } from "./wikiRow";
 
-export const WIKI_SCHEMA_VERSION = 18;
+export const WIKI_SCHEMA_VERSION = 19;
 
 /**
  * Add a column an older database does not have yet.
@@ -657,6 +657,7 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
   await addColumnIfMissing(db, "wiki_claim_embeddings", "embedding_identity", "TEXT");
   await addColumnIfMissing(db, "wiki_concept_embeddings", "embedding_identity", "TEXT");
   await ensureLinkSchema(db);
+  await addColumnIfMissing(db, "wiki_link_resolutions", "claim_ids_json", "TEXT NOT NULL DEFAULT '[]'");
   await backfillConceptTerms(db);
   await backfillConceptEmbeddingQueue(db);
   await rearmPoisonedConceptEmbeddings(db, priorVersion);

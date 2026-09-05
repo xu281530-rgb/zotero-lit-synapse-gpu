@@ -1584,7 +1584,7 @@ export class MinerUService {
         message,
         elapsedMs: Date.now() - started,
       });
-      await this.writeFailure(attachment.key, config, stat, fileName, message);
+      await this.writeFailure(attachment, config, stat, fileName, message);
       if (options.userInitiated) throw error;
       return null;
     } finally {
@@ -1948,6 +1948,7 @@ export class MinerUService {
       ignoreExisting: true,
       createAncestors: true,
     });
+    await this.invalidateReaderTranslationCache(attachment);
     // Canonical Markdown lives only in Zotero. Derived Reader/translation data
     // is invalidated whenever the structured source changes.
     await IOUtils.remove(PathUtils.join(dir, "full.md"), {
@@ -2039,14 +2040,28 @@ export class MinerUService {
     );
   }
 
+  private async invalidateReaderTranslationCache(attachment: any): Promise<void> {
+    await IOUtils.remove(
+      PathUtils.join(
+        this.getCacheRoot(),
+        "reader",
+        String(attachment.libraryID),
+        sanitizeFileName(attachment.key),
+        "translation-cache.json",
+      ),
+      { ignoreAbsent: true },
+    );
+  }
+
   private async writeFailure(
-    attachmentKey: string,
+    attachment: any,
     config: MinerUServiceConfig,
     stat: { size: number; mtime: number },
     fileName: string,
     message: string,
   ): Promise<void> {
     try {
+      const attachmentKey = attachment.key;
       const dir = this.getAttachmentDir(attachmentKey);
       await IOUtils.makeDirectory(dir, {
         ignoreExisting: true,
@@ -2054,6 +2069,7 @@ export class MinerUService {
       });
       // Never leave an old readable Markdown/overlay behind after the source
       // changed and its replacement parse failed.
+      await this.invalidateReaderTranslationCache(attachment);
       await IOUtils.remove(PathUtils.join(dir, "full.md"), {
         ignoreAbsent: true,
       });
@@ -2070,6 +2086,7 @@ export class MinerUService {
       const meta: CacheMeta = {
         version: CACHE_VERSION,
         attachmentKey,
+        libraryID: attachment.libraryID,
         fileName,
         fileSize: stat.size,
         fileMTime: stat.mtime,

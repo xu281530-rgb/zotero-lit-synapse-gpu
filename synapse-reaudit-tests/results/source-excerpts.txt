@@ -1,0 +1,727 @@
+
+== content/scripts/zotero-lit-synapse.js:3964-3974 ==
+  3964         }
+  3965       };
+  3966       MinerUService = class {
+  3967         semaphore = new Semaphore(2);
+  3968         /** In-flight work keyed by attachment to prevent duplicate parsing. */
+  3969         inFlight = /* @__PURE__ */ new Map();
+  3970         /** MinerU failures/fallbacks in the current indexing run, deduplicated by PDF. */
+  3971         runFailures = /* @__PURE__ */ new Map();
+  3972         /** Markdown attachments created during the current indexing run. */
+  3973         runAttachments = 0;
+  3974         /** 界面进度监听器；解析是分钟级操作，没有它用户只能盯着一个不动的弹窗 */
+
+== content/scripts/zotero-lit-synapse.js:4031-4049 ==
+  4031         getCacheRoot() {
+  4032           return PathUtils.join(Zotero.DataDirectory.dir, "zotero-lit-synapse", "mineru");
+  4033         }
+  4034         getAttachmentStatePath() {
+  4035           return PathUtils.join(
+  4036             Zotero.DataDirectory.dir,
+  4037             "zotero-lit-synapse",
+  4038             "mineru-attachment-state.json"
+  4039           );
+  4040         }
+  4041         getAttachmentDir(attachmentKey) {
+  4042           return PathUtils.join(this.getCacheRoot(), sanitizeFileName(attachmentKey));
+  4043         }
+  4044         getTmpDir() {
+  4045           return PathUtils.join(this.getCacheRoot(), "tmp");
+  4046         }
+  4047         sourceIdentity(libraryID, attachmentKey) {
+  4048           return `${Number(libraryID) || Zotero.Libraries.userLibraryID}:${attachmentKey}`;
+  4049         }
+
+== content/scripts/zotero-lit-synapse.js:4350-4418 ==
+  4350         async getMarkdownForAttachment(attachment, options = {}) {
+  4351           const config2 = this.getConfig();
+  4352           if (!config2.enabled && options.ignoreEnabled !== true) return null;
+  4353           if (!attachment?.key) return null;
+  4354           if (isDoc2XGeneratedPDFAttachment(attachment)) {
+  4355             ztoolkit.log(
+  4356               `[PDFSelection] refusing high-precision parse for Doc2X generated PDF ${attachment.key}: ${getAttachmentLabel(attachment)}`
+  4357             );
+  4358             return null;
+  4359           }
+  4360           const allowParse = options.allowParse === true || options.allowParse === void 0 && config2.blockingOnDemand;
+  4361           try {
+  4362             const filePath = attachment.getFilePathAsync ? await attachment.getFilePathAsync() : attachment.getFilePath?.();
+  4363             if (!filePath) return null;
+  4364             const stat = await this.statFile(filePath);
+  4365             if (!stat) return null;
+  4366             const doc2x = options.force === true ? null : await this.readFreshDoc2XMarkdown(attachment, stat);
+  4367             if (doc2x?.markdown) {
+  4368               options.onOrigin?.("doc2x");
+  4369               return doc2x.markdown;
+  4370             }
+  4371             const cached = options.force === true ? null : await this.readStructuredCache(attachment.key, config2, stat);
+  4372             const structured = cached && "assembled" in cached ? cached : null;
+  4373             const attachedMinerU = options.force === true ? null : await this.readFreshMinerUMarkdownAttachment(attachment, stat);
+  4374             if (structured && attachedMinerU) {
+  4375               const currentAttachment = structured.meta.assemblerVersion === ASSEMBLER_VERSION && structured.meta.structuredHash === structured.source.structuredHash && structured.meta.generatedAttachmentKey === attachedMinerU.key && structured.meta.markdownHash === hashDocumentText(attachedMinerU.markdown);
+  4376               if (!currentAttachment) {
+  4377                 const synced = await this.syncMarkdownAttachment(
+  4378                   attachment,
+  4379                   structured.assembled.markdown,
+  4380                   attachment.attachmentFilename || `${attachment.key}.pdf`,
+  4381                   { replaceExisting: true }
+  4382                 );
+  4383                 if (!synced) return null;
+  4384                 await this.updateCacheAttachmentMeta(
+  4385                   attachment.key,
+  4386                   structured,
+  4387                   synced
+  4388                 );
+  4389                 options.onAttachmentChanged?.();
+  4390                 options.onOrigin?.("mineru_attachment");
+  4391                 return synced.markdown;
+  4392               }
+  4393               options.onOrigin?.("mineru_attachment");
+  4394               return attachedMinerU.markdown;
+  4395             }
+  4396             if (attachedMinerU && options.restoreMissingMarkdown) {
+  4397               await this.allowAutomaticMarkdown(
+  4398                 attachment.libraryID,
+  4399                 attachment.key
+  4400               );
+  4401               options.onOrigin?.("mineru_attachment");
+  4402               return attachedMinerU.markdown;
+  4403             }
+  4404             if (structured && options.restoreMissingMarkdown) {
+  4405               const synced = await this.syncMarkdownAttachment(
+  4406                 attachment,
+  4407                 structured.assembled.markdown,
+  4408                 attachment.attachmentFilename || `${attachment.key}.pdf`,
+  4409                 { replaceExisting: true }
+  4410               );
+  4411               if (!synced) return null;
+  4412               await this.updateCacheAttachmentMeta(
+  4413                 attachment.key,
+  4414                 structured,
+  4415                 synced
+  4416               );
+  4417               await this.allowAutomaticMarkdown(
+  4418                 attachment.libraryID,
+
+== content/scripts/zotero-lit-synapse.js:4474-4491 ==
+  4474             const existing = this.inFlight.get(attachment.key);
+  4475             if (existing) {
+  4476               ztoolkit.log(`[MinerU] ${attachment.key} \u5DF2\u5728\u89E3\u6790\u4E2D\uFF0C\u590D\u7528\u540C\u4E00\u4EFB\u52A1`);
+  4477               options.onOrigin?.("mineru_parsed");
+  4478               return existing;
+  4479             }
+  4480             const task = this.parseAndCache(
+  4481               attachment,
+  4482               filePath,
+  4483               stat,
+  4484               config2,
+  4485               options
+  4486             ).finally(() => {
+  4487               this.inFlight.delete(attachment.key);
+  4488             });
+  4489             this.inFlight.set(attachment.key, task);
+  4490             options.onOrigin?.("mineru_parsed");
+  4491             return await task;
+
+== content/scripts/zotero-lit-synapse.js:5058-5127 ==
+  5058          * Avoid indexing loops in the notifier listener by filtering generated content types.
+  5059          */
+  5060         async syncMarkdownAttachment(attachment, markdown, fileName, options) {
+  5061           const parentItemID = attachment?.parentItemID;
+  5062           if (!parentItemID) {
+  5063             ztoolkit.log(
+  5064               `[MinerU] ${attachment?.key} \u6CA1\u6709\u7236\u6761\u76EE\uFF0C\u8DF3\u8FC7 Markdown \u9644\u4EF6\u6302\u8F7D`
+  5065             );
+  5066             return null;
+  5067           }
+  5068           const baseName = sanitizeFileName(fileName.replace(/\.pdf$/i, ""));
+  5069           const title = `${MARKDOWN_ATTACHMENT_PREFIX} (${attachment.key}).md`;
+  5070           const legacyTitles = /* @__PURE__ */ new Set([title, `MinerU \xB7 ${baseName}`]);
+  5071           const tmpPath = PathUtils.join(
+  5072             this.getTmpDir(),
+  5073             `${sanitizeFileName(attachment.key)}-${baseName}.md`
+  5074           );
+  5075           let imported = null;
+  5076           try {
+  5077             const parent = await Zotero.Items.getAsync(parentItemID);
+  5078             if (!parent) return null;
+  5079             const existing = [];
+  5080             for (const childID of parent.getAttachments?.() || []) {
+  5081               try {
+  5082                 const child = await Zotero.Items.getAsync(childID);
+  5083                 if (!child) continue;
+  5084                 const childTitle = child.getField?.("title") || "";
+  5085                 if (legacyTitles.has(childTitle)) {
+  5086                   existing.push(child);
+  5087                 }
+  5088               } catch (e) {
+  5089                 ztoolkit.log(`[MinerU] \u8BFB\u53D6\u5B50\u9644\u4EF6\u5931\u8D25\uFF1A${e}`, "warn");
+  5090               }
+  5091             }
+  5092             if (existing.length > 0 && !options.replaceExisting) {
+  5093               const keep = existing.find((child) => child.getField?.("title") === title) || existing[0];
+  5094               if (keep.getField?.("title") !== title) {
+  5095                 keep.setField("title", title);
+  5096                 await keep.saveTx();
+  5097               }
+  5098               for (const child of existing) {
+  5099                 if (child.id === keep.id) continue;
+  5100                 try {
+  5101                   ztoolkit.log(
+  5102                     `[MinerU] removing duplicate generated Markdown attachment ${child.key}`
+  5103                   );
+  5104                   this.ownReplacementAttachmentKeys.add(child.key);
+  5105                   await child.eraseTx();
+  5106                 } catch (error) {
+  5107                   ztoolkit.log(
+  5108                     `[MinerU] failed to remove duplicate Markdown attachment ${child.key}: ${error}`,
+  5109                     "warn"
+  5110                   );
+  5111                 }
+  5112               }
+  5113               const keepPath = keep.getFilePathAsync ? await keep.getFilePathAsync() : keep.getFilePath?.();
+  5114               if (!keepPath) return null;
+  5115               const keepMarkdown = await IOUtils.readUTF8(keepPath);
+  5116               return { item: keep, key: keep.key, markdown: keepMarkdown };
+  5117             }
+  5118             await IOUtils.makeDirectory(this.getTmpDir(), {
+  5119               ignoreExisting: true,
+  5120               createAncestors: true
+  5121             });
+  5122             await IOUtils.writeUTF8(tmpPath, markdown);
+  5123             imported = await Zotero.Attachments.importFromFile({
+  5124               file: tmpPath,
+  5125               parentItemID,
+  5126               title,
+  5127               contentType: "text/markdown",
+
+== content/scripts/zotero-lit-synapse.js:5180-5228 ==
+  5180               await IOUtils.remove(tmpPath, { ignoreAbsent: true });
+  5181             } catch (_) {
+  5182             }
+  5183           }
+  5184         }
+  5185         /**
+  5186          * Return the shared high-precision parse artifacts used by the embedded
+  5187          * reader. The authoritative Markdown may come from Doc2X or MinerU; raw
+  5188          * MinerU geometry is exposed only when its cache is fresh for this PDF.
+  5189          */
+  5190         async getRichParseForAttachment(attachment, options = {}) {
+  5191           const markdown = await this.getMarkdownForAttachment(attachment, options);
+  5192           if (!markdown) return null;
+  5193           let rawFiles = {};
+  5194           let blocks = [];
+  5195           let structuredHash = null;
+  5196           try {
+  5197             const filePath = attachment.getFilePathAsync ? await attachment.getFilePathAsync() : attachment.getFilePath?.();
+  5198             const stat = filePath ? await this.statFile(filePath) : null;
+  5199             const doc2x = options.force === true || !stat ? null : await this.readFreshDoc2XMarkdown(attachment, stat);
+  5200             if (!doc2x?.markdown) {
+  5201               const cached = stat ? await this.readStructuredCache(
+  5202                 attachment.key,
+  5203                 this.getConfig(),
+  5204                 stat
+  5205               ) : null;
+  5206               if (cached && "assembled" in cached) {
+  5207                 rawFiles = await this.readArtifactFiles(attachment.key);
+  5208                 blocks = cached.assembled.blocks;
+  5209                 structuredHash = cached.source.structuredHash;
+  5210               }
+  5211             } else {
+  5212               ztoolkit.log(
+  5213                 `[Doc2XBridge] reader will use Doc2X Markdown without MinerU raw JSON for ${attachment.key}`
+  5214               );
+  5215             }
+  5216           } catch (error) {
+  5217             ztoolkit.log(
+  5218               `[HighPrecisionPDF] failed to inspect structured cache for ${attachment?.key}: ${error}`,
+  5219               "warn"
+  5220             );
+  5221           }
+  5222           return {
+  5223             markdown,
+  5224             rawFiles,
+  5225             files: rawFiles,
+  5226             blocks,
+  5227             structuredHash,
+  5228             assemblerVersion: ASSEMBLER_VERSION
+
+== content/scripts/zotero-lit-synapse.js:5284-5331 ==
+  5284         async readStructuredCache(attachmentKey, config2, stat) {
+  5285           let meta = null;
+  5286           try {
+  5287             meta = await this.readMeta(attachmentKey);
+  5288           } catch {
+  5289             return null;
+  5290           }
+  5291           if (!meta) return null;
+  5292           const sourceFresh = (meta.version === 1 || meta.version === CACHE_VERSION) && meta.fileSize === stat.size && meta.fileMTime === stat.mtime;
+  5293           if (!sourceFresh) {
+  5294             ztoolkit.log(
+  5295               `[MinerU] PDF changed; structured cache is stale for ${attachmentKey}`
+  5296             );
+  5297             return null;
+  5298           }
+  5299           if (meta.signature !== this.getSignature(config2)) {
+  5300             ztoolkit.log(
+  5301               `[MinerU] parse settings changed; structured cache is stale for ${attachmentKey}`
+  5302             );
+  5303             return null;
+  5304           }
+  5305           if (meta.error) {
+  5306             const elapsed = Date.now() - (meta.failedAt || 0);
+  5307             if (elapsed < FAILURE_RETRY_MS) {
+  5308               return {
+  5309                 skipReason: `\u4E0A\u6B21\u89E3\u6790\u5931\u8D25\uFF08${meta.error}\uFF09\uFF0C\u51B7\u5374\u4E2D`,
+  5310                 discardBeforeRetry: true
+  5311               };
+  5312             }
+  5313             return null;
+  5314           }
+  5315           try {
+  5316             const files = await this.readArtifactFiles(attachmentKey);
+  5317             const source = selectStructuredSource(files);
+  5318             return {
+  5319               meta,
+  5320               source,
+  5321               assembled: assembleStructuredDocument(source)
+  5322             };
+  5323           } catch (error) {
+  5324             return {
+  5325               skipReason: `structured MinerU cache is invalid: ${error instanceof Error ? error.message : String(error)}`,
+  5326               discardBeforeRetry: true
+  5327             };
+  5328           }
+  5329         }
+  5330         async writeCache(attachment, config2, stat, fileName, result, assembled) {
+  5331           const attachmentKey = attachment.key;
+
+== content/scripts/zotero-lit-synapse.js:5369-5399 ==
+  5369               continue;
+  5370             }
+  5371             rawTotalBytes += bytes;
+  5372             await IOUtils.writeUTF8(
+  5373               PathUtils.join(rawDir, structuredCacheFileName(name)),
+  5374               content
+  5375             );
+  5376           }
+  5377           const meta = {
+  5378             version: CACHE_VERSION,
+  5379             attachmentKey,
+  5380             libraryID: attachment.libraryID,
+  5381             fileName,
+  5382             fileSize: stat.size,
+  5383             fileMTime: stat.mtime,
+  5384             signature: this.getSignature(config2),
+  5385             parsedAt: (/* @__PURE__ */ new Date()).toISOString(),
+  5386             markdownLength: assembled.markdown.length,
+  5387             parserVersion: result.structuredSource.parserVersion,
+  5388             structuredFormat: result.structuredSource.format,
+  5389             structuredFileName: result.structuredSource.fileName,
+  5390             structuredHash: result.structuredSource.structuredHash,
+  5391             assemblerVersion: ASSEMBLER_VERSION,
+  5392             markdownHash: hashDocumentText(assembled.markdown)
+  5393           };
+  5394           await IOUtils.writeUTF8(
+  5395             PathUtils.join(dir, "meta.json"),
+  5396             JSON.stringify(meta, null, 2)
+  5397           );
+  5398         }
+  5399         async updateCacheAttachmentMeta(attachmentKey, cached, attached) {
+
+== content/scripts/zotero-lit-synapse.js:5418-5431 ==
+  5418         async invalidateReaderTranslationCache(attachment) {
+  5419           await IOUtils.remove(
+  5420             PathUtils.join(
+  5421               this.getCacheRoot(),
+  5422               "reader",
+  5423               String(attachment.libraryID),
+  5424               sanitizeFileName(attachment.key),
+  5425               "translation-cache.json"
+  5426             ),
+  5427             { ignoreAbsent: true }
+  5428           );
+  5429         }
+  5430         async writeFailure(attachment, config2, stat, fileName, message) {
+  5431           try {
+
+== content/scripts/zotero-lit-synapse.js:56462-56493 ==
+ 56462     }
+ 56463     stop() {
+ 56464       ztoolkit.log(`[HttpServer] stop() called - isRunning: ${this.isRunning}, hasSocket: ${!!this.serverSocket}`);
+ 56465       const socket = this.serverSocket;
+ 56466       this.serverSocket = null;
+ 56467       this.isRunning = false;
+ 56468       this.boundPort = null;
+ 56469       this.boundLoopbackOnly = null;
+ 56470       ztoolkit.log(`[HttpServer] Closing ${this.activeTransports.size} active transport connections...`);
+ 56471       for (const transport of this.activeTransports) {
+ 56472         try {
+ 56473           transport.close(0);
+ 56474         } catch (e) {
+ 56475         }
+ 56476       }
+ 56477       this.activeTransports.clear();
+ 56478       ztoolkit.log("[HttpServer] All transports closed");
+ 56479       try {
+ 56480         ztoolkit.log("[HttpServer] Closing server socket...");
+ 56481         socket?.close();
+ 56482         ztoolkit.log("[HttpServer] Server socket closed successfully");
+ 56483       } catch (e) {
+ 56484         ztoolkit.log(`[HttpServer] Error closing server socket: ${e}`, "error");
+ 56485       }
+ 56486       this.cleanupMCPServer();
+ 56487       ztoolkit.log("[HttpServer] stop() complete");
+ 56488     }
+ 56489     cleanupMCPServer() {
+ 56490       if (this.mcpServer) {
+ 56491         this.mcpServer = null;
+ 56492         ztoolkit.log("[HttpServer] MCP server cleaned up");
+ 56493       }
+
+== content/scripts/zotero-lit-synapse.js:56559-56570 ==
+ 56559     }
+ 56560     listener = {
+ 56561       onSocketAccepted: async (socket, transport) => {
+ 56562         if (socket !== this.serverSocket || !this.isRunning) {
+ 56563           try {
+ 56564             transport.close(0);
+ 56565           } catch {
+ 56566           }
+ 56567           return;
+ 56568         }
+ 56569         let input = null;
+ 56570         let output = null;
+
+== content/scripts/zotero-lit-synapse.js:56852-56862 ==
+ 56852       },
+ 56853       onStopListening: (socket, status) => {
+ 56854         ztoolkit.log(`[HttpServer] onStopListening called, status: ${status}`);
+ 56855         if (socket !== this.serverSocket) return;
+ 56856         this.serverSocket = null;
+ 56857         this.stop();
+ 56858       }
+ 56859     };
+ 56860     /**
+ 56861      * Project the shared tool catalog into the shape /capabilities describes.
+ 56862      *
+
+== content/scripts/zotero-lit-synapse.js:60553-60591 ==
+ 60553         }
+ 60554       }
+ 60555       autoUpdateRetryCount = 0;
+ 60556       refreshSemanticColumn();
+ 60557       ztoolkit.log(`[MCP Plugin] Auto-update completed for ${batch.size} items`);
+ 60558       completed = true;
+ 60559     } catch (error) {
+ 60560       ztoolkit.log(`[MCP Plugin] Auto-update failed: ${error}`, "error");
+ 60561       requeueAutoUpdates(batch, `exception: ${error}`);
+ 60562     } finally {
+ 60563       isAutoIndexing = false;
+ 60564       if (completed) drainAutoUpdatesAfterBuild();
+ 60565     }
+ 60566   }
+ 60567   function drainAutoUpdatesAfterBuild() {
+ 60568     if (isShuttingDown || semanticAutoUpdatesSuspended || pendingAutoUpdateKeys.size === 0 || !Zotero.Prefs.get(PREF_SEMANTIC_AUTO_UPDATE, true)) return;
+ 60569     if (autoUpdateDebounceTimer) clearTimeout(autoUpdateDebounceTimer);
+ 60570     if (autoUpdateRetryTimer) {
+ 60571       clearTimeout(autoUpdateRetryTimer);
+ 60572       pendingTimeouts.delete(autoUpdateRetryTimer);
+ 60573       autoUpdateRetryTimer = null;
+ 60574     }
+ 60575     autoUpdateRetryCount = 0;
+ 60576     autoUpdateDebounceTimer = setTimeout(() => {
+ 60577       autoUpdateDebounceTimer = null;
+ 60578       void processPendingAutoUpdates();
+ 60579     }, 0);
+ 60580   }
+ 60581   function scheduleAutoUpdate(itemKey, libraryID, force) {
+ 60582     if (semanticAutoUpdatesSuspended) return;
+ 60583     const queueKey = toLibraryQueueKey(itemKey, libraryID);
+ 60584     pendingAutoUpdateKeys.set(
+ 60585       queueKey,
+ 60586       (pendingAutoUpdateKeys.get(queueKey) ?? false) || force
+ 60587     );
+ 60588     autoUpdateRetryCount = 0;
+ 60589     if (autoUpdateDebounceTimer) {
+ 60590       clearTimeout(autoUpdateDebounceTimer);
+ 60591     }
+
+== content/scripts/zotero-lit-synapse.js:60891-60924 ==
+ 60891         if (event === "delete") {
+ 60892           ztoolkit.log(`[MCP Plugin] Item notifier: event=${event}, type=${type}, ids=${ids.length}`);
+ 60893           await handleItemsDeleted(numericIds, extraData);
+ 60894           return;
+ 60895         }
+ 60896         const enabled = Zotero.Prefs.get(PREF_SEMANTIC_AUTO_UPDATE, true);
+ 60897         if (!enabled || semanticAutoUpdatesSuspended) {
+ 60898           if (event === "add" || event === "modify" || event === "trash") {
+ 60899             await trackMinerUMarkdownLifecycle(numericIds, event);
+ 60900           }
+ 60901           return;
+ 60902         }
+ 60903         if (event !== "add" && event !== "modify" && event !== "trash") {
+ 60904           return;
+ 60905         }
+ 60906         ztoolkit.log(`[MCP Plugin] Item notifier: event=${event}, type=${type}, ids=${ids.length}`);
+ 60907         if (event === "add") {
+ 60908           const items = Zotero.Items.get(numericIds);
+ 60909           for (const item of items) {
+ 60910             rememberChildParent(item);
+ 60911             if (item.isRegularItem?.()) {
+ 60912               scheduleAutoUpdate(item.key, item.libraryID, true);
+ 60913               continue;
+ 60914             }
+ 60915             if (item.isAnnotation?.()) continue;
+ 60916             if (item.attachmentContentType === "text/markdown") {
+ 60917               const generatedSourceKey = generatedMinerUSourceKey(item);
+ 60918               if (generatedSourceKey) {
+ 60919                 await getMinerUService().allowAutomaticMarkdown(
+ 60920                   item.libraryID,
+ 60921                   generatedSourceKey
+ 60922                 );
+ 60923               }
+ 60924               continue;
+
+== content/scripts/zotero-lit-synapse.js:61042-61060 ==
+ 61042           refreshSemanticColumn();
+ 61043         } else {
+ 61044           ztoolkit.log("[MCP Plugin] Auto index check: no new items to index");
+ 61045         }
+ 61046       }).catch((error) => {
+ 61047         ztoolkit.log(`[MCP Plugin] Auto index failed: ${error}`, "error");
+ 61048       }).finally(() => {
+ 61049         isAutoIndexing = false;
+ 61050         drainAutoUpdatesAfterBuild();
+ 61051       });
+ 61052     } catch (error) {
+ 61053       ztoolkit.log(`[MCP Plugin] Error in triggerAutoIndexBuild: ${error}`, "error");
+ 61054       isAutoIndexing = false;
+ 61055     }
+ 61056   }
+ 61057   function unregisterItemNotifier() {
+ 61058     if (itemNotifierID) {
+ 61059       Zotero.Notifier.unregisterObserver(itemNotifierID);
+ 61060       ztoolkit.log(`[MCP Plugin] Item notifier unregistered: ${itemNotifierID}`);
+
+== mark-reader/content/scripts/zotero-mark-reader.js:194-214 ==
+   194   function attachmentIdentity(attachment) {
+   195     const libraryID = Number(attachment?.libraryID);
+   196     if (!Number.isInteger(libraryID) || libraryID <= 0 || !attachment?.key) {
+   197       throw new Error("Attachment cache requires a libraryID and key.");
+   198     }
+   199     return `${libraryID}:${attachment.key}`;
+   200   }
+   201 
+   202   async function getAttachmentDataDir(attachment) {
+   203     attachmentIdentity(attachment);
+   204     const root = await getDataRoot();
+   205     const dir = joinPath(
+   206       root,
+   207       "reader",
+   208       String(attachment.libraryID),
+   209       sanitizeFileName(attachment.key),
+   210     );
+   211     await ensureDir(dir);
+   212     return dir;
+   213   }
+   214 
+
+== mark-reader/content/scripts/zotero-mark-reader.js:566-644 ==
+   566   }
+   567 
+   568   async function loadTranslationCache(attachment, parse) {
+   569     const identity = attachmentIdentity(attachment);
+   570     if (state.translationCaches.has(identity)) {
+   571       const cached = state.translationCaches.get(identity);
+   572       if (cached.sourceHash !== (parse?.sourceHash || "")) {
+   573         Object.assign(cached, normalizeTranslationCache(cached, attachment, parse));
+   574       }
+   575       return cached;
+   576     }
+   577     const dir = await getAttachmentDataDir(attachment);
+   578     const path = joinPath(dir, TRANSLATION_CACHE_FILE);
+   579     let cache = emptyTranslationCache(attachment, parse);
+   580     let migrated = false;
+   581     if (await exists(path)) {
+   582       try {
+   583         const saved = await readJSON(path);
+   584         if (
+   585           saved.libraryID === Number(attachment.libraryID) &&
+   586           saved.attachmentKey === attachment.key
+   587         ) {
+   588           cache = normalizeTranslationCache(saved, attachment, parse);
+   589         }
+   590       } catch (error) {
+   591         Zotero.logError(error);
+   592       }
+   593     } else {
+   594       const legacy = await loadLegacyTranslationCache(attachment, parse);
+   595       if (legacy) {
+   596         cache = normalizeTranslationCache(legacy, attachment, parse);
+   597         migrated = true;
+   598       }
+   599     }
+   600     migrated = migrateLegacyTranslations(parse, cache) || migrated;
+   601     state.translationCaches.set(identity, cache);
+   602     if (migrated) {
+   603       await saveTranslationCache(attachment, cache);
+   604     }
+   605     return cache;
+   606   }
+   607 
+   608   async function loadLegacyTranslationCache(attachment, parse) {
+   609     const dir = joinPath(await getDataRoot(), sanitizeFileName(attachment.key));
+   610     const path = joinPath(dir, TRANSLATION_CACHE_FILE);
+   611     if (!(await exists(path))) return null;
+   612     try {
+   613       const cache = await readJSON(path);
+   614       if (
+   615         cache.attachmentKey !== attachment.key ||
+   616         !parse?.sourceHash ||
+   617         cache.sourceHash !== parse.sourceHash
+   618       ) return null;
+   619       if (cache.libraryID !== undefined && cache.libraryID !== null) {
+   620         return cache.libraryID === Number(attachment.libraryID) ? cache : null;
+   621       }
+   622 
+   623       // Old files lack libraryID. Require matching metadata and a unique owner
+   624       // across all libraries before copying; ambiguous originals stay untouched.
+   625       const meta = await readJSON(joinPath(dir, "meta.json"));
+   626       if (
+   627         meta.libraryID !== Number(attachment.libraryID) ||
+   628         meta.attachmentKey !== attachment.key ||
+   629         !Zotero.DB?.queryAsync
+   630       ) return null;
+   631       const owners = await Zotero.DB.queryAsync(
+   632         "SELECT itemID, libraryID FROM items WHERE key = ?",
+   633         [attachment.key],
+   634       );
+   635       if (
+   636         owners.length !== 1 ||
+   637         Number(owners[0].libraryID) !== Number(attachment.libraryID)
+   638       ) return null;
+   639       return cache;
+   640     } catch (error) {
+   641       Zotero.logError(error);
+   642       return null;
+   643     }
+   644   }
+
+== mark-reader/content/scripts/zotero-mark-reader.js:692-721 ==
+   692   }
+   693 
+   694   async function saveTranslationCache(attachment, cache) {
+   695     const identity = attachmentIdentity(attachment);
+   696     const previous = state.translationCacheWrites.get(identity) || Promise.resolve();
+   697     const write = previous
+   698       .catch(() => {})
+   699       .then(async () => {
+   700         cache.updatedAt = new Date().toISOString();
+   701         const dir = await getAttachmentDataDir(attachment);
+   702         await writeJSON(joinPath(dir, TRANSLATION_CACHE_FILE), cache);
+   703         notifyTranslationCacheChanged(identity);
+   704       });
+   705     state.translationCacheWrites.set(identity, write);
+   706     try {
+   707       await write;
+   708     } finally {
+   709       if (state.translationCacheWrites.get(identity) === write) {
+   710         state.translationCacheWrites.delete(identity);
+   711       }
+   712     }
+   713   }
+   714 
+   715   function notifyTranslationCacheChanged(identity) {
+   716     for (const listener of state.cacheListeners) {
+   717       try {
+   718         listener(identity);
+   719       } catch (error) {
+   720         Zotero.logError(error);
+   721       }
+
+== mark-reader/content/scripts/zotero-mark-reader.js:1539-1570 ==
+  1539         documents: this.documents.map((document) => ({
+  1540           title: document.title,
+  1541           attachmentKey: document.attachment.key,
+  1542           attachmentIdentity: attachmentIdentity(document.attachment),
+  1543           glossary: document.cache.glossary,
+  1544         })),
+  1545       };
+  1546     }
+  1547 
+  1548     setDocumentGlossary(identity, entries, options = {}) {
+  1549       const document = this.documents.find(
+  1550         (candidate) => attachmentIdentity(candidate.attachment) === identity,
+  1551       );
+  1552       if (!document) {
+  1553         return;
+  1554       }
+  1555       document.cache.glossary.manual = normalizeGlossaryEntries(
+  1556         entries,
+  1557         "document-manual",
+  1558       );
+  1559       if (options.replaceAI) {
+  1560         document.cache.glossary.ai = [];
+  1561       }
+  1562       document.savePromise = document.savePromise.then(() =>
+  1563         saveTranslationCache(document.attachment, document.cache),
+  1564       );
+  1565       this.emit();
+  1566     }
+  1567 
+  1568     addLog(message, level = "info") {
+  1569       this.recordLog(message, level);
+  1570       this.emit();
+
+== mark-reader/content/translation-task.js:228-261 ==
+   228   renderDocuments() {
+   229     const select = document.getElementById("zmr-glossary-document");
+   230     const selected = select.value;
+   231     select.replaceChildren();
+   232     for (const item of this.snapshot?.documents || []) {
+   233       const option = htmlElement("option");
+   234       option.value = item.attachmentIdentity;
+   235       option.textContent = xmlSafeText(item.title);
+   236       select.appendChild(option);
+   237     }
+   238     if ([...select.options].some((option) => option.value === selected)) {
+   239       select.value = selected;
+   240     }
+   241   },
+   242 
+   243   selectedDocument() {
+   244     const key = document.getElementById("zmr-glossary-document").value;
+   245     return this.snapshot?.documents.find((item) => item.attachmentIdentity === key);
+   246   },
+   247 
+   248   renderGlossary(force = false) {
+   249     const body = document.getElementById("zmr-glossary-body");
+   250     const documentItem = this.selectedDocument();
+   251     if (
+   252       !force &&
+   253       this.glossaryDirty &&
+   254       this.renderedGlossaryKey === documentItem?.attachmentIdentity
+   255     ) {
+   256       return;
+   257     }
+   258     body.replaceChildren();
+   259     if (!documentItem) {
+   260       return;
+   261     }
+
+== mark-reader/content/translation-task.js:350-362 ==
+   350     const manual = this.renderedGlossaryQuery
+   351       ? [
+   352           ...existing.filter(
+   353             (entry) => !visibleSources.has(entry.source),
+   354           ),
+   355           ...visible,
+   356         ]
+   357       : visible;
+   358     this.glossaryDirty = false;
+   359     this.task.setDocumentGlossary(item.attachmentIdentity, manual, { replaceAI: true });
+   360   },
+   361 
+   362   async importGlossary() {

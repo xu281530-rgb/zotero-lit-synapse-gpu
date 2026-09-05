@@ -41,7 +41,7 @@ export class HttpServer {
   public static testServer() {
     Zotero.debug("Static testServer method called.");
   }
-  private serverSocket: any;
+  private serverSocket: any = null;
   private isRunning: boolean = false;
   private mcpServer: StreamableMCPServer | null = null;
   private port: number = 8080;
@@ -146,10 +146,12 @@ export class HttpServer {
   public stop() {
     ztoolkit.log(`[HttpServer] stop() called - isRunning: ${this.isRunning}, hasSocket: ${!!this.serverSocket}`);
 
-    if (!this.isRunning || !this.serverSocket) {
-      ztoolkit.log("[HttpServer] Server is not running, nothing to stop");
-      return;
-    }
+    // Retire ownership before close(), whose callback may arrive after restart.
+    const socket = this.serverSocket;
+    this.serverSocket = null;
+    this.isRunning = false;
+    this.boundPort = null;
+    this.boundLoopbackOnly = null;
 
     // Close all active transports
     ztoolkit.log(`[HttpServer] Closing ${this.activeTransports.size} active transport connections...`);
@@ -166,16 +168,11 @@ export class HttpServer {
     // Close server socket
     try {
       ztoolkit.log("[HttpServer] Closing server socket...");
-      this.serverSocket.close();
-      this.isRunning = false;
+      socket?.close();
       ztoolkit.log("[HttpServer] Server socket closed successfully");
     } catch (e) {
       ztoolkit.log(`[HttpServer] Error closing server socket: ${e}`, 'error');
-      this.isRunning = false;
     }
-
-    this.boundPort = null;
-    this.boundLoopbackOnly = null;
 
     // Clean up MCP server
     this.cleanupMCPServer();
@@ -280,7 +277,15 @@ export class HttpServer {
   }
 
   private listener = {
-    onSocketAccepted: async (_socket: any, transport: any) => {
+    onSocketAccepted: async (socket: any, transport: any) => {
+      if (socket !== this.serverSocket || !this.isRunning) {
+        try {
+          transport.close(0);
+        } catch {
+          // The retired listener's transport may already be closed.
+        }
+        return;
+      }
       let input: any = null;
       let output: any = null;
       let sin: any = null;
@@ -627,7 +632,9 @@ export class HttpServer {
     },
     onStopListening: (socket: any, status: any) => {
       ztoolkit.log(`[HttpServer] onStopListening called, status: ${status}`);
-      this.isRunning = false;
+      if (socket !== this.serverSocket) return;
+      this.serverSocket = null;
+      this.stop();
     },
   };
 

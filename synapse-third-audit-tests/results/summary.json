@@ -1,0 +1,11 @@
+{
+  "totalCurrentBehaviorChecks": 80,
+  "pass": 75,
+  "bugReproduced": 5,
+  "unexpectedFailure": 0,
+  "newBehaviorChecks": 15,
+  "newPass": 12,
+  "newBugReproductions": 3,
+  "oldControlChecks": 15,
+  "notes": "5 reproduced scenarios: prior C1 has two scenarios; D1, D2a, D2b are three additional defect scenarios. No genuine Zotero runtime or external service was exercised."
+}

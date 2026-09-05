@@ -1,0 +1,548 @@
+
+===== D1 validation | content/scripts/zotero-lit-synapse.js =====
+44737:     }
+44738:     const hasFields = Object.prototype.hasOwnProperty.call(args, "fields");
+44739:     const hasCreators = Object.prototype.hasOwnProperty.call(args, "creators");
+44740:     if (!hasFields && !hasCreators) {
+44741:       throw new Error("At least one of fields or creators is required");
+44742:     }
+44743:     let fieldCount = 0;
+44744:     if (hasFields) {
+44745:       if (args.fields === null || typeof args.fields !== "object" || Array.isArray(args.fields)) {
+44746:         throw new Error("fields must be an object whose values are strings");
+44747:       }
+44748:       const entries = Object.entries(args.fields);
+44749:       fieldCount = entries.length;
+44750:       for (const [fieldName, value] of entries) {
+44751:         if (typeof value !== "string") {
+44752:           throw new Error(
+44753:             `fields.${fieldName} must be a string. Received ${typeof value}: ${JSON.stringify(value)}`
+44754:           );
+44755:         }
+44756:       }
+44757:     }
+44758:     if (hasCreators) {
+44759:       if (!Array.isArray(args.creators)) {
+44760:         throw new Error("creators must be an array of creator objects");
+44761:       }
+44762:       args.creators.forEach((creator, index) => {
+44763:         if (creator === null || typeof creator !== "object" || Array.isArray(creator)) {
+44764:           throw new Error(`creators[${index}] must be an object`);
+44765:         }
+44766:         if (typeof creator.creatorType !== "string" || !creator.creatorType.trim()) {
+44767:           throw new Error(
+44768:             `creators[${index}].creatorType is required and must be a non-empty string`
+44769:           );
+44770:         }
+44771:         for (const nameField of ["firstName", "lastName", "name"]) {
+44772:           if (creator[nameField] !== void 0 && typeof creator[nameField] !== "string") {
+44773:             throw new Error(
+44774:               `creators[${index}].${nameField} must be a string when provided`
+44775:             );
+44776:           }
+44777:         }
+44778:       });
+44779:     }
+44780:     if (fieldCount === 0 && !hasCreators) {
+44781:       throw new Error(
+44782:         "fields must contain at least one field when creators is not provided"
+44783:       );
+44784:     }
+44785:   }
+44786:   async function assertWikiConceptWriteConfirmed(count) {
+44787:     const settings = getWikiSettings();
+44788:     if (!settings.enabled)
+44789:       throw new Error("LLM Wiki is disabled in plugin preferences.");
+44790:     if (settings.autoWrite && settings.writeMode === "auto") return;
+
+===== D1 call/dispatch guard | content/scripts/zotero-lit-synapse.js =====
+45287:           try {
+45288:             if (WIKI_TOOL_NAMES.has(name)) {
+45289:               assertWikiEnabled();
+45290:             }
+45291:             if (name === "write_metadata") {
+45292:               assertWriteMetadataArgs(args);
+45293:             }
+45294:             if (name === "update_collection" && args?.name === void 0 && args?.parentCollection === void 0) {
+45295:               throw new Error(
+45296:                 "Provide name or parentCollection to update the collection."
+45297:               );
+45298:             }
+45299:             if (MUTATING_TOOL_NAMES.has(name)) {
+45300:               assertWriteEnabled(name);
+45301:               if (!isMutationPreview(name, args)) {
+45302:                 let confirmationArgs = args;
+45303:                 if (name === "merge_items") {
+45304:                   const confirmationPlan = await this.callMergeItems({
+45305:                     ...args,
+45306:                     dryRun: true
+45307:                   });
+45308:                   confirmationArgs = { ...args, confirmationPlan };
+45309:                 }
+45310:                 await assertMutationConfirmed(name, confirmationArgs);
+45311:               }
+45312:             }
+45313:             let result;
+45314:             assertNotCancelled(requestSignal(args));
+45315:             switch (name) {
+
+===== D1 mutation and no rollback | content/scripts/zotero-lit-synapse.js =====
+48610:         async callWriteMetadata(args) {
+48611:           const {
+48612:             itemKey,
+48613:             fields,
+48614:             creators,
+48615:             libraryID = Zotero.Libraries.userLibraryID
+48616:           } = args;
+48617:           try {
+48618:             const item = await Zotero.Items.getByLibraryAndKeyAsync(
+48619:               libraryID,
+48620:               itemKey
+48621:             );
+48622:             if (!item) {
+48623:               throw new Error(`Item not found in library ${libraryID}: ${itemKey}`);
+48624:             }
+48625:             if (!item.isRegularItem()) {
+48626:               throw new Error(
+48627:                 `Item ${itemKey} is not a regular item (it is a ${item.itemType}). Use write_note for notes.`
+48628:               );
+48629:             }
+48630:             const updatedFields = {};
+48631:             let creatorsUpdated = false;
+48632:             let beforeCreators = [];
+48633:             let afterCreators = [];
+48634:             if (fields && typeof fields === "object") {
+48635:               for (const [fieldName, value] of Object.entries(fields)) {
+48636:                 try {
+48637:                   const before = String(item.getField(fieldName) || "");
+48638:                   item.setField(fieldName, String(value));
+48639:                   updatedFields[fieldName] = { before, after: String(value) };
+48640:                 } catch (fieldError) {
+48641:                   throw new Error(
+48642:                     `Failed to set field "${fieldName}": ${fieldError}`
+48643:                   );
+48644:                 }
+48645:               }
+48646:             }
+48647:             if (creators && Array.isArray(creators)) {
+48648:               beforeCreators = item.getCreators().map((c) => ({
+48649:                 creatorType: Zotero.CreatorTypes.getName(c.creatorTypeID),
+48650:                 firstName: c.firstName,
+48651:                 lastName: c.lastName
+48652:               }));
+48653:               item.setCreators(
+48654:                 creators.map((c) => {
+48655:                   const creatorData = {
+48656:                     creatorType: c.creatorType || "author"
+48657:                   };
+48658:                   if (c.name) {
+48659:                     creatorData.name = c.name;
+48660:                   } else {
+48661:                     creatorData.firstName = c.firstName || "";
+48662:                     creatorData.lastName = c.lastName || "";
+48663:                   }
+48664:                   return creatorData;
+48665:                 })
+48666:               );
+48667:               creatorsUpdated = true;
+48668:               afterCreators = creators;
+48669:             }
+48670:             await item.saveTx();
+48671:             ztoolkit.log(
+48672:               `[StreamableMCP] Updated metadata on ${itemKey}: fields=[${Object.keys(updatedFields).join(", ")}], creators=${creatorsUpdated}`
+48673:             );
+48674:             return {
+48675:               success: true,
+48676:               data: {
+48677:                 itemKey,
+48678:                 updatedFields,
+48679:                 creatorsUpdated,
+48680:                 ...creatorsUpdated ? { beforeCreators, afterCreators } : {}
+48681:               },
+48682:               metadata: {
+48683:                 extractedAt: (/* @__PURE__ */ new Date()).toISOString(),
+48684:                 message: `Metadata updated on item ${itemKey}`
+48685:               }
+48686:             };
+48687:           } catch (error) {
+48688:             ztoolkit.log(`[StreamableMCP] Write metadata error: ${error}`, "error");
+48689:             return {
+48690:               success: false,
+48691:               error: String(error)
+48692:             };
+48693:           }
+48694:         }
+48695:         /**
+48696:          * Handle write_item tool calls: create items, reparent attachments, and import files
+
+===== D1 subsequent tag save | content/scripts/zotero-lit-synapse.js =====
+48537:         async callWriteTag(args) {
+48538:           const {
+48539:             action,
+48540:             itemKey,
+48541:             tags,
+48542:             libraryID = Zotero.Libraries.userLibraryID
+48543:           } = args;
+48544:           try {
+48545:             const item = await Zotero.Items.getByLibraryAndKeyAsync(
+48546:               libraryID,
+48547:               itemKey
+48548:             );
+48549:             if (!item) {
+48550:               throw new Error(`Item not found in library ${libraryID}: ${itemKey}`);
+48551:             }
+48552:             const beforeTags = item.getTags().map((t) => t.tag);
+48553:             switch (action) {
+48554:               case "add": {
+48555:                 for (const tag of tags) {
+48556:                   item.addTag(tag, 0);
+48557:                 }
+48558:                 break;
+48559:               }
+48560:               case "remove": {
+48561:                 for (const tag of tags) {
+48562:                   item.removeTag(tag);
+48563:                 }
+48564:                 break;
+48565:               }
+48566:               case "set": {
+48567:                 for (const existing of beforeTags) {
+48568:                   item.removeTag(existing);
+48569:                 }
+48570:                 for (const tag of tags) {
+48571:                   item.addTag(tag, 0);
+48572:                 }
+48573:                 break;
+48574:               }
+48575:               default:
+48576:                 throw new Error(
+48577:                   `Unknown action: ${action}. Use add, remove, or set.`
+48578:                 );
+48579:             }
+48580:             await item.saveTx();
+48581:             const afterTags = item.getTags().map((t) => t.tag);
+48582:             ztoolkit.log(
+48583:               `[StreamableMCP] write_tag ${action} on ${itemKey}: [${beforeTags.join(", ")}] -> [${afterTags.join(", ")}]`
+48584:             );
+48585:             return {
+48586:               action,
+48587:               success: true,
+48588:               data: {
+48589:                 itemKey,
+48590:                 beforeTags,
+48591:                 afterTags,
+48592:                 tagsModified: tags
+48593:               },
+48594:               metadata: {
+48595:                 extractedAt: (/* @__PURE__ */ new Date()).toISOString(),
+48596:                 message: `Tags ${action === "add" ? "added to" : action === "remove" ? "removed from" : "set on"} item ${itemKey}`
+48597:               }
+48598:             };
+48599:           } catch (error) {
+48600:             ztoolkit.log(`[StreamableMCP] Write tag error: ${error}`, "error");
+48601:             return {
+48602:               success: false,
+
+===== D2 state loader and promise chain | content/scripts/zotero-lit-synapse.js =====
+3970:         /** MinerU failures/fallbacks in the current indexing run, deduplicated by PDF. */
+3971:         runFailures = /* @__PURE__ */ new Map();
+3972:         /** Markdown attachments created during the current indexing run. */
+3973:         runAttachments = 0;
+3974:         /** 界面进度监听器；解析是分钟级操作，没有它用户只能盯着一个不动的弹窗 */
+3975:         progressListener = null;
+3976:         attachmentState = null;
+3977:         attachmentStateWrite = Promise.resolve();
+3978:         ownReplacementAttachmentKeys = /* @__PURE__ */ new Set();
+3979:         /** 注册/注销解析进度监听（同一时刻只有一个索引任务，单个监听器足够） */
+3980:         setProgressListener(listener) {
+
+===== D2 state operations | content/scripts/zotero-lit-synapse.js =====
+4050:         async readAttachmentState() {
+4051:           if (this.attachmentState) return this.attachmentState;
+4052:           try {
+4053:             const parsed = JSON.parse(
+4054:               await IOUtils.readUTF8(this.getAttachmentStatePath())
+4055:             );
+4056:             if (parsed?.version === 1 && parsed?.suppressed) {
+4057:               this.attachmentState = parsed;
+4058:               return this.attachmentState;
+4059:             }
+4060:           } catch {
+4061:           }
+4062:           this.attachmentState = { version: 1, suppressed: {} };
+4063:           return this.attachmentState;
+4064:         }
+4065:         async writeAttachmentState() {
+4066:           const state = await this.readAttachmentState();
+4067:           this.attachmentStateWrite = this.attachmentStateWrite.then(async () => {
+4068:             const path = this.getAttachmentStatePath();
+4069:             await IOUtils.makeDirectory(PathUtils.parent(path), {
+4070:               ignoreExisting: true,
+4071:               createAncestors: true
+4072:             });
+4073:             await IOUtils.writeUTF8(path, JSON.stringify(state, null, 2));
+4074:           });
+4075:           await this.attachmentStateWrite;
+4076:         }
+4077:         async suppressAutomaticMarkdown(libraryID, sourceAttachmentKey) {
+4078:           if (!sourceAttachmentKey) return;
+4079:           const state = await this.readAttachmentState();
+4080:           let parentKey;
+4081:           try {
+4082:             const source = await Zotero.Items.getByLibraryAndKeyAsync?.(
+4083:               libraryID,
+4084:               sourceAttachmentKey
+4085:             );
+4086:             parentKey = source?.parentItem?.key || source?.parentItemKey || (source?.parentItemID ? (await Zotero.Items.getAsync(source.parentItemID))?.key : void 0);
+4087:           } catch {
+4088:           }
+4089:           state.suppressed[this.sourceIdentity(libraryID, sourceAttachmentKey)] = {
+4090:             deletedAt: (/* @__PURE__ */ new Date()).toISOString(),
+4091:             parentKey
+4092:           };
+4093:           await this.writeAttachmentState();
+4094:         }
+4095:         async allowAutomaticMarkdown(libraryID, sourceAttachmentKey) {
+4096:           if (!sourceAttachmentKey) return;
+4097:           const state = await this.readAttachmentState();
+4098:           const identity2 = this.sourceIdentity(libraryID, sourceAttachmentKey);
+4099:           if (!(identity2 in state.suppressed)) return;
+4100:           delete state.suppressed[identity2];
+4101:           await this.writeAttachmentState();
+4102:         }
+4103:         async forgetAutomaticMarkdownState(libraryID, sourceAttachmentKey) {
+4104:           await this.allowAutomaticMarkdown(libraryID, sourceAttachmentKey);
+4105:         }
+4106:         async forgetAutomaticMarkdownStateForParent(libraryID, parentKey) {
+4107:           if (!parentKey) return;
+4108:           const state = await this.readAttachmentState();
+4109:           let changed = false;
+4110:           for (const [identity2, entry] of Object.entries(state.suppressed)) {
+4111:             if (identity2.startsWith(`${Number(libraryID)}:`) && entry.parentKey === parentKey) {
+4112:               delete state.suppressed[identity2];
+4113:               changed = true;
+4114:             }
+4115:           }
+4116:           if (changed) await this.writeAttachmentState();
+4117:         }
+4118:         async isAutomaticMarkdownSuppressed(attachment) {
+4119:           const state = await this.readAttachmentState();
+4120:           return Boolean(
+4121:             state.suppressed[this.sourceIdentity(attachment?.libraryID, attachment?.key || "")]
+4122:           );
+4123:         }
+4124:         consumeOwnReplacementDeletion(attachmentKey) {
+4125:           if (!this.ownReplacementAttachmentKeys.has(attachmentKey)) return false;
+4126:           this.ownReplacementAttachmentKeys.delete(attachmentKey);
+4127:           return true;
+4128:         }
+4129:         /**
+4130:          * Find a fresh Doc2X original Markdown note for this exact PDF.
+4131:          *
+4132:          * Doc2X may store lossless source Markdown in note metadata/source files,
+4133:          * or only the fully rendered Zotero note. We accept all three forms, but
+4134:          * only for localized original_MD/原文MD notes; filename affinity and task
+4135:          * metadata remain ranking signals rather than hard requirements.
+4136:          */
+4137:         async readFreshDoc2XMarkdown(attachment, stat) {
+4138:           const parentItemID = attachment?.parentItemID;
+4139:           if (!parentItemID) return null;
+
+===== D2 missing attachment suppression entry | content/scripts/zotero-lit-synapse.js =====
+4417:               await this.allowAutomaticMarkdown(
+4418:                 attachment.libraryID,
+4419:                 attachment.key
+4420:               );
+4421:               options.onAttachmentChanged?.();
+4422:               options.onOrigin?.("mineru_cache");
+4423:               return synced.markdown;
+4424:             }
+4425:             if (structured && !options.userInitiated) {
+4426:               await this.suppressAutomaticMarkdown(
+4427:                 attachment.libraryID,
+4428:                 attachment.key
+4429:               );
+4430:               ztoolkit.log(
+4431:                 `[MinerU] structured cache exists but generated Markdown is absent; respecting deletion for ${attachment.key}`
+4432:               );
+4433:               return null;
+4434:             }
+4435:             if (cached && "skipReason" in cached) {
+4436:               if (options.ignoreFailureCache) {
+4437:                 ztoolkit.log(
+4438:                   `[MinerU] retrying ${attachment.key} despite cached failure: ${cached.skipReason}`
+4439:                 );
+4440:                 if (options.restoreMissingMarkdown && allowParse && cached.discardBeforeRetry) {
+4441:                   await IOUtils.remove(this.getAttachmentDir(attachment.key), {
+
+===== D2 successful parse later marked failed | content/scripts/zotero-lit-synapse.js =====
+4986:               tmpDir: this.getTmpDir()
+4987:             });
+4988:             const result = await client.parseLocalFile(
+4989:               filePath,
+4990:               fileName,
+4991:               attachment.key
+4992:             );
+4993:             const assembled = assembleStructuredDocument(result.structuredSource);
+4994:             await this.writeCache(
+4995:               attachment,
+4996:               config2,
+4997:               stat,
+4998:               fileName,
+4999:               result,
+5000:               assembled
+5001:             );
+5002:             const synced = await this.syncMarkdownAttachment(
+5003:               attachment,
+5004:               assembled.markdown,
+5005:               fileName,
+5006:               { replaceExisting: true }
+5007:             );
+5008:             if (!synced) {
+5009:               throw new Error("Could not create the canonical Zotero Markdown attachment");
+5010:             }
+5011:             const cached = {
+5012:               meta: await this.readMeta(attachment.key),
+5013:               source: result.structuredSource,
+5014:               assembled
+5015:             };
+5016:             await this.updateCacheAttachmentMeta(attachment.key, cached, synced);
+5017:             if (options.userInitiated || options.restoreMissingMarkdown) {
+5018:               await this.allowAutomaticMarkdown(attachment.libraryID, attachment.key);
+5019:             }
+5020:             options.onAttachmentChanged?.();
+5021:             ztoolkit.log(
+5022:               `[MinerU] structured parse completed ${fileName}: ${synced.markdown.length} Markdown characters in ${((Date.now() - started) / 1e3).toFixed(1)}s`
+5023:             );
+5024:             this.emitProgress({
+5025:               phase: "done",
+5026:               attachmentKey: attachment.key,
+5027:               fileName,
+5028:               markdownLength: synced.markdown.length,
+5029:               elapsedMs: Date.now() - started
+5030:             });
+5031:             return synced.markdown;
+5032:           } catch (error) {
+5033:             const message = error instanceof Error ? error.message : String(error);
+5034:             ztoolkit.log(`[MinerU] \u89E3\u6790\u5931\u8D25 ${fileName}: ${message}`, "warn");
+5035:             this.runFailures.set(String(attachment.key || fileName), {
+5036:               fileName,
+5037:               message
+5038:             });
+5039:             this.emitProgress({
+5040:               phase: "failed",
+5041:               attachmentKey: attachment.key,
+5042:               fileName,
+5043:               message,
+5044:               elapsedMs: Date.now() - started
+5045:             });
+5046:             await this.writeFailure(attachment, config2, stat, fileName, message);
+5047:             if (options.userInitiated) throw error;
+5048:             return null;
+
+===== MinerU replacement safety | content/scripts/zotero-lit-synapse.js =====
+5110:                   );
+5111:                 }
+5112:               }
+5113:               const keepPath = keep.getFilePathAsync ? await keep.getFilePathAsync() : keep.getFilePath?.();
+5114:               if (!keepPath) return null;
+5115:               const keepMarkdown = await IOUtils.readUTF8(keepPath);
+5116:               return { item: keep, key: keep.key, markdown: keepMarkdown };
+5117:             }
+5118:             await IOUtils.makeDirectory(this.getTmpDir(), {
+5119:               ignoreExisting: true,
+5120:               createAncestors: true
+5121:             });
+5122:             await IOUtils.writeUTF8(tmpPath, markdown);
+5123:             imported = await Zotero.Attachments.importFromFile({
+5124:               file: tmpPath,
+5125:               parentItemID,
+5126:               title,
+5127:               contentType: "text/markdown",
+5128:               charset: "utf-8"
+5129:             });
+5130:             ztoolkit.log(
+5131:               `[MinerU] Attached Markdown ${imported?.key} to item ${parent.key}: ${title}`
+5132:             );
+5133:             const importedPath = imported?.getFilePathAsync ? await imported.getFilePathAsync() : imported?.getFilePath?.();
+5134:             if (!imported?.key || !importedPath) {
+5135:               throw new Error("Zotero imported the Markdown attachment without a readable file");
+5136:             }
+5137:             const importedMarkdown = await IOUtils.readUTF8(importedPath);
+5138:             if (!importedMarkdown?.trim()) {
+5139:               throw new Error("The imported Zotero Markdown attachment is empty");
+5140:             }
+5141:             this.runAttachments++;
+5142:             for (const child of existing) {
+5143:               try {
+5144:                 ztoolkit.log(
+5145:                   `[MinerU] Replacing existing Markdown attachment ${child.key}`
+5146:                 );
+5147:                 this.ownReplacementAttachmentKeys.add(child.key);
+5148:                 await child.eraseTx();
+5149:               } catch (e) {
+5150:                 ztoolkit.log(
+5151:                   `[MinerU] Failed to delete old Markdown attachment: ${e}`,
+5152:                   "warn"
+5153:                 );
+5154:               }
+5155:             }
+5156:             return {
+5157:               item: imported,
+5158:               key: imported.key,
+5159:               markdown: importedMarkdown
+5160:             };
+5161:           } catch (error) {
+5162:             if (imported?.key) {
+5163:               try {
+5164:                 this.ownReplacementAttachmentKeys.add(imported.key);
+5165:                 await imported.eraseTx?.();
+5166:               } catch (cleanupError) {
+5167:                 ztoolkit.log(
+5168:                   `[MinerU] failed to remove unreadable imported Markdown ${imported.key}: ${cleanupError}`,
+5169:                   "warn"
+5170:                 );
+
+===== Wiki atomic-write request | content/scripts/zotero-lit-synapse.js =====
+15910:             );
+15911:             return null;
+15912:           }
+15913:         }
+15914:         async filePath(attachment) {
+15915:           const viaAsync = await attachment?.getFilePathAsync?.();
+15916:           if (viaAsync) return String(viaAsync);
+15917:           const viaSync = attachment?.getFilePath?.();
+15918:           return viaSync ? String(viaSync) : null;
+15919:         }
+15920:         /**
+15921:          * Replace the file's contents atomically.
+15922:          *
+15923:          * The document is only ever rewritten in full, so a torn write is not a
+15924:          * partially updated note - it is an unparseable one, and the whole read is
+15925:          * lost with it. Writing beside the file and renaming makes the previous
+15926:          * version the worst case.
+15927:          */
+15928:         async write(attachment, markdown) {
+15929:           const filePath = await this.filePath(attachment);
+15930:           if (!filePath) {
+15931:             throw new Error(
+15932:               `Reading note attachment ${attachment?.key} has no file on disk`
+15933:             );
+15934:           }
+15935:           await IOUtils.writeUTF8(filePath, markdown, {
+15936:             tmpPath: `${filePath}.tmp`
+15937:           });
+15938:           try {
+15939:             const toUpload = Zotero?.Sync?.Storage?.Local?.SYNC_STATE_TO_UPLOAD;
+15940:             if (toUpload !== void 0 && attachment) {
+15941:               attachment.attachmentSyncState = toUpload;
+15942:               await attachment.saveTx?.({ skipDateModifiedUpdate: true });
+15943:             }
+15944:           } catch (error) {
+15945:             ztoolkit?.log?.(
+15946:               `[WikiReadingNote] sync state update failed for ${attachment?.key}: ${error}`,
+15947:               "warn"
+15948:             );
+15949:           }
+15950:         }
+15951:         /**

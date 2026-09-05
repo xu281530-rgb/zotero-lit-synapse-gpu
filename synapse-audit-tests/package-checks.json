@@ -1,0 +1,26 @@
+{
+  "javascriptSyntaxFiles": 7,
+  "javascriptSyntaxAllPassed": true,
+  "gpuAssets": [
+    {
+      "file": "LICENSE-NVIDIA-CUDA.txt",
+      "sizeMatches": true,
+      "sha256Matches": true
+    },
+    {
+      "file": "LICENSE-nlohmann-json.txt",
+      "sizeMatches": true,
+      "sha256Matches": true
+    },
+    {
+      "file": "cudart64_12.dll",
+      "sizeMatches": true,
+      "sha256Matches": true
+    },
+    {
+      "file": "vector-gpu.exe",
+      "sizeMatches": true,
+      "sha256Matches": true
+    }
+  ]
+}

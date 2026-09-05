@@ -44,6 +44,7 @@ import { getStoredChunkingSignature } from "../hybridSearchSettings";
 import { hashWikiText } from "./wikiCanonicalizer";
 import {
   LEXICAL_ALGORITHM_VERSION,
+  isUsableLexicalTerm,
   lexicalScore,
   sharedRareTerms,
 } from "./wikiLexicalSignals";
@@ -213,6 +214,7 @@ export interface PendingLinkSignalView {
   mustResolve: boolean;
   fingerprintState: "valid" | "stale";
   suggestedLabels: string[];
+  signals?: Array<{ signalId: number; signalType: string; mustResolve: boolean; thisChunk: { chunkId: number | null; excerpt: string; read: boolean }; otherChunk: { chunkId: number | null; excerpt: string; read: boolean } }>;
   /**
    * Why this pair is being asked AGAIN, when it has been settled before.
    *
@@ -675,13 +677,19 @@ export class WikiLinkService {
   }): Promise<PendingLinkSignalView[]> {
     if (!this.settings().enabled) return [];
     const links = await this.store.links();
-    const signals = await links.pendingSignalsForItem(options);
+    const signals = (await links.pendingSignalsForRelink(options.libraryID, [options.itemKey])).filter((signal) => {
+      if (signal.candidateStatus === "stale" || signal.candidateStatus === "source_deleted") return false;
+      return true;
+    });
     const views = new Map<number, PendingLinkSignalView>();
     for (const signal of signals) {
       const thisIsA = signal.aItemKey === options.itemKey;
       const otherItemKey = thisIsA ? signal.bItemKey : signal.aItemKey;
       const thisSide = thisIsA ? signal.a : signal.b;
       const otherSide = thisIsA ? signal.b : signal.a;
+      const mustResolve = await this.signalIsMandatory(signal);
+      if (!mustResolve && options.chunkIds?.length &&
+        (thisSide.chunkIdSnapshot === null || !options.chunkIds.includes(thisSide.chunkIdSnapshot))) continue;
       const thisRead = await this.chunkIsRead(
         signal.libraryID,
         options.itemKey,
@@ -731,20 +739,23 @@ export class WikiLinkService {
           view.reopenedReason = candidate?.reopenedReason || "";
         }
       }
-      if (signal.termSnapshot && !view.suggestedLabels.includes(signal.termSnapshot)) {
+      if (signal.termSnapshot && (signal.signalType !== "lexical" || isUsableLexicalTerm(signal.termSnapshot)) && !view.suggestedLabels.includes(signal.termSnapshot)) {
         view.suggestedLabels.push(signal.termSnapshot);
       }
       // A pair is mandatory when ANY of its signals is: one reconcilable
       // passage pair is enough to owe an answer, and the answer may of course
       // be that it establishes nothing.
-      if (await this.signalIsMandatory(signal)) view.mustResolve = true;
+      if (mustResolve) view.mustResolve = true;
+      (view.signals ??= []).push({ signalId: signal.signalId, signalType: signal.signalType, mustResolve,
+        thisChunk: { chunkId: thisSide.chunkIdSnapshot, excerpt: thisSide.excerpt, read: thisRead },
+        otherChunk: { chunkId: otherSide.chunkIdSnapshot, excerpt: otherSide.excerpt, read: otherRead } });
       views.set(signal.linkId, view);
     }
     return Array.from(views.values()).sort(
       (left, right) =>
         Number(right.mustResolve) - Number(left.mustResolve) ||
         (right.scoreSymmetric ?? 0) - (left.scoreSymmetric ?? 0),
-    );
+    ).slice(0, options.limit ?? 50);
   }
 
   /** Which pending signals of a library are settleable debt right now. */
@@ -765,8 +776,13 @@ export class WikiLinkService {
   private async signalIsMandatory(
     signal: WikiLinkSignalWithPair,
   ): Promise<boolean> {
-    if (!this.settings().mandatorySettlement) return false;
+    const settings = this.settings();
+    if (!settings.enabled || !settings.mandatorySettlement) return false;
     if (signal.state !== "pending") return false;
+    if (signal.candidateStatus === "stale" || signal.candidateStatus === "source_deleted") return false;
+    if (signal.signalType === "lexical" && !isUsableLexicalTerm(signal.termSnapshot ?? "")) return false;
+    if (signal.signalType === "semantic" &&
+      (signal.score < settings.minDirectionalScore || (signal.scoreSymmetric ?? 0) < settings.minSymmetricScore)) return false;
     // A concept signal has no chunk anchors, so there is no specific passage
     // to have read. It stays optional by construction rather than by policy.
     if (signal.a.chunkIdSnapshot == null || signal.b.chunkIdSnapshot == null) {
@@ -828,6 +844,7 @@ export class WikiLinkService {
     signalIds: readonly number[];
     resolutionType: WikiLinkResolutionType;
     claimId?: number | null;
+    claimIds?: number[];
     pageId?: number | null;
     relationId?: number | null;
     note: string;
@@ -837,11 +854,15 @@ export class WikiLinkService {
      * one thing, so one sentence describes all of them truthfully.
      */
     reasonBySignal?: ReadonlyMap<number, string>;
-  }): Promise<{ resolutionIds: number[]; settled: number }> {
+  }): Promise<{ resolutionIds: number[]; settled: number; decisions: Array<{ signalId: number; resolutionType: WikiLinkResolutionType; claimId?: number | null; claimIds?: number[]; pageId?: number | null; relationId?: number | null }> }> {
     const links = await this.store.links();
     const byLink = new Map<number, number[]>();
+    const claimsByLink = new Map<number, number[]>();
+    const seen = new Set<number>();
     for (const rawId of options.signalIds) {
       const signalId = Number(rawId);
+      if (!Number.isSafeInteger(signalId) || signalId <= 0 || seen.has(signalId)) throw new Error(`Invalid or duplicate signal id ${rawId}`);
+      seen.add(signalId);
       const signal = await links.getSignal(signalId);
       if (!signal) {
         throw new Error(
@@ -853,7 +874,7 @@ export class WikiLinkService {
           `Link signal ${signalId} belongs to library ${signal.libraryID}, not ${options.libraryID}.`,
         );
       }
-      if (signal.state === "stale") {
+      if (signal.state === "stale" || signal.candidateStatus === "stale" || signal.candidateStatus === "source_deleted") {
         throw new Error(
           `Link signal ${signalId} is stale: the text it was computed from has changed, so it cannot be settled. It will be replaced by a fresh signal on the next scan.`,
         );
@@ -863,11 +884,13 @@ export class WikiLinkService {
           `Link signal ${signalId} was already settled as "${signal.state}". A signal is settled once; settling it again would record two different conclusions about one finding.`,
         );
       }
+      claimsByLink.set(signal.linkId, await this.validateResolution(signal, options));
       (byLink.get(signal.linkId) ?? byLink.set(signal.linkId, []).get(signal.linkId)!)
         .push(signalId);
     }
     const resolutionIds: number[] = [];
     let settled = 0;
+    const decisions: Array<{ signalId: number; resolutionType: WikiLinkResolutionType; claimId?: number | null; claimIds?: number[]; pageId?: number | null; relationId?: number | null }> = [];
     for (const [linkId, signalIds] of byLink) {
       resolutionIds.push(
         await links.recordResolution({
@@ -875,6 +898,7 @@ export class WikiLinkService {
           resolutionType: options.resolutionType,
           signalIds,
           claimId: options.claimId,
+          claimIds: claimsByLink.get(linkId),
           pageId: options.pageId,
           relationId: options.relationId,
           note: options.note,
@@ -882,8 +906,59 @@ export class WikiLinkService {
         }),
       );
       settled += signalIds.length;
+      decisions.push(...signalIds.map((signalId) => ({ signalId, resolutionType: options.resolutionType, claimId: options.claimId, claimIds: claimsByLink.get(linkId), pageId: options.pageId, relationId: options.relationId })));
     }
-    return { resolutionIds, settled };
+    return { resolutionIds, settled, decisions };
+  }
+
+  private async validateResolution(signal: WikiLinkSignalWithPair, options: {
+    libraryID: number; resolutionType: WikiLinkResolutionType; claimId?: number | null;
+    claimIds?: number[]; pageId?: number | null; relationId?: number | null;
+    note: string; reasonBySignal?: ReadonlyMap<number, string>;
+  }): Promise<number[]> {
+    const fail = (message: string): never => { throw new Error(`Signal ${signal.signalId}: ${message}`); };
+    const a = signal.aItemKey;
+    const b = signal.bItemKey;
+    if (options.resolutionType === "no_action") {
+      normalizeLinkDismissals({ signalIds: [signal.signalId], reason: options.reasonBySignal?.get(signal.signalId) ?? options.note });
+      return [];
+    }
+    if (options.resolutionType === "shared_claim" || options.resolutionType === "conflict") {
+      if (!options.claimId) return fail("a claimId is required");
+      const claim = await this.store.linkClaim(options.claimId, options.libraryID);
+      const has = (key: string, role: string) => claim.evidence.some((entry) => entry.itemKey === key && entry.evidenceRole === role);
+      if (options.resolutionType === "shared_claim" && !(has(a, "SUPPORTS") && has(b, "SUPPORTS"))) {
+        return fail(`shared_claim requires valid SUPPORTS Evidence from BOTH ${a} and ${b} on Claim ${options.claimId}`);
+      }
+      if (options.resolutionType === "conflict" && !((has(a, "SUPPORTS") && has(b, "CONTRADICTS")) || (has(b, "SUPPORTS") && has(a, "CONTRADICTS")))) {
+        return fail("conflict requires one paper's support and the other paper's contradicting Evidence on the same Claim");
+      }
+      return [claim.claimId];
+    }
+    if (options.resolutionType === "same_page") {
+      if (!options.pageId) return fail("same_page requires pageId and two distinct claimIds");
+      const ids = options.claimIds ?? await this.store.linkPageClaims(options.pageId, options.libraryID);
+      if (options.claimIds && (ids.length !== 2 || ids[0] === ids[1])) return fail("same_page requires exactly two distinct claimIds");
+      const claims: Array<Awaited<ReturnType<WikiStore["linkClaim"]>>> = [];
+      for (const id of ids) {
+        const claim = await this.store.linkClaim(id, options.libraryID);
+        if (claim.pageId !== options.pageId) return fail(`Claim ${id} does not belong to Page ${options.pageId}`);
+        claims.push(claim);
+      }
+      const from = (claim: typeof claims[number], key: string) => claim.evidence.some((entry) => entry.itemKey === key && entry.evidenceRole !== "CONTRADICTS");
+      for (const left of claims.filter((claim) => from(claim, a))) {
+        const right = claims.find((claim) => claim.claimId !== left.claimId && from(claim, b));
+        if (right) return [left.claimId, right.claimId];
+      }
+      return fail(`same_page requires separate Claims with valid Evidence from ${a} and ${b}`);
+    }
+    if (options.resolutionType === "concept_relation") {
+      if (!options.relationId) return fail("concept_relation requires an existing relationId");
+      const { source, target } = await this.store.linkRelationSources(options.relationId, options.libraryID);
+      if (!((source.includes(a) && target.includes(b)) || (source.includes(b) && target.includes(a)))) return fail("the relation's concepts must have source passages from both papers");
+      return [];
+    }
+    return fail(`unknown resolution type ${options.resolutionType}`);
   }
 
   /**

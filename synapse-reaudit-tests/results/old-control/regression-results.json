@@ -1,0 +1,174 @@
+[
+  {
+    "name": "HTTP UTF-8 roundtrip preserves Chinese and emoji",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "HTTP Content-Length waits for complete body",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "HTTP conflicting Content-Length rejected",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "HTTP chunked request decoded",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "HTTP partial response writes retried to completion",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Access: non-loopback Origin rejected",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Access: DNS-rebinding Host rejected",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Access: loopback allowed with auth disabled",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Access: missing bearer rejected when auth required",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Access: correct bearer accepted",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Access: wrong bearer rejected",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "HTTP initial start and ordinary stop report correct state",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "B1 regression: stale close callback leaves new listener live and stoppable",
+    "status": "FAIL",
+    "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\nfalse !== true\n\n    at /mnt/data/synapse-reaudit/tests/regression.js:59:10\n    at check (/mnt/data/synapse-reaudit/tests/regression.js:11:31)\n    at /mnt/data/synapse-reaudit/tests/regression.js:55:8"
+  },
+  {
+    "name": "Pagination: correct page continuation",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Pagination: changed query rejected",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Pagination: expired cursor rejected",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Pagination: cursor from another tool rejected",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Reader: valid chat response text decoded",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Reader: source changes invalidate translation fingerprint",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Reader: translation cache writes persist normally",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "B2 regression: same-key attachments in different libraries have independent translation caches",
+    "status": "FAIL",
+    "error": "AssertionError [ERR_ASSERTION]: Expected \"actual\" to be strictly unequal to:\n\n'/test-data/zotero-lit-synapse/mineru/ABCD2345'\n    at /mnt/data/synapse-reaudit/tests/regression.js:84:90\n    at async check (/mnt/data/synapse-reaudit/tests/regression.js:11:25)\n    at async /mnt/data/synapse-reaudit/tests/regression.js:82:2"
+  },
+  {
+    "name": "MCP: initializes with supported protocol and manifest version",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MCP: malformed JSON rejected as parse error",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MCP: invalid JSON-RPC version rejected",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MCP: unknown tool rejected as invalid params",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MCP: write tools not advertised with default write-disabled prefs",
+    "status": "PASS",
+    "details": {
+      "advertisedTools": 35
+    }
+  },
+  {
+    "name": "MCP: explicitly calling disabled write rejected without mutation",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MCP: user refusal prevents mutation",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MCP: approved note create calls simulated save exactly once",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MCP: missing target note returns isError rather than fake success",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MCP: empty new note rejected without additional save",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Privacy: explicit local path redacted from response payload",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Index notifier: normal group-library add is queued with library identity",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "B3 regression: group add while indexing is retained and subsequently built",
+    "status": "FAIL",
+    "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n+ actual - expected\n\n+ undefined\n- true\n\n    at /mnt/data/synapse-reaudit/tests/regression.js:142:10\n    at async check (/mnt/data/synapse-reaudit/tests/regression.js:11:25)\n    at async /mnt/data/synapse-reaudit/tests/regression.js:140:2"
+  }
+]

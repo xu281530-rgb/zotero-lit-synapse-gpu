@@ -304,6 +304,7 @@ for (const rowShape of ["proxy", "plain"]) {
   const prepared = await service.prepareUpdate({
     libraryID: 1,
     query,
+    compact: false,
     proposedPageTitles: ["Columnar band control"],
   });
   assertMcpSerializable(`${label} wiki_prepare_update`, prepared);
@@ -348,6 +349,14 @@ for (const rowShape of ["proxy", "plain"]) {
     typeof prepared.prepareToken === "string" && prepared.prepareToken,
     `${label} prepareUpdate must still mint a prepare token`,
   );
+  const compact = await service.prepareUpdate({ libraryID: 1, query });
+  assertMcpSerializable(`${label} compact prepare`, compact);
+  const evidencePage = service.getPreparedContext({ libraryID: 1, prepareToken: compact.prepareToken, section: "evidence" });
+  assertMcpSerializable(`${label} prepared evidence page`, evidencePage);
+  assert.ok(evidencePage.items.length > 0);
+  for (const entry of evidencePage.items) {
+    assert.deepEqual(Object.keys(entry).sort(), EVIDENCE_DTO_KEYS);
+  }
 
   // --- wiki_search ---
   const searched = await service.search({ libraryID: 1, query, minScore: 0 });

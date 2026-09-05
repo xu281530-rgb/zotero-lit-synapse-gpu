@@ -656,7 +656,7 @@ being answered with its title and abstract dressed up as body text.
 > bypass around the retrieval funnel every other tool enforces. Index
 > maintenance now lives only in the plugin's preferences UI.
 
-### 4. LLM Wiki (17 tools, can be disabled independently)
+### 4. LLM Wiki (18 tools, can be disabled independently)
 
 The Wiki is an independent long-term knowledge database. It stores reusable
 Pages, Claims, Concepts, Relations and traceable Evidence rather than another
@@ -783,6 +783,7 @@ also excluded from the search index, so a summary of a paper can never be
 retrieved as if it were the paper.
 
 - `wiki_prepare_update` — search existing knowledge before proposing changes; pass up to two exact `proposedPageTitles` so its short-lived token can authorize only the Page titles that were actually searched. `pendingWikiWriteUp` names the papers whose reading notes have moved ahead of the Wiki. Once a paper has been read in full it also requires `wikiReview`, a pass over the whole Wiki on five axes: pages, claims, evidence, concepts, relations
+- `wiki_get_prepared_context` — retrieve a prepared snapshot by section and offset. Prepare defaults to compact output; use `preview: true` to inspect claims, evidence and cross-paper candidates before submitting the five-axis review. Reading records and large entries are paged without losing content.
 - `wiki_commit` — apply validated `SKIP`, Evidence, Claim, Page, Relation or conflict actions
 - `wiki_search` — search Concept/Alias, Claim, Relation and one-hop Evidence links
 - `wiki_get_page` — read a Page with its Claims and Evidence

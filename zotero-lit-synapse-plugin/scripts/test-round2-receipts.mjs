@@ -79,6 +79,14 @@ function createService() {
   service.pumpEmbeddingQueue = async () => undefined;
   return service;
 }
+function createLegacyService() {
+  const service = createService();
+  const commit = service.store.commit.bind(service.store);
+  // Version 18 receipts made knowledge durable before link settlement. Recreate
+  // that boundary to verify recovery of existing receipts after the upgrade.
+  service.store.commit = (input, operation) => commit(input, { ...operation, beforeCommit: undefined });
+  return service;
+}
 async function start(libraryID, itemKey, mode = "qa", sourceVersion = "v1") {
   revisions.set(`${libraryID}:${itemKey}`, sourceVersion);
   return sessions.startOrContinue({
@@ -105,7 +113,7 @@ await check(
   "R05: unrelated reading cannot block recovery, including legacy receipts",
   async () => {
     const unrelated = await start(1, "UNRELATED");
-    const service = createService();
+    const service = createLegacyService();
     service.prepareTokens.set("prepared", {
       libraryID: 1,
       expiresAt: Date.now() + 60000,
@@ -232,7 +240,7 @@ await check(
   "R05: relevant version conflict is durable and independent stages finish",
   async () => {
     const paper = await start(3, "RELEVANT", "fulltext");
-    const service = createService();
+    const service = createLegacyService();
     service.settleReadingSession = async () => {
       throw new Error("Injected session failure");
     };

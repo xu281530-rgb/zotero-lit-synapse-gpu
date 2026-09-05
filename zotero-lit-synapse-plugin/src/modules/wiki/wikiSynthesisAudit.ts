@@ -61,6 +61,8 @@
  */
 
 import { normalizeWikiText } from "./wikiCanonicalizer";
+import { citedWikiChunkIds, parseWikiCitations } from "./wikiCitations";
+import { findWikiSourceQuote } from "./wikiSourceText";
 import {
   CJK_TERMINATORS,
   TRAILING_CLOSERS,
@@ -122,6 +124,8 @@ const STRONG_RISKS: ReadonlySet<WikiSynthesisRisk> = new Set([
 const WEAK_RISK_THRESHOLD = 2;
 
 export interface WikiFlaggedSentence {
+  /** Bound to this statement, its citations and the indexed source text. */
+  auditId?: string;
   /** The sentence as it stands in the submitted note, normalized. */
   sentence: string;
   /** Chunk indexes named inside the sentence, or by its block. */
@@ -225,7 +229,7 @@ const NEGATION: readonly RegExp[] = [
   // compares the sentence against its source rather than reading a prefix.
   /\bfree\s+from\b|\bfails?\s+to\b|\bfailed\s+to\b|\bunable\b/i,
   /\brather\s+than\b|\binstead\s+of\b/i,
-  /不能|无法|未能|不会|并非|没有|不再|无需|不足以/u,
+  /不能|无法|未能|不会|并非|没有|不再|无需|不足以|不需要|不使用|不依赖|不包含|未采用/u,
 ];
 
 /**
@@ -266,7 +270,7 @@ const HEDGES: readonly RegExp[] = [
 const COMMITMENT_HEDGES: readonly RegExp[] = [
   /\bmay\b|\bmight\b|\bcan\s+be\s+a\b/i,
   /\bpossib(?:le|ly|ility|ilities)\b|\bpotential(?:ly)?\b|\bperhaps\b/i,
-  /\bpromising\b|\bpreliminary\b|\bpropos(?:e|es|ed|al)\b|\battempt(?:s|ed)?\b/i,
+  /\bpromising\b|\bpreliminary\b|\bproposed\s+(?:hypothesis|explanation|interpretation)\b|\battempt(?:s|ed)?\b/i,
   /\bexpect(?:s|ed)?\b|\bappears?\s+to\b|\bseems?\b|\bsuggests?\b|\blikely\b/i,
   /\bchalleng(?:e|es|ing)\b|\bdifficult(?:y|ies)?\b|\bhard\s+to\b|\bbottleneck\b/i,
   /\bin\s+principle\b|\bnot\s+necessarily\b|\bnot\s+a\s+unique\b/i,
@@ -302,15 +306,7 @@ const TECHNIQUE_TOKEN = /\b[A-Z][A-Za-z0-9]*(?:[-/][A-Za-z0-9]+)*\b/gu;
  * one would otherwise appear to cite chunk 51.
  */
 export function citedChunkIds(text: string): number[] {
-  const cleaned = String(text ?? "").replace(REFERENCE_BRACKET, " ");
-  const found = new Set<number>();
-  for (const match of cleaned.matchAll(CHUNK_REFERENCE)) {
-    const raw = match[1] ?? match[2];
-    if (raw === undefined) continue;
-    const value = Number.parseInt(raw, 10);
-    if (Number.isInteger(value) && value >= 0) found.add(value);
-  }
-  return [...found].sort((a, b) => a - b);
+  return citedWikiChunkIds(text);
 }
 
 const FENCE = /^\s{0,3}(?:`{3,}|~{3,})/u;
@@ -466,23 +462,10 @@ export function splitSentences(block: string): string[] {
   for (let index = 0; index < masked.length; index += 1) {
     const character = masked[index];
     current += character;
-    /*
-     * The FULL-WIDTH semicolon closes a clause; the ASCII one does not.
-     *
-     * `；` had to become a boundary: notes are written in Chinese, the
-     * guidance asks for connected prose, and Chinese connects coordinate
-     * clauses with it. Read as sentence-internal, a chain of three such
-     * clauses - each carrying its own citation, exactly as asked - came out
-     * as ONE sentence citing three chunks and was refused as a fusion.
-     *
-     * ASCII `;` stayed out after trying it. English prose puts a clause
-     * before it that is not expected to carry its own citation, and such a
-     * fragment inherits its block's citations and is then read as the very
-     * fusion this was meant to stop: "Findings are established for one alloy
-     * and one rig geometry;" was flagged for citing two chunks it never
-     * named. Fixing one false positive by minting another is not a trade.
-     */
-    if (!".?!。？！；".includes(character)) continue;
+    if (!".?!。？！；;".includes(character)) continue;
+    // Split independently cited clauses; keep a shared trailing citation on
+    // the whole statement in either language.
+    if ((character === ";" || character === "；") && !citedChunkIds(unmask(current, spans)).length) continue;
     if (CJK_TERMINATORS.includes(character)) {
       // A closing quote or bracket after the stop closes THIS sentence.
       while (
@@ -686,29 +669,7 @@ function overlappingSourceSentences(
  * check was only looking in chunk 4.
  */
 export function citedChunkSpan(text: string): number[] {
-  const cleaned = String(text ?? "").replace(REFERENCE_BRACKET, " ");
-  const found = new Set<number>();
-  // A citation group is a run of numbers joined by dashes (a range) or by
-  // commas (a list), and both forms are in the guidance - "（chunk 44-47）"
-  // and "（chunk 1, 4）". Reading only the first number of a list is how a
-  // sentence citing `(chunk 1, 2)` was told its subject appears in none of
-  // the chunks it cites, when the subject was sitting in chunk 2.
-  const GROUP = /(?:chunks?|块|段)\s*#?\s*(\d+(?:\s*(?:[-–—]|to|~|、|,|，)\s*\d+)*)/giu;
-  for (const match of cleaned.matchAll(GROUP)) {
-    for (const part of match[1].split(/\s*(?:、|,|，)\s*/u)) {
-      const ends = part.split(/\s*(?:[-–—]|to|~)\s*/u).map((n) => Number.parseInt(n, 10));
-      if (!ends.length || ends.some((n) => !Number.isInteger(n))) continue;
-      const first = ends[0];
-      const last = ends[ends.length - 1];
-      if (last < first || last - first > 400) {
-        found.add(first);
-        continue;
-      }
-      for (let id = first; id <= last; id += 1) found.add(id);
-    }
-  }
-  for (const id of citedChunkIds(cleaned)) found.add(id);
-  return [...found].sort((a, b) => a - b);
+  return citedWikiChunkIds(text);
 }
 
 /**
@@ -867,25 +828,35 @@ export function auditSynthesis(
       const supporting = own.length
         ? citedChunkSpan(sentence)
         : citedChunkSpan(block.text);
+      const assertion = rawSentence.replace(/(?:chunks?|块|段)\s*#?\s*\d+(?:\s*(?:[-–—]|to|~|、|,|，)\s*\d+)*|第\s*\d+\s*(?:块|段)/giu, "")
+        .replace(/[（(]\s*[)）]/gu, "").trim().replace(/[。.!?]+$/u, "").trim();
+      const completeSourceSentence = assertion.length >= 10 && supporting.length === 1 && supporting.every((id) => {
+        const source = chunkText.get(id);
+        return source !== undefined && splitSentences(source).some((part) => {
+          const complete = part.trim().replace(/[。.!?]+$/u, "").trim();
+          const match = findWikiSourceQuote(complete, assertion);
+          return match !== null && match.excerpt === complete;
+        });
+      });
       const reasons: WikiSynthesisRisk[] = [];
       const details: string[] = [];
 
       const absolute = matches(ABSOLUTE_LANGUAGE, sentence);
-      if (absolute) {
+      if (absolute && !completeSourceSentence) {
         reasons.push("absolute-language");
         details.push(
           `states "${absolute}" - show the passage that states it that strongly, or write the strength the paper used`,
         );
       }
       const relation = matches(RELATION_WORDS, sentence);
-      if (relation) {
+      if (relation && !completeSourceSentence) {
         reasons.push("relation-word");
         details.push(
           `asserts the relation "${relation}", whose opposite would read almost identically - quote the passage that fixes it`,
         );
       }
       const direction = matches(DIRECTION_WORDS, sentence);
-      if (direction) {
+      if (direction && !completeSourceSentence) {
         reasons.push("direction-word");
         details.push(`carries the direction word "${direction}"`);
       }
@@ -904,14 +875,14 @@ export function auditSynthesis(
         );
       }
       const negation = matches(NEGATION, sentence);
-      if (negation) {
+      if (negation && !completeSourceSentence) {
         reasons.push("negation");
         details.push(`carries the negation "${negation}"`);
       }
-      if (citedChunks.length > 1 && !citationsAreDistributed(rawSentence)) {
+      if (parseWikiCitations(rawSentence).length > 1 && !citationsAreDistributed(rawSentence)) {
         reasons.push("multi-chunk-fusion");
         details.push(
-          `cites ${citedChunks.length} chunks (${citedChunks.join(", ")}) behind one assertion, so each one has to support it ON ITS OWN - quote all of them, or attribute each clause separately: "A（chunk 46），因而 B（chunk 53）" is a chain of attributed facts and is not flagged`,
+          `cites ${citedChunks.length} chunks (${citedChunks.join(", ")}) behind one assertion - quote the supporting passage from each, and explain their contributions, or attribute each clause separately`,
         );
       }
 
@@ -1051,7 +1022,7 @@ export function auditSynthesis(
       const key = sentence.toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
-      flagged.push({ sentence, citedChunks, reasons, details });
+      flagged.push({ auditId: synthesisAuditId(rawSentence, citedChunks, chunkText), sentence, citedChunks, reasons, details });
     }
   }
   return flagged;
@@ -1063,8 +1034,21 @@ export interface WikiSynthesisSupport {
 }
 
 export interface WikiSynthesisAuditEntry {
-  sentence: string;
+  auditId?: string;
+  sentence?: string;
   support: WikiSynthesisSupport[];
+}
+
+function synthesisAuditId(sentence: string, ids: number[], chunks: Map<number, string>): string {
+  const stableText = (text: string) => text.replace(/\s+/gu, " ").trim();
+  const value = JSON.stringify([stableText(sentence), ids.map((id) => [id, stableText(chunks.get(id) ?? "")])]);
+  let a = 0x811c9dc5;
+  let b = 0x9e3779b9;
+  for (let index = 0; index < value.length; index++) {
+    a = Math.imul(a ^ value.charCodeAt(index), 0x01000193);
+    b = Math.imul(b ^ value.charCodeAt(index), 0x85ebca6b);
+  }
+  return `audit-v2-${(a >>> 0).toString(16).padStart(8, "0")}${(b >>> 0).toString(16).padStart(8, "0")}`;
 }
 
 /**
@@ -1093,6 +1077,7 @@ export const WIKI_SYNTHESIS_MIN_QUOTE_CHARS = 40;
 export const WIKI_EVIDENCE_MIN_EXCERPT_CHARS = 24;
 
 export interface WikiSynthesisAuditProblem {
+  auditId?: string;
   sentence: string;
   problem: string;
 }
@@ -1114,25 +1099,27 @@ export function verifySynthesisAudit(
 ): WikiSynthesisAuditProblem[] {
   const chunkText = new Map<number, string>();
   for (const chunk of chunks) {
-    chunkText.set(chunk.chunkId, normalizeWikiText(String(chunk.text ?? "")));
+    chunkText.set(chunk.chunkId, String(chunk.text ?? ""));
   }
   const byKey = new Map<string, WikiSynthesisAuditEntry>();
   const problems: WikiSynthesisAuditProblem[] = [];
 
   for (const entry of submitted) {
-    const key = normalizeWikiText(String(entry?.sentence ?? "")).toLowerCase();
+    const key = entry.auditId || normalizeWikiText(String(entry?.sentence ?? "")).toLowerCase();
     if (!key) {
       problems.push({
         sentence: "(empty)",
-        problem: "an audit entry has no sentence",
+        problem: "an audit entry has no auditId or sentence",
       });
       continue;
     }
+    if (byKey.has(key)) problems.push({ sentence: entry.sentence ?? key, auditId: entry.auditId, problem: "duplicate audit entry" });
     byKey.set(key, entry);
   }
 
   for (const flag of flagged) {
-    const entry = byKey.get(flag.sentence.toLowerCase());
+    const key = flag.auditId && byKey.has(flag.auditId) ? flag.auditId : flag.sentence.toLowerCase();
+    const entry = byKey.get(key);
     if (!entry) {
       problems.push({
         sentence: flag.sentence,
@@ -1141,11 +1128,15 @@ export function verifySynthesisAudit(
       });
       continue;
     }
-    byKey.delete(flag.sentence.toLowerCase());
+    byKey.delete(key);
+    if (entry.auditId && entry.sentence && normalizeWikiText(entry.sentence) !== flag.sentence) {
+      problems.push({ auditId: flag.auditId, sentence: flag.sentence, problem: "auditId and sentence refer to different statements" });
+      continue;
+    }
     const quoted = new Map<number, string>();
     for (const support of entry.support ?? []) {
       const chunkId = Number(support?.chunkId);
-      const quote = normalizeWikiText(String(support?.quote ?? ""));
+      const quote = String(support?.quote ?? "").trim();
       if (!Number.isInteger(chunkId)) {
         problems.push({
           sentence: flag.sentence,
@@ -1168,7 +1159,7 @@ export function verifySynthesisAudit(
         });
         continue;
       }
-      if (!text.includes(quote)) {
+      if (!findWikiSourceQuote(text, quote)) {
         problems.push({
           sentence: flag.sentence,
           problem: `the quotation offered for chunk ${chunkId} is not in that chunk, character for character. Copy it out of the chunk rather than from the note - the note is your paraphrase. Offered: "${quote.slice(0, 160)}"`,
@@ -1181,20 +1172,21 @@ export function verifySynthesisAudit(
     if (missing.length) {
       problems.push({
         sentence: flag.sentence,
-        problem: `chunk(s) ${missing.join(", ")} are cited but not quoted. A sentence citing several chunks has to be supported by EACH of them on its own; if one of them only shares the topic, drop it from the citation instead of quoting around it`,
+        problem: `chunk(s) ${missing.join(", ")} are cited but not quoted. Supply the contribution from each cited chunk; the quotations may jointly support the statement. Remove citations that contribute no support`,
       });
     }
   }
 
   for (const [, entry] of byKey) {
     problems.push({
-      sentence: normalizeWikiText(String(entry.sentence ?? "")),
+      auditId: entry.auditId,
+      sentence: normalizeWikiText(String(entry.sentence ?? entry.auditId ?? "")),
       problem:
-        "this sentence was not flagged and needed no audit entry - check that it is still in the note you submitted, since an entry matching nothing usually means the sentence was reworded after the audit was written",
+        "this sentence was not flagged or its auditId is stale - use the current auditId after changing the statement, citations or source text",
     });
   }
 
-  return problems;
+  return problems.map((problem) => ({ ...problem, auditId: problem.auditId ?? flagged.find((flag) => flag.sentence === problem.sentence)?.auditId }));
 }
 
 /**
@@ -1205,9 +1197,9 @@ export function verifySynthesisAudit(
  * try again, exactly like the integration gate - instead of as a server fault.
  */
 export class WikiSynthesisAuditRequired extends Error {
-  readonly details: { flagged: number; problems?: number };
+  readonly details: { flagged: number; problems?: number; issues?: WikiFlaggedSentence[]; auditProblems?: WikiSynthesisAuditProblem[]; mode?: "record" | "synthesis" };
 
-  constructor(message: string, details: { flagged: number; problems?: number }) {
+  constructor(message: string, details: WikiSynthesisAuditRequired["details"]) {
     super(message);
     this.name = "WikiSynthesisAuditRequired";
     this.details = details;
@@ -1236,7 +1228,7 @@ export function describeFlaggedSentences(
       ? `cites chunk ${flag.citedChunks.join(", ")}`
       : "cites no chunk";
     return (
-      `${index + 1}. "${flag.sentence}"\n` +
+      `${index + 1}. ${flag.auditId ?? ""} "${flag.sentence}"\n` +
       `   (${cites}; ${flag.reasons.join(", ")})\n` +
       flag.details.map((detail) => `   - ${detail}`).join("\n")
     );

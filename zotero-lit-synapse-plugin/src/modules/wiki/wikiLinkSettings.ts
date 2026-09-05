@@ -4,16 +4,14 @@
  * Collected in one file deliberately. The design document is explicit that
  * thresholds, top-K, M, the breadth cap and the representative-chunk count
  * must be calibrated on real 50- and 500-paper libraries before anyone trusts
- * them, and that the mandatory-settlement gate must not be switched on until
- * that measurement exists. None of that measurement has been done. Writing the
+ * them. That calibration remains outstanding. Writing the
  * values inline across six modules would have buried that fact; here it is the
  * first thing anyone reads, and every one of them is overridable from prefs so
  * a calibration run can move them without a build.
  *
- * `mandatorySettlement` is off by default for the same reason and is the one
- * setting that changes what the server REFUSES rather than what it suggests.
- * A false mandatory signal blocks a commit, so it has to be opted into by
- * someone who has looked at the candidates their own library produces.
+ * `mandatorySettlement` defaults to on for screened, current candidates whose
+ * specific passages were both read. It requires a decision, never a merger:
+ * separate Claims or a reasoned no_action are legitimate outcomes.
  */
 
 declare const Zotero: any;
@@ -25,7 +23,7 @@ export interface WikiLinkSettings {
   enabled: boolean;
   /**
    * Whether a signal whose passages were BOTH read blocks the commit that
-   * ignores it. Off until real-library calibration; see the file comment.
+   * ignores it, after candidate screening. Enabled by default.
    */
   mandatorySettlement: boolean;
   /** Documents kept per paper after the pairwise pass. Design says 6-8. */
@@ -55,8 +53,8 @@ export interface WikiLinkSettings {
 
 export const WIKI_LINK_SETTING_DEFAULTS: WikiLinkSettings = {
   enabled: true,
-  // The one gate the design forbids enabling before measurement.
-  mandatorySettlement: false,
+  // A screened candidate needs an explicit decision, not necessarily a merge.
+  mandatorySettlement: true,
   topK: 8,
   // "M = max(20, 3 × K)", with K at its default.
   coarseCandidates: 24,
@@ -102,7 +100,7 @@ export function getWikiLinkSettings(): WikiLinkSettings {
   const defaults = WIKI_LINK_SETTING_DEFAULTS;
   return {
     enabled: read("enabled") !== false,
-    mandatorySettlement: read("mandatorySettlement") === true,
+    mandatorySettlement: read("mandatorySettlement") !== false,
     topK: integer("topK", defaults.topK, 1, 50),
     coarseCandidates: integer(
       "coarseCandidates",

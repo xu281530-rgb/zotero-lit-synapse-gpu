@@ -750,6 +750,7 @@ STAGE 4 - keep what you just learned (wiki_update_reading_note, then wiki_prepar
 
 Around 5-12 keywords is the recommendation, 1 to ${MAX_HYBRID_KEYWORDS} is accepted, at both stage 1 and stage 3. If you omit keywords the server falls back to mechanical tokenization, returns keywordSource "fallback" with degraded: true, and you should redo that call ONCE with proper terms. Never perform unscoped whole-library full-text search.
 BEYOND THE FUNNEL - the other tools, and when each one is the right call:
+- wiki_prepare_update: use preview true to inspect existing claims and cross-paper candidates before the formal five-axis review. The compact response lists sourceClaimIds and mandatorySignalIds; page their complete evidence and passages with wiki_get_prepared_context. A source-backed claimVerdict does not answer a cross-paper candidate. Every screened current signal whose two passages were read needs a RESOLVE_LINK_SIGNAL decision before completion: shared support, separate Claims, conflict, concept relation, or reasoned no_action. Merging is optional. Then submit a regular prepare with the review and commit.
 - keyword_search: lexical-only retrieval, no embeddings. It covers the metadata of the whole library plus the body text of every document in the keyword index, and a body-only hit is returned with bodyEvidence explaining it. Use it for an exact term you must not miss, or as a COARSE FILTER whose itemKeys you then hand to semantic_search for a fine pass over just that shortlist. Its score is a real 0-1 relevance (one branch, nothing to fuse), unlike hybrid_search's rank-fusion score - never compare the two.
 - semantic_search: embedding-only retrieval. Use it for a concept whose vocabulary you cannot pin down, or as the fine pass over a keyword_search shortlist. Both accept collectionKeys and itemKeys, both page with nextCursor, and both return the SAME row shape as hybrid_search - including fullText, which you must read before you read any snippet.
 - get_item_details: bibliographic metadata for citing a paper. It never returns abstract text, note bodies, annotation text or full text.
@@ -1555,6 +1556,8 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
             itemKey: args.itemKey,
             query: args.query,
             limit: args.limit,
+            compact: args.compact !== false,
+            preview: args.preview === true,
             proposedPageTitles: this.coerceStringArray(args.proposedPageTitles),
             refreshSkeleton: args.refreshSkeleton === true,
             knownSkeletonRevision: typeof args.knownSkeletonRevision === 'string' ? args.knownSkeletonRevision : undefined,
@@ -1563,6 +1566,11 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
                 ? args.wikiReview
                 : undefined,
           });
+          break;
+        }
+        case 'wiki_get_prepared_context': {
+          result = getWikiService().getPreparedContext({ libraryID: args.libraryID ?? Zotero.Libraries.userLibraryID,
+            prepareToken: args.prepareToken, section: args.section, offset: args.offset, limit: args.limit });
           break;
         }
         case 'wiki_commit': {
@@ -1709,6 +1717,7 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
               typeof args?.includeReadingNote === 'boolean'
                 ? args.includeReadingNote
                 : undefined,
+            includeSourceText: args?.includeSourceText === true,
           });
           break;
         case 'wiki_set_reading_expert':
@@ -1748,6 +1757,9 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
             libraryID: args?.libraryID ?? Zotero.Libraries.userLibraryID,
             itemKey: args?.itemKey,
             includeMarkdown: args?.includeMarkdown !== false,
+            markdownOffset: args?.markdownOffset,
+            markdownLimit: args?.markdownLimit,
+            expectedBodyHash: args?.expectedBodyHash,
           });
           break;
         case 'wiki_finish_reading': {
@@ -1969,7 +1981,9 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
       ztoolkit.log(`[StreamableMCP] Tool call error for ${name}: ${error}`);
       return this.createResponse(request.id ?? null, {
         isError: true,
-        content: [{ type: 'text', text: `Error executing ${name}: ${error instanceof Error ? error.message : String(error)}` }],
+        content: [{ type: 'text', text: error instanceof Error && error.name === 'WikiSynthesisAuditRequired'
+          ? JSON.stringify({ error: error.name, message: error.message, ...(error as any).details })
+          : `Error executing ${name}: ${error instanceof Error ? error.message : String(error)}` }],
       });
     }
   }
@@ -3758,6 +3772,7 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
     }
     if (!Array.isArray(raw) || raw.length === 0) return undefined;
     return raw.map((entry: any) => ({
+      auditId: entry?.auditId === undefined ? undefined : String(entry.auditId),
       sentence: String(entry?.sentence ?? ''),
       support: Array.isArray(entry?.support)
         ? entry.support.map((item: any) => ({

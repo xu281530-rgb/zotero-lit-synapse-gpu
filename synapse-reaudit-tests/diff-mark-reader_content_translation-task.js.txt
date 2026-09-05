@@ -1,0 +1,47 @@
+--- old/mark-reader/content/translation-task.js
++++ new/mark-reader/content/translation-task.js
+@@ -231,7 +231,7 @@
+     select.replaceChildren();
+     for (const item of this.snapshot?.documents || []) {
+       const option = htmlElement("option");
+-      option.value = item.attachmentKey;
++      option.value = item.attachmentIdentity;
+       option.textContent = xmlSafeText(item.title);
+       select.appendChild(option);
+     }
+@@ -242,7 +242,7 @@
+ 
+   selectedDocument() {
+     const key = document.getElementById("zmr-glossary-document").value;
+-    return this.snapshot?.documents.find((item) => item.attachmentKey === key);
++    return this.snapshot?.documents.find((item) => item.attachmentIdentity === key);
+   },
+ 
+   renderGlossary(force = false) {
+@@ -251,7 +251,7 @@
+     if (
+       !force &&
+       this.glossaryDirty &&
+-      this.renderedGlossaryKey === documentItem?.attachmentKey
++      this.renderedGlossaryKey === documentItem?.attachmentIdentity
+     ) {
+       return;
+     }
+@@ -259,7 +259,7 @@
+     if (!documentItem) {
+       return;
+     }
+-    this.renderedGlossaryKey = documentItem.attachmentKey;
++    this.renderedGlossaryKey = documentItem.attachmentIdentity;
+     const query = document
+       .getElementById("zmr-glossary-search")
+       .value.trim()
+@@ -356,7 +356,7 @@
+         ]
+       : visible;
+     this.glossaryDirty = false;
+-    this.task.setDocumentGlossary(item.attachmentKey, manual, { replaceAI: true });
++    this.task.setDocumentGlossary(item.attachmentIdentity, manual, { replaceAI: true });
+   },
+ 
+   async importGlossary() {

@@ -1,0 +1,48 @@
+{
+  "archive": "zotero-lit-synapse(1).xpi",
+  "sha256": "628467d1f34d3d769885725563bc6709370f25e21546ccd207f01f6fc3ba579d",
+  "version": "3.1.0",
+  "zip_crc": "PASS",
+  "modified_files": [
+    "content/scripts/zotero-lit-synapse.js",
+    "mark-reader/content/scripts/zotero-mark-reader.js",
+    "mark-reader/content/translation-task.js"
+  ],
+  "javascript_syntax": [
+    {
+      "file": "bootstrap.js",
+      "status": "PASS",
+      "error": ""
+    },
+    {
+      "file": "content/scripts/zotero-lit-synapse.js",
+      "status": "PASS",
+      "error": ""
+    },
+    {
+      "file": "mark-reader/content/preferences/preferences.js",
+      "status": "PASS",
+      "error": ""
+    },
+    {
+      "file": "mark-reader/content/scripts/zotero-mark-reader.js",
+      "status": "PASS",
+      "error": ""
+    },
+    {
+      "file": "mark-reader/content/translation-task.js",
+      "status": "PASS",
+      "error": ""
+    },
+    {
+      "file": "mark-reader/vendor/katex/katex.min.js",
+      "status": "PASS",
+      "error": ""
+    },
+    {
+      "file": "prefs.js",
+      "status": "PASS",
+      "error": ""
+    }
+  ]
+}

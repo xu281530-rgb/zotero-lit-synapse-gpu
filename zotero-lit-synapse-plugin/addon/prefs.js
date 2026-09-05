@@ -64,7 +64,7 @@ pref("wiki.note.episodeSimilarity", "0.92");
 // requires them to be calibrated on 50- and 500-paper libraries; they are
 // prefs so that calibration can move them without a build.
 pref("wiki.link.enabled", true);
-pref("wiki.link.mandatorySettlement", false);
+pref("wiki.link.mandatorySettlement", true);
 pref("wiki.link.topK", 8);
 pref("wiki.link.coarseCandidates", 24);
 pref("wiki.link.anchorsPerType", 3);

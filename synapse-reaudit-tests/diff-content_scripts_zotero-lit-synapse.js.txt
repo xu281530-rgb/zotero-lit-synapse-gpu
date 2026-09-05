@@ -1,0 +1,181 @@
+--- old/content/scripts/zotero-lit-synapse.js
++++ new/content/scripts/zotero-lit-synapse.js
+@@ -5043,7 +5043,7 @@
+               message,
+               elapsedMs: Date.now() - started
+             });
+-            await this.writeFailure(attachment.key, config2, stat, fileName, message);
++            await this.writeFailure(attachment, config2, stat, fileName, message);
+             if (options.userInitiated) throw error;
+             return null;
+           } finally {
+@@ -5334,6 +5334,7 @@
+             ignoreExisting: true,
+             createAncestors: true
+           });
++          await this.invalidateReaderTranslationCache(attachment);
+           await IOUtils.remove(PathUtils.join(dir, "full.md"), {
+             ignoreAbsent: true
+           });
+@@ -5414,13 +5415,27 @@
+             JSON.stringify(meta, null, 2)
+           );
+         }
+-        async writeFailure(attachmentKey, config2, stat, fileName, message) {
++        async invalidateReaderTranslationCache(attachment) {
++          await IOUtils.remove(
++            PathUtils.join(
++              this.getCacheRoot(),
++              "reader",
++              String(attachment.libraryID),
++              sanitizeFileName(attachment.key),
++              "translation-cache.json"
++            ),
++            { ignoreAbsent: true }
++          );
++        }
++        async writeFailure(attachment, config2, stat, fileName, message) {
+           try {
++            const attachmentKey = attachment.key;
+             const dir = this.getAttachmentDir(attachmentKey);
+             await IOUtils.makeDirectory(dir, {
+               ignoreExisting: true,
+               createAncestors: true
+             });
++            await this.invalidateReaderTranslationCache(attachment);
+             await IOUtils.remove(PathUtils.join(dir, "full.md"), {
+               ignoreAbsent: true
+             });
+@@ -5437,6 +5452,7 @@
+             const meta = {
+               version: CACHE_VERSION,
+               attachmentKey,
++              libraryID: attachment.libraryID,
+               fileName,
+               fileSize: stat.size,
+               fileMTime: stat.mtime,
+@@ -56367,7 +56383,7 @@
+     static testServer() {
+       Zotero.debug("Static testServer method called.");
+     }
+-    serverSocket;
++    serverSocket = null;
+     isRunning = false;
+     mcpServer = null;
+     port = 8080;
+@@ -56446,10 +56462,11 @@
+     }
+     stop() {
+       ztoolkit.log(`[HttpServer] stop() called - isRunning: ${this.isRunning}, hasSocket: ${!!this.serverSocket}`);
+-      if (!this.isRunning || !this.serverSocket) {
+-        ztoolkit.log("[HttpServer] Server is not running, nothing to stop");
+-        return;
+-      }
++      const socket = this.serverSocket;
++      this.serverSocket = null;
++      this.isRunning = false;
++      this.boundPort = null;
++      this.boundLoopbackOnly = null;
+       ztoolkit.log(`[HttpServer] Closing ${this.activeTransports.size} active transport connections...`);
+       for (const transport of this.activeTransports) {
+         try {
+@@ -56461,15 +56478,11 @@
+       ztoolkit.log("[HttpServer] All transports closed");
+       try {
+         ztoolkit.log("[HttpServer] Closing server socket...");
+-        this.serverSocket.close();
+-        this.isRunning = false;
++        socket?.close();
+         ztoolkit.log("[HttpServer] Server socket closed successfully");
+       } catch (e) {
+         ztoolkit.log(`[HttpServer] Error closing server socket: ${e}`, "error");
+-        this.isRunning = false;
+-      }
+-      this.boundPort = null;
+-      this.boundLoopbackOnly = null;
++      }
+       this.cleanupMCPServer();
+       ztoolkit.log("[HttpServer] stop() complete");
+     }
+@@ -56545,7 +56558,14 @@
+       );
+     }
+     listener = {
+-      onSocketAccepted: async (_socket, transport) => {
++      onSocketAccepted: async (socket, transport) => {
++        if (socket !== this.serverSocket || !this.isRunning) {
++          try {
++            transport.close(0);
++          } catch {
++          }
++          return;
++        }
+         let input = null;
+         let output = null;
+         let sin = null;
+@@ -56832,7 +56852,9 @@
+       },
+       onStopListening: (socket, status) => {
+         ztoolkit.log(`[HttpServer] onStopListening called, status: ${status}`);
+-        this.isRunning = false;
++        if (socket !== this.serverSocket) return;
++        this.serverSocket = null;
++        this.stop();
+       }
+     };
+     /**
+@@ -60484,6 +60506,7 @@
+     }
+     ztoolkit.log(`[MCP Plugin] Auto-updating search index for ${batch.size} items (forced=${forcedKeys.length}, incremental=${incrementalKeys.length})`);
+     isAutoIndexing = true;
++    let completed = false;
+     try {
+       const { getSemanticSearchService: getSemanticSearchService2 } = await Promise.resolve().then(() => (init_semantic(), semantic_exports));
+       const semanticService = getSemanticSearchService2();
+@@ -60532,12 +60555,28 @@
+       autoUpdateRetryCount = 0;
+       refreshSemanticColumn();
+       ztoolkit.log(`[MCP Plugin] Auto-update completed for ${batch.size} items`);
++      completed = true;
+     } catch (error) {
+       ztoolkit.log(`[MCP Plugin] Auto-update failed: ${error}`, "error");
+       requeueAutoUpdates(batch, `exception: ${error}`);
+     } finally {
+       isAutoIndexing = false;
+-    }
++      if (completed) drainAutoUpdatesAfterBuild();
++    }
++  }
++  function drainAutoUpdatesAfterBuild() {
++    if (isShuttingDown || semanticAutoUpdatesSuspended || pendingAutoUpdateKeys.size === 0 || !Zotero.Prefs.get(PREF_SEMANTIC_AUTO_UPDATE, true)) return;
++    if (autoUpdateDebounceTimer) clearTimeout(autoUpdateDebounceTimer);
++    if (autoUpdateRetryTimer) {
++      clearTimeout(autoUpdateRetryTimer);
++      pendingTimeouts.delete(autoUpdateRetryTimer);
++      autoUpdateRetryTimer = null;
++    }
++    autoUpdateRetryCount = 0;
++    autoUpdateDebounceTimer = setTimeout(() => {
++      autoUpdateDebounceTimer = null;
++      void processPendingAutoUpdates();
++    }, 0);
+   }
+   function scheduleAutoUpdate(itemKey, libraryID, force) {
+     if (semanticAutoUpdatesSuspended) return;
+@@ -60855,7 +60894,7 @@
+           return;
+         }
+         const enabled = Zotero.Prefs.get(PREF_SEMANTIC_AUTO_UPDATE, true);
+-        if (isAutoIndexing || !enabled) {
++        if (!enabled || semanticAutoUpdatesSuspended) {
+           if (event === "add" || event === "modify" || event === "trash") {
+             await trackMinerUMarkdownLifecycle(numericIds, event);
+           }
+@@ -61008,6 +61047,7 @@
+         ztoolkit.log(`[MCP Plugin] Auto index failed: ${error}`, "error");
+       }).finally(() => {
+         isAutoIndexing = false;
++        drainAutoUpdatesAfterBuild();
+       });
+     } catch (error) {
+       ztoolkit.log(`[MCP Plugin] Error in triggerAutoIndexBuild: ${error}`, "error");

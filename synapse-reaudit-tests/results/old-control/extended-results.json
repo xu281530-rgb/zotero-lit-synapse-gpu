@@ -1,0 +1,30 @@
+[
+  {
+    "name": "C1a confirmed: concurrent same-key PDFs from different libraries share the first parse result",
+    "status": "BUG_REPRODUCED",
+    "details": {
+      "libraries": [
+        1,
+        7
+      ],
+      "sameAttachmentKey": "SAMEKEY1",
+      "differentFileStats": true,
+      "parseCalls": [
+        "/pdf/a.pdf"
+      ],
+      "library7Received": "Paper A evidence.",
+      "library7OwnPDFParsed": false
+    }
+  },
+  {
+    "name": "C1b confirmed: later library parse overwrites shared artifact path; freshness ignores cached library owner",
+    "status": "BUG_REPRODUCED",
+    "details": {
+      "sharedArtifactDirectory": "/test-data/zotero-lit-synapse/mineru/SAMEKEY1",
+      "cachedOwnerAfterB": 7,
+      "statCollisionAddedForDiskReuse": true,
+      "library1ReadAfterB": "Paper B different evidence text.",
+      "wrongMarkdownImportedToLibrary1": true
+    }
+  }
+]

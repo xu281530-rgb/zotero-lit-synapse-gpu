@@ -726,7 +726,7 @@ targeted build 生命周期：正文只提取、切块一次，然后同时更�
 > 正文——那是全服务器唯一一条绕开检索漏斗的旁路。数据库维护能力保留在插件设置
 > 界面内部，不再对外暴露。
 
-### 四、LLM Wiki（17 个，可独立禁用）
+### 四、LLM Wiki（18 个，可独立禁用）
 
 Wiki 使用独立长期知识数据库，保存可复用的 Page、Claim、Concept、Relation 和可回溯
 Evidence，而不是再建一份论文摘要索引。普通研究采用“先检索、后受控提交”的流程；
@@ -813,6 +813,7 @@ Evidence 是否单薄、哪些可以提升到全文深度；Concept / Term 需�
 Claim 只能建立在阅读总结已经涵盖的内容之上。该附件也被排除在检索索引之外，避免一篇论文的总结被当作论文原文检索出来。
 
 - `wiki_prepare_update` —— 写入前搜索已有知识；可传入最多两个准确的 `proposedPageTitles`，短期 token 只能授权真正搜索过的 Page 标题；`pendingWikiWriteUp` 列出阅读总结已领先于 Wiki 的文献；文献读完全文后还需传入 `wikiReview`（Page / Claim / Evidence / Concept / 关系五个维度的整体复盘）
+- `wiki_get_prepared_context` —— 按类别和偏移量读取准备阶段的完整快照。准备结果默认精简；先用 `preview: true` 查阅已有论断、证据和跨论文候选，再提交五轴复盘。长记录和大型条目可分页完整取回。
 - `wiki_commit` —— 提交经过验证的 SKIP、Evidence、Claim、Page、Relation 或冲突动作
 - `wiki_search` —— 检索 Concept/Alias、Claim、Relation 与一跳 Evidence 关联
 - `wiki_get_page` —— 查看 Page、Claim 与 Evidence

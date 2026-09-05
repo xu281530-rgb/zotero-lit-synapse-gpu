@@ -732,6 +732,7 @@ export class WikiLinkStore {
     resolutionType: WikiLinkResolutionType;
     signalIds: readonly number[];
     claimId?: number | null;
+    claimIds?: number[];
     pageId?: number | null;
     relationId?: number | null;
     note: string;
@@ -740,13 +741,14 @@ export class WikiLinkStore {
   }): Promise<number> {
     await this.db.queryAsync(
       `INSERT INTO wiki_link_resolutions
-         (link_id, resolution_type, claim_id, page_id, relation_id,
+         (link_id, resolution_type, claim_id, claim_ids_json, page_id, relation_id,
           resolution_note, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         options.linkId,
         options.resolutionType,
         options.claimId ?? null,
+        JSON.stringify(options.claimIds ?? []),
         options.pageId ?? null,
         options.relationId ?? null,
         options.note,
@@ -806,6 +808,7 @@ export class WikiLinkStore {
           "resolutionType",
         ) as WikiLinkResolutionType,
         claimId: numberOrNull(row, "claim_id", "claimId"),
+        claimIds: JSON.parse(text(row, "claim_ids_json", "claimIdsJson") || "[]"),
         pageId: numberOrNull(row, "page_id", "pageId"),
         relationId: numberOrNull(row, "relation_id", "relationId"),
         resolutionNote: text(row, "resolution_note", "resolutionNote"),

@@ -1,0 +1,218 @@
+--- old/mark-reader/content/scripts/zotero-mark-reader.js
++++ new/mark-reader/content/scripts/zotero-mark-reader.js
+@@ -191,11 +191,24 @@
+     return root;
+   }
+ 
++  function attachmentIdentity(attachment) {
++    const libraryID = Number(attachment?.libraryID);
++    if (!Number.isInteger(libraryID) || libraryID <= 0 || !attachment?.key) {
++      throw new Error("Attachment cache requires a libraryID and key.");
++    }
++    return `${libraryID}:${attachment.key}`;
++  }
++
+   async function getAttachmentDataDir(attachment) {
++    attachmentIdentity(attachment);
+     const root = await getDataRoot();
+-    const dir = joinPath(root, sanitizeFileName(attachment.key));
++    const dir = joinPath(
++      root,
++      "reader",
++      String(attachment.libraryID),
++      sanitizeFileName(attachment.key),
++    );
+     await ensureDir(dir);
+-    await ensureDir(joinPath(dir, "raw"));
+     return dir;
+   }
+ 
+@@ -356,8 +369,9 @@
+       throw new Error("MinerU 返回了空的 Markdown。");
+     }
+     await removeLegacyParseCache(attachment);
+-    state.translationCaches.delete(attachment.key);
+-    notifyTranslationCacheChanged(attachment.key);
++    const identity = attachmentIdentity(attachment);
++    state.translationCaches.delete(identity);
++    notifyTranslationCacheChanged(identity);
+     return normalized;
+   }
+ 
+@@ -538,6 +552,7 @@
+   function emptyTranslationCache(attachment, parse) {
+     return {
+       schemaVersion: TRANSLATION_CACHE_SCHEMA_VERSION,
++      libraryID: Number(attachment.libraryID),
+       attachmentKey: attachment.key,
+       sourceHash: parse?.sourceHash || "",
+       updatedAt: new Date().toISOString(),
+@@ -551,31 +566,89 @@
+   }
+ 
+   async function loadTranslationCache(attachment, parse) {
+-    if (state.translationCaches.has(attachment.key)) {
+-      return state.translationCaches.get(attachment.key);
++    const identity = attachmentIdentity(attachment);
++    if (state.translationCaches.has(identity)) {
++      const cached = state.translationCaches.get(identity);
++      if (cached.sourceHash !== (parse?.sourceHash || "")) {
++        Object.assign(cached, normalizeTranslationCache(cached, attachment, parse));
++      }
++      return cached;
+     }
+     const dir = await getAttachmentDataDir(attachment);
+     const path = joinPath(dir, TRANSLATION_CACHE_FILE);
+     let cache = emptyTranslationCache(attachment, parse);
++    let migrated = false;
+     if (await exists(path)) {
+       try {
+-        cache = normalizeTranslationCache(await readJSON(path), attachment, parse);
++        const saved = await readJSON(path);
++        if (
++          saved.libraryID === Number(attachment.libraryID) &&
++          saved.attachmentKey === attachment.key
++        ) {
++          cache = normalizeTranslationCache(saved, attachment, parse);
++        }
+       } catch (error) {
+         Zotero.logError(error);
+       }
+-    }
+-    const migrated = migrateLegacyTranslations(parse, cache);
+-    state.translationCaches.set(attachment.key, cache);
++    } else {
++      const legacy = await loadLegacyTranslationCache(attachment, parse);
++      if (legacy) {
++        cache = normalizeTranslationCache(legacy, attachment, parse);
++        migrated = true;
++      }
++    }
++    migrated = migrateLegacyTranslations(parse, cache) || migrated;
++    state.translationCaches.set(identity, cache);
+     if (migrated) {
+       await saveTranslationCache(attachment, cache);
+     }
+     return cache;
++  }
++
++  async function loadLegacyTranslationCache(attachment, parse) {
++    const dir = joinPath(await getDataRoot(), sanitizeFileName(attachment.key));
++    const path = joinPath(dir, TRANSLATION_CACHE_FILE);
++    if (!(await exists(path))) return null;
++    try {
++      const cache = await readJSON(path);
++      if (
++        cache.attachmentKey !== attachment.key ||
++        !parse?.sourceHash ||
++        cache.sourceHash !== parse.sourceHash
++      ) return null;
++      if (cache.libraryID !== undefined && cache.libraryID !== null) {
++        return cache.libraryID === Number(attachment.libraryID) ? cache : null;
++      }
++
++      // Old files lack libraryID. Require matching metadata and a unique owner
++      // across all libraries before copying; ambiguous originals stay untouched.
++      const meta = await readJSON(joinPath(dir, "meta.json"));
++      if (
++        meta.libraryID !== Number(attachment.libraryID) ||
++        meta.attachmentKey !== attachment.key ||
++        !Zotero.DB?.queryAsync
++      ) return null;
++      const owners = await Zotero.DB.queryAsync(
++        "SELECT itemID, libraryID FROM items WHERE key = ?",
++        [attachment.key],
++      );
++      if (
++        owners.length !== 1 ||
++        Number(owners[0].libraryID) !== Number(attachment.libraryID)
++      ) return null;
++      return cache;
++    } catch (error) {
++      Zotero.logError(error);
++      return null;
++    }
+   }
+ 
+   function normalizeTranslationCache(cache, attachment, parse) {
+     const normalized = {
+       ...emptyTranslationCache(attachment, parse),
+       ...cache,
++      libraryID: Number(attachment.libraryID),
++      attachmentKey: attachment.key,
+       glossary: {
+         manual: normalizeGlossaryEntries(cache?.glossary?.manual, "document-manual"),
+         ai: normalizeGlossaryEntries(cache?.glossary?.ai, "document-ai"),
+@@ -619,29 +692,30 @@
+   }
+ 
+   async function saveTranslationCache(attachment, cache) {
+-    const previous = state.translationCacheWrites.get(attachment.key) || Promise.resolve();
++    const identity = attachmentIdentity(attachment);
++    const previous = state.translationCacheWrites.get(identity) || Promise.resolve();
+     const write = previous
+       .catch(() => {})
+       .then(async () => {
+         cache.updatedAt = new Date().toISOString();
+         const dir = await getAttachmentDataDir(attachment);
+         await writeJSON(joinPath(dir, TRANSLATION_CACHE_FILE), cache);
+-        notifyTranslationCacheChanged(attachment.key);
++        notifyTranslationCacheChanged(identity);
+       });
+-    state.translationCacheWrites.set(attachment.key, write);
++    state.translationCacheWrites.set(identity, write);
+     try {
+       await write;
+     } finally {
+-      if (state.translationCacheWrites.get(attachment.key) === write) {
+-        state.translationCacheWrites.delete(attachment.key);
+-      }
+-    }
+-  }
+-
+-  function notifyTranslationCacheChanged(attachmentKey) {
++      if (state.translationCacheWrites.get(identity) === write) {
++        state.translationCacheWrites.delete(identity);
++      }
++    }
++  }
++
++  function notifyTranslationCacheChanged(identity) {
+     for (const listener of state.cacheListeners) {
+       try {
+-        listener(attachmentKey);
++        listener(identity);
+       } catch (error) {
+         Zotero.logError(error);
+       }
+@@ -1465,14 +1539,15 @@
+         documents: this.documents.map((document) => ({
+           title: document.title,
+           attachmentKey: document.attachment.key,
++          attachmentIdentity: attachmentIdentity(document.attachment),
+           glossary: document.cache.glossary,
+         })),
+       };
+     }
+ 
+-    setDocumentGlossary(attachmentKey, entries, options = {}) {
++    setDocumentGlossary(identity, entries, options = {}) {
+       const document = this.documents.find(
+-        (candidate) => candidate.attachment.key === attachmentKey,
++        (candidate) => attachmentIdentity(candidate.attachment) === identity,
+       );
+       if (!document) {
+         return;
+@@ -1832,9 +1907,9 @@
+       this.translationRequest = null;
+       this.translationSerial = 0;
+       this.boundRender = () => this.queueRender();
+-      this.boundCacheChanged = (attachmentKey) => {
+-        if (attachmentKey === this.attachment?.key) {
+-          this.translationCache = state.translationCaches.get(attachmentKey) || null;
++      this.boundCacheChanged = (identity) => {
++        if (this.attachment && identity === attachmentIdentity(this.attachment)) {
++          this.translationCache = state.translationCaches.get(identity) || null;
+           this.queueRender();
+         }
+       };

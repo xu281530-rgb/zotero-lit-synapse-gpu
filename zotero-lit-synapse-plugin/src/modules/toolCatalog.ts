@@ -74,6 +74,7 @@ export type ToolCategory =
 
 export const WIKI_TOOL_NAMES: ReadonlySet<string> = new Set([
   "wiki_prepare_update",
+  "wiki_get_prepared_context",
   "wiki_commit",
   "wiki_search",
   "wiki_get_page",
@@ -1223,6 +1224,8 @@ export function buildToolCatalog(): ToolDefinition[] {
     inputSchema: {
       type: 'object',
       properties: {
+        compact: { type: 'boolean', default: true, description: 'Return concise candidates and a prepared context index. Full records, evidence, pages and signals are available with wiki_get_prepared_context. Set false for the legacy expanded response.' },
+        preview: { type: 'boolean', default: false, description: 'Read candidates before composing the five-axis review. A preview does not mark the reading prepared and its token cannot authorize CREATE_PAGE. After comparing related papers, prepare again with wikiReview.' },
         libraryID: { type: 'number' },
         itemKey: {
           type: 'string',
@@ -1270,7 +1273,7 @@ export function buildToolCatalog(): ToolDefinition[] {
             },
             claimVerdicts: {
               type: 'array',
-              description: 'One verdict for EVERY Claim in wikiReconciliation.claims. Claims are recalled by Evidence source itemKey, not by query similarity, so none may be omitted.',
+              description: 'One verdict for EVERY Claim in reviewTasks.sourceClaimIds. Read the full claims and evidence through wiki_get_prepared_context before reviewing. These source-backed verdicts are separate from the per-signal cross-paper decisions, which may retain independent Claims or find no substantive relation.',
               items: {
                 type: 'object',
                 properties: {
@@ -1303,11 +1306,28 @@ export function buildToolCatalog(): ToolDefinition[] {
     }
   },
   {
+    name: 'wiki_get_prepared_context',
+    category: 'wiki',
+    description: 'Page through the immutable context captured by wiki_prepare_update. Use the same prepareToken and pagination.nextOffset. Large reading records or excerpts arrive as textFragment parts; concatenate the named field in offset order. Large nested entries arrive as contextFragment parts: join text for each entryIndex in offset order, then JSON.parse it. The token expires after ten minutes or when consumed by a page-creating commit.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        libraryID: { type: 'number' },
+        prepareToken: { type: 'string' },
+        section: { type: 'string', enum: ['pages', 'claims', 'evidence', 'readingRecords', 'linkSignals', 'concepts', 'relations'] },
+        offset: { type: 'integer', minimum: 0, default: 0 },
+        limit: { type: 'integer', minimum: 1, maximum: 50, default: 10 }
+      },
+      required: ['prepareToken', 'section']
+    }
+  },
+  {
     name: 'wiki_commit',
     category: 'wiki',
     description: [
       'Supply a unique operationId before submission. Query wiki_status with it after a timeout; resume saved postprocessing with the same operationId, resume true and actions []. The committed knowledge is never submitted again by a resume.',
       'Apply only controlled Wiki actions. The plugin validates pages, claims, Zotero documents, actual indexed chunks, excerpts, duplicates, versions and the two-page creation ceiling. It never accepts SQL. When automatic Wiki writing is disabled, Zotero asks the user to confirm this Wiki-only database update.',
+      'Every screened current cross-paper candidate with BOTH passages read needs an individual decision. RESOLVE_LINK_SIGNAL records shared_claim, same_page with two independent claimIds, conflict, concept_relation, or a reasoned no_action. Merging is never required. Outcomes are checked against the final stored evidence in the same transaction; invalid decisions roll back the knowledge write.',
       '',
       'ZOTERO NOTE STATUS IS SEPARATE. A commit that completes an open full-text reading session also tries to mark its Markdown reading note completed. That small Zotero write uses the Zotero write permission and confirmation; if it is not authorized, the Wiki commit and session close still succeed and noteStatusWrite reports not_authorized.',
       '',
@@ -1342,6 +1362,7 @@ export function buildToolCatalog(): ToolDefinition[] {
                   'UPDATE_CLAIM',
                   'CREATE_PAGE',
                   'LINK_RELATION',
+                  'RESOLVE_LINK_SIGNAL',
                   'MARK_CONFLICT',
                   'DISMISS_LINK_SIGNALS'
                 ]
@@ -1351,8 +1372,12 @@ export function buildToolCatalog(): ToolDefinition[] {
               resolvesSignalIds: {
                 type: 'array',
                 items: { type: 'integer', minimum: 1 },
-                description: 'Cross-paper candidate signals this write settles, from pendingLinkSignals in wiki_prepare_update. Put them on the action that ACTUALLY settles them: ADD_CLAIM or ATTACH_EVIDENCE when both papers now support one Claim, CREATE_PAGE when they belong under one entry as separate Claims, MARK_CONFLICT when they disagree under comparable conditions, LINK_RELATION when the shared concepts form a provable relation. The server reads the resolution type off the action rather than trusting a label, because the action is what happened. A signal is settled once; settling it twice is refused.'
+                description: 'Compatibility shorthand for signals settled by this action. Final stored evidence is verified in the knowledge transaction: shared Claims need valid SUPPORTS evidence from both papers. Prefer a separate RESOLVE_LINK_SIGNAL action to state the outcome explicitly, especially when retaining distinct Claims on an existing Page. Each signal is decided once.'
               },
+              signalId: { type: 'integer', minimum: 1, description: 'RESOLVE_LINK_SIGNAL: one candidate to decide.' },
+              resolutionType: { type: 'string', enum: ['shared_claim', 'same_page', 'conflict', 'concept_relation', 'no_action'], description: 'RESOLVE_LINK_SIGNAL outcome. shared_claim/conflict require claimId; same_page requires pageId and two claimIds; concept_relation requires relationId; no_action needs only its reason. Every outcome requires a reason comparing both passages.' },
+              claimIds: { type: 'array', minItems: 2, maxItems: 2, uniqueItems: true, items: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string' }] }, description: 'Two distinct Claims retained under one Page. Numeric ids or refs assigned earlier in this commit.' },
+              relationId: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string' }] },
               dismissals: {
                 type: 'array',
                 minItems: 1,
@@ -1456,9 +1481,14 @@ export function buildToolCatalog(): ToolDefinition[] {
               },
               sourceConceptId: {},
               targetConceptId: {},
+              confidence: { type: 'number', minimum: 0, maximum: 1, description: 'Required for LINK_RELATION. Claim confidence is derived from evidence.' },
               predicate: { type: 'string' }
             },
-            required: ['action']
+            required: ['action'],
+            allOf: [
+              { if: { properties: { action: { const: 'LINK_RELATION' } }, required: ['action'] }, then: { required: ['sourceConceptId', 'targetConceptId', 'predicate', 'confidence'] } },
+              { if: { properties: { action: { const: 'RESOLVE_LINK_SIGNAL' } }, required: ['action'] }, then: { required: ['signalId', 'resolutionType', 'reason'] } }
+            ]
           }
         }
       },
@@ -1729,7 +1759,7 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'TWO PHASES. The first call names the paper (itemKey, DOI, URL or title) and returns NO body text: it returns the metadata and abstract and asks you to generate this paper\'s expert reader with wiki_set_reading_expert. Chunks start only after that. This order is deliberate — a persona written after reading half the paper just describes what you already found.',
       '',
-      'PAGING. Once the expert exists, each call returns one page of chunks and the reading note as it currently stands. Pass cursor set to pagination.nextCursor from the previous response and change nothing else. pagination reports totalChunks, the range just returned, deliveredChunks / remainingChunks, readChunkRanges and unreadChunkRanges, a coverageMap drawn as filled and hollow squares, and coverageComplete once every chunk has been delivered.',
+      'PAGING. Once the expert exists, each call returns one page of chunks. The note body is optional, including on the last page. Retrieve it separately with wiki_get_reading_note and follow markdownPagination. Pass cursor set to pagination.nextCursor from the previous response and change nothing else. pagination reports totalChunks, the range just returned, deliveredChunks / remainingChunks, readChunkRanges and unreadChunkRanges, a coverageMap drawn as filled and hollow squares, and coverageComplete once every chunk has been delivered.',
       '',
       'ONE PAPER AT A TIME. Starting a different full-text paper while this one is unfinished is refused. Finish the open one first through the fixed chain: read it out; reset any provisional expert from metadata and abstract; append macroSummary with finalSynthesis true; call wiki_record_concepts with final true; call wiki_prepare_update with the five-axis Wiki Review and one verdict per source-backed Claim; then wiki_commit, settling EVERY chunk this reading was delivered — each one quoted into a Claim or named in a SKIP with a reason, which is what finally closes the paper. Or use wiki_finish_reading with outcome "skipped" to close it without a Wiki write.',
       '',
@@ -1768,6 +1798,10 @@ export function buildToolCatalog(): ToolDefinition[] {
         includeReadingNote: {
           type: 'boolean',
           description: 'Return the reading note markdown with this page. Defaults to true when no cursor was passed (which is what resuming looks like) and false while paging.'
+        },
+        includeSourceText: {
+          type: 'boolean', default: false,
+          description: 'Include rawText, displayText, canonicalHash and extraction-quality flags for each chunk. Only known unit typography is normalized; mathematical signs, powers and variables remain distinct.'
         }
       },
       required: ['userRequested']
@@ -1845,8 +1879,8 @@ export function buildToolCatalog(): ToolDefinition[] {
       'TRANSCRIBE VALUES, NEVER CHARACTERISE THEM - THIS IS CHECKED. The server extracts every measured value from the batch\'s chunks and refuses a record that landed fewer than 80% of them, listing the missing ones by chunk number. Every number the delivered chunks carry belongs in the record with its unit AND the condition it was measured under: alloy composition in wt%, temperature, pressure, power, heating and withdrawal rates, hold times, grain size, strength, elongation, hardness, volume fractions. A composition table, a process-parameter table or a property table is transcribed in full, not described. Placeholder wording standing in for a value that is present in the source - "selected pressures", "certain temperatures", "various conditions", "across a range of powers" - deletes the only part of the sentence the reader needed. Write "0.1-125 MPa", not "selected pressures"; write "1750 +- 7.4 K at 21.6 kW", not "under the stated power".',
       'NO-NEW-CONTENT RECORDS: use unchanged: true with unchangedReason to record references, acknowledgements or repeated material. This may be used any number of consecutive times. The server still appends a numbered record with the chunks read and "no new content"; nothing needs to be invented.',
       'CITE CHUNKS IN THE RECORD TEXT. Every factual paragraph or bullet names the chunk carrying it, for example "melt-pool depth reaches 1.2 mm at a 240 mm/min scan speed (chunk 42)". The citation is a pointer, not a substitute for the content: a block that names a chunk and then says only what the chunk was ABOUT - "tensile properties were measured (chunk 181)", "fracture morphologies were investigated (chunk 41)" - has recorded a table of contents, not a reading. Say what the chunk FOUND. For a question-driven call, every citation must belong to readChunkIds from this turn. Each newly submitted record is audited immediately against those chunks before it is written.',
-      'KEEP THE PAPER\'S STRENGTH. Do not turn may into will, difficult into impossible, preliminary into complete, or a conditional number into an unconditional one. A sentence citing several chunks is allowed only when each cited chunk carries the sentence on its own. If the audit flags a sentence, either weaken it to the source\'s wording or provide synthesisAudit with verbatim support from every cited chunk.',
-      'THE WHOLE-PAPER SUMMARY (written under the heading 全文总结): once coverage reaches 100%, call with finalSynthesis: true and macroSummary. WRITE IT FROM THE WHOLE PAPER AT ONCE, not from the page in front of you - that vantage point is the requirement, and it used to be smuggled into the heading itself, which only made the summary float upwards until no detail survived. The last page of the paper hands the whole note back to you with every reading record in it - read them together first and work out how they RELATE: which record explains another\'s mechanism, which corrects an earlier judgement, which are the same phenomenon measured under different conditions. That relating is the whole job; a summary that does not do it has nothing to add.',
+      'KEEP THE PAPER\'S STRENGTH. Do not turn may into will, difficult into impossible, preliminary into complete, or a conditional number into an unconditional one. Several chunks may jointly support a sentence: each quotation must contribute, and together they must justify it. If the audit flags a sentence, rewrite it or provide synthesisAudit using the current auditId with support from every cited chunk, including the interior of a cited range. Known unit-formatting equivalents are accepted; numerical and mathematical changes are not.',
+      'THE WHOLE-PAPER SUMMARY (written under the heading 全文总结): once coverage reaches 100%, call with finalSynthesis: true and macroSummary. Retrieve all reading records through wiki_get_reading_note pagination first and synthesise the whole paper: which record explains another\'s mechanism, which corrects an earlier judgement, which describe the same phenomenon under different conditions. After final terminology, call wiki_prepare_update with preview true, inspect source-backed claims and cross-paper candidates using wiki_get_prepared_context, then submit the five-axis review through a regular prepare and commit every required per-signal decision.',
       'IT MUST REACH EVERY RECORD, AND THAT IS CHECKED BY CITATION, NEVER BY WORDING: each substantive reading record needs at least one of its chunks cited somewhere in the summary, so a stretch of the paper somebody read cannot drop out of the whole-paper view. Saying it in completely different words always passes - which is what the next rule asks for, so the two never pull against each other. A record that recorded nothing is not asked for.',
       'IT IS NOT A CONCATENATION OF THE RECORDS - a summary more than 60% verbatim from them is refused. Extract the core content and core methods instead. Do not reproduce full parameter tables or preserve numbers mechanically; keep a value only when it is necessary to express a core finding or distinguish an important condition. The complete details remain in the records directly above it. Re-reading any chunk while you write is free.',
     ].join('\n'),
@@ -1885,17 +1919,18 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         synthesisAudit: {
           type: 'array',
-          description: 'Proof for the sentences the final-synthesis check flagged. Send it only on a finalSynthesis call, and only after a previous call listed those sentences — the list names them exactly, and an entry matching no flagged sentence is reported back rather than ignored. One entry per sentence you chose to keep as written; omit entries for sentences you rewrote instead, since a rewritten sentence is re-checked and usually is not flagged at all.',
+          description: 'Support for flagged statements in a readingRecord or macroSummary. Retry the same call and mode using the returned auditId. Provide a source quotation for every cited chunk; the quotations may jointly support the statement. Changed statements, citations or indexed sources receive new auditIds.',
           items: {
             type: 'object',
             properties: {
+              auditId: { type: 'string', description: 'Stable identifier returned with the audit issue. Preferred over sentence matching.' },
               sentence: {
                 type: 'string',
                 description: 'The sentence exactly as it stands in the markdown you are submitting on THIS call. Matched after whitespace normalisation, so reformatting is safe but rewording is not — if you reworded it, drop the entry and let the check re-read it.'
               },
               support: {
                 type: 'array',
-                description: 'One quotation per chunk the sentence cites. All of them are required: a sentence citing three chunks needs three quotations, because each cited chunk has to carry the sentence on its own. If a chunk cannot carry it, remove that chunk from the citation rather than quoting around it.',
+                description: 'One source quotation per cited chunk. Quotations may jointly support a statement; each must contribute to the assertion. Remove citations that contribute no support.',
                 items: {
                   type: 'object',
                   properties: {
@@ -1906,7 +1941,8 @@ export function buildToolCatalog(): ToolDefinition[] {
                 }
               }
             },
-            required: ['sentence', 'support']
+            required: ['support'],
+            anyOf: [{ required: ['auditId'] }, { required: ['sentence'] }]
           }
         },
         readChunkIds: {
@@ -1941,6 +1977,12 @@ export function buildToolCatalog(): ToolDefinition[] {
         includeMarkdown: {
           type: 'boolean',
           description: 'Include the note body. Default true.'
+        },
+        markdownOffset: { type: 'integer', minimum: 0, default: 0 },
+        markdownLimit: { type: 'integer', minimum: 1, maximum: 30000, default: 12000 },
+        expectedBodyHash: {
+          type: 'string',
+          description: 'Required after offset 0: pass markdownPagination.bodyHash to avoid mixing versions. Follow markdownPagination.nextOffset until hasMore is false.'
         }
       },
       required: []

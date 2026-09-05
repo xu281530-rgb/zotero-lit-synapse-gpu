@@ -1,0 +1,17 @@
+{
+  "review_date": "2026-09-05",
+  "archive_sha256": "628467d1f34d3d769885725563bc6709370f25e21546ccd207f01f6fc3ba579d",
+  "unique_behavior_checks": 65,
+  "pass": 63,
+  "bug_reproduced_scenarios": 2,
+  "remaining_confirmed_root_causes": 1,
+  "prior_issues_fixed": [
+    "B1",
+    "B2",
+    "B3"
+  ],
+  "new_regressions_confirmed": 0,
+  "remaining_preexisting_issue": "C1: MinerU cross-library attachment identity collision",
+  "syntax_checks_passed": 7,
+  "real_zotero_execution": false
+}

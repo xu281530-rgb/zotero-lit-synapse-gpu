@@ -1,0 +1,286 @@
+=== main:56440-56491 ===
+56440:       try {
+56441:         this.mcpServer = new StreamableMCPServer();
+56442:         ztoolkit.log(`[HttpServer] Integrated MCP server initialized`);
+56443:       } catch (error) {
+56444:         ztoolkit.log(`[HttpServer] Failed to initialize MCP server: ${error}`);
+56445:       }
+56446:     }
+56447:     stop() {
+56448:       ztoolkit.log(`[HttpServer] stop() called - isRunning: ${this.isRunning}, hasSocket: ${!!this.serverSocket}`);
+56449:       if (!this.isRunning || !this.serverSocket) {
+56450:         ztoolkit.log("[HttpServer] Server is not running, nothing to stop");
+56451:         return;
+56452:       }
+56453:       ztoolkit.log(`[HttpServer] Closing ${this.activeTransports.size} active transport connections...`);
+56454:       for (const transport of this.activeTransports) {
+56455:         try {
+56456:           transport.close(0);
+56457:         } catch (e) {
+56458:         }
+56459:       }
+56460:       this.activeTransports.clear();
+56461:       ztoolkit.log("[HttpServer] All transports closed");
+56462:       try {
+56463:         ztoolkit.log("[HttpServer] Closing server socket...");
+56464:         this.serverSocket.close();
+56465:         this.isRunning = false;
+56466:         ztoolkit.log("[HttpServer] Server socket closed successfully");
+56467:       } catch (e) {
+56468:         ztoolkit.log(`[HttpServer] Error closing server socket: ${e}`, "error");
+56469:         this.isRunning = false;
+56470:       }
+56471:       this.boundPort = null;
+56472:       this.boundLoopbackOnly = null;
+56473:       this.cleanupMCPServer();
+56474:       ztoolkit.log("[HttpServer] stop() complete");
+56475:     }
+56476:     cleanupMCPServer() {
+56477:       if (this.mcpServer) {
+56478:         this.mcpServer = null;
+56479:         ztoolkit.log("[HttpServer] MCP server cleaned up");
+56480:       }
+56481:     }
+56482:     /**
+56483:      * Determine if connection should be kept alive based on request
+56484:      *
+56485:      * 监听器对每条 socket 只处理一个请求，并在 finally 里关流，因此永远不能
+56486:      * 对外宣称 keep-alive：客户端把这条连接留在池里复用，实际早已被服务端
+56487:      * 关掉，下一个请求就会撞上一个死连接。
+56488:      */
+56489:     shouldKeepAlive(_headers, _path) {
+56490:       return false;
+56491:     }
+
+=== main:56825-56838 ===
+56825:               "error"
+56826:             );
+56827:           }
+56828:           ztoolkit.log(
+56829:             `[HttpServer] #${requestId} connection closed after ${Date.now() - acceptedAt}ms`
+56830:           );
+56831:         }
+56832:       },
+56833:       onStopListening: (socket, status) => {
+56834:         ztoolkit.log(`[HttpServer] onStopListening called, status: ${status}`);
+56835:         this.isRunning = false;
+56836:       }
+56837:     };
+56838:     /**
+
+=== main:61026-61069 ===
+61026:   }
+61027:   var WATCHED_SERVER_PREFS = new Set(
+61028:     Object.values(SERVER_LISTENER_PREFS)
+61029:   );
+61030:   var serverStateSyncTimer = null;
+61031:   function applyServerState(reason) {
+61032:     if (isShuttingDown) return;
+61033:     try {
+61034:       const enabled = serverPreferences.isServerEnabled();
+61035:       if (!enabled) {
+61036:         if (httpServer.isServerRunning()) {
+61037:           httpServer.stop();
+61038:           ztoolkit.log(`[MCP Plugin] HTTP server stopped (${reason})`);
+61039:         }
+61040:         return;
+61041:       }
+61042:       const port = serverPreferences.getPort();
+61043:       if (!port || isNaN(port)) {
+61044:         ztoolkit.log(`[MCP Plugin] Skipping server sync, invalid port: ${port}`, "warn");
+61045:         return;
+61046:       }
+61047:       const loopbackOnly = !serverPreferences.isRemoteAccessAllowed();
+61048:       if (httpServer.isServerRunning() && httpServer.getBoundPort() === port && httpServer.isBoundLoopbackOnly() === loopbackOnly) {
+61049:         ztoolkit.log(`[MCP Plugin] HTTP server already matches preferences (${reason})`);
+61050:         return;
+61051:       }
+61052:       if (httpServer.isServerRunning()) {
+61053:         httpServer.stop();
+61054:         ztoolkit.log(`[MCP Plugin] HTTP server stopped for rebind (${reason})`);
+61055:       }
+61056:       httpServer.start(port);
+61057:       ztoolkit.log(
+61058:         `[MCP Plugin] HTTP server listening on ${loopbackOnly ? "127.0.0.1" : "0.0.0.0"}:${port} (${reason})`
+61059:       );
+61060:     } catch (error) {
+61061:       const err = error instanceof Error ? error : new Error(String(error));
+61062:       ztoolkit.log(`[MCP Plugin] Error applying server state (${reason}): ${err.message}`, "error");
+61063:     }
+61064:   }
+61065:   function scheduleServerStateSync(reason) {
+61066:     if (isShuttingDown) return;
+61067:     if (serverStateSyncTimer) clearTimeout(serverStateSyncTimer);
+61068:     serverStateSyncTimer = trackedSetTimeout(() => {
+61069:       serverStateSyncTimer = null;
+
+=== reader:185-202 ===
+185:       Zotero.Profile?.dir;
+186:     if (!dataRoot) {
+187:       throw new Error("无法定位 Zotero 数据目录。");
+188:     }
+189:     const root = joinPath(dataRoot, DATA_DIR_NAME, "mineru");
+190:     await ensureDir(root);
+191:     return root;
+192:   }
+193: 
+194:   async function getAttachmentDataDir(attachment) {
+195:     const root = await getDataRoot();
+196:     const dir = joinPath(root, sanitizeFileName(attachment.key));
+197:     await ensureDir(dir);
+198:     await ensureDir(joinPath(dir, "raw"));
+199:     return dir;
+200:   }
+201: 
+202:   async function getPDFAttachments(items) {
+
+=== reader:545-577 ===
+545:       glossary: {
+546:         manual: [],
+547:         ai: [],
+548:       },
+549:       entries: {},
+550:     };
+551:   }
+552: 
+553:   async function loadTranslationCache(attachment, parse) {
+554:     if (state.translationCaches.has(attachment.key)) {
+555:       return state.translationCaches.get(attachment.key);
+556:     }
+557:     const dir = await getAttachmentDataDir(attachment);
+558:     const path = joinPath(dir, TRANSLATION_CACHE_FILE);
+559:     let cache = emptyTranslationCache(attachment, parse);
+560:     if (await exists(path)) {
+561:       try {
+562:         cache = normalizeTranslationCache(await readJSON(path), attachment, parse);
+563:       } catch (error) {
+564:         Zotero.logError(error);
+565:       }
+566:     }
+567:     const migrated = migrateLegacyTranslations(parse, cache);
+568:     state.translationCaches.set(attachment.key, cache);
+569:     if (migrated) {
+570:       await saveTranslationCache(attachment, cache);
+571:     }
+572:     return cache;
+573:   }
+574: 
+575:   function normalizeTranslationCache(cache, attachment, parse) {
+576:     const normalized = {
+577:       ...emptyTranslationCache(attachment, parse),
+
+=== reader:617-641 ===
+617:     }
+618:     return changed;
+619:   }
+620: 
+621:   async function saveTranslationCache(attachment, cache) {
+622:     const previous = state.translationCacheWrites.get(attachment.key) || Promise.resolve();
+623:     const write = previous
+624:       .catch(() => {})
+625:       .then(async () => {
+626:         cache.updatedAt = new Date().toISOString();
+627:         const dir = await getAttachmentDataDir(attachment);
+628:         await writeJSON(joinPath(dir, TRANSLATION_CACHE_FILE), cache);
+629:         notifyTranslationCacheChanged(attachment.key);
+630:       });
+631:     state.translationCacheWrites.set(attachment.key, write);
+632:     try {
+633:       await write;
+634:     } finally {
+635:       if (state.translationCacheWrites.get(attachment.key) === write) {
+636:         state.translationCacheWrites.delete(attachment.key);
+637:       }
+638:     }
+639:   }
+640: 
+641:   function notifyTranslationCacheChanged(attachmentKey) {
+
+=== main:60842-60887 ===
+60842:   function registerItemNotifier() {
+60843:     const autoUpdateEnabled = Zotero.Prefs.get(PREF_SEMANTIC_AUTO_UPDATE, true);
+60844:     if (autoUpdateEnabled === void 0) {
+60845:       Zotero.Prefs.set(PREF_SEMANTIC_AUTO_UPDATE, false, true);
+60846:     }
+60847:     itemNotifierID = Zotero.Notifier.registerObserver({
+60848:       notify: async (event, type, ids, extraData) => {
+60849:         if (isShuttingDown) return;
+60850:         if (type !== "item") return;
+60851:         const numericIds = ids.map((id) => typeof id === "string" ? parseInt(id, 10) : id);
+60852:         if (event === "delete") {
+60853:           ztoolkit.log(`[MCP Plugin] Item notifier: event=${event}, type=${type}, ids=${ids.length}`);
+60854:           await handleItemsDeleted(numericIds, extraData);
+60855:           return;
+60856:         }
+60857:         const enabled = Zotero.Prefs.get(PREF_SEMANTIC_AUTO_UPDATE, true);
+60858:         if (isAutoIndexing || !enabled) {
+60859:           if (event === "add" || event === "modify" || event === "trash") {
+60860:             await trackMinerUMarkdownLifecycle(numericIds, event);
+60861:           }
+60862:           return;
+60863:         }
+60864:         if (event !== "add" && event !== "modify" && event !== "trash") {
+60865:           return;
+60866:         }
+60867:         ztoolkit.log(`[MCP Plugin] Item notifier: event=${event}, type=${type}, ids=${ids.length}`);
+60868:         if (event === "add") {
+60869:           const items = Zotero.Items.get(numericIds);
+60870:           for (const item of items) {
+60871:             rememberChildParent(item);
+60872:             if (item.isRegularItem?.()) {
+60873:               scheduleAutoUpdate(item.key, item.libraryID, true);
+60874:               continue;
+60875:             }
+60876:             if (item.isAnnotation?.()) continue;
+60877:             if (item.attachmentContentType === "text/markdown") {
+60878:               const generatedSourceKey = generatedMinerUSourceKey(item);
+60879:               if (generatedSourceKey) {
+60880:                 await getMinerUService().allowAutomaticMarkdown(
+60881:                   item.libraryID,
+60882:                   generatedSourceKey
+60883:                 );
+60884:               }
+60885:               continue;
+60886:             }
+60887:             const parentKey = resolveParentKeyOf(item);
+
+=== main:60978-61016 ===
+60978:         return;
+60979:       }
+60980:       if (semanticService.isBuildActive()) {
+60981:         ztoolkit.log("[MCP Plugin] An index build is already in flight, skipping");
+60982:         return;
+60983:       }
+60984:       const stats = await semanticService.getStats();
+60985:       if (stats.indexProgress.status === "indexing") {
+60986:         ztoolkit.log("[MCP Plugin] Indexing already in progress, skipping");
+60987:         return;
+60988:       }
+60989:       isAutoIndexing = true;
+60990:       ztoolkit.log("[MCP Plugin] Starting auto index build for unindexed items in My Library...");
+60991:       semanticService.buildIndex({
+60992:         libraryID: Zotero.Libraries.userLibraryID,
+60993:         rebuild: false,
+60994:         // Only index items that haven't been indexed
+60995:         onProgress: (progress) => {
+60996:           if (progress.processed % 10 === 0) {
+60997:             ztoolkit.log(`[MCP Plugin] Auto index progress: ${progress.processed}/${progress.total}`);
+60998:           }
+60999:         }
+61000:       }).then((result) => {
+61001:         if (result.processed > 0) {
+61002:           ztoolkit.log(`[MCP Plugin] Auto index completed: ${result.processed}/${result.total} items`);
+61003:           refreshSemanticColumn();
+61004:         } else {
+61005:           ztoolkit.log("[MCP Plugin] Auto index check: no new items to index");
+61006:         }
+61007:       }).catch((error) => {
+61008:         ztoolkit.log(`[MCP Plugin] Auto index failed: ${error}`, "error");
+61009:       }).finally(() => {
+61010:         isAutoIndexing = false;
+61011:       });
+61012:     } catch (error) {
+61013:       ztoolkit.log(`[MCP Plugin] Error in triggerAutoIndexBuild: ${error}`, "error");
+61014:       isAutoIndexing = false;
+61015:     }
+61016:   }

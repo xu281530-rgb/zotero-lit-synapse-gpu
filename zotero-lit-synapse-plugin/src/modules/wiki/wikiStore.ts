@@ -910,7 +910,7 @@ export class WikiStore {
     return rows.map((row: any) => ({ libraryID: Number(row.library_id), operationId: String(row.operation_id), committed: true, steps: JSON.parse(String(row.steps_json)) }));
   }
 
-  async commit(input: WikiCommitInput, operation?: { operationId: string; inputHash: string; payload: unknown }): Promise<WikiCommitResult> {
+  async commit(input: WikiCommitInput, operation?: { operationId: string; inputHash: string; payload: unknown; beforeCommit?: (result: WikiCommitResult) => Promise<void> }): Promise<WikiCommitResult> {
     await this.initialize();
     if (!Number.isInteger(input.libraryID) || input.libraryID <= 0) {
       throw new Error("libraryID must be a positive integer");
@@ -939,6 +939,7 @@ export class WikiStore {
       evidenceChangedClaimIds: [],
       actionClaimIds: input.actions.map(() => null),
       actionPageIds: input.actions.map(() => null),
+      actionRelationIds: input.actions.map(() => null),
     };
     const affectedPageIds = new Set<number>();
     const evidenceChangedClaimIds = new Set<number>();
@@ -951,11 +952,8 @@ export class WikiStore {
       for (let actionIndex = 0; actionIndex < input.actions.length; actionIndex += 1) {
         const action = input.actions[actionIndex];
         if (action.action === "SKIP") continue;
-        // Settled by WikiService once the transaction is durable, because the
-        // link tables record what a write PRODUCED - and a resolution written
-        // inside a transaction that then rolls back would claim a settlement
-        // for a Claim that does not exist.
-        if (action.action === "DISMISS_LINK_SIGNALS") continue;
+        // The service settles links after all actions, within this transaction.
+        if (action.action === "DISMISS_LINK_SIGNALS" || action.action === "RESOLVE_LINK_SIGNAL") continue;
         if (
           "ref" in action &&
           action.ref &&
@@ -1361,6 +1359,12 @@ export class WikiStore {
               Date.now(),
             ],
           );
+          const relationId = Number(await this.db.valueQueryAsync(
+            "SELECT relation_id FROM wiki_relations WHERE source_concept_id = ? AND normalized_predicate = ? AND target_concept_id = ?",
+            [source, normalizeWikiName(predicate), target],
+          ));
+          result.actionRelationIds![actionIndex] = relationId;
+          this.assignRef(action.ref, relationId, result.refs);
           result.linkedRelations += 1;
           const relationPages = await this.db.queryAsync(
             `SELECT page_id FROM wiki_pages
@@ -1422,6 +1426,7 @@ export class WikiStore {
           String(rowValue(claim[0], "claim_text", "claimText")),
         );
       }
+      await operation?.beforeCommit?.(result);
       if (operation) await this.db.queryAsync('UPDATE wiki_commit_operations SET result_json = ? WHERE library_id = ? AND operation_id = ?', [JSON.stringify(result), input.libraryID, operation.operationId]);
     });
     return result;
@@ -1429,6 +1434,43 @@ export class WikiStore {
 
   private mapEvidence(row: any): WikiEvidenceRecord {
     return mapWikiEvidenceRow(row);
+  }
+
+  /** Reads transaction-local evidence without invoking source maintenance. */
+  async linkClaim(claimId: number, libraryID: number): Promise<{ claimId: number; pageId: number; evidence: WikiEvidenceRecord[] }> {
+    const row = await this.requireClaim(claimId, libraryID);
+    if (String(rowValue(row, "epistemic_status", "epistemicStatus")) === "unsupported") throw new Error(`Claim ${claimId} is unsupported`);
+    const evidence = await this.db.queryAsync(
+      "SELECT * FROM wiki_evidence WHERE claim_id = ? AND library_id = ? AND link_state = 'valid'",
+      [claimId, libraryID],
+    );
+    return { claimId, pageId: Number(rowValue(row, "page_id", "pageId")), evidence: evidence.map((entry) => this.mapEvidence(entry)) };
+  }
+
+  async linkPageClaims(pageId: number, libraryID: number): Promise<number[]> {
+    await this.requirePage(pageId, libraryID);
+    const rows = await this.db.queryAsync("SELECT claim_id FROM wiki_claims WHERE page_id = ? AND epistemic_status <> 'unsupported' ORDER BY claim_id", [pageId]);
+    return rows.map((row) => Number(rowValue(row, "claim_id", "claimId")));
+  }
+
+  async linkRelationSources(relationId: number, libraryID: number): Promise<{ source: string[]; target: string[] }> {
+    const rows = await this.db.queryAsync(
+      `SELECT r.source_concept_id, r.target_concept_id FROM wiki_relations r
+       JOIN wiki_concepts a ON a.concept_id = r.source_concept_id
+       JOIN wiki_concepts b ON b.concept_id = r.target_concept_id
+       WHERE r.relation_id = ? AND a.library_id = ? AND b.library_id = ?`,
+      [relationId, libraryID, libraryID],
+    );
+    if (!rows.length) throw new Error(`Relation ${relationId} does not belong to this library`);
+    const sources = async (conceptId: number): Promise<string[]> => {
+      const found = await this.db.queryAsync(
+        `SELECT DISTINCT s.item_key FROM wiki_concept_term_sources s JOIN wiki_concept_terms t ON t.term_id = s.term_id
+         WHERE t.concept_id = ? AND s.library_id = ? AND s.chunk_id_snapshot IS NOT NULL AND s.excerpt <> ''`,
+        [conceptId, libraryID],
+      );
+      return found.map((row) => String(rowValue(row, "item_key", "itemKey")));
+    };
+    return { source: await sources(Number(rowValue(rows[0], "source_concept_id", "sourceConceptId"))), target: await sources(Number(rowValue(rows[0], "target_concept_id", "targetConceptId"))) };
   }
 
   /**

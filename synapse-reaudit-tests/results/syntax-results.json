@@ -1,0 +1,37 @@
+[
+  {
+    "file": "bootstrap.js",
+    "status": "PASS",
+    "error": ""
+  },
+  {
+    "file": "content/scripts/zotero-lit-synapse.js",
+    "status": "PASS",
+    "error": ""
+  },
+  {
+    "file": "mark-reader/content/preferences/preferences.js",
+    "status": "PASS",
+    "error": ""
+  },
+  {
+    "file": "mark-reader/content/scripts/zotero-mark-reader.js",
+    "status": "PASS",
+    "error": ""
+  },
+  {
+    "file": "mark-reader/content/translation-task.js",
+    "status": "PASS",
+    "error": ""
+  },
+  {
+    "file": "mark-reader/vendor/katex/katex.min.js",
+    "status": "PASS",
+    "error": ""
+  },
+  {
+    "file": "prefs.js",
+    "status": "PASS",
+    "error": ""
+  }
+]

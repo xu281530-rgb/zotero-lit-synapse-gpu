@@ -1,0 +1,108 @@
+[
+  {
+    "name": "Metadata: valid approved write changes requested title once",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Metadata: write disabled prevents even in-memory changes",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Metadata: refusal prevents even in-memory changes",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Metadata: non-string values are rejected before changes",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "D1: rejected multi-field metadata write contaminates cached item and later tag save persists it",
+    "status": "BUG_REPRODUCED",
+    "details": {
+      "metadataCallReportedError": true,
+      "immediateDatabaseWrite": false,
+      "cachedTitleAfterError": "Uncommitted title",
+      "laterAction": "add tag only",
+      "persistedTitleAfterTag": "Uncommitted title",
+      "saveCount": 1
+    }
+  },
+  {
+    "name": "Tags: malformed tag string is rejected without removing old tags",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "File import: disabled file-import gate refuses an approved write",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MinerU: sequential suppression state updates preserve both identities",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "D2a: one transient state-file write error prevents all subsequent state writes in same service",
+    "status": "BUG_REPRODUCED",
+    "details": {
+      "injectedIOFailures": 1,
+      "totalLaterStateOperations": 2,
+      "actualStateWriteAttempts": 1,
+      "stateFilePersisted": false,
+      "ioWouldSucceedOnRetry": true,
+      "publicParseCase": {
+        "markdownCreated": true,
+        "parseReportedError": true,
+        "failureCacheWritten": true,
+        "totalWriteCalls": 6
+      }
+    }
+  },
+  {
+    "name": "D2b: concurrent reads of missing Markdown on a fresh service lose one same-library suppression",
+    "status": "BUG_REPRODUCED",
+    "details": {
+      "publicEntryPoint": "getMarkdownForAttachment",
+      "requestedSuppressions": [
+        "1:SAMEKEY1",
+        "1:OTHERKEY"
+      ],
+      "persistedSuppressions": [
+        "1:OTHERKEY"
+      ],
+      "sameLibrary": true,
+      "differentAttachmentKeys": true,
+      "noIOError": true
+    }
+  },
+  {
+    "name": "MinerU: preloaded shared state preserves concurrent suppression updates",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MinerU: first parse generates readable attached Markdown",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MinerU: replacing Markdown keeps old attachment if importing replacement fails",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MinerU: unreadable replacement is cleaned up, existing attachment retained",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Wiki reading-note file write requests atomic temp-path replacement",
+    "status": "PASS",
+    "details": null
+  }
+]

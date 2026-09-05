@@ -41,6 +41,7 @@
  */
 
 import { normalizeWikiText } from "./wikiCanonicalizer";
+import { citedWikiChunkIds } from "./wikiCitations";
 import { splitNoteBlocks, splitSentences } from "./wikiSynthesisAudit";
 
 /**
@@ -297,49 +298,9 @@ export function assertTemplateSections(
   throw new WikiRecordTemplateError(lines.join("\n"));
 }
 
-/** `chunk 41`, `chunk 44-47`, `chunk 44、45、46`, `第 3 块`. */
-const CHUNK_RUN =
-  /(?:chunks?|块|段)\s*#?\s*(\d+(?:\s*(?:[-–—]|to|~|、|,|，)\s*\d+)*)|第\s*(\d+)\s*(?:块|段)/giu;
-
-const REFERENCE_BRACKET = /\[[\d\s,–—-]+\]/gu;
-
-/**
- * Every chunk a text names, expanding runs and lists.
- *
- * `citedChunkIds` in `wikiSynthesisAudit` deliberately reads one number per
- * citation, because that is what an Evidence trail needs. Coverage needs the
- * other reading: a record that dismisses four consecutive chunks of equation
- * derivation in one breath has accounted for all four, and forcing it to
- * repeat the word "chunk" four times would buy nothing but noise.
- */
+/** Every chunk named by the same citation parser used for evidence audits. */
 export function expandedCitedChunkIds(text: string): number[] {
-  const cleaned = String(text ?? "").replace(REFERENCE_BRACKET, " ");
-  const found = new Set<number>();
-  for (const match of cleaned.matchAll(CHUNK_RUN)) {
-    const single = match[2];
-    if (single !== undefined) {
-      found.add(Number.parseInt(single, 10));
-      continue;
-    }
-    const run = match[1];
-    if (run === undefined) continue;
-    const parts = run.split(/\s*(?:[-–—]|to|~|、|,|，)\s*/u).filter(Boolean);
-    const numbers = parts
-      .map((part) => Number.parseInt(part, 10))
-      .filter((value) => Number.isInteger(value) && value >= 0);
-    if (!numbers.length) continue;
-    // `41-44` is a range; `44、46、48` is a list. A two-number group separated
-    // by a dash is the only ambiguous case, and reading it as a range is the
-    // one that matches how ranges are written.
-    const isRange =
-      numbers.length === 2 && /[-–—]|to|~/u.test(run) && numbers[1] > numbers[0];
-    if (isRange) {
-      for (let id = numbers[0]; id <= numbers[1]; id += 1) found.add(id);
-    } else {
-      for (const id of numbers) found.add(id);
-    }
-  }
-  return [...found].sort((a, b) => a - b);
+  return citedWikiChunkIds(text);
 }
 
 /**

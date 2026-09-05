@@ -313,9 +313,11 @@ const notifier = hooksSource.slice(
 );
 const deleteBranch = notifier.indexOf("if (event === 'delete')");
 assert.ok(deleteBranch >= 0, "the notifier must handle permanent deletion");
+const refreshGuard = notifier.indexOf("if (!enabled || semanticAutoUpdatesSuspended)");
+assert.ok(refreshGuard >= 0, "the notifier must honor refresh scheduling settings");
 assert.ok(
-  deleteBranch < notifier.indexOf("if (isAutoIndexing || !enabled)"),
-  "an active build must defer deletion cleanup, not drop the notifier event",
+  deleteBranch < refreshGuard,
+  "disabled or suspended refresh must not drop permanent deletion cleanup",
 );
 assert.ok(
   deleteBranch < notifier.indexOf("PREF_SEMANTIC_AUTO_UPDATE"),

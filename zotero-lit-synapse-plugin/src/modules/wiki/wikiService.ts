@@ -110,8 +110,10 @@ import {
   WikiLinkService,
   normalizeLinkDismissals,
 } from "./wikiLinkService";
-import type { WikiLinkResolutionType } from "./wikiLinkTypes";
+import type { WikiLinkResolutionType, WikiLinkSettlementResult } from "./wikiLinkTypes";
 import { WikiRetriever } from "./wikiRetriever";
+import { boundPreparedContext, compactWikiClaim, fragmentContextText, pagePreparedContext, type WikiPreparedContext } from "./wikiPreparedContext";
+import { findWikiSourceQuote, wikiSourceTextView } from "./wikiSourceText";
 import type {
   WikiClaimSearchResult,
   WikiDocumentSearchResult,
@@ -351,12 +353,12 @@ function assertSynthesisEvidenceClosure(
             "and NOT finalSynthesis - carrying synthesisAudit with one entry "
           : "Then resubmit the WHOLE summary with finalSynthesis true and synthesisAudit carrying one entry ") +
         "for every sentence that is still flagged:\n" +
-        '  synthesisAudit: [{ "sentence": "<the sentence exactly as it stands in the note you ' +
-        'submit>", "support": [{ "chunkId": 18, "quote": "<verbatim from chunk 18>" }, ...] }]' +
+        '  synthesisAudit: [{ "auditId": "<the current issue auditId>", ' +
+        '"support": [{ "chunkId": 18, "quote": "<verbatim from chunk 18>" }, ...] }]' +
         "\nOmit an entry for any sentence you rewrote. Sentences you neither prove nor rewrite " +
         "are refused again.\n\n" +
         `SENTENCES TO ANSWER (${flagged.length}):\n${describeFlaggedSentences(flagged)}`,
-      { flagged: flagged.length },
+      { flagged: flagged.length, issues: flagged, mode: what },
     );
   }
 
@@ -365,7 +367,8 @@ function assertSynthesisEvidenceClosure(
   const shown = problems.slice(0, 25);
   throw new WikiSynthesisAuditRequired(
     `The synthesis audit does not close: ${problems.length} problem(s), so nothing was written. Fix ` +
-      "these and resubmit macroSummary with finalSynthesis true. Remember that rewriting a " +
+      (what === "record" ? "these and resubmit readingRecord in the same call mode. " : "these and resubmit macroSummary with finalSynthesis true. ") +
+      "Remember that rewriting a " +
       "sentence to the paper's own strength removes the need to justify it at all.\n\n" +
       shown
         .map(
@@ -376,7 +379,7 @@ function assertSynthesisEvidenceClosure(
       (problems.length > shown.length
         ? `\n... and ${problems.length - shown.length} more.`
         : ""),
-    { flagged: flagged.length, problems: problems.length },
+    { flagged: flagged.length, problems: problems.length, issues: flagged, auditProblems: problems, mode: what },
   );
 }
 
@@ -459,6 +462,8 @@ export class WikiService {
       reconciliationSessionId?: number;
       /** A commit holding this token is running; a second one must not start. */
       inFlight?: boolean;
+      context?: WikiPreparedContext;
+      canCommit?: boolean;
     }
   >();
 
@@ -521,6 +526,8 @@ export class WikiService {
     /** Re-send the Wiki skeleton even if it has not changed. */
     refreshSkeleton?: boolean;
     knownSkeletonRevision?: string;
+    compact?: boolean;
+    preview?: boolean;
     /**
      * The whole-Wiki review, required once a paper has been read in full.
      * See {@link assertReadyToWriteUp}.
@@ -528,12 +535,12 @@ export class WikiService {
     wikiReview?: Partial<WikiWholeWikiReview>;
   }): Promise<any> {
     this.prunePrepareTokens();
-    await this.recordWikiReviewIfOffered(
+    if (!options.preview) await this.recordWikiReviewIfOffered(
       options.libraryID,
       options.wikiReview,
       options.itemKey,
     );
-    await this.assertReadyToWriteUp(options.libraryID, options.itemKey);
+    if (!options.preview) await this.assertReadyToWriteUp(options.libraryID, options.itemKey);
     const exactCandidates = await this.store.prepareUpdate(options);
     const semanticCandidates = await this.search({
       ...options,
@@ -591,14 +598,14 @@ export class WikiService {
     const openSession = options.itemKey
       ? await sessions.openForItem(options.libraryID, options.itemKey)
       : await sessions.getOpen(options.libraryID);
-    if (openSession) await sessions.markPrepared(openSession.sessionId);
+    if (openSession && !options.preview) await sessions.markPrepared(openSession.sessionId);
     let wikiReconciliation: any = null;
     if (openSession && openSession.finalSynthesisAt !== null) {
       const paper = await this.requirePaperItem(
         openSession.libraryID,
         openSession.itemKey,
       );
-      const body = (await this.readNoteBody(paper)) ?? "";
+      const body = (await this.readNoteBody(paper, openSession)) ?? "";
       wikiReconciliation = await this.paperReconciliationSnapshot(
         openSession,
         body,
@@ -662,6 +669,7 @@ export class WikiService {
      * and would answer optimistically.
      */
     const linkTargets = new Map<string, number[]>();
+    if (openSession) linkTargets.set(openSession.itemKey, []);
     if (options.itemKey) linkTargets.set(options.itemKey, []);
     for (const entry of pendingWiki) {
       linkTargets.set(entry.session.itemKey, entry.pendingChunkIds);
@@ -674,7 +682,7 @@ export class WikiService {
             libraryID: options.libraryID,
             itemKey,
             chunkIds: chunkIds.length ? chunkIds : undefined,
-            limit: WIKI_PENDING_LINK_SIGNAL_LIMIT,
+            limit: Infinity,
           })),
         );
       } catch (error) {
@@ -691,11 +699,12 @@ export class WikiService {
       libraryID: options.libraryID,
       expiresAt: Date.now() + 10 * 60 * 1000,
       preparedPageTitles: new Set(proposedPageTitles.map(normalizeWikiName)),
+      canCommit: !options.preview,
       ...(openSession && openSession.wikiReviewAt !== null
         ? { reconciliationSessionId: openSession.sessionId }
         : {}),
     });
-    return {
+    const response = {
       ...exactCandidates,
       semanticClaims: semanticCandidates.claims.slice(0, options.limit ?? 10),
       semanticWarnings: semanticCandidates.warnings,
@@ -711,7 +720,7 @@ export class WikiService {
             readingSession: {
               sessionId: openSession.sessionId,
               itemKey: openSession.itemKey,
-              state: "prepared",
+              state: options.preview ? openSession.state : "prepared",
               mode: openSession.mode,
               wikiReviewRecorded: openSession.wikiReviewAt !== null,
             },
@@ -732,7 +741,8 @@ export class WikiService {
               'dismissals: [{ signalId, reason }, ...]，每条理由不少于 40 字并结合该 signal 自己的两段原文。' +
               "一条理由套一整批是不行的——同一批里的 signal 指向的是不同段落对，" +
               "一句话描述不了它们，存进去的判断就会挂在它没引用过的段落上。" +
-              "其余四种在对应的写入动作上带 resolvesSignalIds。" +
+              "推荐用 RESOLVE_LINK_SIGNAL 为每条候选明确填写 resolutionType 和 reason；" +
+              "保留独立时使用 same_page 并填写 pageId 和两个 claimIds。无需为了结束而合并。" +
               "若某一对带有 reopenedReason，说明它以前被结算过、而当时的依据已经不成立" +
               "（Wiki 被重置过，或者后来出现了同时引用两篇的 Claim）：" +
               "priorDismissals 里是上一位读者的原话，请针对它作判断，不要原样重复一遍。",
@@ -760,6 +770,86 @@ export class WikiService {
           }
         : {}),
     };
+    const contextSkeleton = response.wikiSkeleton?.unchanged
+      ? await this.skeletonFor({ ...options, knownSkeletonRevision: undefined }, proposedPageTitles)
+      : response.wikiSkeleton;
+    return this.presentPreparedContext(response, options, contextSkeleton);
+  }
+
+  private async presentPreparedContext(response: any, options: { compact?: boolean; preview?: boolean; libraryID: number }, contextSkeleton = response.wikiSkeleton): Promise<any> {
+    const { prepareToken, wikiReconciliation, pendingLinkSignals = [], wikiSkeleton: skeleton } = response;
+    const allClaims = new Map<number, any>();
+    for (const claim of [...response.claims, ...response.semanticClaims, ...(wikiReconciliation?.claims ?? []),
+      ...response.pagePreparations.flatMap((page: any) => [...(page.claims ?? []), ...(page.semanticClaims ?? [])])]) {
+      if (!allClaims.has(claim.claimId)) {
+        const stored = await this.store.getClaim(claim.claimId);
+        allClaims.set(claim.claimId, stored ? { ...stored, score: claim.score } : claim);
+      }
+    }
+    const crossPaperCandidates: any[] = [];
+    for (const itemKey of new Set<string>(pendingLinkSignals.map((entry: any) => entry.otherItemKey))) {
+      const related = await this.store.listClaimsByEvidenceSource(options.libraryID, itemKey);
+      for (const claim of related) allClaims.set(claim.claimId, { ...claim, score: allClaims.get(claim.claimId)?.score });
+      crossPaperCandidates.push(...related.map((claim) => ({ ...compactWikiClaim(claim), sourceItemKey: itemKey })));
+    }
+    const signalViews = new Map<number, any>();
+    for (const pair of pendingLinkSignals) {
+      const individual = pair.signals ?? (pair.signalIds ?? []).map((signalId: number) => ({
+        signalId, mustResolve: pair.mustResolve, signalType: pair.signalTypes?.[0],
+        thisChunk: pair.thisChunk, otherChunk: pair.otherChunk,
+      }));
+      for (const signal of individual) signalViews.set(signal.signalId, {
+        linkId: pair.linkId, otherItemKey: pair.otherItemKey, otherTitle: pair.otherTitle,
+        ...signal, signalIds: [signal.signalId], suggestedLabels: pair.suggestedLabels,
+        priorDismissals: pair.priorDismissals?.filter((prior: any) => prior.signalId === signal.signalId),
+      });
+    }
+    const signals = [...signalViews.values()].sort((a, b) => Number(b.mustResolve) - Number(a.mustResolve) || a.signalId - b.signalId);
+    const context: WikiPreparedContext = boundPreparedContext({
+      pages: contextSkeleton?.pages ?? [],
+      claims: [...allClaims.values()].map(compactWikiClaim),
+      evidence: fragmentContextText([...allClaims.values()].flatMap((claim) => (claim.evidence ?? []).map((entry: any) => ({ ...entry, claimId: claim.claimId }))), "excerpt"),
+      readingRecords: fragmentContextText(wikiReconciliation?.readingRecords ?? [], "content"),
+      linkSignals: signals,
+      concepts: [...(response.concepts ?? []), ...(contextSkeleton?.nearbyConcepts ?? []), ...(contextSkeleton?.hubConcepts ?? []), ...(contextSkeleton?.duplicateCandidates ?? []),
+        ...response.pagePreparations.flatMap((page: any) => page.concepts ?? [])],
+      relations: contextSkeleton?.relations ?? [],
+    });
+    this.prepareTokens.get(prepareToken)!.context = context;
+    const contextIndex = { tool: "wiki_get_prepared_context", prepareToken, sections: Object.fromEntries(Object.entries(context).map(([key, values]) => [key, values.length])),
+      fragmentNote: "Join text for each contextFragment.entryIndex in offset order, then JSON.parse to restore that entry. Text fields with textFragment are joined directly in offset order." };
+    const reviewTasks = { sourceClaimIds: (wikiReconciliation?.claims ?? []).map((claim: any) => claim.claimId),
+      mandatorySignalIds: signals.filter((signal) => signal.mustResolve).map((signal) => signal.signalId),
+      note: "claimVerdicts reviews this paper's existing evidence. Separately decide every mandatory cross-paper signal using RESOLVE_LINK_SIGNAL. Independent claims and reasoned no_action are valid outcomes." };
+    if (options.compact === false) return { prepareToken, ...response, preview: options.preview === true, context: contextIndex, crossPaperCandidates, reviewTasks };
+    return {
+      prepareToken, prepareTokenExpiresInSeconds: 600, preview: options.preview === true,
+      context: contextIndex, reviewTasks,
+      ...response,
+      pendingLinkNote: "Decide every mustResolve signal individually. Full passages and further signals are paged through wiki_get_prepared_context, section linkSignals.",
+      pendingLinkSignals: signals.slice(0, 10).map((signal) => ({ ...signal,
+        thisChunk: { ...signal.thisChunk, excerpt: String(signal.thisChunk?.excerpt ?? "").slice(0, 500) },
+        otherChunk: { ...signal.otherChunk, excerpt: String(signal.otherChunk?.excerpt ?? "").slice(0, 500) },
+        priorDismissals: signal.priorDismissals?.map((prior: any) => ({ ...prior, reason: prior.reason.slice(0, 500) })),
+        excerptsTruncated: (signal.thisChunk?.excerpt?.length ?? 0) > 500 || (signal.otherChunk?.excerpt?.length ?? 0) > 500 })),
+      pendingLinkSignalCount: signals.length,
+      claims: response.claims.slice(0, 10).map((claim: any) => compactWikiClaim(allClaims.get(claim.claimId) ?? claim)),
+      semanticClaims: response.semanticClaims.slice(0, 10).map((claim: any) => compactWikiClaim(allClaims.get(claim.claimId) ?? claim)),
+      pagePreparations: response.pagePreparations.map((page: any) => ({ canonicalTitle: page.canonicalTitle, pageIds: page.pages.map((entry: any) => entry.pageId), claimIds: page.claims.map((entry: any) => entry.claimId) })),
+      wikiSkeleton: skeleton && !skeleton.unchanged ? { ...skeleton, pages: (skeleton.pages ?? []).slice(0, 10), pagesTruncated: (skeleton.pages?.length ?? 0) > 10, contextSection: "pages" } : skeleton,
+      ...(wikiReconciliation ? { wikiReconciliation: { ...wikiReconciliation, readingRecords: undefined,
+        readingRecordCount: wikiReconciliation.readingRecords.length, claimCount: wikiReconciliation.claims.length,
+        claims: wikiReconciliation.claims.slice(0, 10).map((claim: any) => compactWikiClaim(allClaims.get(claim.claimId) ?? claim)), contextSection: "readingRecords" } } : {}),
+      crossPaperCandidates: crossPaperCandidates.slice(0, 10),
+      crossPaperCandidateCount: crossPaperCandidates.length,
+    };
+  }
+
+  getPreparedContext(options: { libraryID: number; prepareToken: string; section: string; offset?: number; limit?: number }): any {
+    this.prunePrepareTokens();
+    const prepared = this.prepareTokens.get(options.prepareToken);
+    if (!prepared?.context || prepared.libraryID !== options.libraryID) throw new Error("Prepared context is unavailable or expired. Call wiki_prepare_update again.");
+    return { prepareToken: options.prepareToken, ...pagePreparedContext(prepared.context, options.section, options.offset, options.limit) };
   }
 
   /**
@@ -1457,7 +1547,7 @@ export class WikiService {
         `Evidence source ${itemKey} has no indexed chunks; build the search index first`,
       );
     }
-    const excerpt = normalizeWikiText(String(entry.excerpt ?? ""));
+    const excerpt = String(entry.excerpt ?? "").trim();
     if (!excerpt) throw new Error("Evidence excerpt is required");
     if (excerpt.length < WIKI_EVIDENCE_MIN_EXCERPT_CHARS) {
       throw new Error(
@@ -1488,12 +1578,12 @@ export class WikiService {
         )
       : undefined;
     let chunk =
-      named && normalizeWikiText(named.text).includes(excerpt)
+      named && findWikiSourceQuote(named.text, excerpt)
         ? named
         : undefined;
     if (!chunk) {
       const carrying = chunks.filter((candidate) =>
-        normalizeWikiText(candidate.text).includes(excerpt),
+        findWikiSourceQuote(candidate.text, excerpt),
       );
       if (carrying.length > 1) {
         throw new Error(
@@ -1549,7 +1639,7 @@ export class WikiService {
       sourceContentHash: status?.contentHash || "unknown",
       sourceChunkSignature: status?.chunkSignature || getStoredChunkingSignature(libraryID) || "unknown",
       sourceResetGeneration: resetGeneration || "none",
-      excerpt,
+      excerpt: findWikiSourceQuote(chunk.text, excerpt)!.excerpt,
       evidenceRole: entry.evidenceRole,
       readDepth: await this.verifiedReadDepth(
         entry.readDepth,
@@ -1944,6 +2034,7 @@ export class WikiService {
       if (
         !prepared ||
         prepared.libraryID !== input.libraryID ||
+        prepared.canCommit === false ||
         prepared.expiresAt < Date.now()
       ) {
         throw new Error(
@@ -2009,11 +2100,25 @@ export class WikiService {
       // unknown outcome.
       const sessions = await this.store.readingSessions();
       const openSessions = await sessions.listOpen(input.libraryID);
+      const resolvedItemKeys = new Set<string>();
+      const linkStore = await this.store.links();
+      for (const action of actions) {
+        const ids = action.action === "RESOLVE_LINK_SIGNAL" ? [action.signalId]
+          : action.action === "DISMISS_LINK_SIGNALS" ? normalizeLinkDismissals(action).map((entry) => entry.signalId)
+          : (action as any).resolvesSignalIds ?? [];
+        for (const id of ids) {
+          const signal = await linkStore.getSignal(id);
+          if (signal?.libraryID === input.libraryID) {
+            resolvedItemKeys.add(signal.aItemKey);
+            resolvedItemKeys.add(signal.bItemKey);
+          }
+        }
+      }
       const citedSession = openSessions.find((session) => session.mode === 'fulltext' &&
-        (actions.some((action) => 'evidence' in action && action.evidence?.some((evidence) => evidence.itemKey === session.itemKey)) ||
+        (resolvedItemKeys.has(session.itemKey) || actions.some((action) => 'evidence' in action && action.evidence?.some((evidence) => evidence.itemKey === session.itemKey)) ||
           writeOffs.some((writeOff) => writeOff.itemKey === session.itemKey)));
       input = { ...input, readingSessionId: input.readingSessionId ?? citedSession?.sessionId };
-      const relatedKeys = new Set(writeOffs.map((entry) => entry.itemKey));
+      const relatedKeys = new Set([...resolvedItemKeys, ...writeOffs.map((entry) => entry.itemKey)]);
       for (const action of actions) {
         for (const evidence of ('evidence' in action ? action.evidence : undefined) ?? []) relatedKeys.add(evidence.itemKey);
       }
@@ -2026,10 +2131,16 @@ export class WikiService {
         if (!session || session.libraryID !== input.libraryID) throw new Error('The reading session does not belong to this library.');
         sessionSnapshot.push({ sessionId: session.sessionId, itemKey: session.itemKey, sourceVersion: session.sourceVersion, noteKey: session.noteKey });
       }
-      dependencies = this.commitReadingDependencies(input, actions, writeOffs, sessionSnapshot);
+      dependencies = this.commitReadingDependencies(input, actions, writeOffs, sessionSnapshot, resolvedItemKeys);
       result = await this.store.commit({ ...input, actions }, {
         operationId: input.operationId!, inputHash,
         payload: { input, actions, warnings, writeOffs, sessions: sessionSnapshot, dependencies },
+        beforeCommit: async (written) => {
+          // Verify final evidence, including earlier and later actions, before
+          // either the knowledge or its link resolutions become durable.
+          await this.assertLinkSignalsAnswered(input);
+          written.linkSettlement = await this.settleLinkSignals(input, actions, written);
+        },
       });
     } catch (error) {
       // Nothing was written, so hand the token back for a straight retry.
@@ -2045,9 +2156,9 @@ export class WikiService {
     return this.finishCommit(input, actions, warnings, result, writeOffs, options, sessionSnapshot, dependencies);
   }
 
-  private commitReadingDependencies(input: WikiCommitInput, actions: WikiCommitAction[], writeOffs: WikiWikiWriteOff[], snapshot: WikiCommitReadingDependency[]): WikiCommitDependencies {
+  private commitReadingDependencies(input: WikiCommitInput, actions: WikiCommitAction[], writeOffs: WikiWikiWriteOff[], snapshot: WikiCommitReadingDependency[], resolvedItemKeys: ReadonlySet<string> = new Set()): WikiCommitDependencies {
     const terminologyKeys = new Set(writeOffs.map((entry) => entry.itemKey));
-    const settlementKeys = new Set(terminologyKeys);
+    const settlementKeys = new Set([...terminologyKeys, ...resolvedItemKeys]);
     for (const action of actions) {
       for (const evidence of ('evidence' in action ? action.evidence : undefined) ?? []) {
         terminologyKeys.add(evidence.itemKey);
@@ -2097,11 +2208,8 @@ export class WikiService {
     // just finished open.
     for (const writeOff of writeOffs) citedKeys.add(writeOff.itemKey);
 
-    // After the durable boundary, and deliberately so: a resolution says
-    // "this Claim was written because of that signal", and it can only be true
-    // once the Claim exists. Failures here are logged rather than thrown - the
-    // Wiki write is permanent, and turning a successful commit into an error
-    // because an audit row could not be added would be the wrong trade.
+    // New resolutions are already durable with the knowledge. Legacy receipts
+    // may still owe settlement; incomplete recovery must not close a session.
     const afterCommit = async <T>(stage: string, operation: () => Promise<T>): Promise<T | undefined> => {
       if (steps[stage]?.state === 'completed') return steps[stage].result;
       if (steps[stage]?.state === 'superseded') {
@@ -2109,6 +2217,10 @@ export class WikiService {
         return undefined;
       }
       try {
+        if ((stage === 'question reading settlement' || stage === 'reading session') &&
+          (steps['link settlement']?.state !== 'completed' || steps['link recheck']?.state !== 'completed')) {
+          throw new Error('Cross-paper settlement recovery must finish before closing reading.');
+        }
         for (const before of dependencies[stage] ?? []) {
           const sessions = await this.store.readingSessions();
           const current = await sessions.get(before.sessionId);
@@ -2150,7 +2262,7 @@ export class WikiService {
         return undefined;
       }
     };
-    const linkSettlement = await afterCommit("link settlement", () => this.settleLinkSignals(input, actions, result));
+    const linkSettlement = await afterCommit("link settlement", async () => result.linkSettlement ?? this.settleLinkSignals(input, actions, result));
 
     /*
      * A Claim citing both papers of a dismissed pair contradicts that
@@ -2206,6 +2318,7 @@ export class WikiService {
       const queue = await this.store.embeddingQueue();
       return queue.pendingCount();
     });
+    if (steps["embedding queue status"]) steps["embedding queue status"].meaning = "queue_status_snapshot_read";
     // Kick the drain but do not wait for it: its outcome cannot change the
     // fact that the commit succeeded.
     void this.pumpEmbeddingQueue().catch((error) => ztoolkit.log("[wiki] embedding drain failed", error));
@@ -2217,12 +2330,13 @@ export class WikiService {
       postprocessing: { state: stageNames.some((name) => steps[name]?.state === 'superseded') ? 'needs_review' : stageNames.every((name) => steps[name]?.state === 'completed') ? 'completed' : 'pending', steps },
       committed: true,
       embeddingPending,
+      embedding: { state: embeddingPending === undefined ? "unknown" : embeddingPending > 0 ? "pending" : "ready", pendingClaims: embeddingPending, statusIsSnapshot: true },
       embeddingNote:
         (embeddingPending ?? 0) > 0
           ? `The Wiki write is committed and permanent. ${embeddingPending} claim embedding(s) are queued and will be built in the background; Wiki keyword retrieval already sees these claims, and semantic retrieval will once the queue drains. Nothing needs to be re-submitted.`
           : undefined,
       ...(readingSession ? { readingSession } : {}),
-      ...(questionReading ? { questionReading } : {}),
+      ...(questionReading ? { wikiWriteUp: questionReading, questionReading } : {}),
       ...(linkSettlement ? { linkSettlement } : {}),
       ...(reopenedLinks.length
         ? {
@@ -2512,30 +2626,46 @@ export class WikiService {
    * Without that distinction the feature would demand that a reader reconcile
    * text they have not seen, which they can only do by guessing.
    *
-   * Off unless `wiki.link.mandatorySettlement` is set. The design is explicit
-   * that this gate must not be switched on before real-library calibration: a
-   * bad threshold here does not produce a noisy suggestion, it produces a
-   * commit nobody can complete.
+   * Enabled by default after screening. Every candidate needs a decision;
+   * retaining independent findings or no substantive relation is valid.
    */
   private async assertLinkSignalsAnswered(
     input: WikiCommitInput,
   ): Promise<void> {
     const settled = new Set<number>();
+    const add = (id: unknown) => {
+      const value = Number(id);
+      if (!Number.isSafeInteger(value) || value <= 0 || settled.has(value)) throw new Error(`Invalid or duplicate link signal decision: ${id}`);
+      settled.add(value);
+    };
     for (const action of input.actions) {
       for (const raw of (action as any).resolvesSignalIds ?? []) {
-        settled.add(Number(raw));
+        if (!["ADD_CLAIM", "ATTACH_EVIDENCE", "UPDATE_CLAIM", "CREATE_PAGE", "LINK_RELATION", "MARK_CONFLICT"].includes(action.action)) {
+          throw new Error(`${action.action} cannot carry resolvesSignalIds. Use RESOLVE_LINK_SIGNAL to record each decision.`);
+        }
+        add(raw);
       }
+      if (action.action === "RESOLVE_LINK_SIGNAL") add(action.signalId);
       if (action.action !== "DISMISS_LINK_SIGNALS") continue;
       // Shape, reflex and length are all checked per signal by
       // `normalizeLinkDismissals`, which is also what the settlement below
       // reads - so what is validated here and what is written there cannot
       // drift apart.
       for (const dismissal of normalizeLinkDismissals(action as any)) {
-        settled.add(dismissal.signalId);
+        add(dismissal.signalId);
       }
     }
 
     const itemKeys = new Set<string>();
+    const sessions = await this.store.readingSessions();
+    const target = input.readingSessionId ? await sessions.get(input.readingSessionId) : await sessions.getOpen(input.libraryID);
+    if (target && target.libraryID === input.libraryID) itemKeys.add(target.itemKey);
+    const linkStore = await this.store.links();
+    for (const signalId of settled) {
+      const signal = await linkStore.getSignal(signalId);
+      if (!signal || signal.libraryID !== input.libraryID) throw new Error(`Signal ${signalId} does not belong to this library`);
+      // A decision about A-B must not create a new obligation to review B-C.
+    }
     for (const action of input.actions) {
       for (const entry of (action as any).evidence ?? []) {
         if (entry?.itemKey) itemKeys.add(String(entry.itemKey));
@@ -2560,10 +2690,8 @@ export class WikiService {
     throw new Error(
       `${outstanding.length} cross-paper candidate signal(s) point at passages that have BOTH been ` +
         `read, and this commit neither used nor dismissed them: ${described}` +
-        `${outstanding.length > 5 ? ", ..." : ""}. Each needs one of: a shared Claim citing both ` +
-        "papers, a Page holding both as separate Claims, a MARK_CONFLICT, or a LINK_RELATION - each " +
-        "carrying resolvesSignalIds - or a DISMISS_LINK_SIGNALS saying why the resemblance establishes " +
-        "nothing. Nothing was written.",
+        `${outstanding.length > 5 ? ", ..." : ""}. Call wiki_prepare_update with preview true to see every mandatory candidate, then page section linkSignals with wiki_get_prepared_context. ` +
+        "Use RESOLVE_LINK_SIGNAL for each: shared_claim, same_page (two independent Claims), conflict, concept_relation, or reasoned no_action. Nothing was written.",
     );
   }
 
@@ -2636,25 +2764,24 @@ export class WikiService {
   /**
    * Record which signals this commit's writes settled.
    *
-   * The resolution type is read off the ACTION rather than declared by the
-   * caller, because the action is what actually happened: a Claim citing both
-   * papers is a shared_claim whatever anyone calls it, and letting the two
-   * disagree would make the audit trail describe a different commit from the
-   * one that ran.
+   * Explicit decisions and legacy action annotations are both verified
+   * against transaction-local evidence before any knowledge becomes durable.
    */
   private async settleLinkSignals(
     input: WikiCommitInput,
     actions: WikiCommitAction[],
     result: WikiCommitResult,
   ): Promise<
-    | { settledSignals: number; resolutions: number; dismissed: number }
+    | WikiLinkSettlementResult
     | undefined
   > {
     const settlements: Array<{
       signalIds: number[];
       resolutionType: WikiLinkResolutionType;
       claimId?: number | null;
+      claimIds?: number[];
       pageId?: number | null;
+      relationId?: number | null;
       note: string;
       reasonBySignal?: ReadonlyMap<number, string>;
     }> = [];
@@ -2696,19 +2823,21 @@ export class WikiService {
 
     for (let index = 0; index < actions.length; index += 1) {
       const action = actions[index];
+      if (action.action === "RESOLVE_LINK_SIGNAL") {
+        if (String(action.reason ?? "").trim().length < 40) throw new Error(`Signal ${action.signalId} requires a reason of at least 40 characters comparing both passages`);
+        const resolve = (value: number | string | undefined) => {
+          if (value === undefined) return undefined;
+          const id = settledId(value, undefined, undefined);
+          if (!id) throw new Error(`Unresolved link decision reference: ${value}`);
+          return id;
+        };
+        settlements.push({ signalIds: [action.signalId], resolutionType: action.resolutionType,
+          claimId: resolve(action.claimId), claimIds: action.claimIds?.map((id) => resolve(id)!),
+          pageId: resolve(action.pageId), relationId: resolve(action.relationId), note: action.reason });
+        continue;
+      }
       if (action.action === "DISMISS_LINK_SIGNALS") {
-        // Defensive, though `assertLinkSignalsAnswered` has already normalized
-        // every one of these before the transaction opened. This code runs
-        // AFTER the durable write, where an exception would report a commit
-        // that actually landed as a failure - the same reason the settlement
-        // loop below logs rather than throws.
-        let dismissals: ReturnType<typeof normalizeLinkDismissals>;
-        try {
-          dismissals = normalizeLinkDismissals(action as any);
-        } catch (error) {
-          ztoolkit.log("[wiki] could not read a link dismissal", error);
-          continue;
-        }
+        const dismissals = normalizeLinkDismissals(action as any);
         settlements.push({
           signalIds: dismissals.map((entry) => entry.signalId),
           resolutionType: "no_action",
@@ -2777,6 +2906,7 @@ export class WikiService {
           settlements.push({
             signalIds,
             resolutionType: "concept_relation",
+            relationId: result.actionRelationIds?.[index],
             note: "Settled as a relation between concepts the two papers share.",
           });
           break;
@@ -2788,6 +2918,7 @@ export class WikiService {
     let settledSignals = 0;
     let resolutions = 0;
     let dismissed = 0;
+    const decisions: WikiLinkSettlementResult["decisions"] = [];
     for (const settlement of settlements) {
       try {
         const outcome = await this.links.resolveSignals({
@@ -2795,12 +2926,15 @@ export class WikiService {
           signalIds: settlement.signalIds,
           resolutionType: settlement.resolutionType,
           claimId: settlement.claimId,
+          claimIds: settlement.claimIds,
           pageId: settlement.pageId,
+          relationId: settlement.relationId,
           note: settlement.note,
           reasonBySignal: settlement.reasonBySignal,
         });
         settledSignals += outcome.settled;
         resolutions += outcome.resolutionIds.length;
+        decisions.push(...outcome.decisions);
         if (settlement.resolutionType === "no_action") {
           dismissed += outcome.settled;
         }
@@ -2809,7 +2943,7 @@ export class WikiService {
         throw error;
       }
     }
-    return { settledSignals, resolutions, dismissed };
+    return { settledSignals, resolutions, dismissed, decisions };
   }
 
   /**
@@ -2926,6 +3060,7 @@ export class WikiService {
       itemKey: string;
       pendingChunkIds: number[];
       pendingChunks: number;
+      pendingSignalIds?: number[];
     }> = [];
     for (const entry of pending) {
       const remaining = await sessions.pendingWikiChunks(
@@ -2974,6 +3109,11 @@ export class WikiService {
       libraryID,
     )) {
       if (!belongsToOperation(session)) continue;
+      const pendingLinks = await this.links.unsettledMandatory({ libraryID, itemKeys: new Set([session.itemKey]), settledSignalIds: new Set() });
+      if (pendingLinks.length) {
+        stillPending.push({ itemKey: session.itemKey, pendingChunkIds: [], pendingChunks: 0, pendingSignalIds: pendingLinks.map((signal) => signal.signalId) });
+        continue;
+      }
       const coverage = await sessions.coverage(session.sessionId);
       await sessions.close(
         session.sessionId,
@@ -3013,7 +3153,7 @@ export class WikiService {
                   stillPending
                     .map(
                       (row) =>
-                        `${row.itemKey} chunk(s) ${row.pendingChunkIds.join(", ")}`,
+                        row.pendingSignalIds?.length ? `${row.itemKey} cross-paper signals ${row.pendingSignalIds.join(", ")}` : `${row.itemKey} chunk(s) ${row.pendingChunkIds.join(", ")}`,
                     )
                     .join("; ") +
                   ". Each of those chunks needs either Evidence quoting it in a Claim, or a SKIP " +
@@ -3134,6 +3274,8 @@ export class WikiService {
       // left to say so.
       const outstanding = await sessions.pendingWikiChunks(open.sessionId);
       const blockers: string[] = [];
+      const pendingLinks = await this.links.unsettledMandatory({ libraryID: input.libraryID, itemKeys: new Set([open.itemKey]), settledSignalIds: new Set() });
+      if (pendingLinks.length) blockers.push(`cross-paper signals still need individual decisions: ${pendingLinks.map((signal) => signal.signalId).join(", ")}`);
       const unrecorded = await sessions.pendingIntegrationIndexes(open.sessionId);
       if (unrecorded.length) blockers.push(`reading records are missing for chunk indexes ${unrecorded.join(", ")}`);
       if (open.finalSynthesisAt === null) {
@@ -3266,7 +3408,10 @@ export class WikiService {
       if (latest?.sessionId !== saved.sessionId && latest?.noteKey === saved.noteKey) {
         throw new Error("A newer reading now uses this note; the old terminal status requires review.");
       }
-      if (saved.state !== options.outcome) await sessions.close(saved.sessionId, options.outcome, options.note ?? "");
+      if (saved.state !== options.outcome) {
+        await this.assertSkippedLinksDecided(options.libraryID, saved.itemKey, options.outcome);
+        await sessions.close(saved.sessionId, options.outcome, options.note ?? "");
+      }
       const noteStatusWrite = await this.syncNoteStatusLocked(saved, options.outcome, writeOptions.authorizeNoteStatusWrite);
       if (noteStatusWrite.updated) await this.store.clearNoteOperation(saved.libraryID, saved.itemKey);
       return { closed: true, recovered: true, itemKey: saved.itemKey, outcome: options.outcome, noteStatusWrite };
@@ -3304,6 +3449,7 @@ export class WikiService {
     }
     const coverage = await sessions.coverage(open.sessionId);
     const owedAtClose = await sessions.pendingWikiChunks(open.sessionId);
+    await this.assertSkippedLinksDecided(options.libraryID, open.itemKey, options.outcome);
     if (await this.store.getNoteOperation(open.libraryID, open.itemKey)) {
       throw new Error("A reading-note operation needs recovery before closing. Retry its original request.");
     }
@@ -3352,6 +3498,12 @@ export class WikiService {
           ? ` Its Zotero reading note is marked ${noteResult.status}.`
           : ` Its Wiki state is closed, but the Zotero reading-note status was not changed (${noteResult.reason}).`),
     };
+  }
+
+  private async assertSkippedLinksDecided(libraryID: number, itemKey: string, outcome: string): Promise<void> {
+    if (outcome !== "skipped") return;
+    const pending = await this.links.unsettledMandatory({ libraryID, itemKeys: new Set([itemKey]), settledSignalIds: new Set() });
+    if (pending.length) throw new Error(`Before concluding this reading as skipped, decide cross-paper signals ${pending.map((signal) => signal.signalId).join(", ")} with RESOLVE_LINK_SIGNAL. Independent Claims and reasoned no_action are valid. Use failed only when the reading could not be completed.`);
   }
 
   // =====================================================================
@@ -3750,8 +3902,8 @@ export class WikiService {
           ? "Every chunk has been delivered. Do the whole-paper pass now: call wiki_update_reading_note " +
             "once more with finalSynthesis true and macroSummary. It is written under the heading " +
             "全文总结, and it is written FROM THE WHOLE PAPER AT ONCE rather than from the last page - " +
-            "that vantage point is the requirement itself. The last page handed the whole note " +
-            "back to you: read every reading record together FIRST and work out how they relate - which " +
+            "that vantage point is the requirement itself. Retrieve all pages of wiki_get_reading_note " +
+            "using markdownPagination, then read every record together and work out how they relate - which " +
             "one explains another's mechanism, which corrects an earlier judgement, which are the same " +
             "phenomenon measured under different conditions. That relating is the job. Re-reading any " +
             "chunk while you write is free.\n" +
@@ -4175,6 +4327,9 @@ export class WikiService {
     libraryID: number;
     itemKey?: string;
     includeMarkdown?: boolean;
+    markdownOffset?: number;
+    markdownLimit?: number;
+    expectedBodyHash?: string;
   }): Promise<any> {
     const sessions = await this.store.readingSessions();
     const requestedKey = String(options.itemKey ?? "").trim();
@@ -4201,6 +4356,7 @@ export class WikiService {
     const coverage = await sessions.coverage(session.sessionId);
     const delivered = await sessions.deliveredIndexes(session.sessionId);
     const pendingOperation = await this.store.getNoteOperation(session.libraryID, session.itemKey);
+    const markdownPage = options.includeMarkdown === false ? {} : await this.readingMarkdownPage(parsed.body, options);
     return {
       found: true,
       itemKey: session.itemKey,
@@ -4226,10 +4382,22 @@ export class WikiService {
         attachmentKey: attachment?.key ?? session.noteKey ?? "",
         bodyChars: parsed.body.length,
         metadata: parsed.metadata,
-        ...(options.includeMarkdown === false ? {} : { markdown: parsed.body }),
+        metadataScope: "last_saved_note_snapshot",
+        ...markdownPage,
       },
       nextStep: this.resumeInstruction(session, coverage),
     };
+  }
+
+  private async readingMarkdownPage(body: string, options: { markdownOffset?: number; markdownLimit?: number; expectedBodyHash?: string }): Promise<any> {
+    const offset = options.markdownOffset ?? 0;
+    const limit = options.markdownLimit ?? 12000;
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 30000) throw new Error("Markdown pagination requires a nonnegative offset and a limit from 1 to 30000");
+    const bodyHash = await hashExactText(body);
+    if (offset > 0 && options.expectedBodyHash !== bodyHash) throw new Error("The reading note changed or expectedBodyHash is missing. Restart from markdownOffset 0.");
+    const end = Math.min(body.length, offset + limit);
+    return { markdown: body.slice(offset, end), markdownPagination: { offset, returnedChars: Math.max(0, end - offset), totalChars: body.length,
+      hasMore: end < body.length, nextOffset: end < body.length ? end : null, bodyHash, tool: "wiki_get_reading_note" } };
   }
 
   /**
@@ -4789,6 +4957,10 @@ export class WikiService {
         ? null
         : (coverage.firstMissingIndex ?? coverage.deliveredChunks),
       integratedChunks: session.integratedChunks,
+      deliveredProgress: { chunks: coverage.deliveredChunks, totalChunks: coverage.totalChunks, complete: coverage.complete,
+        nextChunk: coverage.complete ? null : coverage.firstMissingIndex ?? coverage.deliveredChunks },
+      integratedProgress: { chunks: session.integratedChunks, totalChunks: coverage.totalChunks,
+        complete: session.integratedChunks >= coverage.totalChunks, pendingDeliveredChunks: Math.max(0, coverage.deliveredChunks - session.integratedChunks) },
       integrationDebt: integrationDebt(session),
       maxOutstandingBatches: WIKI_MAX_OUTSTANDING_BATCHES,
       lastIntegrationUnchanged: session.lastIntegrationUnchanged,
@@ -6013,6 +6185,7 @@ export class WikiService {
      * - and false while paging, where the model already has it.
      */
     includeReadingNote?: boolean;
+    includeSourceText?: boolean;
   }): Promise<any> {
     if (options.userRequested !== true) {
       throw new Error(
@@ -6370,19 +6543,10 @@ export class WikiService {
       limit: 20,
     });
 
-    // Resuming looks exactly like a call without a cursor, and a resuming
-    // model has lost the note, so it comes back with the page by default.
-    // The note comes back on the LAST page whether it was asked for or not.
-    // Paging suppresses it for a reason - a note re-sent with every batch is
-    // the same text twenty times - but the moment coverage closes is the one
-    // moment the whole note is the material rather than the overhead: the
-    // macro summary about to be written has to relate the records to each
-    // other, and a reader that cannot see them relates nothing and pastes
-    // them instead. That is exactly what happened at 98% verbatim overlap.
-    const includeNote =
-      options.includeReadingNote ??
-      (!servedFromCursor || coverage.complete);
-    const noteAttachment = await this.notes.findAttachment(item);
+    // Resuming includes one bounded note page; ordinary paging, including the
+    // last batch, leaves note retrieval to wiki_get_reading_note.
+    const includeNote = options.includeReadingNote ?? !servedFromCursor;
+    const noteAttachment = current.noteKey ? await this.notes.getByKey(libraryID, current.noteKey) : await this.notes.findAttachment(item);
     const noteBody = noteAttachment
       ? parseReadingNote((await this.notes.read(noteAttachment)) ?? "").body
       : "";
@@ -6463,13 +6627,13 @@ export class WikiService {
         ),
         coverageMap: formatCoverageMap(deliveredAfter, chunks.length),
       },
-      chunks: rows,
+      chunks: options.includeSourceText ? await Promise.all(rows.map(async (row) => ({ ...row, sourceText: await wikiSourceTextView(row.text) }))) : rows,
       readingNote: {
         exists: Boolean(noteAttachment),
         attachmentKey: noteAttachment?.key ?? current.noteKey ?? "",
         bodyChars: noteBody.length,
         ...this.noteProgress(current, coverage, deliveredAfter),
-        ...(includeNote ? { markdown: noteBody } : {}),
+        ...(includeNote ? await this.readingMarkdownPage(noteBody, {}) : {}),
       },
       integrationInstruction:
         "Write one readingRecord now, as this paper's expert, containing only what the chunks just " +

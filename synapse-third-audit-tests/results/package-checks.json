@@ -1,0 +1,42 @@
+{
+  "sha256": "628467d1f34d3d769885725563bc6709370f25e21546ccd207f01f6fc3ba579d",
+  "memberCount": 64,
+  "zipCRC": "PASS",
+  "syntax": [
+    {
+      "path": "prefs.js",
+      "pass": true,
+      "error": ""
+    },
+    {
+      "path": "bootstrap.js",
+      "pass": true,
+      "error": ""
+    },
+    {
+      "path": "content/scripts/zotero-lit-synapse.js",
+      "pass": true,
+      "error": ""
+    },
+    {
+      "path": "mark-reader/content/translation-task.js",
+      "pass": true,
+      "error": ""
+    },
+    {
+      "path": "mark-reader/content/scripts/zotero-mark-reader.js",
+      "pass": true,
+      "error": ""
+    },
+    {
+      "path": "mark-reader/content/preferences/preferences.js",
+      "pass": true,
+      "error": ""
+    },
+    {
+      "path": "mark-reader/vendor/katex/katex.min.js",
+      "pass": true,
+      "error": ""
+    }
+  ]
+}

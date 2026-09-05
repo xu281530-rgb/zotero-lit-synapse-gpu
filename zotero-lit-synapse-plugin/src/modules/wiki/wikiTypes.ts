@@ -65,6 +65,7 @@ export const WIKI_ACTIONS = [
   // write, and without a way to say it the honest answer would be unavailable
   // - which is how a reader ends up inventing a Claim to clear a checklist.
   "DISMISS_LINK_SIGNALS",
+  "RESOLVE_LINK_SIGNAL",
 ] as const;
 export type WikiActionName = (typeof WIKI_ACTIONS)[number];
 
@@ -165,6 +166,7 @@ export type WikiCommitAction =
     }
   | {
       action: "LINK_RELATION";
+      ref?: string;
       sourceConceptId: number | string;
       predicate: string;
       targetConceptId: number | string;
@@ -194,6 +196,16 @@ export type WikiCommitAction =
       signalIds?: number[];
       /** At least 40 characters, arguing from both sides' quoted text. */
       reason?: string;
+    }
+  | {
+      action: "RESOLVE_LINK_SIGNAL";
+      signalId: number;
+      resolutionType: WikiLinkResolutionType;
+      claimId?: number | string;
+      claimIds?: Array<number | string>;
+      pageId?: number | string;
+      relationId?: number | string;
+      reason: string;
     };
 
 export interface WikiCommitInput {
@@ -250,6 +262,9 @@ export interface WikiCommitResult {
    */
   actionClaimIds: Array<number | null>;
   actionPageIds: Array<number | null>;
+  actionRelationIds?: Array<number | null>;
+  /** Verified and saved in the same transaction as the knowledge. */
+  linkSettlement?: WikiLinkSettlementResult;
 }
 
 export interface WikiEvidenceRecord {
@@ -376,3 +391,4 @@ export interface WikiPageDeletion {
   /** Pages whose summary mentioned a relation this delete removed. */
   refreshedPages: number[];
 }
+import type { WikiLinkResolutionType, WikiLinkSettlementResult } from "./wikiLinkTypes";

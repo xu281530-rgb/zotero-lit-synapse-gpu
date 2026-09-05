@@ -29,7 +29,9 @@ import { normalize, tokenizeForIndex } from "../keyword/scientificTokenizer";
 import { lexicalIdf } from "./wikiLinkScoring";
 
 /** 词法信号的算法版本。切词、停用规则或打分改动都必须改这里。 */
-export const LEXICAL_ALGORITHM_VERSION = "link-lex-v4";
+export const LEXICAL_ALGORITHM_VERSION = "link-lex-v5";
+// v5 excludes bare prose and figure-color labels, keeping technical phrases
+// and curated concepts available through the other candidate channels.
 // v4: v3 left the PDF pipeline's own residue — LaTeX command names (mathtt,
 // colon, bullet) and units the tokeniser had joined (mmmin from mm/min, which
 // UNIT_SHAPED only caught in its slashed form). Both are genuinely rare and
@@ -143,9 +145,15 @@ const UNIT_SHAPED = /^[a-z]{1,3}[/·-][a-z]{1,4}[0-9]*$/u;
  */
 const JOINED_UNIT = /^[a-z]{0,3}(min|sec|hr|hrs|mpa|gpa|kpa|mol|rpm)$/u;
 
+const NON_TERM_LABELS = new Set([
+  "arise", "arises", "arising", "ambiguity", "shown", "showing", "respectively",
+  "black", "white", "red", "green", "blue", "yellow",
+]);
+
 export function isUsableLexicalTerm(term: string): boolean {
   const value = String(term ?? "").trim();
   if (!value) return false;
+  if (NON_TERM_LABELS.has(value.toLowerCase())) return false;
 
   const letters = (value.match(/\p{L}/gu) ?? []).length;
   if (letters === 0) return false; // 300, 1100, 数字与符号

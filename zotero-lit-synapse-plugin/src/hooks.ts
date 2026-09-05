@@ -68,7 +68,7 @@ const AUTO_UPDATE_RETRY_MAX_MS = 10 * 60 * 1000;
  */
 const AUTO_UPDATE_MAX_RETRIES = 8;
 
-// Flag to prevent recursive auto-update during indexing
+// Serializes builds; incoming item notifications still join the pending queue.
 let isAutoIndexing = false;
 let semanticAutoUpdatesSuspended = false;
 
@@ -196,6 +196,7 @@ async function processPendingAutoUpdates() {
 
   // Set flag to prevent recursive calls during indexing
   isAutoIndexing = true;
+  let completed = false;
 
   try {
     const { getSemanticSearchService } = await import("./modules/semantic");
@@ -265,13 +266,37 @@ async function processPendingAutoUpdates() {
     // Refresh semantic column to show updated status
     refreshSemanticColumn();
     ztoolkit.log(`[MCP Plugin] Auto-update completed for ${batch.size} items`);
+    completed = true;
   } catch (error) {
     ztoolkit.log(`[MCP Plugin] Auto-update failed: ${error}`, 'error');
     requeueAutoUpdates(batch, `exception: ${error}`);
   } finally {
     // Always reset the flag
     isAutoIndexing = false;
+    if (completed) drainAutoUpdatesAfterBuild();
   }
+}
+
+function drainAutoUpdatesAfterBuild(): void {
+  if (
+    isShuttingDown ||
+    semanticAutoUpdatesSuspended ||
+    pendingAutoUpdateKeys.size === 0 ||
+    !Zotero.Prefs.get(PREF_SEMANTIC_AUTO_UPDATE, true)
+  ) return;
+
+  // The busy build has finished, so its deferred notifications can run now.
+  if (autoUpdateDebounceTimer) clearTimeout(autoUpdateDebounceTimer);
+  if (autoUpdateRetryTimer) {
+    clearTimeout(autoUpdateRetryTimer);
+    pendingTimeouts.delete(autoUpdateRetryTimer);
+    autoUpdateRetryTimer = null;
+  }
+  autoUpdateRetryCount = 0;
+  autoUpdateDebounceTimer = setTimeout(() => {
+    autoUpdateDebounceTimer = null;
+    void processPendingAutoUpdates();
+  }, 0);
 }
 
 /**
@@ -767,7 +792,7 @@ function registerItemNotifier() {
       // Automatic refresh remains optional; the search infrastructure itself
       // is always available.
       const enabled = Zotero.Prefs.get(PREF_SEMANTIC_AUTO_UPDATE, true);
-      if (isAutoIndexing || !enabled) {
+      if (!enabled || semanticAutoUpdatesSuspended) {
         if (event === 'add' || event === 'modify' || event === 'trash') {
           await trackMinerUMarkdownLifecycle(numericIds, event);
         }
@@ -778,10 +803,9 @@ function registerItemNotifier() {
       // which is why editing a title or abstract never reached the index, and
       // `trash` was never handled at all — which is why moving a PDF to the
       // trash (the normal way a PDF is removed) left its body text in the
-      // parent's index. All four are safe: the queue is debounced, the
-      // isAutoIndexing guard above still blocks events raised by our own
-      // indexing, and modify-driven work is queued non-forced so an unchanged
-      // item costs one timestamp comparison and nothing else.
+      // parent's index. The queue retains events during builds; the Markdown
+      // and annotation guards below prevent self-generated indexing loops.
+      // Plain modifications stay non-forced for the timestamp fast path.
       if (
         event !== 'add' &&
         event !== 'modify' &&
@@ -1000,6 +1024,7 @@ async function triggerAutoIndexBuild() {
     }).finally(() => {
       // Always reset the flag
       isAutoIndexing = false;
+      drainAutoUpdatesAfterBuild();
     });
 
   } catch (error) {
