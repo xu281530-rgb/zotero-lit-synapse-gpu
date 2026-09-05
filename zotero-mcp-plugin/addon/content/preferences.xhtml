@@ -341,7 +341,7 @@
        is narrow; giving each its own full-width row was spending height on
        nothing. Falls back to one column when the pane is too narrow to read
        two labels side by side. */
-    .zmp-p2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+    .zmp-p2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 6px; }
     .zmp-p2 > .zmp-sw { margin-bottom: 0; min-width: 0; }
     /* A paired row has half a row's width, and the name is what gets squeezed
        out of it and onto a second line. Hand the name the row's own slack: a
@@ -372,11 +372,15 @@
       align-items: center;
       justify-content: space-between;
       gap: 14px;
-      padding: 11px 14px;
+      /* The boxed row is the pane's unit of height, repeated 35 times, so its
+         padding is worth more than any other. What is left is set by the
+         tallest thing standing in it — the switch, or a number box — and both
+         of those came down with it. */
+      padding: 6px 12px;
       background: var(--bg-soft);
       border: 1px solid var(--border-light);
       border-radius: var(--r);
-      margin-bottom: 10px;
+      margin-bottom: 6px;
       transition: border-color 0.15s, background 0.15s;
     }
     .zmp-sw:hover { background: var(--bg-hover); border-color: var(--border); }
@@ -386,7 +390,7 @@
     .zmp-sw.zmp-inert .zmp-tog-track { cursor: not-allowed; }
     .zmp-sw.zmp-inert:hover .zmp-tog-track { box-shadow: none; }
     .zmp-sw .zmp-sw-text, .zmp-sw .zmp-sw-sub { overflow-wrap: break-word; }
-    .zmp-sw-text { font-size: 13px; font-weight: 550; color: var(--text); }
+    .zmp-sw-text { font-size: 13px; font-weight: 550; line-height: 1.35; color: var(--text); }
     .zmp-sw-sub { font-size: 11.5px; color: var(--text-3); margin-top: 2px; line-height: 1.4; }
     /* A row is one line: its name, whatever short badge it carries, and the
        question mark that holds everything that used to be printed underneath. */
@@ -484,8 +488,8 @@
     .zmp-tog {
       position: relative;
       display: inline-block;
-      width: 38px;
-      height: 22px;
+      width: 34px;
+      height: 20px;
       flex-shrink: 0;
     }
     .zmp-tog input[type="checkbox"] {
@@ -502,8 +506,8 @@
     .zmp-tog-track::before {
       content: "";
       position: absolute;
-      width: 16px;
-      height: 16px;
+      width: 14px;
+      height: 14px;
       left: 3px;
       top: 3px;
       background: var(--tog-knob);
@@ -513,7 +517,7 @@
     }
     .zmp-tog:hover .zmp-tog-track { box-shadow: 0 0 0 4px var(--focus-ring); }
     .zmp-tog input[type="checkbox"]:checked + .zmp-tog-track { background: var(--blue); }
-    .zmp-tog input[type="checkbox"]:checked + .zmp-tog-track::before { transform: translateX(16px); }
+    .zmp-tog input[type="checkbox"]:checked + .zmp-tog-track::before { transform: translateX(14px); }
     .zmp-tog input[type="checkbox"]:focus-visible + .zmp-tog-track { box-shadow: 0 0 0 4px var(--focus-ring); }
 
     /* ============================================================
@@ -580,6 +584,11 @@
       flex: none;
       width: 84px;
       max-width: 84px;
+      /* Shorter than a standalone field: this one stands inside a boxed row,
+         and it is what sets that row's height. The fields out in the open
+         keep their full 32px. */
+      height: 28px;
+      line-height: 26px;
       text-align: right;
       font-variant-numeric: tabular-nums;
     }
