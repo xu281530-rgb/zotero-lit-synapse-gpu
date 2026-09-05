@@ -327,6 +327,71 @@ const KEYWORD_LINE_PATTERN =
   /^[ \t>*_]*(?:#{1,6}[ \t]*)?(?:keywords?|key\s+words|index\s+terms|关\s*键\s*词|關\s*鍵\s*詞)[ \t]*[:：]?/iu;
 
 /**
+ * The subset of {@link FRONT_MATTER_LABELS} that introduces a keyword list.
+ *
+ * These open a keyword block rather than merely being deleted, because the
+ * terms they label are often paragraphs of their own — see
+ * {@link looksLikeKeywordTerm}.
+ */
+const KEYWORD_LABELS = new Set(
+  [
+    "keywords",
+    "keyword",
+    "keywordsabstract",
+    "indexterms",
+    "关键词",
+    "關鍵詞",
+  ].map(frontMatterKey),
+);
+
+/**
+ * Longest a paragraph can be and still plausibly be one keyword term.
+ *
+ * Measured against real lists in this library: the longest single term runs to
+ * 47 characters ("Manufacturing-constrained stress alignment field") and a
+ * whole comma-separated line of them to about 70. A body sentence is almost
+ * always longer, and where it is not it carries sentence punctuation.
+ */
+const KEYWORD_TERM_MAX_CHARS = 80;
+
+/**
+ * Punctuation that closes a clause with more text behind it — prose, not a
+ * term.
+ *
+ * Deliberately excludes `;` and `；`, which is how Chinese journals SEPARATE
+ * keywords, and deliberately does not fire on a trailing full stop, which some
+ * publishers print after the last term.
+ */
+const KEYWORD_TERM_PROSE_PATTERN = /[.。！？!?]\s+\S/u;
+
+/** Terms one block may swallow before it is assumed to have run away. */
+const KEYWORD_BLOCK_MAX_TERMS = 20;
+
+/**
+ * Whether a paragraph inside an open keyword block is still a term.
+ *
+ * This is the block's secondary terminator, and it exists because the primary
+ * one — the next heading — is not always there to find. Zotero's own PDF
+ * worker is the last-resort body source when neither Doc2X nor MinerU produced
+ * Markdown, and it emits no headings at all; in a document it extracted, a
+ * block would otherwise run to the end of the front-matter window and take up
+ * to {@link FRONT_MATTER_MAX_CHARS} of the introduction with it.
+ *
+ * The test is biased towards stopping early on purpose. Leaving one keyword in
+ * the body costs a polluted chunk; eating a section costs the paper's argument.
+ */
+function looksLikeKeywordTerm(paragraph: string): boolean {
+  const trimmed = paragraph.trim();
+  if (!trimmed) return false;
+  if (trimmed.length > KEYWORD_TERM_MAX_CHARS) return false;
+  if (KEYWORD_TERM_PROSE_PATTERN.test(trimmed)) return false;
+  // `Introduction` alone on a line is a section name the extractor failed to
+  // mark up. It is short and unpunctuated, so nothing above catches it.
+  const key = frontMatterKey(trimmed).replace(/^\d+/u, "");
+  return !BODY_SECTION_HEADINGS.some((name) => key === frontMatterKey(name));
+}
+
+/**
  * Bibliographic furniture: identifiers, dates and classification codes that
  * belong to the record rather than to the paper.
  */
@@ -529,6 +594,13 @@ export function stripFrontMatterDuplicates(
   const titleLength = (metadata.title ?? "").trim().length;
 
   let matchedAbstract = false;
+  /**
+   * Index of the last paragraph no rule claimed, so a RUN of them can be told
+   * from a single one — see the front-matter terminator at the end of the loop.
+   */
+  let lastUnclaimedIndex: number | null = null;
+  /** Terms taken by the keyword block now open, or null when none is. */
+  let keywordBlockTerms: number | null = null;
   const kept: string[] = [];
 
   for (let index = 0; index < paragraphs.length; index += 1) {
@@ -546,18 +618,49 @@ export function stripFrontMatterDuplicates(
     const body = heading ?? trimmed;
     const tokens = overlapTokens(body);
 
+    /*
+     * An open keyword block runs from its label to the next heading, and
+     * everything inside it is front matter — the terms themselves, and the
+     * `Article history: Received … Accepted …` furniture printed beside them
+     * in the same column.
+     *
+     * The label alone is not enough to delete them. KEYWORD_LINE_PATTERN is
+     * anchored at the start of a paragraph, so it removes the terms only when
+     * they share the label's paragraph — and whether they do is decided by the
+     * extractor, not the paper. MinerU glues label and terms together; Doc2X
+     * leaves a blank line between every one, which makes each term a paragraph
+     * of its own that no rule below recognises. Those orphans were reaching the
+     * index as body text: five bare noun phrases embedded as a chunk, scored in
+     * the `body` field they do not belong to, duplicating the item's own tags.
+     */
+    if (keywordBlockTerms !== null) {
+      if (
+        heading !== null ||
+        keywordBlockTerms >= KEYWORD_BLOCK_MAX_TERMS ||
+        !looksLikeKeywordTerm(trimmed)
+      ) {
+        keywordBlockTerms = null;
+      } else {
+        keywordBlockTerms += 1;
+        removed.keywordChars += paragraph.length;
+        continue;
+      }
+    }
+
     // A column label carries nothing on its own, and once its content is gone
     // it would otherwise be left behind as an empty heading. The optional
     // leading code covers patent front pages, where the label is printed as
     // `(54) 发明名称`.
-    if (
-      heading !== null &&
-      FRONT_MATTER_LABELS.has(
-        frontMatterKey(heading.replace(/^\s*[（(]\s*\d{1,3}\s*[)）]\s*/u, "")),
-      )
-    ) {
-      removed.labelChars += paragraph.length;
-      continue;
+    if (heading !== null) {
+      const labelKey = frontMatterKey(
+        heading.replace(/^\s*[（(]\s*\d{1,3}\s*[)）]\s*/u, ""),
+      );
+      if (FRONT_MATTER_LABELS.has(labelKey)) {
+        // A keyword label opens a block; every other label leaves none open.
+        keywordBlockTerms = KEYWORD_LABELS.has(labelKey) ? 0 : null;
+        removed.labelChars += paragraph.length;
+        continue;
+      }
     }
 
     if (
@@ -596,6 +699,11 @@ export function stripFrontMatterDuplicates(
 
     if (KEYWORD_LINE_PATTERN.test(trimmed)) {
       removed.keywordChars += paragraph.length;
+      // `Keywords:` alone on a line means the terms follow as separate
+      // paragraphs. Opening the block unconditionally costs nothing for the
+      // inline form: whatever comes next is a heading or the abstract, and
+      // either one closes it on the very next iteration.
+      keywordBlockTerms = 0;
       continue;
     }
 
@@ -608,15 +716,24 @@ export function stripFrontMatterDuplicates(
     }
 
     // Nothing claimed this paragraph. If the abstract has already been found,
-    // the front matter is over: the abstract is the last thing a record can
-    // vouch for, so the first unrecognised paragraph after it is body text.
-    // This is what stops the window running on into a patent's claims, and it
-    // works for journals that print no `Introduction` heading at all.
-    if (matchedAbstract) {
+    // the front matter is ending: the abstract is the last thing a record can
+    // vouch for, so unrecognised paragraphs after it are body text. This is
+    // what stops the window running on into a patent's claims, and it works
+    // for journals that print no `Introduction` heading at all.
+    //
+    // It takes TWO in a row, not one. A single stray — a page number, a
+    // `Graphical abstract` caption, one orphaned keyword — sits between the
+    // abstract and the identifiers, dates and classification codes printed
+    // after it; ending on the first of those handed the whole remaining column
+    // to the body and disabled every rule below for the rest of the document.
+    // Both paragraphs of the run are kept either way, so waiting one more
+    // costs nothing.
+    if (matchedAbstract && lastUnclaimedIndex === index - 1) {
       kept.push(...paragraphs.slice(index));
       break;
     }
 
+    lastUnclaimedIndex = index;
     kept.push(paragraph);
   }
 

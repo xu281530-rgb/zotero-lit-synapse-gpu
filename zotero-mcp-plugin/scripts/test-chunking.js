@@ -663,4 +663,168 @@ assert.doesNotMatch(patent.text, /^一种单晶TiAl的等温锻造方法$/m);
 assert.match(patent.text, /1\.一种单晶TiAl的等温锻造方法，其特征在于/);
 assert.match(patent.text, /2\.根据权利要求1所述/);
 
+// ---------------------------------------------------------------------------
+// Keyword blocks: the terms are paragraphs of their own as often as not
+// ---------------------------------------------------------------------------
+
+// Doc2X leaves a blank line between the label and every term, so each one
+// becomes its own paragraph. Before the keyword block existed, only the
+// `Keywords:` label was removed and the five bare noun phrases reached the
+// index as body text — embedded as a chunk, scored in the `body` field, and
+// duplicating tags the item already carried.
+const doc2xKeywords = stripFrontMatterDuplicates(
+  [
+    "# A Study of Columnar Grains",
+    "Jiayu Pan $^{a}$ , Feng Liu $^{b,*}$",
+    "$^{a}$ Department of Mechanical Engineering, Tsinghua University, Beijing 100084, China",
+    "## A R T I C L E I N F O",
+    "Keywords:",
+    "Composites",
+    "Additive manufacturing",
+    "Path planning",
+    "Manufacturing constraints",
+    "## A B S T R A C T",
+    metadata.abstract,
+    "## 1. Introduction",
+    "Columnar grains matter because they set the creep life of a blade.",
+  ].join("\n\n"),
+  metadata,
+);
+assert.equal(doc2xKeywords.matchedAbstract, true);
+assert.equal(
+  doc2xKeywords.text,
+  "## 1. Introduction\n\nColumnar grains matter because they set the creep life of a blade.",
+);
+assert.ok(
+  doc2xKeywords.removed.keywordChars > 0,
+  "the terms are accounted for as keywords, not as anonymous losses",
+);
+
+// MinerU glues label and terms into one paragraph. That form was already
+// handled by KEYWORD_LINE_PATTERN alone and must stay handled.
+const minerUKeywords = stripFrontMatterDuplicates(
+  [
+    "## ARTICLE INFO",
+    "Keywords:\nComposites\nAdditive manufacturing\nPath planning",
+    "## ABSTRACT",
+    metadata.abstract,
+    "## 1. Introduction",
+    "Body text.",
+  ].join("\n\n"),
+  metadata,
+);
+assert.equal(minerUKeywords.text, "## 1. Introduction\n\nBody text.");
+
+// KEYWORDS printed after ABSTRACT. The terms must still go: reaching them
+// through the "front matter is over" terminator would have kept the whole
+// block AND disabled every rule below it for the rest of the document.
+const keywordsAfterAbstract = stripFrontMatterDuplicates(
+  [
+    "## Abstract",
+    metadata.abstract,
+    "Keywords:",
+    "Composites",
+    "Additive manufacturing",
+    "## 1. Introduction",
+    "Columnar grains matter because they set the creep life of a blade.",
+  ].join("\n\n"),
+  metadata,
+);
+assert.equal(keywordsAfterAbstract.matchedAbstract, true);
+assert.equal(
+  keywordsAfterAbstract.text,
+  "## 1. Introduction\n\nColumnar grains matter because they set the creep life of a blade.",
+);
+
+// Zotero's own PDF worker is the last-resort body source and marks up no
+// headings at all, so the block's primary terminator never fires. The first
+// paragraph that does not read as a term has to stop it, or the block runs to
+// the end of the front-matter window and takes the introduction with it.
+const headinglessKeywords = stripFrontMatterDuplicates(
+  [
+    "A Study of Columnar Grains",
+    "Keywords:",
+    "Composites",
+    "Additive manufacturing",
+    "Columnar grains matter because they set the creep life of a blade, and " +
+      "this paragraph is far too long to pass for a keyword.",
+    "A second body paragraph carries the argument further still.",
+  ].join("\n\n"),
+  metadata,
+);
+assert.doesNotMatch(headinglessKeywords.text, /Composites/);
+assert.doesNotMatch(headinglessKeywords.text, /Additive manufacturing/);
+assert.match(headinglessKeywords.text, /creep life of a blade/);
+assert.match(headinglessKeywords.text, /A second body paragraph/);
+
+// Same, for the short unpunctuated section name a headingless extraction
+// leaves behind. It passes the length and punctuation tests, so the body
+// section names are what catch it.
+const headinglessSection = stripFrontMatterDuplicates(
+  [
+    "A Study of Columnar Grains",
+    "Keywords: composites, additive manufacturing",
+    "Introduction",
+    "Columnar grains matter because they set the creep life of a blade.",
+  ].join("\n\n"),
+  metadata,
+);
+assert.match(headinglessSection.text, /^Introduction/m);
+assert.match(headinglessSection.text, /creep life of a blade/);
+
+// Chinese journals separate keywords with a semicolon. That is a term
+// separator here, not sentence punctuation, and must not close the block.
+const chineseMetadata = {
+  title: "连续纤维增材制造路径规划",
+  abstract:
+    "本文提出一种考虑制造约束的应力对齐场方法，用于连续纤维增材制造的打印路径规划，" +
+    "并通过实验验证了该方法在复杂构件上的承载性能与可打印性。",
+  creators: ["潘佳宇"],
+};
+const chineseKeywords = stripFrontMatterDuplicates(
+  [
+    "# 连续纤维增材制造路径规划",
+    "## 摘要",
+    chineseMetadata.abstract,
+    "关键词：",
+    "连续纤维增材制造；",
+    "路径规划；",
+    "纤维取向",
+    "## 1 引言",
+    "连续纤维复合材料在航空结构中的应用日益广泛。",
+  ].join("\n\n"),
+  chineseMetadata,
+);
+assert.doesNotMatch(chineseKeywords.text, /连续纤维增材制造；/);
+assert.doesNotMatch(chineseKeywords.text, /路径规划；/);
+assert.doesNotMatch(chineseKeywords.text, /纤维取向/);
+assert.match(chineseKeywords.text, /## 1 引言/);
+assert.match(chineseKeywords.text, /航空结构中的应用日益广泛/);
+
+// An abstract printed with no label of its own, directly under the keywords,
+// must end the block rather than be swallowed by it.
+const unlabelledAbstract = stripFrontMatterDuplicates(
+  [
+    "Keywords:",
+    "Composites",
+    metadata.abstract,
+    "## 1. Introduction",
+    "Body text.",
+  ].join("\n\n"),
+  metadata,
+);
+assert.equal(unlabelledAbstract.matchedAbstract, true);
+assert.equal(unlabelledAbstract.text, "## 1. Introduction\n\nBody text.");
+
+// A block that finds no terminator at all is still bounded, so a pathological
+// document cannot lose its whole front-matter window to one keyword label.
+const runawayKeywords = stripFrontMatterDuplicates(
+  [
+    "Keywords:",
+    ...Array.from({ length: 24 }, (_, i) => `Term number ${i}`),
+  ].join("\n\n"),
+  metadata,
+);
+assert.match(runawayKeywords.text, /Term number 23/);
+
 console.log("Chunking and hybrid-settings regression tests passed");

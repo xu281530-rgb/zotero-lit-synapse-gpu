@@ -51,7 +51,9 @@ const { VectorStore } = await import(
 const { SemanticSearchService } = await import(
   "../src/modules/semantic/semanticSearchService.ts"
 );
-const { buildToolCatalog } = await import("../src/modules/toolCatalog.ts");
+const { buildToolCatalog, renderToolDoctrine, toolDoctrineUri } = await import(
+  "../src/modules/toolCatalog.ts"
+);
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -794,13 +796,31 @@ const tool = (name) => {
   return found;
 };
 
+/**
+ * Everything a caller ends up reading about one tool, both halves joined.
+ *
+ * A tool's prose lives in two fields: `description`, which tools/list re-sends
+ * every turn, and `doctrine`, which the caller fetches once from
+ * zotero://tool/<name>. Which half a given sentence sits in is a token-budget
+ * decision, and it has already moved once — the split that introduced
+ * `doctrine` left this suite asserting on `description` for a sentence that had
+ * become doctrine, so the test failed while the guarantee it protects was
+ * perfectly intact and still being served.
+ *
+ * So assert on what the model reads, not on where this build happens to keep
+ * it. renderToolDoctrine is the exact text zotero://tool/<name> returns; a tool
+ * with no doctrine has only its description to read.
+ */
+const toolText = (name) =>
+  renderToolDoctrine(catalog, toolDoctrineUri(name)) ?? tool(name).description;
+
 test("find_similar does not promise a fixed page size", async () => {
   // The server applies resolveResultCap(args.topK, settings.maxDocuments): the
   // page size IS the user's maximum-documents setting. "20 documents per page"
   // was true only for a user who never changed the default.
   const similar = tool("find_similar");
   const text = [
-    similar.description,
+    toolText("find_similar"),
     similar.inputSchema.properties.topK.description,
   ].join("\n");
   assert.doesNotMatch(
@@ -814,7 +834,7 @@ test("find_similar does not promise a fixed page size", async () => {
     "naming the default's value as the maximum reads as a hard limit",
   );
   assert.match(
-    similar.description,
+    toolText("find_similar"),
     /page size is the user's configured MAXIMUM NUMBER OF DOCUMENTS/i,
   );
   assert.match(
@@ -827,7 +847,7 @@ test("find_similar stays purely semantic", async () => {
   // Its definition is "representative chunks -> vector similarity -> document
   // aggregation". Nothing keyword-shaped may creep into it.
   const similar = tool("find_similar");
-  assert.match(similar.description, /Purely semantic/i);
+  assert.match(toolText("find_similar"), /Purely semantic/i);
   assert.deepEqual(
     Object.keys(similar.inputSchema.properties).filter((name) =>
       /keyword/i.test(name),
@@ -836,7 +856,7 @@ test("find_similar stays purely semantic", async () => {
     "no keyword parameter may appear on find_similar",
   );
   assert.match(
-    similar.description,
+    toolText("find_similar"),
     /the floor applied to it is the user's SEMANTIC relevance threshold/i,
   );
 });
@@ -860,7 +880,7 @@ test("no tool claims the body is unsearchable", async () => {
   }
   for (const name of ["hybrid_search", "keyword_search"]) {
     assert.match(
-      tool(name).description,
+      toolText(name),
       /indexed body|body text/i,
       `${name} must say that indexed body text is searched`,
     );
