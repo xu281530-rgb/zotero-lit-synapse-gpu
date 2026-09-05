@@ -19,6 +19,10 @@ import {
   unregisterWikiPanel,
 } from "./modules/wiki/wikiPanel";
 import { getWikiService } from "./modules/wiki/wikiService";
+import {
+  registerPrefsWindowStyle,
+  unregisterPrefsWindowStyle,
+} from "./modules/prefsWindowStyle";
 
 const PREF_SEMANTIC_AUTO_UPDATE = 'extensions.zotero.zotero-lit-synapse.semantic.autoUpdate';
 const GENERATED_MINERU_MARKDOWN_TITLE =
@@ -1188,6 +1192,7 @@ async function onStartup() {
   });
 
   BasicExampleFactory.registerPrefs();
+  registerPrefsWindowStyle();
 
   await Promise.all(
     Zotero.getMainWindows().map((win) => onMainWindowLoad(win)),
@@ -1354,6 +1359,15 @@ function onShutdown(): void {
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
     ztoolkit.log(`[MCP Plugin] [SHUTDOWN] Error removing menus: ${err.message}`, "error");
+  }
+
+  // Same reasoning for the settings-window listener: dropping it keeps no
+  // closure into the destroyed sandbox alive
+  try {
+    unregisterPrefsWindowStyle();
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    ztoolkit.log(`[MCP Plugin] [SHUTDOWN] Error removing settings style: ${err.message}`, "error");
   }
 
   try {
@@ -1524,11 +1538,14 @@ function openPreferencesWindow() {
   }
 }
 
+const MCP_MENU_STYLE_ID = "zotero-lit-synapse-menu-style";
+
 const MCP_MENU_ELEMENT_IDS = [
   "zotero-lit-synapse-semantic-separator",
   "zotero-lit-synapse-semantic-menu",
   "zotero-lit-synapse-collection-semantic-separator",
   "zotero-lit-synapse-collection-semantic-menu",
+  MCP_MENU_STYLE_ID,
 ];
 
 /**
@@ -1545,6 +1562,25 @@ function unregisterSemanticIndexMenus(win: Window) {
     }
   } catch (e) {
     // window may already be gone
+  }
+}
+
+/**
+ * Load zoteroPane.css into a main window. It carries the size of the menu
+ * icons applied below; the icon box itself is Zotero's, so it can only be
+ * resized from a stylesheet, not from the element's inline style.
+ */
+function injectMenuStylesheet(win: _ZoteroTypes.MainWindow) {
+  try {
+    const doc = win.document;
+    if (doc.getElementById(MCP_MENU_STYLE_ID)) return;
+    const link = doc.createElement("link");
+    link.id = MCP_MENU_STYLE_ID;
+    link.rel = "stylesheet";
+    link.href = `chrome://${addon.data.config.addonRef}/content/zoteroPane.css?version=${addon.data.config.addonVersion}`;
+    doc.documentElement?.appendChild(link);
+  } catch (error) {
+    ztoolkit.log(`[MCP Plugin] Failed to inject menu stylesheet: ${error}`, "error");
   }
 }
 
@@ -1575,6 +1611,7 @@ function applyMenuIcon(elem: Element, tag: "menu" | "menuitem" = "menu") {
 function registerSemanticIndexMenu(win: _ZoteroTypes.MainWindow) {
   // Remove any leftovers first (re-enable / duplicate onMainWindowLoad calls)
   unregisterSemanticIndexMenus(win as unknown as Window);
+  injectMenuStylesheet(win);
   try {
     const doc = win.document;
 

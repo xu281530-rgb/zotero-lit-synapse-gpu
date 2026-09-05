@@ -1,0 +1,11 @@
+/* Main-window chrome tweaks for Zotero LitSynapse.
+ *
+ * Zotero renders context-menu icons in a 16px box (toolkit's `.menu-icon`
+ * rule). The plugin logo reads better a little larger, so our two right-click
+ * entries get a 24px box — 1.5x the stock size. The rules are keyed on our own
+ * element IDs so no other menu in the window is affected. */
+#zotero-lit-synapse-semantic-menu .menu-icon,
+#zotero-lit-synapse-collection-semantic-menu .menu-icon {
+  width: 24px;
+  height: 24px;
+}
