@@ -1365,31 +1365,28 @@ function selectTab(doc: Document, name: string) {
 /**
  * Keep a help popover inside the pane.
  *
- * The popover hangs from its question mark and opens rightwards, which is
- * right up to the point where the question mark itself is near the right
- * edge — and pairing the short rows put a lot of them there. Beyond that
- * edge the pane's scroll container clips the text rather than letting it
- * hang out, so the box has to be flipped.
+ * The popover hangs straight down from its question mark, centred on it, and
+ * a mark near a pane edge would put half the box past that edge — where the
+ * preferences window's scroll container clips the text rather than letting it
+ * hang out. Pairing the short rows put a lot of marks near an edge.
  *
- * CSS cannot ask how much room is left, so the choice is made here, each
- * time one opens: drop it leftwards, and if it does not fit that way either,
- * pin it to the pane's edge. Measuring on open rather than once at load is
- * deliberate — the pane is resizable, and a tab the user has not visited yet
- * has no layout to measure.
+ * CSS cannot ask how much room is left, so the box is measured as it opens
+ * and slid back inside, keeping its width. Measuring on open rather than once
+ * at load is deliberate: the pane is resizable, and a tab the user has not
+ * visited yet has no layout to measure.
  */
 function bindHelpPopovers(doc: Document) {
   /** Clearance kept between the popover and the edge it is avoiding. */
   const EDGE = 10;
-  /** How far past the mark the box sits when it opens the normal way. */
-  const OVERHANG = 6;
 
   const place = (mark: HTMLElement) => {
     const popover = mark.querySelector('.zmp-q-p') as HTMLElement | null;
     if (!popover) return;
-    // Start from the authored position, so a popover that has been flipped
-    // once is re-judged rather than staying flipped for good.
+    // Back to the authored position first, so a popover already slid once is
+    // re-judged rather than staying where the last row put it.
     popover.style.left = '';
     popover.style.right = '';
+    popover.style.transform = '';
 
     // The pane is the boundary, not the window: the preferences window
     // scrolls the pane inside a container that clips at the pane's edge.
@@ -1397,23 +1394,22 @@ function bindHelpPopovers(doc: Document) {
       doc.documentElement) as HTMLElement | null;
     if (!pane) return;
     const limit = pane.getBoundingClientRect();
-    const anchorBox = mark.getBoundingClientRect();
+    const anchor = mark.getBoundingClientRect();
     // The popover is displayed by :hover / :focus-within, both of which are
     // already matching by the time this runs, so it has a width to read.
     const width = popover.getBoundingClientRect().width;
     if (!width) return;
 
-    if (anchorBox.left - OVERHANG + width <= limit.right - EDGE) return;
+    let left = anchor.left + anchor.width / 2 - width / 2;
+    if (left + width > limit.right - EDGE) left = limit.right - EDGE - width;
+    // Checked second so that a pane too narrow for the box lands against the
+    // left edge, where the text starts, rather than the right.
+    if (left < limit.left + EDGE) left = limit.left + EDGE;
 
-    const roomOnRight = limit.right - anchorBox.right;
-    if (anchorBox.right + OVERHANG - width >= limit.left + EDGE) {
-      popover.style.left = 'auto';
-      popover.style.right = `${-OVERHANG}px`;
-      return;
-    }
-    // Wider than either side allows: sit against the pane's right edge.
-    popover.style.left = 'auto';
-    popover.style.right = `${EDGE - roomOnRight}px`;
+    // Positioned against the mark's padding box, which is where an absolute
+    // child's offsets are measured from.
+    popover.style.transform = 'none';
+    popover.style.left = `${left - anchor.left - mark.clientLeft}px`;
   };
 
   for (const mark of Array.from(

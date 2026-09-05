@@ -438,13 +438,15 @@
     .zmp-q-p {
       display: none;
       position: absolute;
+      /* Hangs straight down from the mark and centred on it. preferenceScript
+         slides it sideways when a pane edge is in the way; the width is fixed
+         so that it has a stable figure to judge. */
       top: calc(100% + 7px);
-      left: -6px;
+      left: 50%;
+      transform: translateX(-50%);
       z-index: 20;
       box-sizing: border-box;
-      /* Width is fixed so the flip logic in preferenceScript has a stable
-         figure to judge; the vw cap is only for a pane too narrow to hold it. */
-      width: 320px;
+      width: 240px;
       max-width: 92vw;
       padding: 10px 12px;
       background: var(--bg);
