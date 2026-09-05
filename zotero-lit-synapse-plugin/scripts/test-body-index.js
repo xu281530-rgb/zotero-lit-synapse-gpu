@@ -481,11 +481,12 @@ assert.match(
   /if \(!needsIndex && !mustClearStaleBody(?: && ![A-Za-z]+)*\) \{/,
   "the shortcut must be skipped when stale body vectors could survive it",
 );
-// ...and the long way round really does clear them, atomically.
+// The replacement removes obsolete chunks atomically. Matching chunk IDs are
+// updated in place so an embedding-only refresh preserves reading identity.
 assert.match(
   vectorStoreSource,
-  /replaceItemIndex[\s\S]{0,600}?executeTransaction[\s\S]{0,200}?DELETE FROM embeddings WHERE item_key = \?[\s\S]{0,120}?DELETE FROM vectors_f32 WHERE item_key = \?/,
-  "replaceItemIndex must delete every old vector for the item before writing",
+  /replaceItemIndex[\s\S]{0,900}?mutateEmbeddings[\s\S]{0,900}?DELETE FROM embeddings WHERE item_key = \? AND chunk_id IN[\s\S]{0,180}?DELETE FROM vectors_f32 WHERE item_key = \? AND chunk_id IN/,
+  "replaceItemIndex must remove obsolete chunks from both vector tables",
 );
 // The empty-content path clears them too, by replacing with no records.
 assert.match(

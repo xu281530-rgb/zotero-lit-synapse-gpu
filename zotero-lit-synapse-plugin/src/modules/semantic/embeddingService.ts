@@ -7,6 +7,8 @@
 
 declare let Zotero: any;
 declare let ztoolkit: ZToolkit;
+import { SharedQuery } from './sharedQuery';
+import { hashExactText } from '../wiki/wikiCanonicalizer';
 
 import {
   type BatchCapacityState,
@@ -26,6 +28,28 @@ export interface EmbeddingResult {
   embedding: Float32Array;
   language: 'zh' | 'en';
   dimensions: number;
+  identity: EmbeddingIdentity;
+}
+
+export interface EmbeddingIdentity {
+  model: string;
+  apiBase: string;
+  provider: ApiProviderType;
+  dimensions: number;
+  requestedDimensions?: number;
+  inputHash?: string;
+  queryMode?: boolean;
+}
+
+export function sameEmbeddingSpace(left: EmbeddingIdentity, right: EmbeddingIdentity): boolean {
+  return left.model === right.model && left.apiBase === right.apiBase &&
+    left.provider === right.provider && left.dimensions === right.dimensions &&
+    left.requestedDimensions === right.requestedDimensions;
+}
+
+interface GeneratedEmbeddingBatch {
+  vectors: number[][];
+  identity: EmbeddingIdentity;
 }
 
 export interface BatchEmbeddingItem {
@@ -262,6 +286,10 @@ export interface EmbeddingConfig {
   timeout: number;          // Request timeout in ms
   maxRetries: number;       // Max retry attempts
   apiProvider?: ApiProviderType;  // API provider (auto-detected if 'auto' or not set)
+}
+
+interface EmbeddingRequestConfig extends EmbeddingConfig {
+  requestedDimensions?: number;
 }
 
 const DEFAULT_CONFIG: EmbeddingConfig = {
@@ -510,22 +538,22 @@ export class EmbeddingService {
   /**
    * Get the effective API provider (configured or detected)
    */
-  getEffectiveProvider(): ApiProviderType {
-    if (this.config.apiProvider && this.config.apiProvider !== 'auto') {
-      return this.config.apiProvider;
+  getEffectiveProvider(config: EmbeddingConfig = this.config): ApiProviderType {
+    if (config.apiProvider && config.apiProvider !== 'auto') {
+      return config.apiProvider;
     }
-    if (this.detectedProvider) {
+    if (config === this.config && this.detectedProvider) {
       return this.detectedProvider;
     }
-    return this.detectApiProvider(this.config.apiBase);
+    return this.detectApiProvider(config.apiBase);
   }
 
   /**
    * Get the embedding API endpoint URL based on provider
    */
-  private getEmbeddingEndpoint(): string {
-    const provider = this.getEffectiveProvider();
-    const baseUrl = this.config.apiBase.replace(/\/$/, ''); // Remove trailing slash
+  private getEmbeddingEndpoint(config: EmbeddingConfig = this.config): string {
+    const provider = this.getEffectiveProvider(config);
+    const baseUrl = config.apiBase.replace(/\/$/, ''); // Remove trailing slash
 
     let endpoint: string;
 
@@ -713,8 +741,8 @@ export class EmbeddingService {
   /**
    * Check if the model supports custom dimensions parameter
    */
-  supportsCustomDimensions(): boolean {
-    const model = this.config.model.toLowerCase();
+  supportsCustomDimensions(config: EmbeddingConfig = this.config): boolean {
+    const model = config.model.toLowerCase();
     // OpenAI text-embedding-3-* models
     if (model.includes('text-embedding-3')) return true;
     // DashScope text-embedding-v3/v4 models
@@ -1003,6 +1031,8 @@ export class EmbeddingService {
     const previousBase = this.config.apiBase;
     const previousModel = this.config.model;
     const previousProvider = this.config.apiProvider;
+    const previousDimensions = this.config.dimensions;
+    const previousApiKey = this.config.apiKey;
     this.config = { ...this.config, ...newConfig };
 
     // The provider is auto-detected from the URL and then cached. Pointing the
@@ -1012,7 +1042,9 @@ export class EmbeddingService {
     if (
       this.config.apiBase !== previousBase ||
       this.config.model !== previousModel ||
-      this.config.apiProvider !== previousProvider
+      this.config.apiProvider !== previousProvider ||
+      this.config.dimensions !== previousDimensions ||
+      this.config.apiKey !== previousApiKey
     ) {
       this.detectedProvider = null;
       this.clearQueryCache();
@@ -1035,11 +1067,32 @@ export class EmbeddingService {
       apiBase: this.config.apiBase,
       model: this.config.model,
       dimensions: this.config.dimensions,
+      apiProvider: this.config.apiProvider,
       maxBatchItems: this.getEffectiveMaxItems(),
       timeout: this.config.timeout,
       maxRetries: this.config.maxRetries,
       apiKeyConfigured: !!this.config.apiKey
     };
+  }
+
+  getConfigurationIdentity(): Omit<EmbeddingIdentity, 'dimensions'> & { dimensions?: number; configurationRevision: number } {
+    const snapshot = this.captureRequestConfig();
+    return { apiBase: snapshot.apiBase, model: snapshot.model,
+      provider: snapshot.apiProvider!, dimensions: snapshot.dimensions,
+      requestedDimensions: snapshot.requestedDimensions, configurationRevision: this.queryGeneration };
+  }
+
+  private captureRequestConfig(): EmbeddingRequestConfig {
+    const snapshot = { ...this.config, apiProvider: this.getEffectiveProvider() };
+    // Ollama's native dimensions are left alone unless explicitly configured.
+    // Resolve the preference now so waiting and retries cannot change the body.
+    const rawDimensions = snapshot.apiProvider === 'ollama'
+      ? Zotero.Prefs.get(PREF_DIMENSIONS, true)
+      : snapshot.dimensions;
+    const dimensions = Number(rawDimensions);
+    const requestedDimensions = this.supportsCustomDimensions(snapshot) &&
+      Number.isInteger(dimensions) && dimensions > 0 ? dimensions : undefined;
+    return Object.freeze({ ...snapshot, requestedDimensions });
   }
 
   /**
@@ -1057,15 +1110,17 @@ export class EmbeddingService {
    * those would trade a large amount of memory for a hit rate of zero.
    */
   private queryCache = new Map<string, { result: EmbeddingResult; at: number }>();
+  private queryRequests = new SharedQuery<GeneratedEmbeddingBatch>();
+  private queryGeneration = 0;
 
-  private queryCacheKey(text: string, language: string): string | null {
-    const model = this.config?.model;
-    const apiBase = this.config?.apiBase;
+  private queryCacheKey(text: string, language: string, config: EmbeddingRequestConfig): string | null {
+    const model = config.model;
+    const apiBase = config.apiBase;
     if (!model || !apiBase) return null;
     // The endpoint and model are part of the identity: the same sentence
     // embedded by a different model is a different vector, and a stale hit
     // after switching providers would be silently wrong.
-    return [apiBase, model, this.config?.dimensions ?? '', language, text].join(
+    return [apiBase, model, config.apiProvider ?? '', config.requestedDimensions ?? '', language, 'query', text].join(
       '\u0000',
     );
   }
@@ -1083,6 +1138,7 @@ export class EmbeddingService {
       embedding: new Float32Array(entry.result.embedding),
       language: entry.result.language,
       dimensions: entry.result.dimensions,
+      identity: { ...entry.result.identity },
     };
   }
 
@@ -1092,6 +1148,7 @@ export class EmbeddingService {
         embedding: new Float32Array(result.embedding),
         language: result.language,
         dimensions: result.dimensions,
+        identity: { ...result.identity },
       },
       at: Date.now(),
     });
@@ -1106,6 +1163,8 @@ export class EmbeddingService {
   /** Drop cached query vectors, e.g. after the model or endpoint changes. */
   public clearQueryCache(): void {
     this.queryCache.clear();
+    this.queryGeneration++;
+    this.queryRequests.clear();
   }
 
   async embed(
@@ -1118,6 +1177,7 @@ export class EmbeddingService {
     await this.initialize();
 
     // Detect language for tracking (API doesn't need language-specific models)
+    if (options?.signal?.aborted) throw new Error('Query cancelled');
     const detectedLang = language === 'auto' || !language
       ? this.detectLanguage(text)
       : language;
@@ -1135,7 +1195,9 @@ export class EmbeddingService {
     // paper cited in one literature review was simply missing from the next.
     // Reusing the vector makes a repeated search reproducible, and as a side
     // effect removes an API round trip that dominates search latency.
-    const cacheKey = isQuery ? this.queryCacheKey(text, detectedLang) : null;
+    const requestConfig = this.captureRequestConfig();
+    const cacheKey = isQuery ? this.queryCacheKey(text, detectedLang, requestConfig) : null;
+    const queryGeneration = this.queryGeneration;
     if (cacheKey) {
       const hit = this.readQueryCache(cacheKey);
       if (hit) {
@@ -1159,8 +1221,13 @@ export class EmbeddingService {
     }
 
     try {
-      const embeddings = await this.callEmbeddingAPI([text], options?.signal);
-      const embedding = embeddings[0];
+      const generated = cacheKey
+        ? await this.queryRequests.run(cacheKey, (signal) => this.callEmbeddingAPI([text], signal, requestConfig), options?.signal)
+        : await this.callEmbeddingAPI([text], options?.signal, requestConfig);
+      if (cacheKey && queryGeneration !== this.queryGeneration) {
+        throw new Error('Embedding configuration changed. Retry the query with the current model.');
+      }
+      const embedding = generated.vectors[0];
 
       const elapsed = Date.now() - startTime;
       ztoolkit.log(`[EmbeddingService] embed() completed: dims=${embedding.length}, time=${elapsed}ms`);
@@ -1168,7 +1235,8 @@ export class EmbeddingService {
       const result: EmbeddingResult = {
         embedding: new Float32Array(embedding),
         language: detectedLang,
-        dimensions: embedding.length
+        dimensions: embedding.length,
+        identity: { ...generated.identity, inputHash: await hashExactText(text.trim()), queryMode: isQuery },
       };
       if (cacheKey) this.writeQueryCache(cacheKey, result);
       return result;
@@ -1208,6 +1276,8 @@ export class EmbeddingService {
     ztoolkit.log(`[EmbeddingService] embedBatch() start: ${items.length} items`);
 
     const results = new Map<string, EmbeddingResult>();
+    const requestConfig = this.captureRequestConfig();
+    const generation = this.queryGeneration;
     const pauseCheck = options?.onPauseCheck;
 
     // Check API configuration
@@ -1253,7 +1323,10 @@ export class EmbeddingService {
 
       try {
         // Call API
-        const embeddings = await this.callEmbeddingAPI(texts);
+        if (generation !== this.queryGeneration) throw new Error('Embedding configuration changed during indexing; retry with the current model.');
+        const generated = await this.callEmbeddingAPI(texts, undefined, requestConfig);
+        if (generation !== this.queryGeneration) throw new Error('Embedding configuration changed during indexing; retry with the current model.');
+        const embeddings = generated.vectors;
 
         // Never fewer vectors than chunks. A short response would otherwise
         // pair chunk N with the vector for chunk N+1 from here on, quietly
@@ -1276,7 +1349,8 @@ export class EmbeddingService {
           results.set(item.id, {
             embedding: new Float32Array(embedding),
             language: lang,
-            dimensions: embedding.length
+            dimensions: embedding.length,
+            identity: { ...generated.identity, inputHash: await hashExactText(item.text.trim()), queryMode: false },
           });
         }
 
@@ -1416,8 +1490,15 @@ export class EmbeddingService {
     if (statusCode) {
       if (statusCode === 429) {
         let retryAfterMs = 60000; // default 60s
-        if (error.headers?.['retry-after']) {
-          retryAfterMs = parseInt(error.headers['retry-after'], 10) * 1000;
+        let retryAfter = error.headers?.['retry-after'];
+        try {
+          retryAfter ??= error.xmlhttp?.getResponseHeader('Retry-After');
+        } catch { /* A network failure may leave response headers unavailable. */ }
+        if (retryAfter !== undefined && retryAfter !== null && String(retryAfter).trim()) {
+          const seconds = Number(retryAfter);
+          const delay = Number.isFinite(seconds)
+            ? seconds * 1000 : Date.parse(String(retryAfter)) - Date.now();
+          if (Number.isFinite(delay)) retryAfterMs = Math.max(0, delay);
         }
         return { type: 'rate_limit', retryAfterMs };
       }
@@ -1475,7 +1556,9 @@ export class EmbeddingService {
   private async callEmbeddingAPI(
     texts: string[],
     signal?: AbortSignal,
-  ): Promise<number[][]> {
+    requestConfig: EmbeddingRequestConfig = this.captureRequestConfig(),
+  ): Promise<GeneratedEmbeddingBatch> {
+    const generation = this.queryGeneration;
     // Validate and clean input texts
     const cleanTexts = texts.map(t => t.trim()).filter(t => t.length > 0);
     if (cleanTexts.length === 0) {
@@ -1490,8 +1573,8 @@ export class EmbeddingService {
     }
     texts = cleanTexts;
 
-    const provider = this.getEffectiveProvider();
-    const url = this.getEmbeddingEndpoint();
+    const provider = this.getEffectiveProvider(requestConfig);
+    const url = this.getEmbeddingEndpoint(requestConfig);
 
     // 非回环地址必须走 HTTPS，除非用户显式允许明文 HTTP
     try {
@@ -1526,23 +1609,22 @@ export class EmbeddingService {
       // model is a known MRL model: config.dimensions falls back to a
       // default (512) that must not silently change a model's native
       // dimensionality (requires Ollama >= 0.12 for the dimensions field)
-      const userDims = Zotero.Prefs.get(PREF_DIMENSIONS, true);
       requestBody = {
-        model: this.config.model,
+        model: requestConfig.model,
         input: texts.length === 1 ? texts[0] : texts,  // Single string or array
-        ...(userDims && this.supportsCustomDimensions()
-          ? { dimensions: parseInt(String(userDims), 10) } : {})
+        ...(requestConfig.requestedDimensions !== undefined
+          ? { dimensions: requestConfig.requestedDimensions } : {})
       };
     } else {
       // OpenAI-compatible format (OpenAI, ollama-openai, etc.)
       requestBody = {
-        model: this.config.model,
+        model: requestConfig.model,
         input: texts
       };
 
       // Add dimensions if supported by the model
-      if (this.config.dimensions && this.supportsCustomDimensions()) {
-        requestBody.dimensions = this.config.dimensions;
+      if (requestConfig.requestedDimensions !== undefined) {
+        requestBody.dimensions = requestConfig.requestedDimensions;
       }
     }
 
@@ -1561,20 +1643,20 @@ export class EmbeddingService {
     const requestBodySize = requestBodyStr.length;
     const totalTextLength = texts.reduce((sum, t) => sum + t.length, 0);
 
-    ztoolkit.log(`[EmbeddingService] Request details: texts=${texts.length}, totalTextChars=${totalTextLength}, bodySize=${requestBodySize}, model=${this.config.model}`);
+    ztoolkit.log(`[EmbeddingService] Request details: texts=${texts.length}, totalTextChars=${totalTextLength}, bodySize=${requestBodySize}, model=${requestConfig.model}`);
 
-    for (let attempt = 0; attempt < this.config.maxRetries; attempt++) {
+    for (let attempt = 0; attempt < requestConfig.maxRetries; attempt++) {
       try {
         const headers: Record<string, string> = {
           'Content-Type': 'application/json'
         };
 
         // Add Authorization header if API key is provided
-        if (this.config.apiKey) {
-          headers['Authorization'] = `Bearer ${this.config.apiKey}`;
+        if (requestConfig.apiKey) {
+          headers['Authorization'] = `Bearer ${requestConfig.apiKey}`;
         }
 
-        ztoolkit.log(`[EmbeddingService] Sending request attempt ${attempt + 1}/${this.config.maxRetries} to ${url}`);
+        ztoolkit.log(`[EmbeddingService] Sending request attempt ${attempt + 1}/${requestConfig.maxRetries} to ${url}`);
 
         if (signal?.aborted) throw abortError();
 
@@ -1597,7 +1679,7 @@ export class EmbeddingService {
           response = await Zotero.HTTP.request('POST', url, {
             headers,
             body: requestBodyStr,
-            timeout: this.config.timeout,
+            timeout: requestConfig.timeout,
             responseType: 'json',
             cancellerReceiver: (canceller: () => void) => {
               cancelRequest = canceller;
@@ -1672,7 +1754,7 @@ export class EmbeddingService {
         // Auto-detect and save actual dimensions from first embedding
         if (embeddings.length > 0 && embeddings[0].length > 0) {
           const actualDims = embeddings[0].length;
-          if (this.detectedDimensions !== actualDims) {
+          if (generation === this.queryGeneration && this.detectedDimensions !== actualDims) {
             this.detectedDimensions = actualDims;
             this.saveDetectedDimensions(actualDims);
             ztoolkit.log(`[EmbeddingService] Auto-detected dimensions: ${actualDims}, provider: ${provider}`);
@@ -1680,12 +1762,21 @@ export class EmbeddingService {
         }
 
         // Store detected provider for future requests
-        if (!this.detectedProvider) {
+        if (generation === this.queryGeneration && !this.detectedProvider) {
           this.detectedProvider = provider;
           ztoolkit.log(`[EmbeddingService] Auto-detected provider: ${provider}`);
         }
 
-        return embeddings;
+        return {
+          vectors: embeddings,
+          identity: {
+            model: typeof data.model === 'string' && data.model.trim() ? data.model : requestConfig.model,
+            apiBase: requestConfig.apiBase,
+            provider,
+            dimensions: embeddings[0]?.length ?? 0,
+            requestedDimensions: requestConfig.requestedDimensions,
+          },
+        };
 
       } catch (error: any) {
         // Log raw error details for debugging.
@@ -1784,7 +1875,7 @@ export class EmbeddingService {
         // A cancelled request must not be retried - the caller stopped caring.
         if (signal?.aborted) throw abortError();
 
-        ztoolkit.log(`[EmbeddingService] API attempt ${attempt + 1}/${this.config.maxRetries} failed: ${lastError.type} (status=${lastError.statusCode}) - ${lastError.message}`, 'warn');
+        ztoolkit.log(`[EmbeddingService] API attempt ${attempt + 1}/${requestConfig.maxRetries} failed: ${lastError.type} (status=${lastError.statusCode}) - ${lastError.message}`, 'warn');
 
         // Non-retryable errors surface immediately. payload_too_large is one
         // of them: resending the same body cannot make it shorter, and only
@@ -1797,13 +1888,13 @@ export class EmbeddingService {
         // Handle rate limit - wait the specified time
         if (lastError.type === 'rate_limit') {
           this.usageStats.rateLimitHits++;
-          const waitMs = lastError.retryAfterMs || 60000;
+          const waitMs = lastError.retryAfterMs ?? 60000;
           await this.waitForRateLimit(waitMs, 'API returned 429 rate limit');
           continue; // retry immediately after waiting
         }
 
         // Wait before retry (exponential backoff) for retryable errors
-        if (attempt < this.config.maxRetries - 1) {
+        if (attempt < requestConfig.maxRetries - 1) {
           const delay = Math.pow(2, attempt) * 1000;
           ztoolkit.log(`[EmbeddingService] Waiting ${delay}ms before retry...`);
           await new Promise(resolve => setTimeout(resolve, delay));
@@ -1813,7 +1904,7 @@ export class EmbeddingService {
 
     // All retries exhausted
     if (lastError) {
-      ztoolkit.log(`[EmbeddingService] All ${this.config.maxRetries} retries failed: ${lastError.getUserMessage()}`, 'error');
+      ztoolkit.log(`[EmbeddingService] All ${requestConfig.maxRetries} retries failed: ${lastError.getUserMessage()}`, 'error');
       throw lastError;
     }
 
@@ -1913,6 +2004,8 @@ export class EmbeddingService {
    * Destroy the service
    */
   destroy(): void {
+    this.queryRequests.clear();
+    this.clearQueryCache();
     this.initialized = false;
     this.initPromise = null;
     this.status = {

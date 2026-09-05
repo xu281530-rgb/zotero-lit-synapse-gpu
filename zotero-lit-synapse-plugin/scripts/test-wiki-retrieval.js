@@ -51,7 +51,9 @@ function adapt(sqlite) {
 }
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zmp-wiki-retrieval-"));
-const sqlite = new DatabaseSync(path.join(dir, "zotero-lit-synapse-wiki.sqlite"));
+const sqlite = new DatabaseSync(
+  path.join(dir, "zotero-lit-synapse-wiki.sqlite"),
+);
 sqlite.exec("PRAGMA foreign_keys = ON");
 const store = new WikiStore(adapt(sqlite));
 await store.initialize();
@@ -233,10 +235,17 @@ assert.ok(
 const gradientClaimText =
   "A higher thermal gradient suppresses interface instability.";
 const gradientClaimHash = await hashWikiText(gradientClaimText);
+const queryVectorIdentity = {
+  model: "embedding-model-a",
+  apiBase: "http://embedding-test.invalid/v1",
+  provider: "openai",
+  dimensions: 2,
+};
 await store.saveClaimEmbedding({
   claimId: committed.refs["claim:gradient"],
   vector: new Float32Array([1, 0]),
   model: "embedding-model-a",
+  identity: queryVectorIdentity,
   textHash: gradientClaimHash,
 });
 
@@ -246,6 +255,7 @@ async function embeddingOnlySearch() {
     query: "orthogonal vector-only lookup",
     queryVector: new Float32Array([1, 0]),
     queryVectorModel: "embedding-model-a",
+    queryVectorIdentity,
     minScore: 0.9,
     limit: 20,
   });

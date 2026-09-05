@@ -643,7 +643,7 @@ async function renderWikiPanelContent(
   const [pages, status, snapshot, conceptList] = await Promise.all([
     store.listPages(libraryID),
     store.getStatus(libraryID),
-    store.getRetrievalSnapshot(libraryID),
+    store.getRetrievalSnapshot(libraryID, { includeEmbeddings: false }),
     service.listConcepts(libraryID),
   ]);
   const conceptEntities = new Map(

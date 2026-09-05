@@ -126,6 +126,15 @@ export default {
 
   test: {
     waitForPlugin: `() => Zotero.${pkg.config.addonInstance}.data.initialized`,
+    prefs: {
+      [`extensions.zotero.${pkg.config.prefsPrefix}.firstInstallPromptShown`]: true,
+      [`${pkg.config.prefsPrefix}.mcp.server.enabled`]: true,
+      [`${pkg.config.prefsPrefix}.mcp.server.port`]: 23121,
+      [`${pkg.config.prefsPrefix}.semantic.autoUpdate`]: false,
+      [`${pkg.config.prefsPrefix}.embedding.apiBase`]: "http://127.0.0.1:23125/audit/v1",
+      [`${pkg.config.prefsPrefix}.embedding.model`]: "audit",
+      [`${pkg.config.prefsPrefix}.embedding.dimensions`]: "2",
+    },
   },
 
   // If you need to see a more detailed log, uncomment the following line:

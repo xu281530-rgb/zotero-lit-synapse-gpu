@@ -587,10 +587,13 @@ const gpuHit = (itemKey, chunkId, score) => ({
 
 // ============ 3. Service: validation and wiring ============
 
+const SOURCE_IDENTITY = { model: "fixture", apiBase: "https://fixture.invalid/v1", provider: "openai", dimensions: 2 };
+
 function fakeService({ itemVectors, matches, gpu = false }) {
   const service = Object.create(SemanticSearchService.prototype);
   const seen = {};
   service.initialize = async () => {};
+  service.embeddingService = { getConfigurationIdentity: () => SOURCE_IDENTITY };
   service.vectorStore = {
     isGpuSearchEnabled: () => gpu,
     getItemVectors: async (itemKey) => itemVectors.get(itemKey) ?? [],
@@ -611,6 +614,7 @@ const SRC_VECTORS = Array.from({ length: 6 }, (_, chunkId) => ({
   chunkId,
   vector: new Float32Array([Math.cos(chunkId), Math.sin(chunkId)]),
   language: "en",
+  identity: SOURCE_IDENTITY,
 }));
 
 // Happy path: query vectors come from the stored chunks (no embedding call),

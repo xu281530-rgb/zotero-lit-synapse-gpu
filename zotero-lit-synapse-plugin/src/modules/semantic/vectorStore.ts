@@ -15,6 +15,8 @@ import {
   type KeywordIndexReport,
 } from "../keyword/keywordIndexStore";
 import { bodyIndexStateFromSourceKind } from './bodyIndexState';
+import type { EmbeddingIdentity } from './embeddingService';
+import { embeddingSpaceKey, parseEmbeddingIdentity, serializeEmbeddingIdentity } from './embeddingIdentity';
 import {
   VectorDimensionMismatchError,
   isVectorDimensionMismatchError,
@@ -93,6 +95,7 @@ export interface VectorRecord {
   vector: Float32Array;
   language: 'zh' | 'en';
   chunkText: string;
+  identity?: EmbeddingIdentity;
   metadata?: Record<string, any>;
 }
 
@@ -115,6 +118,8 @@ export interface SearchResult {
 }
 
 export interface VectorSearchOptions {
+  /** Required for production retrieval; omitted only by local scan benchmarks. */
+  identity?: EmbeddingIdentity;
   topK?: number;
   /** Aggregate chunks by document and optionally cap distinct documents. */
   groupByItem?: boolean;
@@ -160,6 +165,7 @@ export interface MultiQueryDocumentMatch {
 }
 
 export interface MultiQuerySearchOptions {
+  identity?: EmbeddingIdentity;
   /** How many chunks to keep per document PER query vector. */
   chunksPerQuery?: number;
   language?: 'zh' | 'en' | 'all';
@@ -437,6 +443,7 @@ export class VectorStore {
   private dbPath: string = '';
   private db: any = null;
   private initialized: boolean = false;
+  private activeEmbeddingWrites = 0;
   private initPromise: Promise<void> | null = null;
 
   // In-memory cache for frequently accessed vectors
@@ -931,6 +938,22 @@ export class VectorStore {
       // Column already exists.
     }
 
+    await this.initializeDocumentRevisions();
+
+    for (const column of ['embedding_identity TEXT', 'embedding_space TEXT']) {
+      try {
+        await this.db.queryAsync(`ALTER TABLE embeddings ADD COLUMN ${column}`);
+      } catch (error) {
+        if (!/duplicate column/i.test(String(error))) throw error;
+      }
+    }
+    await this.db.queryAsync('CREATE INDEX IF NOT EXISTS idx_embeddings_space ON embeddings(embedding_space)');
+    await this.db.queryAsync('CREATE TABLE IF NOT EXISTS embedding_revision_state (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL)');
+    await this.db.queryAsync('INSERT OR IGNORE INTO embedding_revision_state(id, revision) VALUES (1, 0)');
+    for (const operation of ['INSERT', 'UPDATE', 'DELETE']) {
+      await this.db.queryAsync(`CREATE TRIGGER IF NOT EXISTS embedding_revision_${operation.toLowerCase()} AFTER ${operation} ON embeddings BEGIN UPDATE embedding_revision_state SET revision = revision + 1 WHERE id = 1; END`);
+    }
+
     // Migration: Add Int8 quantized vector columns for optimized search
     // vector_int8: Int8 quantized vector data (1 byte per dimension vs 4 bytes)
     // vector_scale: Scale factor for dequantization
@@ -1103,9 +1126,9 @@ export class VectorStore {
     // Encode Int8 data as base64 string for reliable SQLite storage
     const int8Base64 = this.int8ArrayToBase64(quantized.int8Data);
 
-    await this.db.executeTransaction(async () => {
+    await this.mutateEmbeddings(async () => {
       // Write int8 + metadata to embeddings (vector column = empty blob placeholder)
-      await this.db.queryAsync(`INSERT OR REPLACE INTO embeddings (item_key, chunk_id, vector, language, chunk_text, dimensions, vector_int8, vector_scale, vector_norm) VALUES (?, ?, x'', ?, ?, ?, ?, ?, ?)`, [
+      await this.db.queryAsync(`INSERT INTO embeddings (item_key, chunk_id, vector, language, chunk_text, dimensions, vector_int8, vector_scale, vector_norm, embedding_identity, embedding_space, chunk_chars) VALUES (?, ?, x'', ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(item_key, chunk_id) DO UPDATE SET vector = excluded.vector, language = excluded.language, chunk_text = excluded.chunk_text, dimensions = excluded.dimensions, vector_int8 = excluded.vector_int8, vector_scale = excluded.vector_scale, vector_norm = excluded.vector_norm, embedding_identity = excluded.embedding_identity, embedding_space = excluded.embedding_space, chunk_chars = excluded.chunk_chars`, [
         storageKey,
         record.chunkId,
         record.language,
@@ -1113,7 +1136,10 @@ export class VectorStore {
         record.vector.length,
         int8Base64,
         quantized.scale,
-        quantized.norm
+        quantized.norm,
+        serializeEmbeddingIdentity(record.identity, record.vector.length),
+        embeddingSpaceKey(record.identity),
+        (record.chunkText || '').length,
       ]);
 
       // Write float32 vector to separate table
@@ -1122,16 +1148,11 @@ export class VectorStore {
         record.chunkId,
         vectorBlob
       ]);
-    });
+    }, [{ kind: 'itemChanged', libraryID: record.libraryID ?? Zotero.Libraries.userLibraryID, itemKey: record.itemKey }]);
 
     // Update cache
     const cacheKey = `${storageKey}_${record.chunkId}`;
     this.updateCache(cacheKey, record.vector);
-    await this.publishGpuMutation({
-      kind: 'itemChanged',
-      libraryID: record.libraryID ?? Zotero.Libraries.userLibraryID,
-      itemKey: record.itemKey,
-    });
   }
 
   /**
@@ -1143,7 +1164,12 @@ export class VectorStore {
 
     await this.ensureInitialized();
 
-    await this.db.executeTransaction(async () => {
+    const changedItems = new Map<string, GpuVectorIdentity>();
+    for (const record of records) {
+      const identity = { libraryID: record.libraryID ?? Zotero.Libraries.userLibraryID, itemKey: record.itemKey };
+      changedItems.set(`${identity.libraryID}:${identity.itemKey}`, identity);
+    }
+    await this.mutateEmbeddings(async () => {
       for (const record of records) {
         const storageKey = this.toStorageKey(record.itemKey, record.libraryID);
         const vectorBlob = this.float32ArrayToBuffer(record.vector);
@@ -1154,7 +1180,7 @@ export class VectorStore {
         const int8Base64 = this.int8ArrayToBase64(quantized.int8Data);
 
         // Write int8 + metadata to embeddings (vector column = empty blob placeholder)
-        await this.db.queryAsync(`INSERT OR REPLACE INTO embeddings (item_key, chunk_id, vector, language, chunk_text, dimensions, vector_int8, vector_scale, vector_norm) VALUES (?, ?, x'', ?, ?, ?, ?, ?, ?)`, [
+        await this.db.queryAsync(`INSERT INTO embeddings (item_key, chunk_id, vector, language, chunk_text, dimensions, vector_int8, vector_scale, vector_norm, embedding_identity, embedding_space, chunk_chars) VALUES (?, ?, x'', ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(item_key, chunk_id) DO UPDATE SET vector = excluded.vector, language = excluded.language, chunk_text = excluded.chunk_text, dimensions = excluded.dimensions, vector_int8 = excluded.vector_int8, vector_scale = excluded.vector_scale, vector_norm = excluded.vector_norm, embedding_identity = excluded.embedding_identity, embedding_space = excluded.embedding_space, chunk_chars = excluded.chunk_chars`, [
           storageKey,
           record.chunkId,
           record.language,
@@ -1162,7 +1188,10 @@ export class VectorStore {
           record.vector.length,
           int8Base64,
           quantized.scale,
-          quantized.norm
+          quantized.norm,
+          serializeEmbeddingIdentity(record.identity, record.vector.length),
+          embeddingSpaceKey(record.identity),
+          (record.chunkText || '').length,
         ]);
 
         // Write float32 vector to separate table
@@ -1172,20 +1201,9 @@ export class VectorStore {
           vectorBlob
         ]);
       }
-    });
+    }, Array.from(changedItems.values(), (identity) => ({ kind: 'itemChanged', ...identity })));
 
     ztoolkit.log(`[VectorStore] Inserted ${records.length} vectors with Int8 quantization`);
-    const changedItems = new Map<string, GpuVectorIdentity>();
-    for (const record of records) {
-      const identity = {
-        libraryID: record.libraryID ?? Zotero.Libraries.userLibraryID,
-        itemKey: record.itemKey,
-      };
-      changedItems.set(`${identity.libraryID}:${identity.itemKey}`, identity);
-    }
-    for (const identity of changedItems.values()) {
-      await this.publishGpuMutation({ kind: 'itemChanged', ...identity });
-    }
   }
 
   async replaceItemIndex(options: {
@@ -1203,16 +1221,23 @@ export class VectorStore {
     await this.ensureInitialized();
     const storageKey = this.toStorageKey(options.itemKey, options.libraryID);
 
-    await this.db.executeTransaction(async () => {
-      await this.db.queryAsync(`DELETE FROM embeddings WHERE item_key = ?`, [storageKey]);
-      await this.db.queryAsync(`DELETE FROM vectors_f32 WHERE item_key = ?`, [storageKey]);
+    await this.mutateEmbeddings(async () => {
+      const survivingIds = new Set(options.records.map((record) => record.chunkId));
+      const previous = await this.db.queryAsync('SELECT chunk_id FROM embeddings WHERE item_key = ?', [storageKey]);
+      const removed = previous.filter((row: any) => !survivingIds.has(row.chunk_id)).map((row: any) => row.chunk_id);
+      for (let offset = 0; offset < removed.length; offset += 400) {
+        const batch = removed.slice(offset, offset + 400);
+        const placeholders = batch.map(() => '?').join(',');
+        await this.db.queryAsync(`DELETE FROM embeddings WHERE item_key = ? AND chunk_id IN (${placeholders})`, [storageKey, ...batch]);
+        await this.db.queryAsync(`DELETE FROM vectors_f32 WHERE item_key = ? AND chunk_id IN (${placeholders})`, [storageKey, ...batch]);
+      }
 
       for (const record of options.records) {
         const vectorBlob = this.float32ArrayToBuffer(record.vector);
         const quantized = this.quantizeWithNorm(record.vector);
         const int8Base64 = this.int8ArrayToBase64(quantized.int8Data);
         await this.db.queryAsync(
-          `INSERT OR REPLACE INTO embeddings (item_key, chunk_id, vector, language, chunk_text, dimensions, vector_int8, vector_scale, vector_norm) VALUES (?, ?, x'', ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO embeddings (item_key, chunk_id, vector, language, chunk_text, dimensions, vector_int8, vector_scale, vector_norm, embedding_identity, embedding_space, chunk_chars) VALUES (?, ?, x'', ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(item_key, chunk_id) DO UPDATE SET vector = excluded.vector, language = excluded.language, chunk_text = excluded.chunk_text, dimensions = excluded.dimensions, vector_int8 = excluded.vector_int8, vector_scale = excluded.vector_scale, vector_norm = excluded.vector_norm, embedding_identity = excluded.embedding_identity, embedding_space = excluded.embedding_space, chunk_chars = excluded.chunk_chars`,
           [
             storageKey,
             record.chunkId,
@@ -1222,6 +1247,9 @@ export class VectorStore {
             int8Base64,
             quantized.scale,
             quantized.norm,
+            serializeEmbeddingIdentity(record.identity, record.vector.length),
+            embeddingSpaceKey(record.identity),
+            (record.chunkText || '').length,
           ],
         );
         await this.db.queryAsync(
@@ -1231,7 +1259,7 @@ export class VectorStore {
       }
 
       await this.db.queryAsync(
-        `INSERT OR REPLACE INTO index_status (item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified, content_length, source_kind, body_retry_signature) VALUES (?, strftime('%s', 'now'), 2, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO index_status (item_key, indexed_at, version, chunk_count, content_hash, item_modified, attachment_modified, content_length, source_kind, body_retry_signature) VALUES (?, strftime('%s', 'now'), 2, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(item_key) DO UPDATE SET indexed_at = excluded.indexed_at, version = excluded.version, chunk_count = excluded.chunk_count, content_hash = excluded.content_hash, item_modified = excluded.item_modified, attachment_modified = excluded.attachment_modified, content_length = excluded.content_length, source_kind = excluded.source_kind, body_retry_signature = excluded.body_retry_signature`,
         [
           storageKey,
           options.records.length,
@@ -1243,7 +1271,7 @@ export class VectorStore {
           options.bodyRetrySignature ?? null,
         ],
       );
-    });
+    }, [{ kind: 'itemChanged', itemKey: options.itemKey, libraryID: options.libraryID }]);
 
     for (const key of this.vectorCache.keys()) {
       if (key.startsWith(`${storageKey}_`)) this.vectorCache.delete(key);
@@ -1251,11 +1279,78 @@ export class VectorStore {
     for (const record of options.records) {
       this.updateCache(`${storageKey}_${record.chunkId}`, record.vector);
     }
-    await this.publishGpuMutation({
-      kind: 'itemChanged',
-      libraryID: options.libraryID,
-      itemKey: options.itemKey,
-    });
+  }
+
+  private async mutateEmbeddings(write: () => Promise<void>, mutations: GpuVectorMutation[]): Promise<void> {
+    this.activeEmbeddingWrites++;
+    try {
+      await this.db.executeTransaction(write);
+      for (const mutation of mutations) await this.publishGpuMutation(mutation);
+    } finally {
+      this.activeEmbeddingWrites--;
+    }
+  }
+
+  async hasCompatibleItemEmbeddingConfiguration(
+    itemKey: string,
+    libraryID: number,
+    configuration: Omit<EmbeddingIdentity, 'dimensions'> & { dimensions?: number },
+  ): Promise<boolean> {
+    await this.ensureInitialized();
+    const rows = await this.db.queryAsync(
+      'SELECT DISTINCT embedding_space, dimensions FROM embeddings WHERE item_key = ?',
+      [this.toStorageKey(itemKey, libraryID)],
+    );
+    return rows.length > 0 && rows.every((row: any) => row.embedding_space &&
+      row.embedding_space === embeddingSpaceKey({ ...configuration, dimensions: Number(row.dimensions) }));
+  }
+
+  private async withEmbeddingIdentityCheck<T>(
+    queryVectors: Float32Array[],
+    options: VectorSearchOptions | MultiQuerySearchOptions,
+    scan: () => Promise<T>,
+  ): Promise<T> {
+    // Benchmarks deliberately use stored vectors without claiming an API identity.
+    if (!options.identity || queryVectors.length === 0) return scan();
+    await this.ensureInitialized();
+    this.throwIfVectorScanCancelled(options.signal, options.deadlineAt);
+    for (const query of queryVectors) serializeEmbeddingIdentity(options.identity, query.length);
+    if (this.activeEmbeddingWrites) throw new Error('The vector index is updating; retry after embedding identity synchronization completes.');
+    const revision = await this.db.valueQueryAsync('SELECT revision FROM embedding_revision_state WHERE id = 1');
+    const libraryID = options.libraryID ?? Zotero.Libraries.userLibraryID;
+    const conditions: string[] = [];
+    const params: any[] = [];
+    if (options.itemKeys !== undefined) {
+      if (options.itemKeys.length === 0) return scan();
+      conditions.push(`item_key IN (${options.itemKeys.map(() => '?').join(',')})`);
+      params.push(...options.itemKeys.map((key) => this.toStorageKey(key, libraryID)));
+    } else if ('allLibraries' in options && options.allLibraries) {
+      // The benchmark can explicitly span libraries.
+    } else if (libraryID === Zotero.Libraries.userLibraryID) {
+      conditions.push("item_key NOT GLOB '[0-9]*:*'");
+    } else {
+      conditions.push('item_key GLOB ?');
+      params.push(`${libraryID}:*`);
+    }
+    if (options.language && options.language !== 'all') {
+      conditions.push('language = ?');
+      params.push(options.language);
+    }
+    conditions.push('(embedding_space IS NULL OR embedding_space != ?)');
+    params.push(embeddingSpaceKey(options.identity));
+    const incompatible = await this.queryRowsCancellable(
+      `SELECT item_key FROM embeddings WHERE ${conditions.join(' AND ')} LIMIT 1`,
+      params, options.signal, options.deadlineAt, (row: any) => String(row.item_key),
+    );
+    if (incompatible.length) {
+      throw new Error('The semantic index contains vectors with unknown or incompatible generating identity. Rebuild the affected documents with the current embedding service and model before semantic retrieval.');
+    }
+    const result = await scan();
+    const after = await this.db.valueQueryAsync('SELECT revision FROM embedding_revision_state WHERE id = 1');
+    if (this.activeEmbeddingWrites || after !== revision) {
+      throw new Error('The vector index changed during retrieval. Retry so every result uses a consistent embedding identity.');
+    }
+    return result;
   }
 
   /**
@@ -1381,6 +1476,14 @@ export class VectorStore {
     queryVector: Float32Array,
     options: VectorSearchOptions = {},
   ): Promise<SearchResult[]> {
+    return this.withEmbeddingIdentityCheck([queryVector], options,
+      () => this.searchUnchecked(queryVector, options));
+  }
+
+  private async searchUnchecked(
+    queryVector: Float32Array,
+    options: VectorSearchOptions,
+  ): Promise<SearchResult[]> {
     if (!this.gpuBackend.isEnabled()) {
       return this.searchCpu(
         queryVector,
@@ -1477,6 +1580,11 @@ export class VectorStore {
     // Build query conditions
     const conditions: string[] = ['1=1'];
     const params: any[] = [];
+
+    if (options.identity) {
+      conditions.push('embedding_space = ?');
+      params.push(embeddingSpaceKey(options.identity));
+    }
 
     if (language !== 'all') {
       conditions.push('language = ?');
@@ -1871,6 +1979,14 @@ export class VectorStore {
     queryVectors: Float32Array[],
     options: MultiQuerySearchOptions = {},
   ): Promise<MultiQueryDocumentMatch[]> {
+    return this.withEmbeddingIdentityCheck(queryVectors, options,
+      () => this.searchMultiQueryUnchecked(queryVectors, options));
+  }
+
+  private async searchMultiQueryUnchecked(
+    queryVectors: Float32Array[],
+    options: MultiQuerySearchOptions,
+  ): Promise<MultiQueryDocumentMatch[]> {
     if (queryVectors.length === 0) return [];
     if (options.itemKeys !== undefined && options.itemKeys.length === 0) {
       return [];
@@ -2014,6 +2130,10 @@ export class VectorStore {
 
     const conditions: string[] = ['1=1'];
     const params: any[] = [];
+    if (options.identity) {
+      conditions.push('embedding_space = ?');
+      params.push(embeddingSpaceKey(options.identity));
+    }
     if (language !== 'all') {
       conditions.push('language = ?');
       params.push(language);
@@ -2823,7 +2943,7 @@ export class VectorStore {
     // part of what a rollback undoes.
     const keywordStore = this.getKeywordIndexStore();
     await keywordStore.ensureSchema();
-    await this.db.executeTransaction(async () => {
+    await this.mutateEmbeddings(async () => {
       await this.db.queryAsync(
         `DELETE FROM embeddings WHERE ${scope.clause}`,
         scope.params,
@@ -2849,13 +2969,12 @@ export class VectorStore {
         `UPDATE index_builds SET reset_completed = 1 WHERE build_id = ?`,
         [buildID],
       );
-    });
+    }, [{ kind: 'libraryCleared', libraryID }]);
 
     for (const key of this.vectorCache.keys()) {
       const identity = this.fromStorageKey(key.slice(0, key.lastIndexOf('_')));
       if (identity.libraryID === libraryID) this.vectorCache.delete(key);
     }
-    await this.publishGpuMutation({ kind: 'libraryCleared', libraryID });
   }
 
   /**
@@ -3074,7 +3193,7 @@ export class VectorStore {
     // Schema creation is idempotent DDL and deliberately precedes the business
     // transaction, matching clearLibraryForBuild.
     await keywordStore.ensureSchema();
-    await this.db.executeTransaction(async () => {
+    await this.mutateEmbeddings(async () => {
       await this.db.queryAsync(
         `DELETE FROM embeddings WHERE item_key = ?`,
         [storageKey]
@@ -3096,7 +3215,7 @@ export class VectorStore {
         [effectiveLibraryID, itemKey],
       );
       await keywordStore.removeItem(effectiveLibraryID, itemKey);
-    });
+    }, [{ kind: 'itemsDeleted', items: [{ libraryID: effectiveLibraryID, itemKey }] }]);
 
     // Clear cache entries
     for (const key of this.vectorCache.keys()) {
@@ -3106,15 +3225,6 @@ export class VectorStore {
     }
 
     ztoolkit.log(`[VectorStore] Deleted vectors for item: ${itemKey}`);
-    await this.publishGpuMutation({
-      kind: 'itemsDeleted',
-      items: [
-        {
-          libraryID: effectiveLibraryID,
-          itemKey,
-        },
-      ],
-    });
   }
 
   /**
@@ -3139,7 +3249,7 @@ export class VectorStore {
     await keywordStore.ensureSchema();
 
     const batchSize = 500;
-    await this.db.executeTransaction(async () => {
+    await this.mutateEmbeddings(async () => {
       for (let offset = 0; offset < storageKeys.length; offset += batchSize) {
         const batch = storageKeys.slice(offset, offset + batchSize);
         const placeholders = batch.map(() => '?').join(',');
@@ -3170,7 +3280,7 @@ export class VectorStore {
           identity.itemKey,
         );
       }
-    });
+    }, [{ kind: 'itemsDeleted', items: identities }]);
 
     for (const key of this.vectorCache.keys()) {
       if (storageKeys.some((storageKey) => key.startsWith(`${storageKey}_`))) {
@@ -3181,10 +3291,6 @@ export class VectorStore {
     ztoolkit.log(
       `[VectorStore] Deleted vectors for ${storageKeys.length} targeted items`,
     );
-    await this.publishGpuMutation({
-      kind: 'itemsDeleted',
-      items: identities,
-    });
   }
 
   /**
@@ -3254,7 +3360,7 @@ export class VectorStore {
 
     const keywordStore = this.getKeywordIndexStore();
     await keywordStore.ensureSchema();
-    await this.db.executeTransaction(async () => {
+    await this.mutateEmbeddings(async () => {
       await this.db.queryAsync(`DELETE FROM embeddings${where}`, params);
       await this.db.queryAsync(`DELETE FROM vectors_f32${where}`, params);
       await this.db.queryAsync(`DELETE FROM index_status${where}`, params);
@@ -3294,7 +3400,7 @@ export class VectorStore {
           `Atomic index clear left rows: embeddings=${afterEmbeddings}, vectors_f32=${afterF32}, index_status=${afterIndex}, kw_docs=${afterKeywordDocuments}, kw_terms=${afterKeywordTerms}`,
         );
       }
-    });
+    }, [libraryID === undefined ? { kind: 'allCleared' } : { kind: 'libraryCleared', libraryID }]);
 
     ztoolkit.log(`[VectorStore] clear() transaction committed`);
 
@@ -3307,11 +3413,6 @@ export class VectorStore {
     } catch (vacuumError) {
       ztoolkit.log(`[VectorStore] VACUUM failed (non-critical): ${vacuumError}`, 'warn');
     }
-    await this.publishGpuMutation(
-      libraryID === undefined
-        ? { kind: 'allCleared' }
-        : { kind: 'libraryCleared', libraryID },
-    );
   }
 
   private async countSemanticBusinessRows(): Promise<SemanticBusinessCounts> {
@@ -3393,6 +3494,7 @@ export class VectorStore {
     options: SemanticDatabaseClearOptions = {},
   ): Promise<SemanticDatabaseClearReport> {
     let databaseCleared = false;
+    this.activeEmbeddingWrites++;
     try {
       await this.ensureInitialized();
 
@@ -3478,6 +3580,8 @@ export class VectorStore {
     } catch (error) {
       if (error instanceof SemanticDatabaseClearError) throw error;
       throw new SemanticDatabaseClearError(databaseCleared, error);
+    } finally {
+      this.activeEmbeddingWrites--;
     }
   }
 
@@ -3806,12 +3910,13 @@ export class VectorStore {
     chunkId: number;
     vector: Float32Array;
     language: string;
+    identity?: EmbeddingIdentity;
   }>> {
     await this.ensureInitialized();
 
     // Get dimensions and language from embeddings table
     const storageKey = this.toStorageKey(itemKey, libraryID);
-    const metaRows = await this.db.queryAsync(`SELECT chunk_id, language, dimensions, vector_int8, vector_scale FROM embeddings WHERE item_key = ? ORDER BY chunk_id`, [storageKey]);
+    const metaRows = await this.db.queryAsync(`SELECT chunk_id, language, dimensions, vector_int8, vector_scale, embedding_identity FROM embeddings WHERE item_key = ? ORDER BY chunk_id`, [storageKey]);
 
     if (!metaRows || metaRows.length === 0) {
       return [];
@@ -3828,7 +3933,7 @@ export class VectorStore {
       }
     }
 
-    const results: Array<{ chunkId: number; vector: Float32Array; language: string }> = [];
+    const results: Array<{ chunkId: number; vector: Float32Array; language: string; identity?: EmbeddingIdentity }> = [];
     for (const row of metaRows) {
       const dimensions = Number(row.dimensions);
       const vecBlob = vecMap.get(row.chunk_id);
@@ -3857,7 +3962,8 @@ export class VectorStore {
         results.push({
           chunkId: row.chunk_id,
           vector,
-          language: row.language
+          language: row.language,
+          identity: parseEmbeddingIdentity(row.embedding_identity),
         });
       }
     }
@@ -3926,6 +4032,88 @@ export class VectorStore {
       text: row.chunk_text || '',
       language: row.language,
     }));
+  }
+
+  private async initializeDocumentRevisions(): Promise<void> {
+    await this.db.executeTransaction(async () => {
+      await this.db.queryAsync(`CREATE TABLE IF NOT EXISTS document_revisions (item_key TEXT PRIMARY KEY, revision TEXT NOT NULL)`);
+      const columns = await this.db.queryAsync('PRAGMA table_info(document_revisions)');
+      const legacy = !columns.some((row: any) => row.name === 'wiki_pending');
+      for (const column of ['total_chunks INTEGER NOT NULL DEFAULT 0', 'total_chars INTEGER NOT NULL DEFAULT 0', 'wiki_pending INTEGER NOT NULL DEFAULT 1']) {
+        if (!columns.some((row: any) => row.name === column.split(' ')[0])) {
+          await this.db.queryAsync(`ALTER TABLE document_revisions ADD COLUMN ${column}`);
+        }
+      }
+      await this.db.queryAsync('CREATE INDEX IF NOT EXISTS idx_document_revisions_pending ON document_revisions(wiki_pending) WHERE wiki_pending = 1');
+      const embeddingColumns = await this.db.queryAsync('PRAGMA table_info(embeddings)');
+      if (!embeddingColumns.some((row: any) => row.name === 'chunk_chars')) {
+        await this.db.queryAsync('ALTER TABLE embeddings ADD COLUMN chunk_chars INTEGER');
+        // Backfill once; later page requests only read the maintained counters.
+        const rows = await this.db.queryAsync('SELECT id, chunk_text FROM embeddings');
+        for (const row of rows) {
+          await this.db.queryAsync('UPDATE embeddings SET chunk_chars = ? WHERE id = ?', [String(row.chunk_text || '').length, row.id]);
+        }
+      }
+      for (const name of ['insert', 'delete', 'update', 'source', 'source_insert', 'source_delete']) {
+        await this.db.queryAsync(`DROP TRIGGER IF EXISTS document_revision_${name}`);
+      }
+      await this.db.queryAsync('CREATE TABLE IF NOT EXISTS document_revision_state (id INTEGER PRIMARY KEY CHECK(id = 1), revision TEXT NOT NULL)');
+      await this.db.queryAsync('INSERT OR IGNORE INTO document_revision_state (id, revision) VALUES (1, lower(hex(randomblob(16))))');
+      const revise = (reference: string, count: string, chars: string) => `INSERT INTO document_revisions (item_key, revision, total_chunks, total_chars, wiki_pending) VALUES (${reference}.item_key, lower(hex(randomblob(16))), MAX(0, ${count}), MAX(0, ${chars}), 1) ON CONFLICT(item_key) DO UPDATE SET revision = excluded.revision, total_chunks = MAX(0, document_revisions.total_chunks + (${count})), total_chars = MAX(0, document_revisions.total_chars + (${chars})), wiki_pending = 1; UPDATE document_revision_state SET revision = lower(hex(randomblob(16))) WHERE id = 1;`;
+      const newChars = 'COALESCE(NEW.chunk_chars, length(COALESCE(NEW.chunk_text, \'\')))';
+      const oldChars = 'COALESCE(OLD.chunk_chars, length(COALESCE(OLD.chunk_text, \'\')))';
+      await this.db.queryAsync(`CREATE TRIGGER document_revision_insert AFTER INSERT ON embeddings BEGIN ${revise('NEW', '1', newChars)} END`);
+      await this.db.queryAsync(`CREATE TRIGGER document_revision_delete AFTER DELETE ON embeddings BEGIN ${revise('OLD', '-1', `-(${oldChars})`)} END`);
+      await this.db.queryAsync(`CREATE TRIGGER document_revision_update AFTER UPDATE OF chunk_text, chunk_id, item_key ON embeddings WHEN OLD.chunk_text IS NOT NEW.chunk_text OR OLD.chunk_id IS NOT NEW.chunk_id OR OLD.item_key IS NOT NEW.item_key BEGIN ${revise('OLD', '-1', `-(${oldChars})`)} ${revise('NEW', '1', newChars)} END`);
+      const sourceChange = 'OLD.content_hash IS NOT NEW.content_hash OR OLD.source_kind IS NOT NEW.source_kind OR OLD.body_retry_signature IS NOT NEW.body_retry_signature OR OLD.chunk_signature IS NOT NEW.chunk_signature';
+      await this.db.queryAsync(`CREATE TRIGGER document_revision_source AFTER UPDATE OF content_hash, source_kind, body_retry_signature, chunk_signature ON index_status WHEN ${sourceChange} BEGIN ${revise('NEW', '0', '0')} END`);
+      await this.db.queryAsync(`CREATE TRIGGER document_revision_source_insert AFTER INSERT ON index_status BEGIN ${revise('NEW', '0', '0')} END`);
+      await this.db.queryAsync(`CREATE TRIGGER document_revision_source_delete AFTER DELETE ON index_status BEGIN ${revise('OLD', '0', '0')} END`);
+      if (legacy) {
+        await this.db.queryAsync(`INSERT OR IGNORE INTO document_revisions (item_key, revision) SELECT item_key, lower(hex(randomblob(16))) FROM embeddings GROUP BY item_key`);
+        await this.db.queryAsync(`UPDATE document_revisions SET total_chunks = (SELECT COUNT(*) FROM embeddings e WHERE e.item_key = document_revisions.item_key), total_chars = COALESCE((SELECT SUM(COALESCE(chunk_chars, length(COALESCE(chunk_text, '')))) FROM embeddings e WHERE e.item_key = document_revisions.item_key), 0), wiki_pending = 1`);
+      }
+    });
+  }
+
+  async listPendingWikiSourceChanges(): Promise<Array<{ libraryID: number; itemKey: string; revision: string }>> {
+    await this.ensureInitialized();
+    const rows = await this.db.queryAsync('SELECT item_key, revision FROM document_revisions WHERE wiki_pending = 1');
+    return rows.map((row: any) => ({ ...this.fromStorageKey(String(row.item_key)), revision: String(row.revision) }));
+  }
+
+  async getWikiSourceRevision(): Promise<string> {
+    await this.ensureInitialized();
+    return String(await this.db.valueQueryAsync('SELECT revision FROM document_revision_state WHERE id = 1'));
+  }
+
+  async acknowledgeWikiSourceChange(change: { libraryID: number; itemKey: string; revision: string }): Promise<void> {
+    await this.ensureInitialized();
+    await this.db.queryAsync('UPDATE document_revisions SET wiki_pending = 0 WHERE item_key = ? AND revision = ?', [this.toStorageKey(change.itemKey, change.libraryID), change.revision]);
+  }
+
+  async getDocumentRevision(itemKey: string, libraryID?: number): Promise<string> {
+    await this.ensureInitialized();
+    const storageKey = this.toStorageKey(itemKey, libraryID);
+    const revision = await this.db.valueQueryAsync('SELECT revision FROM document_revisions WHERE item_key = ?', [storageKey]);
+    return JSON.stringify([storageKey, revision || 'missing']);
+  }
+
+  async getDocumentChunkPage(itemKey: string, libraryID: number, offset: number, limit: number): Promise<{
+    chunks: Array<{ chunkId: number; text: string; language: string }>;
+    totalChunks: number;
+    totalChars: number;
+    revision: string;
+  }> {
+    await this.ensureInitialized();
+    const revision = await this.getDocumentRevision(itemKey, libraryID);
+    const key = this.toStorageKey(itemKey, libraryID);
+    const totals = await this.db.queryAsync('SELECT total_chunks, total_chars FROM document_revisions WHERE item_key = ?', [key]);
+    const totalChunks = Number(totals[0]?.total_chunks || 0);
+    const totalChars = Number(totals[0]?.total_chars || 0);
+    const rows = await this.db.queryAsync('SELECT chunk_id, chunk_text, language FROM embeddings WHERE item_key = ? ORDER BY chunk_id LIMIT ? OFFSET ?', [key, limit, Math.min(offset, totalChunks)]);
+    if (revision !== await this.getDocumentRevision(itemKey, libraryID)) throw new Error('The document changed while reading this page. Restart without the cursor.');
+    return { revision, totalChunks, totalChars, chunks: rows.map((row: any) => ({ chunkId: Number(row.chunk_id), text: String(row.chunk_text || ''), language: row.language })) };
   }
 
   // ============ Utility Methods ============

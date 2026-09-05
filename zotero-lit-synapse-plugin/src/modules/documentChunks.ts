@@ -23,6 +23,17 @@
 
 // The leaf module, not the ./semantic barrel — see toolCatalog.ts.
 import type { FullTextAvailability } from "./semantic/bodyIndexState";
+import { hashExactText } from "./wiki/wikiCanonicalizer";
+
+export async function documentChunkRevision(chunks: Array<{ chunkId: number; text: string }>): Promise<string> {
+  return hashExactText(JSON.stringify(chunks.map((chunk) => [chunk.chunkId, chunk.text])));
+}
+
+export function assertChunkRevision(expected: string | undefined, actual: string): void {
+  if (expected !== actual) {
+    throw new DocumentChunksError("The document changed or this reading bookmark predates version checks. Start again without the cursor to verify the current text; old reading progress is not proof of reading this version.");
+  }
+}
 
 /** Chunks per page when the caller does not say. */
 export const DEFAULT_DOCUMENT_CHUNKS_PER_PAGE = 8;
@@ -64,6 +75,12 @@ export interface DocumentChunksRequest {
 }
 
 export interface DocumentChunksDeps {
+  getPage?(itemKey: string, libraryID: number, offset: number, limit: number): Promise<{
+    chunks: Array<{ chunkId: number; text: string; language?: string }>;
+    totalChunks: number;
+    totalChars?: number;
+    revision: string;
+  }>;
   /** Every stored chunk of this document, already in chunk_id order. */
   getChunks(
     itemKey: string,
@@ -90,6 +107,7 @@ interface ChunkCursor {
   l: number;
   o: number;
   s: number;
+  r?: string;
 }
 
 /**
@@ -98,10 +116,9 @@ interface ChunkCursor {
  * Stateless on purpose, and this is the one place this plugin's two paging
  * styles genuinely differ. A ranked search has to snapshot its ranking, because
  * re-running retrieval for page 2 can reorder page 1's documents underneath the
- * caller. Reading order cannot reorder: chunk 9 follows chunk 8 today and in an
- * hour. So this cursor carries only "where I was", never expires, and survives
- * a Zotero restart — which is what a caller reading a long paper across several
- * turns actually needs.
+ * caller. Reading bookmarks survive a Zotero restart, but their content revision
+ * must still match: a rebuilt index can change passages without changing their
+ * count. In that case the caller must restart against the current text.
  */
 export function encodeChunkCursor(cursor: ChunkCursor): string {
   const json = JSON.stringify(cursor);
@@ -139,7 +156,11 @@ export function decodeChunkCursor(raw: string): ChunkCursor {
     !parsed.k ||
     typeof parsed.l !== "number" ||
     typeof parsed.o !== "number" ||
-    typeof parsed.s !== "number"
+    typeof parsed.s !== "number" ||
+    !Number.isInteger(parsed.l) || parsed.l <= 0 ||
+    !Number.isInteger(parsed.o) || parsed.o < 0 ||
+    !Number.isInteger(parsed.s) || parsed.s < 1 || parsed.s > MAX_DOCUMENT_CHUNKS_PER_PAGE ||
+    (parsed.r !== undefined && typeof parsed.r !== "string")
   ) {
     throw new DocumentChunksError(
       "cursor is not a valid get_document_chunks cursor. Pass nextCursor back exactly as it was returned, or start again with itemKey.",
@@ -198,9 +219,14 @@ export async function readDocumentChunks(
   let offset = 0;
   let pageSize = resolvePageSize(request.limit);
   let servedFromCursor = false;
+  let cursorRevision: string | undefined;
 
   if (typeof request.cursor === "string" && request.cursor.trim()) {
     const cursor = decodeChunkCursor(request.cursor.trim());
+    if (request.libraryID !== undefined && request.libraryID !== cursor.l) {
+      throw new DocumentChunksError("cursor and libraryID refer to different libraries. Drop the cursor to start a new reading.");
+    }
+    cursorRevision = cursor.r;
     // A cursor names the document it continues. A caller that sends a cursor
     // AND a different itemKey has asked two questions at once; answering the
     // cursor's would silently ignore the one they wrote out in full.
@@ -226,8 +252,15 @@ export async function readDocumentChunks(
   const refusal = refusalFor(availability, itemKey);
   if (refusal) throw new DocumentChunksError(refusal);
 
-  const chunks = await deps.getChunks(itemKey, libraryID);
-  const totalChunks = chunks.length;
+  if (!servedFromCursor) {
+    const requested = Number(request.offset);
+    offset = Number.isFinite(requested) && requested > 0 ? Math.floor(requested) : 0;
+  }
+  const storedPage = await deps.getPage?.(itemKey, libraryID, offset, pageSize);
+  const chunks = storedPage ? storedPage.chunks : await deps.getChunks(itemKey, libraryID);
+  const totalChunks = storedPage ? storedPage.totalChunks : chunks.length;
+  const revision = storedPage ? storedPage.revision : await documentChunkRevision(chunks);
+  if (servedFromCursor) assertChunkRevision(cursorRevision, revision);
   if (totalChunks === 0) {
     throw new DocumentChunksError(
       `${itemKey} has no stored chunks, even though the index recorded it as "${availability}". The index is likely stale for this document; rebuild or refresh it in the plugin preferences.`,
@@ -241,7 +274,7 @@ export async function readDocumentChunks(
   }
   offset = Math.min(offset, totalChunks);
 
-  const page = chunks.slice(offset, offset + pageSize);
+  const page = storedPage ? chunks : chunks.slice(offset, offset + pageSize);
   const rows: DocumentChunkRow[] = page.map((chunk, index) => ({
     chunkIndex: offset + index,
     chunkId: chunk.chunkId,
@@ -280,6 +313,7 @@ export async function readDocumentChunks(
               l: libraryID,
               o: end,
               s: pageSize,
+              r: revision,
             }),
           }
         : {}),
@@ -288,7 +322,9 @@ export async function readDocumentChunks(
     data: rows,
     metadata: {
       extractedAt: new Date().toISOString(),
-      totalChars: chunks.reduce((sum, chunk) => sum + chunk.text.length, 0),
+      ...(storedPage
+        ? (storedPage.totalChars === undefined ? {} : { totalChars: storedPage.totalChars })
+        : { totalChars: chunks.reduce((sum, chunk) => sum + chunk.text.length, 0) }),
       returnedChars: rows.reduce((sum, row) => sum + row.chars, 0),
       nextStep: hasMore
         ? `You have read chunks ${range} of ${totalChunks}. Continue with cursor set to pagination.nextCursor and nothing else changed. Stop as soon as the text stops answering the question — a long paper is many pages, and reading all of them by reflex is what this paging exists to prevent. To search inside this document instead of reading on, call search_fulltext with itemKey "${itemKey}". To pull the passages around a specific chunk, pass its chunkId (not its chunkIndex) to search_fulltext's chunkIds.`

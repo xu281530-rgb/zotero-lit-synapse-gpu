@@ -21,7 +21,15 @@ export function floatVector(
 ): Float32Array | null {
   if (!Number.isInteger(dimensions) || dimensions <= 0) return null;
   const expectedBytes = dimensions * Float32Array.BYTES_PER_ELEMENT;
-  if (blob instanceof Uint8Array) {
+  if (Array.isArray(blob)) {
+    if (blob.length !== expectedBytes) return null;
+    // mozStorage exposes BLOBs as byte arrays in Zotero, unlike Node SQLite.
+    for (const byte of blob) {
+      if (!Number.isInteger(byte) || byte < 0 || byte > 255) return null;
+    }
+    return new Float32Array(Uint8Array.from(blob).buffer);
+  }
+  if (ArrayBuffer.isView(blob)) {
     if (blob.byteLength !== expectedBytes) return null;
     return new Float32Array(
       blob.buffer.slice(blob.byteOffset, blob.byteOffset + blob.byteLength),
@@ -29,11 +37,14 @@ export function floatVector(
       dimensions,
     );
   }
-  if (blob instanceof ArrayBuffer) {
-    if (blob.byteLength !== expectedBytes) return null;
-    return new Float32Array(blob, 0, dimensions);
+  try {
+    // This brand check also accepts an ArrayBuffer from another Zotero window.
+    const buffer = ArrayBuffer.prototype.slice.call(blob, 0);
+    if (buffer.byteLength !== expectedBytes) return null;
+    return new Float32Array(buffer, 0, dimensions);
+  } catch {
+    return null;
   }
-  return null;
 }
 
 /** Cosine similarity, clamped to [0, 1]. Zero for anything incomparable. */

@@ -199,6 +199,8 @@ export type WikiCommitAction =
 export interface WikiCommitInput {
   libraryID: number;
   userInitiated: boolean;
+  operationId?: string;
+  resume?: boolean;
   /** Required by WikiService when CREATE_PAGE is present. */
   prepareToken?: string;
   /**

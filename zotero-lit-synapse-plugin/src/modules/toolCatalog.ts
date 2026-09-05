@@ -140,7 +140,7 @@ export function buildToolCatalog(): ToolDefinition[] {
       '',
       'CONSEQUENCE FOR HOW YOU READ THE ROWS: `score` is that RRF value. It is a POSITION, not a relevance - it is a small number (a document first in both branches lands near 0.033 at the default k=60) and comparing it against 0.6, or against a score from another search, or against a score from keyword_search or semantic_search, is meaningless. When you need to know how relevant a document actually is, read normalizedKeywordScore and normalizedSemanticScore, which are real 0-1 relevances on their own branch scale and are exactly what the thresholds were applied to. A MISSING one means that branch did not admit the document - not that it scored zero, and not that the document is weak. Do not re-sort the list by anything else: re-sorting a rank fusion undoes the fusion. And at most the user-configured number of documents is returned, which is an upper bound and NOT a target: a weakly related paper is never added to make the list longer.',
       '',
-      'THERE IS A THIRD ROUTE, AND WHETHER IT IS RUNNING IS A USER SETTING. Besides keyword and semantic there is a Wiki route, which retrieves documents through Claims the Wiki already holds. It is OFF by default - shipped at weight 0 in shadow mode, where it is measured and changes nothing - so ordinarily the two branches above are the whole story. When the user raises the Wiki RRF weight in preferences it becomes a real third route under exactly the same rule: filtered on its own scale against its own floor, unioned with the others, and added to the fusion as wikiWeight/(rrfK + wikiRank). Read metadata.fusionNote, which states the formula actually used for THIS response, and metadata.wikiEnabled / wikiShadowMode / wikiWeight, which say whether the route ran. THE CASE TO WATCH FOR: with the route live, a document can be admitted by the Wiki alone, and that row arrives with BOTH normalizedKeywordScore and normalizedSemanticScore missing. That is not a broken row and not a zero-relevance one - it is a paper the Wiki says is relevant that neither text branch found. Judge it from its title, snippet and wikiRank, and do not discard it as malformed.',
+      'THERE IS A THIRD ROUTE, AND WHETHER IT IS RUNNING IS A USER SETTING. Besides keyword and semantic there is a Wiki route, which retrieves documents through Claims the Wiki already holds. It is OFF by default - shipped at weight 0 in shadow mode. Shadow-only Wiki retrieval is skipped: metadata.wikiRetrievalStatus is "skipped_shadow", and the candidate and overlap statistics are null because they were not measured, not zero hits. Ordinarily the two branches above are the whole story. When the user raises the Wiki RRF weight in preferences it becomes a real third route under exactly the same rule: filtered on its own scale against its own floor, unioned with the others, and added to the fusion as wikiWeight/(rrfK + wikiRank). Read metadata.fusionNote for the formula actually used for THIS response, metadata.wikiEnabled / wikiShadowMode / wikiWeight for its settings, and metadata.wikiRetrievalStatus to check whether it ran. THE CASE TO WATCH FOR: with the route live, a document can be admitted by the Wiki alone, and that row arrives with BOTH normalizedKeywordScore and normalizedSemanticScore missing. That is not a broken row and not a zero-relevance one - it is a paper the Wiki says is relevant that neither text branch found. Judge it from its title, snippet and wikiRank, and do not discard it as malformed.',
       '',
       'WHAT YOU GET BACK: a LIGHTWEIGHT candidate row per surviving document — itemKey, title, creators, year, venue, the language it is written in, the RRF score plus each branch\'s own relevance, which of your keywords matched which fields, and a short snippet from its best-matching passages. A document the keyword branch matched in its BODY also carries bodyEvidence: the passages that contained your terms, with their chunkIds. Read it whenever matchedFields is just ["body"] — that row has nothing in its title or abstract to judge it by, and the passage is the whole reason it is here. That is a shortlist to triage, not a reading pile.',
       '',
@@ -1230,7 +1230,11 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         refreshSkeleton: {
           type: 'boolean',
-          description: 'Re-send wikiSkeleton even when the Wiki has not changed since the last one. Normally unnecessary: an unchanged skeleton comes back as {unchanged: true} and the copy you already have is still current. Pass true if you do not have it.'
+          description: 'Force a full wikiSkeleton response.'
+        },
+        knownSkeletonRevision: {
+          type: 'string',
+          description: 'Revision of the skeleton you already hold for this paper and question. Only an exact match returns unchanged; omit in a new conversation or after context loss.'
         },
         query: { type: 'string' },
         limit: { type: 'integer', minimum: 1, maximum: 50 },
@@ -1302,6 +1306,7 @@ export function buildToolCatalog(): ToolDefinition[] {
     name: 'wiki_commit',
     category: 'wiki',
     description: [
+      'Supply a unique operationId before submission. Query wiki_status with it after a timeout; resume saved postprocessing with the same operationId, resume true and actions []. The committed knowledge is never submitted again by a resume.',
       'Apply only controlled Wiki actions. The plugin validates pages, claims, Zotero documents, actual indexed chunks, excerpts, duplicates, versions and the two-page creation ceiling. It never accepts SQL. When automatic Wiki writing is disabled, Zotero asks the user to confirm this Wiki-only database update.',
       '',
       'ZOTERO NOTE STATUS IS SEPARATE. A commit that completes an open full-text reading session also tries to mark its Markdown reading note completed. That small Zotero write uses the Zotero write permission and confirmation; if it is not authorized, the Wiki commit and session close still succeed and noteStatusWrite reports not_authorized.',
@@ -1320,9 +1325,11 @@ export function buildToolCatalog(): ToolDefinition[] {
           type: 'string',
           description: 'Required when actions contain CREATE_PAGE. Obtain it from wiki_prepare_update for the same library.'
         },
+        operationId: { type: 'string', pattern: '^[A-Za-z0-9_-]{8,128}$', description: 'Stable identifier for this exact write, retained across retries and restarts.' },
+        resume: { type: 'boolean', description: 'Resume only saved postprocessing; requires operationId and actions [].' },
         actions: {
           type: 'array',
-          minItems: 1,
+          minItems: 0,
           items: {
             type: 'object',
             properties: {
@@ -1507,7 +1514,7 @@ export function buildToolCatalog(): ToolDefinition[] {
     ].join('\n'),
     inputSchema: {
       type: 'object',
-      properties: { libraryID: { type: 'number' } }
+      properties: { libraryID: { type: 'number' }, operationId: { type: 'string', description: 'Query a durable commit receipt and its pending recovery steps.' } }
     }
   },
   {
@@ -2155,11 +2162,8 @@ export function toolDoctrineUri(toolName: string): string {
  */
 export function doctrinePointer(toolName: string): string {
   return (
-    `METHOD: read the resource ${toolDoctrineUri(toolName)} before your first ` +
-    `${toolName} call in a session. It carries the procedure for writing this ` +
-    `tool's arguments and for reading its response, and this tool is materially ` +
-    `worse without it. Once read it holds for the whole session — do not fetch ` +
-    `it again.`
+    `METHOD: read the resource ${toolDoctrineUri(toolName)} before the first call ` +
+    `in a session. Follow its argument and evidence rules; reuse it for the session.`
   );
 }
 

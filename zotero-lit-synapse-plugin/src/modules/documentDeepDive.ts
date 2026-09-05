@@ -14,6 +14,7 @@
  * 这里没有第二套检索体系，只有「候选集合从文献换成 chunk」这一个区别。
  */
 
+import { assertNotCancelled, forwardCancellation, createRequestController } from "./requestCancellation";
 import {
   CHUNK_FIELD_WEIGHTS,
   rankLexicalCandidates,
@@ -46,6 +47,7 @@ declare let ztoolkit: ZToolkit;
 const MAX_CHUNK_CANDIDATES = 500;
 
 export interface DeepDiveRequest {
+  signal?: AbortSignal;
   itemKey: string;
   libraryID?: number;
   query: string;
@@ -264,14 +266,15 @@ export async function runDocumentDeepDive(
     Math.max(cap.value, storedChunks.length),
   );
   const candidatePoolTruncated = storedChunks.length > MAX_CHUNK_CANDIDATES;
+  assertNotCancelled(request.signal);
 
   // Same two user-configured budgets as library-level retrieval. The keyword
   // branch here ranks already-loaded chunks rather than querying Zotero, so it
   // is far cheaper than a library scan — but it is still bounded, because
   // "cheap in practice" is not a guarantee.
   const { keywordSearchTimeoutMs, vectorScanTimeoutMs } = settings;
-  const semanticAbort =
-    typeof AbortController !== "undefined" ? new AbortController() : null;
+  const semanticAbort = createRequestController();
+  const unlink = forwardCancellation(request.signal, semanticAbort);
 
   const searchResult = await runHybridSearch(
     {
@@ -314,8 +317,8 @@ export async function runDocumentDeepDive(
       },
       cancelSemanticSearch: () => semanticAbort?.abort(),
     },
-  );
-  semanticAbort?.abort();
+  ).finally(() => { unlink(); semanticAbort?.abort(); });
+  assertNotCancelled(request.signal);
 
   const warnings = [...searchResult.warnings];
   // Front of the list, ahead of retrieval-quality notes: it qualifies what the

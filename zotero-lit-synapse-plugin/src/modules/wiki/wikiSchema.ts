@@ -8,7 +8,7 @@ import {
 } from "./wikiConceptTerms";
 import { rowColumn } from "./wikiRow";
 
-export const WIKI_SCHEMA_VERSION = 14;
+export const WIKI_SCHEMA_VERSION = 17;
 
 /**
  * Add a column an older database does not have yet.
@@ -163,6 +163,10 @@ async function migrateReadingSessionStates(db: WikiDatabase): Promise<void> {
 
 export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
   await db.queryAsync("PRAGMA foreign_keys = ON");
+  await db.queryAsync(`CREATE TABLE IF NOT EXISTS wiki_commit_operations (
+    library_id INTEGER NOT NULL, operation_id TEXT NOT NULL, input_hash TEXT NOT NULL,
+    payload_json TEXT NOT NULL, result_json TEXT NOT NULL, steps_json TEXT NOT NULL DEFAULT '{}',
+    response_json TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY (library_id, operation_id))`);
   const priorVersion = Number(
     (await db.valueQueryAsync("PRAGMA user_version", [])) ?? 0,
   );
@@ -483,6 +487,7 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
     await addColumnIfMissing(db, "wiki_reading_sessions", column, definition);
   }
   await migrateReadingSessionStates(db);
+  await addColumnIfMissing(db, "wiki_reading_sessions", "source_version", "TEXT NOT NULL DEFAULT ''");
   await db.queryAsync(`
     CREATE TABLE IF NOT EXISTS wiki_reading_chunks (
       session_id INTEGER NOT NULL REFERENCES wiki_reading_sessions(session_id) ON DELETE CASCADE,
@@ -643,6 +648,8 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
     `CREATE INDEX IF NOT EXISTS idx_wiki_concept_embedding_queue_due
        ON wiki_concept_embedding_queue(next_attempt_at)`,
   );
+  await addColumnIfMissing(db, "wiki_claim_embeddings", "embedding_identity", "TEXT");
+  await addColumnIfMissing(db, "wiki_concept_embeddings", "embedding_identity", "TEXT");
   await ensureLinkSchema(db);
   await backfillConceptTerms(db);
   await backfillConceptEmbeddingQueue(db);

@@ -307,21 +307,23 @@ const indexBusinessTables = [
       }
     },
     queryAsync: async (sql, params = []) => {
-      if (sql.startsWith("DELETE FROM embeddings")) {
+      if (sql.startsWith("SELECT chunk_id FROM embeddings")) {
+        return [...state.embeddings.keys()].filter((key) => key.startsWith(`${params[0]}:`)).map((key) => ({ chunk_id: Number(key.slice(`${params[0]}:`.length)) }));
+      } else if (sql.startsWith("DELETE FROM embeddings")) {
         for (const key of [...state.embeddings.keys()]) {
-          if (key.startsWith(`${params[0]}:`)) state.embeddings.delete(key);
+          if (key.startsWith(`${params[0]}:`) && params.slice(1).includes(Number(key.slice(`${params[0]}:`.length)))) state.embeddings.delete(key);
         }
       } else if (sql.startsWith("DELETE FROM vectors_f32")) {
         for (const key of [...state.vectors.keys()]) {
-          if (key.startsWith(`${params[0]}:`)) state.vectors.delete(key);
+          if (key.startsWith(`${params[0]}:`) && params.slice(1).includes(Number(key.slice(`${params[0]}:`.length)))) state.vectors.delete(key);
         }
-      } else if (sql.includes("INSERT OR REPLACE INTO embeddings")) {
+      } else if (sql.includes("INSERT INTO embeddings")) {
         if (failEmbeddingInsert)
           throw new Error("simulated embedding write failure");
-        state.embeddings.set(`${params[0]}:${params[1]}`, params[4]);
+        state.embeddings.set(`${params[0]}:${params[1]}`, params[3]);
       } else if (sql.includes("INSERT OR REPLACE INTO vectors_f32")) {
         state.vectors.set(`${params[0]}:${params[1]}`, params[2]);
-      } else if (sql.includes("INSERT OR REPLACE INTO index_status")) {
+      } else if (sql.includes("INSERT INTO index_status")) {
         state.status.set(params[0], params[2]);
       } else if (sql.includes("DELETE FROM index_failures")) {
         state.failures.delete(`${params[0]}:${params[1]}`);

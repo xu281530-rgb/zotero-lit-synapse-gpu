@@ -1,3 +1,4 @@
+import { TOOL_ABORT_SIGNAL, requestSignal, forwardCancellation, assertNotCancelled, createRequestController } from './requestCancellation';
 import {
   handleGetLibraries,
   handleSearchLibraries,
@@ -26,6 +27,7 @@ import {
 import { buildReadingLedgerHint } from './readingLedgerHint';
 import {
   filterToolCatalog,
+  buildToolCatalog,
   projectDoctrineResources,
   projectToolsForList,
   renderToolDoctrine,
@@ -810,6 +812,46 @@ export class StreamableMCPServer {
     // No initialization needed - using direct function calls
   }
 
+  private activeReads = new Map<string | number, Set<AbortController>>();
+
+  private async callWithCancellation(request: MCPRequest): Promise<MCPResponse> {
+    const name = request.params?.name;
+    if (typeof name !== 'string' || !name || (request.params?.arguments !== undefined &&
+      (!request.params.arguments || typeof request.params.arguments !== 'object' || Array.isArray(request.params.arguments)))) {
+      return this.createError(request.id ?? null, -32602, 'Invalid tools/call params: name must be a string and arguments must be an object.');
+    }
+    if (!buildToolCatalog().some((tool) => tool.name === name)) {
+      return this.createError(request.id ?? null, -32602, REMOVED_TOOL_REPLACEMENTS[name] ?? `Unknown tool: ${name}`);
+    }
+    const readOnly = ['get_libraries', 'search_libraries', 'search_library', 'hybrid_search',
+      'keyword_search', 'semantic_search', 'find_similar', 'search_fulltext', 'get_document_chunks',
+      'wiki_search', 'get_item_details', 'get_item_abstract', 'get_annotations', 'search_annotations'].includes(name);
+    if (!readOnly || request.id == null) return this.handleToolCall(request);
+    const controller = createRequestController();
+    const reads = this.activeReads.get(request.id) ?? new Set<AbortController>();
+    reads.add(controller);
+    this.activeReads.set(request.id, reads);
+    let cancelled: (() => void) | undefined;
+    try {
+      return await Promise.race([
+        this.handleToolCall({ ...request, params: { ...request.params, arguments: {
+          ...(request.params.arguments ?? {}), [TOOL_ABORT_SIGNAL]: controller.signal,
+        } } }),
+        new Promise<MCPResponse>((resolve) => {
+          cancelled = () => resolve(this.createResponse(request.id ?? null, {
+            isError: true, content: [{ type: 'text', text: 'Request cancelled. Retrieval stopped; an already-running database read may finish in the background.' }],
+          }));
+          controller.signal.addEventListener('abort', cancelled, { once: true });
+        }),
+      ]);
+    } finally {
+      if (cancelled) controller.signal.removeEventListener('abort', cancelled);
+      controller.abort();
+      reads.delete(controller);
+      if (!reads.size) this.activeReads.delete(request.id);
+    }
+  }
+
   clearSemanticState(): void {
     this.hybridPages.clear();
     this.similarPages.clear();
@@ -943,6 +985,12 @@ export class StreamableMCPServer {
 
     if (isNotification) {
       switch (request.method) {
+        case 'notifications/cancelled': {
+          const reads = this.activeReads.get(request.params?.requestId);
+          // Stateless clients can reuse IDs; never cancel another client's ambiguous request.
+          if (reads?.size === 1) reads.values().next().value?.abort();
+          return null;
+        }
         case 'initialized':
         case 'notifications/initialized':
           this.isInitialized = true;
@@ -978,7 +1026,7 @@ export class StreamableMCPServer {
           return this.handleToolsList(request);
 
         case 'tools/call':
-          return await this.handleToolCall(request);
+          return await this.callWithCancellation(request);
 
         case 'resources/list':
           return this.handleResourcesList(request);
@@ -1227,6 +1275,7 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
       }
 
       let result;
+      assertNotCancelled(requestSignal(args));
 
       switch (name) {
         case 'get_libraries':
@@ -1508,6 +1557,7 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
             limit: args.limit,
             proposedPageTitles: this.coerceStringArray(args.proposedPageTitles),
             refreshSkeleton: args.refreshSkeleton === true,
+            knownSkeletonRevision: typeof args.knownSkeletonRevision === 'string' ? args.knownSkeletonRevision : undefined,
             wikiReview:
               args.wikiReview && typeof args.wikiReview === 'object'
                 ? args.wikiReview
@@ -1522,6 +1572,8 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
             {
               libraryID,
               userInitiated: true,
+              operationId: args.operationId,
+              resume: args.resume === true,
               prepareToken: args.prepareToken,
               readingSessionId: Number.isInteger(args.readingSessionId)
                 ? args.readingSessionId
@@ -1548,6 +1600,7 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
                 : this.coerceStringArray(args.itemKeys),
             minScore: args.minScore,
             limit: args.limit,
+            signal: requestSignal(args),
           });
           break;
         }
@@ -1562,7 +1615,9 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
           result = await getWikiService().getStore().getClaim(args.claimId);
           break;
         case 'wiki_status':
-          result = await getWikiService().status(args?.libraryID);
+          result = args?.operationId
+            ? await getWikiService().commitStatus(args.libraryID ?? Zotero.Libraries.userLibraryID, args.operationId)
+            : await getWikiService().status(args?.libraryID);
           break;
         case 'wiki_scan_links': {
           assertWikiEnabled();
@@ -1640,6 +1695,7 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
         case 'wiki_build_from_paper':
           result = await getWikiService().buildFromPaper({
             libraryID: args?.libraryID ?? Zotero.Libraries.userLibraryID,
+            libraryIDExplicit: args?.libraryID !== undefined,
             userRequested: args?.userRequested === true,
             itemKey: args?.itemKey,
             doi: args?.doi,
@@ -1894,6 +1950,7 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
       // 一旦变成字符串，按字段名清空就无从下手。字符串里的绝对路径
       // 由 handleMCPRequest 的出口统一脱敏，不在这里重复扫描大文本。
       result = scrubPathFields(result);
+      assertNotCancelled(requestSignal(args));
 
       // Wrap result in MCP content format with proper text type.
       // Keep large results compact: the HTTP layer writes the body in a
@@ -1903,21 +1960,17 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
         content: [
           {
             type: 'text',
-            text:
-              compactJson.length > 100000
-                ? compactJson
-                : JSON.stringify(result, null, 2),
+            text: compactJson,
           },
         ],
         ...(isFailedStructuredWrite(name, result) ? { isError: true } : {}),
       });
     } catch (error) {
       ztoolkit.log(`[StreamableMCP] Tool call error for ${name}: ${error}`);
-      return this.createError(
-        request.id ?? null,
-        -32603,
-        `Error executing ${name}: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      return this.createResponse(request.id ?? null, {
+        isError: true,
+        content: [{ type: 'text', text: `Error executing ${name}: ${error instanceof Error ? error.message : String(error)}` }],
+      });
     }
   }
 
@@ -2110,8 +2163,7 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
     // Both branches must be able to stop, not just be stopped waiting for:
     // an abandoned embedding request or library scan would otherwise keep
     // burning time (and API quota) after the hybrid deadline has passed.
-    const semanticAbort =
-      typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const semanticAbort = createRequestController();
     // Filled in by the vector scan so the response can report how much work
     // the collection scope actually saved.
     const semanticScanStats: {
@@ -2119,6 +2171,10 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
       chunksMatched?: number;
     } = {};
     let lexicalCancelled = false;
+    const wikiAbort = createRequestController();
+    const wikiWarnings: string[] = [];
+    const unlinkSemantic = forwardCancellation(requestSignal(args), semanticAbort);
+    const unlinkWiki = forwardCancellation(requestSignal(args), wikiAbort);
     let lexicalDiagnostics:
       | Awaited<ReturnType<typeof runLexicalSearch>>['diagnostics']
       | null = null;
@@ -2135,7 +2191,7 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
             libraryID,
             scopeItemKeys,
             deadlineAt: lexicalDeadlineAt,
-            isCancelled: () => lexicalCancelled,
+            isCancelled: () => lexicalCancelled || requestSignal(args)?.aborted === true,
           });
           lexicalDiagnostics = outcome.diagnostics;
           ztoolkit.log(
@@ -2171,7 +2227,7 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
         cancelSemanticSearch: () => {
           semanticAbort?.abort();
         },
-        ...(wikiSettings.enabled
+        ...(wikiSettings.enabled && !wikiSettings.shadowMode
           ? {
               wikiSearch: async () => {
                 const wiki = await getWikiService().search({
@@ -2184,16 +2240,29 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
                       : undefined,
                   minScore: 0,
                   limit: null,
+                  signal: wikiAbort?.signal,
                 });
+                wikiWarnings.push(...wiki.warnings);
                 return wiki.documents;
               },
+              cancelWikiSearch: () => wikiAbort?.abort(),
             }
           : {}),
       },
-    );
+    ).finally(() => {
+      unlinkSemantic();
+      unlinkWiki();
+      lexicalCancelled = true;
+      semanticAbort?.abort();
+      wikiAbort?.abort();
+    });
+    assertNotCancelled(requestSignal(args));
     // Nothing else is waiting on these branches once fusion is done.
     lexicalCancelled = true;
     semanticAbort?.abort();
+    wikiAbort?.abort();
+    searchResult.warnings.push(...wikiWarnings);
+    if (wikiWarnings.length) searchResult.degraded = true;
 
     const diagnostics = lexicalDiagnostics as
       | Awaited<ReturnType<typeof runLexicalSearch>>['diagnostics']
@@ -2217,7 +2286,7 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
       keywordOrigin === 'fallback'
         ? provenance.probeOrigin === 'derived'
           ? `warning: Keywords were generated by mechanical fallback tokenization, not by AI/domain-expert analysis; retrieval quality may be lower. ${fallbackReason} The lexical branch only covers the language the query was written in. Redo this search once with a domain-expert keyword set: identify the sub-field, adopt its expert perspective, and pass bilingual Chinese and English terms of art, translations, synonyms and abbreviations as a non-empty array of trimmed strings, together with domain and expertRole. Around 5-12 keywords is the recommended amount, and any number from 1 to ${MAX_HYBRID_KEYWORDS} is accepted. ${retryBudgetNote} These results are usable in the meantime: the ranking below is real, only the lexical probes were mechanical.`
-          : `warning: ${fallbackReason} The ranking below is real and your keywords were used, but the call cannot be recorded as domain-expert retrieval. Redo it once with domain and expertRole naming the discipline and the specialist perspective you adopted. ${retryBudgetNote}`
+          : `warning: ${fallbackReason} Your supplied keywords were used. Their provenance is unverified; use these results without rerunning solely to add domain or expertRole. Re-search only if the actual keywords need improving.`
         : null;
 
     const hybridWarnings = [...searchResult.warnings];
@@ -2307,7 +2376,7 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
         fusion: 'independent_thresholds_weighted_rrf',
         fusionNote:
           wikiSettings.enabled && wikiSettings.shadowMode
-            ? 'Keyword and semantic branches keep their existing independent thresholds and Weighted RRF ranking. The Wiki route was independently filtered by normalizedWikiScore and measured in Shadow Mode, so it did not create, remove, or reorder any result. Wiki evidenceConfidence, readDepth and epistemicStatus are reliability fields and were not multiplied into relevance.'
+            ? 'Keyword and semantic branches use independent thresholds and Weighted RRF. Shadow-only Wiki diagnostics were skipped; no Wiki candidates or overlap statistics were measured.'
             : 'Each route was filtered on its OWN relevance scale and survivors were unioned. Ranking is Weighted RRF: keywordWeight/(rrfK + keywordRank) + semanticWeight/(rrfK + semanticRank) + wikiWeight/(rrfK + wikiRank), with an absent route contributing zero. normalizedWikiScore is relevance; evidenceConfidence, readDepth and epistemicStatus remain separate reliability fields.',
         keywordSource: keywordOrigin,
         keywordProbeOrigin: provenance.probeOrigin,
@@ -2366,12 +2435,13 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
         semanticResultCount: searchResult.semanticResultCount,
         keywordAdmittedCount: searchResult.keywordAdmittedCount,
         semanticAdmittedCount: searchResult.semanticAdmittedCount,
-        wikiResultCount: searchResult.wikiResultCount,
+        wikiResultCount: wikiSettings.shadowMode ? null : searchResult.wikiResultCount,
+        wikiRetrievalStatus: !wikiSettings.enabled ? 'disabled' : wikiSettings.shadowMode ? 'skipped_shadow' : 'executed',
         wikiAdmittedCount: searchResult.wikiAdmittedCount,
-        wikiCandidateItemKeys: searchResult.wikiCandidateItemKeys,
-        wikiNovelDocumentCount: searchResult.wikiNovelDocumentCount,
-        wikiKeywordOverlapCount: searchResult.wikiKeywordOverlapCount,
-        wikiSemanticOverlapCount: searchResult.wikiSemanticOverlapCount,
+        wikiCandidateItemKeys: wikiSettings.shadowMode ? null : searchResult.wikiCandidateItemKeys,
+        wikiNovelDocumentCount: wikiSettings.shadowMode ? null : searchResult.wikiNovelDocumentCount,
+        wikiKeywordOverlapCount: wikiSettings.shadowMode ? null : searchResult.wikiKeywordOverlapCount,
+        wikiSemanticOverlapCount: wikiSettings.shadowMode ? null : searchResult.wikiSemanticOverlapCount,
         degraded,
         // A machine-readable form of the warning above: "the semantic half of
         // this search produced nothing and cannot produce anything until the
@@ -2968,16 +3038,15 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
   ): Promise<void> {
     if (!itemKey) return;
     const resolvedLibraryID = libraryID ?? Zotero.Libraries.userLibraryID;
-    let item: any = null;
-    try {
-      item = await Zotero.Items.getByLibraryAndKeyAsync(
-        resolvedLibraryID,
-        itemKey,
+    const item = await Zotero.Items.getByLibraryAndKeyAsync(
+      resolvedLibraryID,
+      itemKey,
+    );
+    if (!item || item.deleted) {
+      throw new Error(
+        `${tool}: item ${itemKey} was not found in library ${resolvedLibraryID}. Verify itemKey and libraryID with get_libraries and hybrid_search before reading the document.`,
       );
-    } catch {
-      return; // Missing keys are the existing handlers' error to report.
     }
-    if (!item) return;
 
     let kind: ItemKeyKind = 'regular';
     if (item.isAnnotation?.()) kind = 'annotation';
@@ -3285,11 +3354,17 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
   private async callGetDocumentChunks(args: any): Promise<any> {
     const defaultLibraryID = Zotero.Libraries.userLibraryID;
     const deps: DocumentChunksDeps = {
+      getPage: async (itemKey, libraryID, offset, limit) => {
+        const { getVectorStore } = await import('./semantic');
+        return getVectorStore().getDocumentChunkPage(itemKey, libraryID, offset, limit);
+      },
       getChunks: async (itemKey, libraryID) => {
         const { getVectorStore } = await import('./semantic/vectorStore');
         return getVectorStore().getChunksForItem(itemKey, libraryID);
       },
       getFullTextAvailability: async (itemKey, libraryID) => {
+        // Resolve the cursor before checking its document and library.
+        await this.assertDocumentKey(itemKey, libraryID, 'get_document_chunks');
         const rows: Array<Record<string, any>> = [{ itemKey, libraryID }];
         await this.annotateFullTextAvailability(rows, libraryID);
         return rows[0].fullText as FullTextAvailability;
@@ -3308,16 +3383,6 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
         }
       },
     };
-
-    // The five-state availability vocabulary describes documents, so for a
-    // note it produced `not_indexed` and a message about a text attachment
-    // that does not exist. Rule the wrong KIND of key out before asking about
-    // its index state.
-    await this.assertDocumentKey(
-      typeof args?.itemKey === 'string' ? args.itemKey.trim() : '',
-      args?.libraryID,
-      'get_document_chunks',
-    );
 
     try {
       const read = await readDocumentChunks(args ?? {}, deps, defaultLibraryID);
@@ -3912,6 +3977,7 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
         maxChunks: args.maxChunks,
         minKeywordScore: args.minKeywordScore,
         minSemanticScore: args.minSemanticScore,
+        signal: requestSignal(args),
       }),
       args.itemKey,
     );
@@ -4051,8 +4117,8 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
     try {
       if (branch === 'semantic') {
         const semanticService = getSemanticSearchService();
-        const abort =
-          typeof AbortController !== 'undefined' ? new AbortController() : null;
+        const abort = createRequestController();
+        const unlink = forwardCancellation(requestSignal(args), abort);
         const matches = await runWithTimeout(
           () =>
             semanticService.search(args.query, {
@@ -4072,7 +4138,7 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
             }),
           settings.vectorScanTimeoutMs + DEFAULT_EMBEDDING_TIMEOUT_MS,
           'Semantic search',
-        ).finally(() => abort?.abort());
+        ).finally(() => { unlink(); abort?.abort(); });
         rows = this.normaliseSingleBranchRows(matches, 'semantic');
       } else {
         // The user's setting is a promise about when THIS request ends, so it
@@ -4093,7 +4159,7 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
               libraryID,
               scopeItemKeys: scopeItemKeys ? new Set(scopeItemKeys) : undefined,
               deadlineAt,
-              isCancelled: () => keywordCancelled,
+              isCancelled: () => keywordCancelled || requestSignal(args)?.aborted === true,
               // No second branch to make up the difference here: past the
               // deadline the caller gets a timeout, not a silent subset that
               // reads like a complete answer.
@@ -4670,6 +4736,7 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
             libraryID,
             minScore: scoreFloor.value,
             vectorScanTimeoutMs,
+            signal: requestSignal(args),
           }),
         // Backstop only; the scan carries its own deadline internally.
         backstop.timeoutMs + 5000,

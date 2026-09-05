@@ -151,6 +151,7 @@ export type WikiReadingAbandonOutcome = Extract<
 >;
 
 export interface WikiReadingSessionRecord {
+  sourceVersion?: string;
   sessionId: number;
   libraryID: number;
   itemKey: string;
@@ -355,6 +356,7 @@ function mapSession(row: any): WikiReadingSessionRecord {
   const wikiReviewAt = rowColumn(row, "wiki_review_at", "wikiReviewAt");
   return {
     sessionId: Number(rowColumn(row, "session_id", "sessionId")),
+    sourceVersion: String(rowColumn(row, "source_version", "sourceVersion") ?? ""),
     libraryID: Number(rowColumn(row, "library_id", "libraryID")),
     itemKey: String(rowColumn(row, "item_key", "itemKey")),
     title: String(rowColumn(row, "title", "title") ?? ""),
@@ -603,6 +605,7 @@ export class WikiReadingSessions {
     itemKey: string;
     title: string;
     totalChunks: number;
+    sourceVersion?: string;
     /** Defaults to `fulltext`, which is what every pre-2.5.0 caller meant. */
     mode?: WikiReadingMode;
   }): Promise<WikiReadingSessionRecord> {
@@ -631,7 +634,7 @@ export class WikiReadingSessions {
         );
         existing.mode = "fulltext";
       }
-      return this.continueExisting(existing, options.totalChunks);
+      return this.continueExisting(existing, options.totalChunks, options.sourceVersion);
     }
     if (mode === "fulltext") {
       const open = await this.getOpen(options.libraryID);
@@ -640,8 +643,8 @@ export class WikiReadingSessions {
     const now = Date.now();
     await this.db.queryAsync(
       `INSERT INTO wiki_reading_sessions
-       (library_id, item_key, title, total_chunks, state, started_at, updated_at, mode)
-       VALUES (?, ?, ?, ?, 'reading', ?, ?, ?)`,
+       (library_id, item_key, title, total_chunks, state, started_at, updated_at, mode, source_version)
+       VALUES (?, ?, ?, ?, 'reading', ?, ?, ?, ?)`,
       [
         options.libraryID,
         options.itemKey,
@@ -650,6 +653,7 @@ export class WikiReadingSessions {
         now,
         now,
         mode,
+        options.sourceVersion ?? "",
       ],
     );
     const opened = await this.openForItem(options.libraryID, options.itemKey);
@@ -690,30 +694,40 @@ export class WikiReadingSessions {
   private async continueExisting(
     open: WikiReadingSessionRecord,
     totalChunks: number,
+    sourceVersion?: string,
   ): Promise<WikiReadingSessionRecord> {
-    if (open.totalChunks === totalChunks) return open;
+    if (open.totalChunks === totalChunks && (sourceVersion === undefined || open.sourceVersion === sourceVersion)) return open;
     // A re-chunked document invalidates what "delivered" meant, and with it
     // every count derived from delivery: the batch ledger, how much of the
     // paper the note covers, the whole-paper synthesis - made from text that
     // no longer maps onto these chunks - and the Wiki review done over it. The
     // note's BODY is kept, because the reading it records is still a reading
     // of this paper, but its coverage claim restarts from zero.
+    await this.db.executeTransaction(async () => {
     await this.db.queryAsync(
       `UPDATE wiki_reading_sessions
        SET total_chunks = ?, updated_at = ?, delivered_batches = 0,
            integrated_batches = 0, integrated_chunks = 0,
            last_integration_unchanged = 0, final_synthesis_at = NULL,
            concepts_recorded_at = NULL, staged_concepts = '',
-           wiki_review_at = NULL, wiki_review = ''
+           wiki_review_at = NULL, wiki_review = '', source_version = ?,
+           concepts_declared_at = NULL, concepts_declared_reason = '',
+           question_chunks_carried_over = 0, pending_wiki_chunks = 0, pending_wiki_since = NULL,
+           state = 'reading'
        WHERE session_id = ?`,
-      [totalChunks, Date.now(), open.sessionId],
+      [totalChunks, Date.now(), sourceVersion ?? "", open.sessionId],
     );
     await this.db.queryAsync(
       "DELETE FROM wiki_reading_chunks WHERE session_id = ?",
       [open.sessionId],
     );
+    });
     return {
       ...open,
+      sourceVersion: sourceVersion ?? "",
+      state: "reading",
+      conceptsDeclaredAt: null,
+      questionChunksCarriedOver: 0,
       totalChunks,
       deliveredBatches: 0,
       integratedBatches: 0,
@@ -917,8 +931,10 @@ export class WikiReadingSessions {
     const found = await this.db.valueQueryAsync(
       `SELECT 1 FROM wiki_reading_chunks c
        JOIN wiki_reading_sessions s ON s.session_id = c.session_id
-       WHERE s.library_id = ? AND s.item_key = ? AND c.chunk_id = ?
-       LIMIT 1`,
+         WHERE s.library_id = ? AND s.item_key = ? AND c.chunk_id = ?
+           AND s.source_version = (SELECT source_version FROM wiki_reading_sessions
+             WHERE library_id = s.library_id AND item_key = s.item_key ORDER BY session_id DESC LIMIT 1)
+         LIMIT 1`,
       [libraryID, itemKey, chunkId],
     );
     return found != null;
@@ -1367,9 +1383,10 @@ export class WikiReadingSessions {
           AND s.library_id = (SELECT library_id FROM wiki_reading_sessions
                                WHERE session_id = ?)
           AND s.session_id <> ?
+          AND s.source_version = (SELECT source_version FROM wiki_reading_sessions WHERE session_id = ?)
           AND (s.state IN ('committed','answered')
                OR c.settled_at IS NOT NULL)`,
-      [sessionId, sessionId, sessionId],
+      [sessionId, sessionId, sessionId, sessionId],
     );
     return new Set<number>(
       rows.map((row: any) => Number(rowColumn(row, "chunk_id", "chunkId"))),
@@ -1385,6 +1402,8 @@ export class WikiReadingSessions {
          FROM wiki_reading_chunks c
          JOIN wiki_reading_sessions s ON s.session_id = c.session_id
         WHERE s.library_id = ? AND s.item_key = ?
+          AND s.source_version = (SELECT source_version FROM wiki_reading_sessions
+            WHERE library_id = s.library_id AND item_key = s.item_key ORDER BY session_id DESC LIMIT 1)
         ORDER BY c.chunk_index`,
       [libraryID, itemKey],
     );

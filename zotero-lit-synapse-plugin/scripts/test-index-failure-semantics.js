@@ -154,7 +154,7 @@ function buildService(store) {
       return new Map(
         batch.map(({ id }) => [
           id,
-          { embedding: new Float32Array([1, 0]), language: "en" },
+          { embedding: new Float32Array([1, 0]), language: "en", identity: { model: "fixture", provider: "openai", apiBase: "https://fixture.invalid/v1", dimensions: 2 } },
         ]),
       );
     },

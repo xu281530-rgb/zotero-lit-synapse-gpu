@@ -110,6 +110,8 @@ for (const itemKey of indexedChunks.keys()) {
 }
 
 const vectorStore = getVectorStore();
+// These fixtures keep one stationary source; revision changes are tested in Zotero.
+vectorStore.getDocumentRevision = async () => "";
 vectorStore.initialize = async () => {};
 vectorStore.getChunksForItem = async (k) => indexedChunks.get(k) ?? [];
 vectorStore.getIndexStatus = async (k) => ({
@@ -129,11 +131,11 @@ let embed = { mode: "ok" };
 const embeddingService = getEmbeddingService();
 embeddingService.getConfig = () => ({ model: "test-embed-model" });
 embeddingService.embed = async (_text, _language, isQuery) => {
-  if (isQuery) return { embedding: new Float32Array([1, 0]) };
+  if (isQuery) return { embedding: new Float32Array([1, 0]), identity: { model: "test-embed-model", apiBase: "test", provider: "openai", dimensions: 2 } };
   embed.onEnter?.();
   if (embed.mode === "throw") throw new Error("embedding backend is down");
   if (embed.mode === "hang") await embed.release;
-  return { embedding: new Float32Array([1, 0]) };
+  return { embedding: new Float32Array([1, 0]), identity: { model: "test-embed-model", apiBase: "test", provider: "openai", dimensions: 2 } };
 };
 
 const dbPath = path.join(tempDir, "wiki.sqlite");

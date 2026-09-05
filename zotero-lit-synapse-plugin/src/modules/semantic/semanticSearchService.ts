@@ -8,6 +8,8 @@
  * - Integration with existing Zotero services
  */
 
+import { assertNotCancelled, createRequestController } from '../requestCancellation';
+import { compatibleEmbeddingIdentity, parseEmbeddingIdentity, serializeEmbeddingIdentity } from './embeddingIdentity';
 import {
   getEmbeddingService,
   EmbeddingService,
@@ -572,8 +574,7 @@ export class SemanticSearchService {
     } = options;
     // Own an internal controller even when the caller passed none, so a
     // deadline can abort the embedding request instead of orphaning it.
-    const abortController =
-      typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const abortController = createRequestController();
     const abortSearch = () => {
       try {
         abortController?.abort();
@@ -609,6 +610,8 @@ export class SemanticSearchService {
         ztoolkit.log(
           `[SemanticSearch][Timing] embedding=${embeddingMs}ms libraryID=${libraryID}`,
         );
+        if (!queryEmbedding.identity) throw new Error('The query embedding has no generating identity; retry with the current embedding service.');
+        serializeEmbeddingIdentity(queryEmbedding.identity, queryEmbedding.embedding.length);
         ztoolkit.log(`[SemanticSearch] Query embedding: lang=${queryEmbedding.language}, dims=${queryEmbedding.dimensions}`);
 
         // 2. Vector search. "all" remains unfiltered; "auto" uses query language.
@@ -644,6 +647,7 @@ export class SemanticSearchService {
               libraryID,
               deadlineAt: effectiveVectorDeadlineAt,
               signal: abortController?.signal,
+              identity: queryEmbedding.identity,
               stats: scanStats,
             },
           );
@@ -773,8 +777,7 @@ export class SemanticSearchService {
       embeddingTimeoutMs = DEFAULT_EMBEDDING_TIMEOUT_MS,
       signal,
     } = options;
-    const abortController =
-      typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const abortController = createRequestController();
     const abortSearch = () => {
       try {
         abortController?.abort();
@@ -794,6 +797,7 @@ export class SemanticSearchService {
 
     try {
       await this.initialize();
+      assertNotCancelled(abortController.signal);
 
       const queryEmbedding = await withDeadline(
         () =>
@@ -804,6 +808,9 @@ export class SemanticSearchService {
         'Query embedding',
         abortSearch,
       );
+      assertNotCancelled(abortController.signal);
+      if (!queryEmbedding.identity) throw new Error('The query embedding has no generating identity; retry with the current embedding service.');
+      serializeEmbeddingIdentity(queryEmbedding.identity, queryEmbedding.embedding.length);
 
       if (vectorScanTimeoutMs) {
         deadlineAt = Date.now() + vectorScanTimeoutMs;
@@ -821,6 +828,8 @@ export class SemanticSearchService {
           minScore,
           libraryID,
           deadlineAt,
+          signal: abortController.signal,
+          identity: queryEmbedding.identity,
         },
       );
 
@@ -966,6 +975,14 @@ export class SemanticSearchService {
     const queryVectors = requestedChunkIds.map(
       (chunkId) => vectorByChunkId.get(chunkId) as Float32Array,
     );
+    const selected = requestedChunkIds.map((chunkId) => itemVectors.find((chunk) => chunk.chunkId === chunkId)!);
+    const queryIdentity = parseEmbeddingIdentity(selected[0]?.identity);
+    const configuration = this.embeddingService.getConfigurationIdentity();
+    if (!queryIdentity || selected.some((chunk) => !compatibleEmbeddingIdentity(queryIdentity, chunk.identity) ||
+      chunk.vector.length !== chunk.identity?.dimensions) ||
+      !compatibleEmbeddingIdentity(queryIdentity, { ...configuration, dimensions: queryIdentity.dimensions })) {
+      throw new Error(`Item ${itemKey} has unknown or incompatible embedding identity. Rebuild its semantic index with the current service and model before finding similar documents.`);
+    }
 
     // The deadline is sized for THIS call: N query chunks on the path that will
     // actually run. Reusing the single-scan budget unchanged made a normal
@@ -982,6 +999,7 @@ export class SemanticSearchService {
     const scanStats: { scanned?: number; documents?: number } = {};
     const scanStartedAt = Date.now();
     const matches = await this.vectorStore.searchMultiQuery(queryVectors, {
+      identity: queryIdentity,
       chunksPerQuery,
       language,
       libraryID,
@@ -1832,9 +1850,9 @@ export class SemanticSearchService {
     // all, so taking it here would keep serving passages from a PDF we can no
     // longer read — and, worse, would let a completed full-library rebuild
     // record its chunking signature over chunks produced by the old rules.
-    // Going the long way round replaces the whole item atomically
-    // (replaceItemIndex deletes every embedding for the key first), so what
-    // remains is exactly the title/abstract chunks this run produced.
+    // Going the long way round replaces the whole item atomically, removing
+    // chunks absent from the replacement, so what remains is exactly the
+    // title/abstract chunks this run produced.
     //
     // Only skipped when the stored row is already metadata-only: then there is
     // provably no body left to clear, and re-embedding a title and an abstract
@@ -1879,7 +1897,12 @@ export class SemanticSearchService {
           `a rebuild that changed nothing`,
       );
     }
-    if (!needsIndex && !mustClearStaleBody && !chunkRulesChanged) {
+    const embeddingConfigurationChanged = force && storedStatus !== null &&
+      !needsIndex && !mustClearStaleBody && !chunkRulesChanged &&
+      !await this.vectorStore.hasCompatibleItemEmbeddingConfiguration(
+        item.key, item.libraryID, this.embeddingService.getConfigurationIdentity(),
+      );
+    if (!needsIndex && !mustClearStaleBody && !chunkRulesChanged && !embeddingConfigurationChanged) {
       // Content hash unchanged, just update timestamps
       if (storedStatus) {
           await this.vectorStore.updateIndexStatus(
@@ -1943,12 +1966,15 @@ export class SemanticSearchService {
     const records = chunks.map((chunk, idx) => {
       const embedding = embeddings.get(`${item.key}_${idx}`);
       if (!embedding) return null;
+      if (!embedding.identity) throw new Error(`Embedding for ${item.key} chunk ${idx} has no generating identity; indexing stopped to avoid untraceable vectors.`);
+      serializeEmbeddingIdentity(embedding.identity, embedding.embedding.length);
 
       return {
         itemKey: item.key,
         libraryID: item.libraryID,
         chunkId: idx,
         vector: embedding.embedding,
+        identity: embedding.identity,
         language: embedding.language,
         chunkText: chunk  // Store full chunk (max ~450 chars from TextChunker)
       };

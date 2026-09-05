@@ -1,6 +1,6 @@
 import { getStoredChunkingSignature } from "../hybridSearchSettings";
 import { bodyIndexStateFromSourceKind } from "../semantic/bodyIndexState";
-import { getEmbeddingService } from "../semantic/embeddingService";
+import { getEmbeddingService, sameEmbeddingSpace, type EmbeddingIdentity } from "../semantic/embeddingService";
 import {
   conceptNamesWorthReviewing,
   normalizeOrigin,
@@ -8,6 +8,7 @@ import {
 import { getVectorStore } from "../semantic/vectorStore";
 import {
   hashWikiText,
+  hashExactText,
   normalizeWikiName,
   normalizeWikiText,
 } from "./wikiCanonicalizer";
@@ -84,6 +85,8 @@ import { describeEvidenceMismatch } from "./wikiEvidenceDiagnostics";
 import type { WikiEmbeddingWorkUnit } from "./wikiEmbeddingQueue";
 import {
   decodeChunkCursor,
+  documentChunkRevision,
+  assertChunkRevision,
   encodeChunkCursor,
   resolvePageSize,
 } from "../documentChunks";
@@ -135,6 +138,15 @@ interface WikiWikiWriteOff {
   chunkIds: number[];
   reason: string;
 }
+
+interface WikiCommitReadingDependency {
+  sessionId: number;
+  itemKey: string;
+  sourceVersion?: string;
+  noteKey?: string;
+}
+
+type WikiCommitDependencies = Record<string, WikiCommitReadingDependency[]>;
 
 type WikiNoteStatusWriteResult =
   | {
@@ -413,17 +425,11 @@ const GATE_HINT =
   "carry it on their own.";
 
 export class WikiService {
+  private activeCommitOperations = new Set<string>();
   private readonly store: WikiStore;
   private readonly retriever: WikiRetriever;
   private readonly notes: WikiReadingNoteStore;
-  /**
-   * The Wiki revision each library's skeleton was last sent at.
-   *
-   * Lives for as long as the plugin does, which is longer than a conversation
-   * - so a stale entry can only ever cost a client one "unchanged" it did not
-   * expect, never wrong data. See {@link skeletonFor}.
-   */
-  private readonly skeletonRevisions = new Map<string, string>();
+  private readonly skeletonRevisions = new Map<string, { revision: string; skeleton: any }>();
 
   private readonly prepareTokens = new Map<
     string,
@@ -465,7 +471,7 @@ export class WikiService {
    * no real connections, and the ratio is what tells them apart.
    */
   async status(libraryID?: number): Promise<any> {
-    const base = await this.store.getStatus(libraryID);
+    const base = { ...(await this.store.getStatus(libraryID)), pendingCommitOperations: await this.store.listPendingCommitOperations(libraryID) };
     if (libraryID === undefined) return base;
     try {
       return { ...base, ...(await this.links.statistics(libraryID)) };
@@ -496,6 +502,7 @@ export class WikiService {
     proposedPageTitles?: string[];
     /** Re-send the Wiki skeleton even if it has not changed. */
     refreshSkeleton?: boolean;
+    knownSkeletonRevision?: string;
     /**
      * The whole-Wiki review, required once a paper has been read in full.
      * See {@link assertReadyToWriteUp}.
@@ -1160,13 +1167,9 @@ export class WikiService {
    * of the same thing accumulating in one conversation's context. Sending
    * "unchanged" instead costs a line.
    *
-   * Keyed per library, and per paper only in the sense that the revision moves
-   * when the Wiki does. That makes the suppression wrong in exactly one case:
-   * a second client, on the same library, that never saw the first copy. It is
-   * made harmless rather than prevented - the response always carries the
-   * revision and says how to get the full thing, and `refreshSkeleton` forces
-   * it unconditionally, so a model that finds itself without the data has a
-   * way out that does not require anyone to have guessed right here.
+   * The revision identifies the library content and this request's paper and
+   * query. Suppression requires the caller to acknowledge that exact revision;
+   * a new client receives the full skeleton even if another client cached it.
    */
   private async skeletonFor(
     options: {
@@ -1174,15 +1177,21 @@ export class WikiService {
       itemKey?: string;
       query: string;
       refreshSkeleton?: boolean;
+      knownSkeletonRevision?: string;
     },
     proposedPageTitles: string[],
   ): Promise<any> {
     const revision = await this.store.wikiRevision(options.libraryID);
-    const key = String(options.libraryID);
-    if (!options.refreshSkeleton && this.skeletonRevisions.get(key) === revision) {
+    const embedding = getEmbeddingService();
+    await embedding.initialize();
+    const modelConfig = embedding.getConfigurationIdentity();
+    const key = JSON.stringify([options.libraryID, options.itemKey ?? "", options.query, proposedPageTitles, modelConfig]);
+    const responseRevision = await hashExactText(JSON.stringify([key, revision]));
+    const cached = this.skeletonRevisions.get(key);
+    if (!options.refreshSkeleton && options.knownSkeletonRevision === responseRevision && cached?.revision === revision) {
       return {
         unchanged: true,
-        revision,
+        revision: responseRevision,
         note:
           "Wiki 结构自本次会话上一份骨架以来没有变化，沿用那一份。" +
           "若你手上没有它，用 refreshSkeleton true 重新获取。",
@@ -1195,12 +1204,16 @@ export class WikiService {
           .filter(Boolean),
       ),
     );
+    if (!options.refreshSkeleton && cached?.revision === revision) {
+      return { ...JSON.parse(JSON.stringify(cached.skeleton)), revision: responseRevision };
+    }
     const skeleton = await this.wikiSkeleton(options.libraryID, {
       itemKey: options.itemKey,
       probes,
     });
-    this.skeletonRevisions.set(key, revision);
-    return { ...skeleton, revision };
+    if (!skeleton.warnings?.length) this.skeletonRevisions.set(key, { revision, skeleton: JSON.parse(JSON.stringify(skeleton)) });
+    while (this.skeletonRevisions.size > 8) this.skeletonRevisions.delete(this.skeletonRevisions.keys().next().value!);
+    return { ...skeleton, revision: responseRevision };
   }
 
   private async wikiSkeleton(
@@ -1209,14 +1222,18 @@ export class WikiService {
   ): Promise<any> {
     const warnings: string[] = [];
     let model = "";
+    let identity: EmbeddingIdentity | undefined;
     const probes: { text: string; vector: Float32Array | null }[] = [];
     try {
       const embeddingService = getEmbeddingService();
-      model = embeddingService.getConfig().model;
       for (const text of options.probes) {
+        const embedded = await embeddingService.embed(text, "auto", true);
+        if (identity && !sameEmbeddingSpace(identity, embedded.identity)) throw new Error("Embedding configuration changed between concept probes; retry this request.");
+        identity = embedded.identity;
+        model = embedded.identity.model;
         probes.push({
           text,
-          vector: (await embeddingService.embed(text, "auto", true)).embedding,
+          vector: embedded.embedding,
         });
       }
     } catch (error) {
@@ -1241,6 +1258,7 @@ export class WikiService {
     const seedConceptIds = options.itemKey
       ? await this.store.conceptIdsForItem(libraryID, options.itemKey)
       : [];
+    if (identity) await this.store.requeueIncompatibleEmbeddings(libraryID, identity);
     const [pages, neighbourhood, duplicates, extendable] = await Promise.all([
       this.store.listPageTitles(libraryID),
       this.store.conceptNeighbourhood({
@@ -1250,6 +1268,8 @@ export class WikiService {
           .map((probe) => probe.vector)
           .filter((vector): vector is Float32Array => Boolean(vector)),
         model,
+        identity,
+        warnings,
         limit: WIKI_SKELETON_NEIGHBOURS,
         hubLimit: WIKI_SKELETON_HUBS,
       }),
@@ -1257,6 +1277,8 @@ export class WikiService {
         libraryID,
         probes,
         model,
+        identity,
+        warnings,
         limit: 5,
         // Annotates each candidate with sourceDocuments / sourcedFromThisPaper.
         // Without it the duplicate list says a concept exists and stops there,
@@ -1270,6 +1292,8 @@ export class WikiService {
           .filter((vector): vector is Float32Array => Boolean(vector)),
         seedConceptIds,
         model,
+        identity,
+        warnings,
         limit: WIKI_SKELETON_EXTENDABLE_PAGES,
       }),
     ]);
@@ -1405,7 +1429,9 @@ export class WikiService {
     }
     const vectorStore = getVectorStore();
     await vectorStore.initialize();
+    const evidenceVersion = await vectorStore.getDocumentRevision(itemKey, libraryID);
     const chunks = await vectorStore.getChunksForItem(itemKey, libraryID);
+    assertChunkRevision(evidenceVersion, await vectorStore.getDocumentRevision(itemKey, libraryID));
     if (!chunks.length) {
       throw new Error(
         `Evidence source ${itemKey} has no indexed chunks; build the search index first`,
@@ -1493,7 +1519,7 @@ export class WikiService {
     }
     const status = await vectorStore.getIndexStatus(itemKey, libraryID);
     const bodyState = bodyIndexStateFromSourceKind(status?.sourceKind);
-    await this.assertChunkWasRead(libraryID, itemKey, chunk.chunkId, bodyState);
+    await this.assertChunkWasRead(libraryID, itemKey, chunk.chunkId, bodyState, evidenceVersion);
     const resetGeneration = await vectorStore.getCommittedResetGeneration();
     return {
       libraryID,
@@ -1501,7 +1527,7 @@ export class WikiService {
       chunkIdSnapshot: chunk.chunkId,
       chunkTextHash: await hashWikiText(chunk.text),
       sourceContentHash: status?.contentHash || "unknown",
-      sourceChunkSignature: getStoredChunkingSignature(libraryID) || "unknown",
+      sourceChunkSignature: status?.chunkSignature || getStoredChunkingSignature(libraryID) || "unknown",
       sourceResetGeneration: resetGeneration || "none",
       excerpt,
       evidenceRole: entry.evidenceRole,
@@ -1541,9 +1567,16 @@ export class WikiService {
     itemKey: string,
     chunkId: number,
     bodyState: string,
+    sourceVersion?: string,
   ): Promise<void> {
     if (bodyState !== "body") return;
     const sessions = await this.store.readingSessions();
+    if (sourceVersion !== undefined) {
+      const latest = await sessions.latestForItem(libraryID, itemKey);
+      if (latest && latest.sourceVersion !== sourceVersion) {
+        throw new Error(`The indexed text of ${itemKey} changed. Read the current version before committing evidence; earlier reading progress cannot verify it.`);
+      }
+    }
     if (await sessions.hasReadChunkId(libraryID, itemKey, chunkId)) return;
     const coverage = await sessions.coverageForItem(libraryID, itemKey);
     throw new Error(
@@ -1834,16 +1867,49 @@ export class WikiService {
     }
   }
 
-  async commit(
+  async commitStatus(libraryID: number, operationId: string): Promise<any> {
+    const saved = await this.store.getCommitOperation(libraryID, operationId);
+    if (!saved) return { operationId, libraryID, status: 'not_recorded', committed: false, inProgress: this.activeCommitOperations.has(`${libraryID}:${operationId}`) };
+    const needsReview = Object.values(saved.steps).some((step: any) => step.state === 'superseded');
+    return { operationId, libraryID, committed: true, status: saved.response ? 'completed' : needsReview ? 'postprocessing_needs_review' : 'postprocessing_pending', steps: saved.steps, result: saved.result, response: saved.response,
+      nextStep: saved.response ? undefined : needsReview
+        ? 'Review the changed paper using its current reading session. Superseded bookkeeping will not be replayed; settle current reading with a new operation after review. Resume this operation to retry any other pending stages. Its knowledge is already saved; do not resubmit it.'
+        : 'Resume wiki_commit with the same operationId, resume true, and actions []. Do not submit the saved knowledge as a new operation.' };
+  }
+
+  async commit(input: WikiCommitInput, options: WikiNoteStatusWriteOptions = {}): Promise<any> {
+    const operationId = input.operationId ?? await hashWikiText(`${Date.now()}:${Math.random()}`);
+    if (!/^[A-Za-z0-9_-]{8,128}$/.test(operationId)) throw new Error('operationId must contain 8-128 letters, digits, underscores or hyphens');
+    const key = `${input.libraryID}:${operationId}`;
+    if (this.activeCommitOperations.has(key)) throw new Error(`Operation ${operationId} is in progress. Query wiki_status with this operationId.`);
+    this.activeCommitOperations.add(key);
+    try {
+      const stable = (value: any): any => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object'
+        ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])])) : value;
+      const inputHash = JSON.stringify(stable({ libraryID: input.libraryID, actions: input.actions, readingSessionId: input.readingSessionId }));
+      const saved = await this.store.getCommitOperation(input.libraryID, operationId);
+      if (saved) {
+        if (!input.resume && saved.inputHash !== inputHash) throw new Error('This operationId belongs to different actions. Use a new operationId for a different write.');
+        if (input.resume && input.actions?.length) throw new Error('A resume uses saved actions; pass actions [] to avoid ignoring new actions.');
+        if (saved.response) return saved.response;
+        return await this.finishCommit(saved.payload.input, saved.payload.actions, saved.payload.warnings, saved.result, saved.payload.writeOffs, options, saved.payload.sessions, saved.payload.dependencies);
+      }
+      if (input.resume) throw new Error(`Operation ${operationId} was not recorded; no saved write can be resumed.`);
+      return await this.commitNew({ ...input, operationId }, options, inputHash);
+    } finally { this.activeCommitOperations.delete(key); }
+  }
+
+  private async commitNew(
     input: WikiCommitInput,
-    options: WikiNoteStatusWriteOptions = {},
+    options: WikiNoteStatusWriteOptions,
+    inputHash: string,
   ): Promise<
     WikiCommitResult & {
       warnings: string[];
       /** Always true on return: the database transaction is durable. */
       committed: true;
       /** Claims whose vector is queued rather than built yet. */
-      embeddingPending: number;
+      embeddingPending: number | undefined;
       embeddingNote?: string;
     }
   > {
@@ -1895,6 +1961,8 @@ export class WikiService {
 
     let result: WikiCommitResult;
     let writeOffs: WikiWikiWriteOff[];
+    const sessionSnapshot: WikiCommitReadingDependency[] = [];
+    let dependencies: WikiCommitDependencies = {};
     try {
       await this.assertRequiredReconciliationActions(input);
       // Both before the transaction: a write-off whose reason does not argue,
@@ -1919,7 +1987,30 @@ export class WikiService {
       // afterwards, off the request, so a slow or broken embedding backend can
       // no longer turn a successful commit into a client-side timeout of
       // unknown outcome.
-      result = await this.store.commit({ ...input, actions });
+      const sessions = await this.store.readingSessions();
+      const openSessions = await sessions.listOpen(input.libraryID);
+      const citedSession = openSessions.find((session) => session.mode === 'fulltext' &&
+        (actions.some((action) => 'evidence' in action && action.evidence?.some((evidence) => evidence.itemKey === session.itemKey)) ||
+          writeOffs.some((writeOff) => writeOff.itemKey === session.itemKey)));
+      input = { ...input, readingSessionId: input.readingSessionId ?? citedSession?.sessionId };
+      const relatedKeys = new Set(writeOffs.map((entry) => entry.itemKey));
+      for (const action of actions) {
+        for (const evidence of ('evidence' in action ? action.evidence : undefined) ?? []) relatedKeys.add(evidence.itemKey);
+      }
+      for (const itemKey of relatedKeys) {
+        const session = await sessions.latestForItem(input.libraryID, itemKey);
+        if (session) sessionSnapshot.push({ sessionId: session.sessionId, itemKey, sourceVersion: session.sourceVersion, noteKey: session.noteKey });
+      }
+      if (input.readingSessionId && !sessionSnapshot.some((entry) => entry.sessionId === input.readingSessionId)) {
+        const session = await sessions.get(input.readingSessionId);
+        if (!session || session.libraryID !== input.libraryID) throw new Error('The reading session does not belong to this library.');
+        sessionSnapshot.push({ sessionId: session.sessionId, itemKey: session.itemKey, sourceVersion: session.sourceVersion, noteKey: session.noteKey });
+      }
+      dependencies = this.commitReadingDependencies(input, actions, writeOffs, sessionSnapshot);
+      result = await this.store.commit({ ...input, actions }, {
+        operationId: input.operationId!, inputHash,
+        payload: { input, actions, warnings, writeOffs, sessions: sessionSnapshot, dependencies },
+      });
     } catch (error) {
       // Nothing was written, so hand the token back for a straight retry.
       if (consumedToken) {
@@ -1930,6 +2021,36 @@ export class WikiService {
     }
     // Durable. The token can never be spent again.
     if (consumedToken) this.prepareTokens.delete(consumedToken);
+
+    return this.finishCommit(input, actions, warnings, result, writeOffs, options, sessionSnapshot, dependencies);
+  }
+
+  private commitReadingDependencies(input: WikiCommitInput, actions: WikiCommitAction[], writeOffs: WikiWikiWriteOff[], snapshot: WikiCommitReadingDependency[]): WikiCommitDependencies {
+    const terminologyKeys = new Set(writeOffs.map((entry) => entry.itemKey));
+    const settlementKeys = new Set(terminologyKeys);
+    for (const action of actions) {
+      for (const evidence of ('evidence' in action ? action.evidence : undefined) ?? []) {
+        terminologyKeys.add(evidence.itemKey);
+        if (Number.isFinite(Number(evidence.chunkIdSnapshot))) settlementKeys.add(evidence.itemKey);
+      }
+    }
+    // Older receipts saved all open sessions; only actual reading consumers inherit them.
+    return {
+      terminology: snapshot.filter((entry) => terminologyKeys.has(entry.itemKey)),
+      'question reading settlement': snapshot.filter((entry) => settlementKeys.has(entry.itemKey)),
+      'reading session': snapshot.filter((entry) => entry.sessionId === input.readingSessionId),
+    };
+  }
+
+  private async finishCommit(input: WikiCommitInput, actions: WikiCommitAction[], warnings: string[], result: WikiCommitResult,
+    writeOffs: WikiWikiWriteOff[], options: WikiNoteStatusWriteOptions, sessionSnapshot: WikiCommitReadingDependency[] = [], dependencies?: WikiCommitDependencies): Promise<any> {
+    warnings = [...warnings];
+    dependencies ??= this.commitReadingDependencies(input, actions, writeOffs, sessionSnapshot);
+    let saved: any;
+    try { saved = await this.store.getCommitOperation(input.libraryID, input.operationId!); }
+    catch (error) { warnings.push(`Knowledge is already saved; recovery status is temporarily unavailable: ${String(error)}`); }
+    const steps: Record<string, any> = saved?.steps ?? {};
+    const stageNames = ['link settlement', 'link recheck', 'terminology', 'question reading settlement', 'reading session', 'embedding queue status'];
 
     // Which chunks of which papers this commit actually quoted. The keys alone
     // used to be enough because the debt was per paper; now that it is per
@@ -1961,7 +2082,55 @@ export class WikiService {
     // once the Claim exists. Failures here are logged rather than thrown - the
     // Wiki write is permanent, and turning a successful commit into an error
     // because an audit row could not be added would be the wrong trade.
-    const linkSettlement = await this.settleLinkSignals(input, actions, result);
+    const afterCommit = async <T>(stage: string, operation: () => Promise<T>): Promise<T | undefined> => {
+      if (steps[stage]?.state === 'completed') return steps[stage].result;
+      if (steps[stage]?.state === 'superseded') {
+        warnings.push(`Knowledge is already saved. ${stage} needs review: ${steps[stage].error}`);
+        return undefined;
+      }
+      try {
+        for (const before of dependencies[stage] ?? []) {
+          const sessions = await this.store.readingSessions();
+          const current = await sessions.get(before.sessionId);
+          const latest = await sessions.latestForItem(input.libraryID, before.itemKey);
+          const sourceChanged = before.sourceVersion
+            ? await getVectorStore().getDocumentRevision(before.itemKey, input.libraryID) !== before.sourceVersion
+            : false;
+          if (sourceChanged || !current || current.libraryID !== input.libraryID || current.itemKey !== before.itemKey || current.sourceVersion !== before.sourceVersion || latest?.sessionId !== before.sessionId ||
+            (stage === 'reading session' && before.noteKey !== undefined && current.noteKey !== before.noteKey)) {
+            const error = `Reading state of ${before.itemKey} changed. Review its current version; this saved operation will not settle newer reading or overwrite another note.`;
+            steps[stage] = { state: 'superseded', error, itemKey: before.itemKey, sessionId: before.sessionId, nextStep: 'Review current reading, then use a new operation to settle it. The original knowledge write is already committed.' };
+            await this.store.updateCommitOperation(input.libraryID, input.operationId!, steps);
+            warnings.push(`Knowledge is already saved. ${stage} needs review: ${error}`);
+            return undefined;
+          }
+        }
+        steps[stage] = { state: 'pending' };
+        await this.store.updateCommitOperation(input.libraryID, input.operationId!, steps);
+        const run = async () => {
+          const value = await operation();
+          if ((value as any)?.warnings?.some((warning: string) => /could not|not written|more was staged/.test(warning))) throw new Error((value as any).warnings.join(' '));
+          if ((value as any)?.noteStatusWrite?.updated === false) {
+            const error = `The Zotero reading note status still needs updating (${(value as any).noteStatusWrite.reason})`;
+            steps[stage] = { state: 'pending', error, result: value };
+            await this.store.updateCommitOperation(input.libraryID, input.operationId!, steps);
+            warnings.push(`Knowledge is already saved. ${stage} remains pending: ${error}. Do not resubmit the saved actions.`);
+            return value;
+          }
+          steps[stage] = { state: 'completed', result: value ?? null };
+          await this.store.updateCommitOperation(input.libraryID, input.operationId!, steps);
+          return value;
+        };
+        return stage === 'link settlement' || stage === 'link recheck' ? await this.store.commitBookkeeping(run) : await run();
+      } catch (error) {
+        steps[stage] = { state: 'pending', error: String(error) };
+        try { await this.store.updateCommitOperation(input.libraryID, input.operationId!, steps); } catch { /* The original transaction still contains the pending operation. */ }
+        warnings.push(`Knowledge is already saved. ${stage} remains pending: ${error instanceof Error ? error.message : String(error)}. Do not resubmit the saved actions.`);
+        ztoolkit.log(`[wiki] post-commit ${stage} failed`, error);
+        return undefined;
+      }
+    };
+    const linkSettlement = await afterCommit("link settlement", () => this.settleLinkSignals(input, actions, result));
 
     /*
      * A Claim citing both papers of a dismissed pair contradicts that
@@ -1980,8 +2149,7 @@ export class WikiService {
       bItemKey: string;
       claimId: number;
     }> = [];
-    try {
-      reopenedLinks = await this.links.reopenContradictedDismissals({
+    reopenedLinks = await afterCommit('link recheck', () => this.links.reopenContradictedDismissals({
         libraryID: input.libraryID,
         // Both sets: a Claim written here, and a Claim that merely GAINED
         // Evidence here. The second is the case the sweep exists for - a
@@ -1991,43 +2159,46 @@ export class WikiService {
           ...result.affectedClaimIds,
           ...result.evidenceChangedClaimIds,
         ],
-      });
-    } catch (error) {
-      ztoolkit.log("[wiki] could not sweep contradicted dismissals", error);
-    }
+      })) ?? [];
 
     // Terminology, written where the question-driven path can actually reach it.
-    const conceptWriteUp = await this.writeQuestionReadingConcepts(
+    const conceptWriteUp = await afterCommit("terminology", () => this.writeQuestionReadingConcepts(
       input.libraryID,
       citedKeys,
       actions,
-    );
+      dependencies.terminology,
+    ));
 
-    const questionReading = await this.settleQuestionReading(
+    const questionReading = await afterCommit("question reading settlement", () => this.settleQuestionReading(
       input.libraryID,
       citedChunkIdsByItem,
       writeOffs,
-    );
-    const readingSession = await this.settleReadingSession(
+      dependencies['question reading settlement'],
+    ));
+    const readingSession = await afterCommit("reading session", () => this.settleReadingSession(
       input,
       actions,
       citedKeys,
       options.authorizeNoteStatusWrite,
-    );
+    ));
 
-    const queue = await this.store.embeddingQueue();
-    const embeddingPending = await queue.pendingCount();
+    const embeddingPending = await afterCommit("embedding queue status", async () => {
+      const queue = await this.store.embeddingQueue();
+      return queue.pendingCount();
+    });
     // Kick the drain but do not wait for it: its outcome cannot change the
     // fact that the commit succeeded.
-    void this.pumpEmbeddingQueue();
+    void this.pumpEmbeddingQueue().catch((error) => ztoolkit.log("[wiki] embedding drain failed", error));
 
-    return {
+    const response = {
       ...result,
       warnings,
+      operationId: input.operationId,
+      postprocessing: { state: stageNames.some((name) => steps[name]?.state === 'superseded') ? 'needs_review' : stageNames.every((name) => steps[name]?.state === 'completed') ? 'completed' : 'pending', steps },
       committed: true,
       embeddingPending,
       embeddingNote:
-        embeddingPending > 0
+        (embeddingPending ?? 0) > 0
           ? `The Wiki write is committed and permanent. ${embeddingPending} claim embedding(s) are queued and will be built in the background; Wiki keyword retrieval already sees these claims, and semantic retrieval will once the queue drains. Nothing needs to be re-submitted.`
           : undefined,
       ...(readingSession ? { readingSession } : {}),
@@ -2048,6 +2219,10 @@ export class WikiService {
         : {}),
       ...(conceptWriteUp ? { conceptWriteUp } : {}),
     };
+    try {
+      await this.store.updateCommitOperation(input.libraryID, input.operationId!, steps, response.postprocessing.state === 'completed' ? response : undefined);
+    } catch (error) { warnings.push(`Knowledge is saved; operation status persistence needs retry: ${String(error)}`); }
+    return response;
   }
 
   /**
@@ -2077,6 +2252,7 @@ export class WikiService {
     libraryID: number,
     citedKeys: ReadonlySet<string>,
     actions: WikiCommitAction[],
+    dependencies?: WikiCommitReadingDependency[],
   ): Promise<
     | {
         papers: Array<{ itemKey: string; concepts: number; sources: number }>;
@@ -2100,7 +2276,10 @@ export class WikiService {
 
     for (const itemKey of citedKeys) {
       try {
-        const open = await sessions.openForItem(libraryID, itemKey);
+        const dependency = dependencies?.find((entry) => entry.itemKey === itemKey);
+        const open = dependencies
+          ? dependency ? await sessions.get(dependency.sessionId) : null
+          : await sessions.openForItem(libraryID, itemKey);
         // Only the question-driven path. A full-text read keeps its own
         // terminology pass, which is a review of the whole paper and a
         // stronger thing than this.
@@ -2607,6 +2786,7 @@ export class WikiService {
         }
       } catch (error) {
         ztoolkit.log("[wiki] could not settle a link signal", error);
+        throw error;
       }
     }
     return { settledSignals, resolutions, dismissed };
@@ -2649,6 +2829,7 @@ export class WikiService {
     libraryID: number,
     citedChunkIdsByItem: Map<string, Set<number>>,
     writeOffs: WikiWikiWriteOff[],
+    dependencies?: WikiCommitReadingDependency[],
   ): Promise<
     | {
         settledByEvidence: Array<{ itemKey: string; chunkIds: number[] }>;
@@ -2674,10 +2855,14 @@ export class WikiService {
     | undefined
   > {
     const sessions = await this.store.readingSessions();
+    const relatedKeys = new Set([...citedChunkIdsByItem.keys(), ...writeOffs.map((entry) => entry.itemKey)]);
+    const belongsToOperation = (session: WikiReadingSessionRecord) => dependencies
+      ? dependencies.some((entry) => entry.sessionId === session.sessionId)
+      : relatedKeys.has(session.itemKey);
     const pending = await sessions.listPendingWiki(libraryID);
 
     const byItem = new Map(
-      pending.map((entry) => [entry.session.itemKey, entry]),
+      pending.filter((entry) => belongsToOperation(entry.session)).map((entry) => [entry.session.itemKey, entry]),
     );
     const settledByEvidence: Array<{ itemKey: string; chunkIds: number[] }> =
       [];
@@ -2768,6 +2953,7 @@ export class WikiService {
     for (const session of await sessions.listSettledQuestionSessions(
       libraryID,
     )) {
+      if (!belongsToOperation(session)) continue;
       const coverage = await sessions.coverage(session.sessionId);
       await sessions.close(
         session.sessionId,
@@ -2873,8 +3059,17 @@ export class WikiService {
     | undefined
   > {
     const sessions = await this.store.readingSessions();
-    const open = await sessions.getOpen(input.libraryID);
+    const open = input.readingSessionId ? await sessions.get(input.readingSessionId) : await sessions.getOpen(input.libraryID);
     if (!open) return undefined;
+    if (open.libraryID !== input.libraryID) throw new Error('The saved reading session does not belong to this library.');
+    if (open.state === 'committed') {
+      const coverage = await sessions.coverage(open.sessionId);
+      const noteStatusWrite = await this.syncNoteStatus(open, 'completed', authorizeNoteStatusWrite);
+      return { sessionId: open.sessionId, itemKey: open.itemKey, state: open.state, released: true,
+        deliveredChunks: coverage.deliveredChunks, totalChunks: coverage.totalChunks, coverageComplete: coverage.complete,
+        note: 'The saved session was already closed; only its reading-note status was retried.', noteStatusWrite };
+    }
+    if (open.mode !== 'fulltext' || !['reading', 'prepared'].includes(open.state)) return undefined;
 
     const concernsOpenPaper =
       input.readingSessionId === open.sessionId || citedKeys.has(open.itemKey);
@@ -3552,10 +3747,12 @@ export class WikiService {
     const item = await this.requirePaperItem(options.libraryID, itemKey);
     const vectorStore = getVectorStore();
     await vectorStore.initialize();
+    const readingVersion = await vectorStore.getDocumentRevision(itemKey, options.libraryID);
     const [documentChunks, indexStatus] = await Promise.all([
       vectorStore.getChunksForItem(itemKey, options.libraryID),
       vectorStore.getIndexStatus(itemKey, options.libraryID),
     ]);
+    assertChunkRevision(readingVersion, await vectorStore.getDocumentRevision(itemKey, options.libraryID));
     if (!documentChunks.length) {
       throw new Error(
         `${itemKey} has no indexed chunks, so nothing about it can be recorded as read. Build its search index first.`,
@@ -3575,6 +3772,7 @@ export class WikiService {
       itemKey,
       title: String(item.getField?.("title") || ""),
       totalChunks: documentChunks.length,
+      sourceVersion: readingVersion,
       mode: "qa",
     });
 
@@ -4222,6 +4420,7 @@ export class WikiService {
         let prior = embedded.get(note.related);
         if (prior === undefined) {
           const priorResult = await embeddingService.embed(note.related);
+          if (!sameEmbeddingSpace(priorResult.identity, freshResult.identity)) return routeFallback("embedding configuration changed");
           prior = priorResult?.embedding ?? null;
           embedded.set(note.related, prior);
         }
@@ -4371,10 +4570,15 @@ export class WikiService {
         session.itemKey,
       );
       if (!item) return { updated: false, reason: "item_not_found" };
-      const body = await this.readNoteBody(item);
-      if (body === null) {
+      const attachment = session.noteKey
+        ? await this.notes.getByKey(session.libraryID, session.noteKey)
+        : await this.notes.findAttachment(item);
+      if (!attachment || (attachment.parentID !== undefined && attachment.parentID !== item.id)) {
         return { updated: false, reason: "reading_note_not_found" };
       }
+      const raw = await this.notes.read(attachment);
+      if (raw === null) return { updated: false, reason: "reading_note_not_found" };
+      const body = parseReadingNote(raw).body;
       if (authorizeWrite) {
         try {
           const authorized = await authorizeWrite();
@@ -4389,7 +4593,7 @@ export class WikiService {
           return { updated: false, reason: "not_authorized" };
         }
       }
-      const written = await this.writeNote(item, session, body, status);
+      const written = await this.writeNote(item, session, body, status, { attachment });
       return {
         updated: true,
         attachmentKey: written.attachmentKey,
@@ -4530,31 +4734,34 @@ export class WikiService {
    */
   private async embedWithModel(
     text: string,
-  ): Promise<{ vector: Float32Array; model: string }> {
+  ): Promise<{ vector: Float32Array; model: string; identity: EmbeddingIdentity }> {
     const embeddingService = getEmbeddingService();
     const embedded = await embeddingService.embed(text, "auto", false);
     return {
       vector: embedded.embedding,
-      model: embeddingService.getConfig().model,
+      model: embedded.identity.model,
+      identity: embedded.identity,
     };
   }
 
   private async embedQueuedClaim(unit: WikiEmbeddingWorkUnit): Promise<void> {
-    const { vector, model } = await this.embedWithModel(unit.text);
+    const { vector, model, identity } = await this.embedWithModel(unit.text);
     await this.store.saveClaimEmbedding({
       claimId: unit.id,
       vector,
       model,
+      identity,
       textHash: await hashWikiText(unit.text),
     });
   }
 
   private async embedQueuedConcept(unit: WikiEmbeddingWorkUnit): Promise<void> {
-    const { vector, model } = await this.embedWithModel(unit.text);
+    const { vector, model, identity } = await this.embedWithModel(unit.text);
     await this.store.saveConceptEmbedding({
       conceptId: unit.id,
       vector,
       model,
+      identity,
       textHash: await hashWikiText(unit.text),
     });
   }
@@ -4567,17 +4774,19 @@ export class WikiService {
     minScore?: number;
     limit?: number | null;
     useVector?: boolean;
+    signal?: AbortSignal;
   }): Promise<WikiServiceSearchResult> {
     const warnings: string[] = [];
     let queryVector: Float32Array | undefined;
     let queryVectorModel: string | undefined;
+    let queryVectorIdentity: EmbeddingIdentity | undefined;
     if (options.useVector !== false) {
       try {
         const embeddingService = getEmbeddingService();
-        queryVectorModel = embeddingService.getConfig().model;
-        queryVector = (
-          await embeddingService.embed(options.query, "auto", true)
-        ).embedding;
+        const embedded = await embeddingService.embed(options.query, "auto", true, { signal: options.signal });
+        queryVectorModel = embedded.identity.model;
+        queryVectorIdentity = embedded.identity;
+        queryVector = embedded.embedding;
       } catch (error) {
         warnings.push(
           `Wiki vector search unavailable; Concept/Alias/Claim/Relation keyword retrieval still ran: ${
@@ -4586,12 +4795,15 @@ export class WikiService {
         );
       }
     }
+    if (options.signal?.aborted) throw new Error("Wiki search cancelled");
+    if (queryVectorIdentity) await this.store.requeueIncompatibleEmbeddings(options.libraryID, queryVectorIdentity);
     const result = await this.retriever.search({
       ...options,
       queryVector,
       queryVectorModel,
+      queryVectorIdentity,
     });
-    return { ...result, vectorSearchUsed: Boolean(queryVector), warnings };
+    return { ...result, vectorSearchUsed: Boolean(queryVector), warnings: [...warnings, ...(result.warnings ?? [])] };
   }
 
   async reverify(libraryID?: number, itemKeys?: string[]): Promise<any> {
@@ -4641,7 +4853,7 @@ export class WikiService {
           text: chunk.text,
           contentHash: status?.contentHash || "unknown",
           chunkSignature:
-            getStoredChunkingSignature(sourceLibraryID) || "unknown",
+            status?.chunkSignature || getStoredChunkingSignature(sourceLibraryID) || "unknown",
           resetGeneration: generation || "none",
         }));
       },
@@ -5629,6 +5841,7 @@ export class WikiService {
    */
   async buildFromPaper(options: {
     libraryID: number;
+    libraryIDExplicit?: boolean;
     userRequested: boolean;
     itemKey?: string;
     doi?: string;
@@ -5664,9 +5877,14 @@ export class WikiService {
     let offset = 0;
     let pageSize = resolvePageSize(options.limit);
     let servedFromCursor = false;
+    let cursorRevision: string | undefined;
 
     if (typeof options.cursor === "string" && options.cursor.trim()) {
       const cursor = decodeChunkCursor(options.cursor.trim());
+      if (options.libraryIDExplicit !== false && options.libraryID !== undefined && options.libraryID !== cursor.l) {
+        throw new Error("cursor and libraryID refer to different libraries. Drop the cursor to start a new reading.");
+      }
+      cursorRevision = cursor.r;
       if (
         options.itemKey &&
         options.itemKey.trim() &&
@@ -5695,6 +5913,7 @@ export class WikiService {
 
     const vectorStore = getVectorStore();
     await vectorStore.initialize();
+    const sourceVersion = await vectorStore.getDocumentRevision(itemKey, libraryID);
     const [chunks, indexStatus] = await Promise.all([
       vectorStore.getChunksForItem(itemKey, libraryID),
       vectorStore.getIndexStatus(itemKey, libraryID),
@@ -5712,6 +5931,8 @@ export class WikiService {
     }
 
     const title = String(item.getField("title") || "");
+    assertChunkRevision(sourceVersion, await vectorStore.getDocumentRevision(itemKey, libraryID));
+    if (servedFromCursor) assertChunkRevision(cursorRevision, sourceVersion);
 
     // Opening the session is what enforces one paper at a time. It throws
     // WikiReadingSessionConflict when a different paper is still unfinished.
@@ -5738,6 +5959,7 @@ export class WikiService {
       title,
       totalChunks: chunks.length,
       mode: "fulltext",
+      sourceVersion,
     });
     const carriedOverFromQuestions = session.questionChunksCarriedOver;
 
@@ -6050,6 +6272,7 @@ export class WikiService {
                 l: libraryID,
                 o: end,
                 s: pageSize,
+                r: sourceVersion,
               }),
             }
           : {}),

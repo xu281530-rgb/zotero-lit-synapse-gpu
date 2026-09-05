@@ -59,6 +59,11 @@ export class WikiEvidenceRelinker {
           report.sourceDeleted += 1;
           continue;
         }
+        const sourceRevision = await this.store.evidenceSourceRevision?.(item.libraryID, item.itemKey);
+        const updateOptions = {
+          deferDerivedUpdates: true,
+          ...(sourceRevision === undefined ? {} : { expectedSource: { libraryID: item.libraryID, itemKey: item.itemKey, revision: sourceRevision } }),
+        };
         const chunks = await this.source.getChunks(
           item.libraryID,
           item.itemKey,
@@ -86,7 +91,7 @@ export class WikiEvidenceRelinker {
               sourceResetGeneration: item.sourceResetGeneration,
               linkState: "stale",
             },
-            { deferDerivedUpdates: true },
+            updateOptions,
           );
           report.stale += 1;
           continue;
@@ -101,7 +106,7 @@ export class WikiEvidenceRelinker {
             sourceResetGeneration: matched.resetGeneration,
             linkState: "valid",
           },
-          { deferDerivedUpdates: true },
+          updateOptions,
         );
         report.relinked += 1;
       }

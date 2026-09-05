@@ -141,6 +141,8 @@ fake.createPaper({ key: "PAPERONE", title: "Grain refinement under hot working" 
 fake.createPaper({ key: "PAPERTWO", title: "热变形中的软化机制" });
 
 const vectorStore = getVectorStore();
+// These fixtures keep one stationary source; revision changes are tested in Zotero.
+vectorStore.getDocumentRevision = async () => "";
 vectorStore.initialize = async () => {};
 vectorStore.getChunksForItem = async (key) => CHUNKS.get(key) ?? [];
 vectorStore.getIndexStatus = async (key) => ({

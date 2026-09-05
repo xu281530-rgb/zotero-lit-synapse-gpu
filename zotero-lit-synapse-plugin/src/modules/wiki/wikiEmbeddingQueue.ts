@@ -174,18 +174,18 @@ export class WikiEmbeddingQueue {
    * resets its backoff, which is what a caller re-submitting the same text
    * means.
    */
-  async enqueue(id: number, text: string): Promise<void> {
+  async enqueue(id: number, text: string, options: { preserveExisting?: boolean } = {}): Promise<void> {
     const now = Date.now();
     const { queueTable, idColumn } = this.target;
     await this.db.queryAsync(
       `INSERT INTO ${queueTable}
        (${idColumn}, text_hash, attempts, last_error, enqueued_at, next_attempt_at)
        VALUES (?, ?, 0, '', ?, ?)
-       ON CONFLICT(${idColumn}) DO UPDATE SET
+       ON CONFLICT(${idColumn}) ${options.preserveExisting ? "DO NOTHING" : `DO UPDATE SET
          text_hash = excluded.text_hash,
          attempts = 0,
          last_error = '',
-         next_attempt_at = excluded.next_attempt_at`,
+         next_attempt_at = excluded.next_attempt_at`}`,
       [id, await hashWikiText(text), now, now],
     );
   }

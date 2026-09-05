@@ -210,7 +210,10 @@ async function callTool(name, args) {
     }),
   );
   const body = JSON.parse(response.body);
-  if (body.error) return { error: body.error.message };
+  assert.equal(body.error, undefined, "tool failures must not be protocol errors");
+  if (body.result.isError && body.result.content[0].text.startsWith("Error executing ")) {
+    return { error: body.result.content[0].text, isError: true };
+  }
   return {
     result: JSON.parse(body.result.content[0].text),
     isError: body.result.isError === true,

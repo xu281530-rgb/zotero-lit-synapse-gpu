@@ -10,6 +10,8 @@ import type {
 } from "./wikiTypes";
 import type { WikiStore } from "./wikiStore";
 import { cosine, floatVector } from "./wikiVector";
+import type { EmbeddingIdentity } from "../semantic/embeddingService";
+import { compatibleEmbeddingIdentity, parseEmbeddingIdentity } from "../semantic/embeddingIdentity";
 
 const ONE_HOP_DECAY = 0.72;
 
@@ -55,6 +57,7 @@ export interface WikiDocumentSearchResult {
 }
 
 export interface WikiSearchResult {
+  warnings?: string[];
   claims: WikiClaimSearchResult[];
   documents: WikiDocumentSearchResult[];
   /** Plain DTOs, for the same reason as {@link WikiClaimSearchResult.evidence}. */
@@ -83,11 +86,17 @@ export class WikiRetriever {
     keywords?: string[];
     queryVector?: Float32Array;
     queryVectorModel?: string;
+    queryVectorIdentity?: EmbeddingIdentity;
     itemKeys?: string[];
     minScore?: number;
     limit?: number | null;
+    signal?: AbortSignal;
   }): Promise<WikiSearchResult> {
-    const snapshot = await this.store.getRetrievalSnapshot(options.libraryID);
+    const snapshot = await this.store.getRetrievalSnapshot(options.libraryID, {
+      itemKeys: options.itemKeys, includeEmbeddings: Boolean(options.queryVector),
+    });
+    const checkCancelled = () => { if (options.signal?.aborted) throw new Error("Wiki search cancelled"); };
+    checkCancelled();
     const queryTerms = terms(
       [options.query, ...(options.keywords ?? [])].join(" "),
     );
@@ -228,8 +237,12 @@ export class WikiRetriever {
     }
 
     const claims: WikiClaimSearchResult[] = [];
+    let incompatibleVectors = 0;
     const matchedConceptIds = new Set<number>();
+    let scanned = 0;
     for (const claim of snapshot.claims) {
+      if (++scanned % 128 === 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      checkCancelled();
       const claimId = Number(column(claim, "claim_id", "claimId"));
       if (scopedClaimIds && !scopedClaimIds.has(claimId)) continue;
       const pageId = Number(column(claim, "page_id", "pageId"));
@@ -258,8 +271,14 @@ export class WikiRetriever {
       );
       const embedding = embeddings.get(claimId);
       let vectorScore = 0;
+      const compatible = compatibleEmbeddingIdentity(
+        options.queryVectorIdentity,
+        parseEmbeddingIdentity(column(embedding, "embedding_identity", "embeddingIdentity")),
+      );
+      if (options.queryVector && embedding && !compatible) incompatibleVectors++;
       if (
         options.queryVector &&
+        compatible &&
         options.queryVectorModel &&
         embedding &&
         String(column(embedding, "model", "model")) ===
@@ -319,7 +338,7 @@ export class WikiRetriever {
       (a, b) =>
         b.normalizedWikiScore - a.normalizedWikiScore || a.claimId - b.claimId,
     );
-    const documents = new Map<string, WikiDocumentSearchResult>();
+    const groups = new Map<string, { itemKey: string; libraryID: number; claims: Map<number, WikiClaimSearchResult> }>();
     for (const claim of claims) {
       for (const evidence of claim.evidence) {
         if (column(evidence, "link_state", "linkState") !== "valid") continue;
@@ -331,35 +350,41 @@ export class WikiRetriever {
         )
           continue;
         const key = `${libraryID}:${itemKey}`;
-        const existing = documents.get(key);
-        if (!existing) {
-          documents.set(key, {
-            itemKey,
-            libraryID,
-            normalizedWikiScore: claim.normalizedWikiScore,
-            evidenceConfidence: claim.evidenceConfidence,
-            readDepth:
-              claim.readDepth ??
-              (column(evidence, "read_depth", "readDepth") as WikiReadDepth),
-            epistemicStatus: claim.epistemicStatus,
-            wikiClaims: [claim],
-          });
-        } else {
-          existing.normalizedWikiScore = Math.max(
-            existing.normalizedWikiScore,
-            claim.normalizedWikiScore,
-          );
-          existing.evidenceConfidence = Math.max(
-            existing.evidenceConfidence,
-            claim.evidenceConfidence,
-          );
-          existing.wikiClaims.push(claim);
+        let group = groups.get(key);
+        if (!group) {
+          group = { itemKey, libraryID, claims: new Map() };
+          groups.set(key, group);
         }
+        let localClaim = group.claims.get(claim.claimId);
+        if (!localClaim) {
+          localClaim = { ...claim, evidence: [], readDepth: null };
+          group.claims.set(claim.claimId, localClaim);
+        }
+        localClaim.evidence.push(evidence);
       }
     }
+    // Evidence depth was verified on write; relinking a changed source resets it.
+    // Only this document's valid evidence can raise its current reading depth.
+    const documents: WikiDocumentSearchResult[] = Array.from(groups.values(), (group) => {
+      const wikiClaims = Array.from(group.claims.values());
+      let readDepth: WikiReadDepth = "chunk_local";
+      for (const claim of wikiClaims) {
+        claim.readDepth = claim.evidence.reduce<WikiReadDepth>((depth, evidence) =>
+          DEPTH_ORDER.indexOf(evidence.readDepth) > DEPTH_ORDER.indexOf(depth) ? evidence.readDepth : depth,
+        "chunk_local");
+        if (DEPTH_ORDER.indexOf(claim.readDepth) > DEPTH_ORDER.indexOf(readDepth)) readDepth = claim.readDepth;
+      }
+      return {
+        itemKey: group.itemKey, libraryID: group.libraryID, wikiClaims, readDepth,
+        normalizedWikiScore: Math.max(...wikiClaims.map((claim) => claim.normalizedWikiScore)),
+        evidenceConfidence: Math.max(...wikiClaims.map((claim) => claim.evidenceConfidence)),
+        epistemicStatus: wikiClaims[0].epistemicStatus,
+      };
+    });
     return {
+      ...(incompatibleVectors ? { warnings: [`${incompatibleVectors} Wiki vectors have an unknown or incompatible generating identity and were excluded. Rebuild the queued Wiki embeddings; keyword retrieval remains available.`] } : {}),
       claims,
-      documents: Array.from(documents.values())
+      documents: documents
         .sort(
           (a, b) =>
             b.normalizedWikiScore - a.normalizedWikiScore ||

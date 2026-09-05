@@ -1100,6 +1100,8 @@ for (const itemKey of indexedChunks.keys()) {
   });
 }
 const vectorStore = getVectorStore();
+// These fixtures keep one stationary source; revision changes are tested in Zotero.
+vectorStore.getDocumentRevision = async () => "";
 vectorStore.initialize = async () => {};
 vectorStore.getChunksForItem = async (itemKey) =>
   indexedChunks.get(itemKey) ?? [];
@@ -1156,7 +1158,11 @@ const bodyBuild = await bodyAwareService.buildFromPaper({
 });
 assert.equal(bodyBuild.chunkCount, 1);
 assert.equal(bodyBuild.pagination.totalChunks, 1);
-assert.equal(bodyBuild.pagination.hasMore, false, "a 1-chunk paper is one page");
+assert.equal(
+  bodyBuild.pagination.hasMore,
+  false,
+  "a 1-chunk paper is one page",
+);
 assert.equal(
   bodyBuild.pagination.coverageComplete,
   true,
@@ -1349,10 +1355,17 @@ sourceKinds.set("BODY1", "body");
 const claimEmbeddingTextHash = await hashWikiText(
   "Cooling-rate refinement becomes weaker above the transition temperature.",
 );
+const embeddingIdentity = {
+  apiBase: "http://embedding-test.invalid/v1",
+  provider: "openai",
+  model: "embedding-model-a",
+  dimensions: 3,
+};
 await store.saveClaimEmbedding({
   claimId: commit.refs["claim:boundary"],
   vector: new Float32Array([1, 0, 0]),
   model: "embedding-model-a",
+  identity: embeddingIdentity,
   textHash: claimEmbeddingTextHash,
 });
 await assert.rejects(
@@ -1361,10 +1374,11 @@ await assert.rejects(
       claimId: commit.refs["claim:boundary"],
       vector: new Float32Array([1, 0, 0]),
       model: "embedding-model-b",
+      identity: embeddingIdentity,
       textHash: claimEmbeddingTextHash,
     }),
-  /different model or dimensions/iu,
-  "Claim Embeddings must not mix model identities",
+  /model does not match.*identity/iu,
+  "Claim Embeddings must retain their actual generating model",
 );
 await assert.rejects(
   () =>
@@ -1372,11 +1386,58 @@ await assert.rejects(
       claimId: commit.refs["claim:boundary"],
       vector: new Float32Array([1, 0]),
       model: "embedding-model-a",
+      identity: embeddingIdentity,
       textHash: claimEmbeddingTextHash,
     }),
-  /different model or dimensions/iu,
-  "Claim Embeddings must not mix vector dimensions",
+  /identity does not match.*vector/iu,
+  "Claim Embeddings must retain their actual generated dimensions",
 );
+await store.saveClaimEmbedding({
+  claimId: commit.refs["claim:boundary"],
+  vector: new Float32Array([1, 0, 0]),
+  model: "embedding-model-b",
+  identity: { ...embeddingIdentity, model: "embedding-model-b" },
+  textHash: claimEmbeddingTextHash,
+});
+assert.equal(
+  JSON.parse(
+    sqlite
+      .prepare(
+        "SELECT embedding_identity FROM wiki_claim_embeddings WHERE claim_id = ?",
+      )
+      .get(commit.refs["claim:boundary"]).embedding_identity,
+  ).model,
+  "embedding-model-b",
+  "rebuilding one row under a new model preserves the new identity without clearing knowledge",
+);
+const preservedQueue = await store.embeddingQueue();
+const queueClaimId = commit.refs["claim:boundary"];
+await preservedQueue.enqueue(
+  queueClaimId,
+  "Cooling-rate refinement becomes weaker above the transition temperature.",
+);
+sqlite
+  .prepare(
+    "UPDATE wiki_embedding_queue SET attempts = 3, last_error = 'temporary outage', next_attempt_at = 123456789 WHERE claim_id = ?",
+  )
+  .run(queueClaimId);
+await preservedQueue.enqueue(
+  queueClaimId,
+  "Cooling-rate refinement becomes weaker above the transition temperature.",
+  { preserveExisting: true },
+);
+const preservedRetry = sqlite
+  .prepare(
+    "SELECT attempts, last_error, next_attempt_at FROM wiki_embedding_queue WHERE claim_id = ?",
+  )
+  .get(queueClaimId);
+assert.equal(
+  preservedRetry.attempts,
+  3,
+  "an overlapping compatibility query must not reset an existing retry",
+);
+assert.equal(preservedRetry.last_error, "temporary outage");
+assert.equal(preservedRetry.next_attempt_at, 123456789);
 const searchDbPath = path.join(tempDir, "zotero-lit-synapse-semantic.sqlite");
 const searchSqlite = new DatabaseSync(searchDbPath);
 searchSqlite.exec(

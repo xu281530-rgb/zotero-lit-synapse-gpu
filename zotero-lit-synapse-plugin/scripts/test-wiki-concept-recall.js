@@ -121,17 +121,25 @@ function fakeVector(text) {
 }
 
 let embedMode = "ok";
+const embeddingIdentity = {
+  model: "test-embed-model",
+  apiBase: "test",
+  provider: "openai",
+  dimensions: VOCAB.length + TAIL,
+};
 const embeddingService = getEmbeddingService();
 embeddingService.getConfig = () => ({ model: "test-embed-model" });
 embeddingService.embed = async (text) => {
   if (embedMode === "throw") throw new Error("embedding backend is down");
-  return { embedding: fakeVector(text) };
+  return { embedding: fakeVector(text), identity: embeddingIdentity };
 };
 
 fake.createPaper({ key: "PAPERONE", title: "Squeeze casting of Al-Zn-Mg-Cu" });
 fake.createPaper({ key: "PAPERTWO", title: "凝固前沿的溶质输运" });
 
 const vectorStore = getVectorStore();
+// These fixtures keep one stationary source; revision changes are tested in Zotero.
+vectorStore.getDocumentRevision = async () => "";
 vectorStore.initialize = async () => {};
 vectorStore.getChunksForItem = async () => [];
 vectorStore.getIndexStatus = async (key) => ({
@@ -181,6 +189,7 @@ await block("an empty Wiki has a revision and a skeleton", async () => {
     libraryID: LIBRARY,
     seedConceptIds: [],
     model: "test-embed-model",
+    identity: embeddingIdentity,
   });
   assert.deepEqual(neighbourhood.seeds, []);
   assert.deepEqual(neighbourhood.neighbours, []);
@@ -191,6 +200,7 @@ await block("an empty Wiki has a revision and a skeleton", async () => {
       libraryID: LIBRARY,
       probes: [{ text: "挤压铸造", vector: fakeVector("挤压铸造") }],
       model: "test-embed-model",
+      identity: embeddingIdentity,
     }),
     [{ probe: "挤压铸造", matches: [] }],
   );
@@ -220,8 +230,16 @@ await block("the embedding text does not depend on row order", async () => {
     forward.startsWith("界面换热系数"),
     "the canonical name leads; an incidental English alias must not",
   );
-  assert.match(forward, /IHTC/u, "aliases are in, or cross-language dedup dies");
-  assert.match(forward, /传热能力/u, "so is the description, or relatedness dies");
+  assert.match(
+    forward,
+    /IHTC/u,
+    "aliases are in, or cross-language dedup dies",
+  );
+  assert.match(
+    forward,
+    /传热能力/u,
+    "so is the description, or relatedness dies",
+  );
 
   // The default type carries no information and would only add noise.
   assert.equal(
@@ -237,191 +255,228 @@ await block("the embedding text does not depend on row order", async () => {
 
 // --- 2. Every concept gets a vector ---------------------------------------
 
-await block("creating a concept queues it, and a drain gives it a vector", async () => {
-  await service.recordConcepts({
-    libraryID: LIBRARY,
-    concepts: [
-      {
-        primaryTerm: { zh: "界面换热系数", en: "interfacial heat transfer coefficient", abbr: "IHTC" },
-        conceptType: "property",
-        description: "表征铸件与模具接触界面处传热能力的参数。",
-        sources: [{ itemKey: "PAPERONE" }],
-      },
-      {
-        primaryTerm: { zh: "挤压铸造", en: "squeeze casting" },
-        conceptType: "technique",
-        description: "在压力下完成凝固结晶的近净成形工艺。",
-        sources: [{ itemKey: "PAPERONE" }],
-      },
-      {
-        primaryTerm: { zh: "晶粒细化", en: "grain refinement" },
-        conceptType: "phenomenon",
-        description: "初生晶粒由粗大枝晶转变为细小等轴晶。",
-        sources: [{ itemKey: "PAPERONE" }],
-      },
-    ],
-  });
-  const queue = await store.conceptEmbeddingQueue();
-  assert.equal(
-    await queue.pendingCount(),
-    3,
-    "a concept nobody embedded is a concept recall cannot reach",
-  );
-  await service.pumpEmbeddingQueue({ limit: 100 });
-  assert.equal(await queue.pendingCount(), 0, "the drain must empty the queue");
-  assert.equal(
-    rows("SELECT concept_id FROM wiki_concept_embeddings").length,
-    3,
-  );
-  const stored = one(
-    "SELECT dimensions, model FROM wiki_concept_embeddings LIMIT 1",
-  );
-  assert.equal(stored.model, "test-embed-model");
-  assert.equal(stored.dimensions, VOCAB.length + TAIL);
-});
+await block(
+  "creating a concept queues it, and a drain gives it a vector",
+  async () => {
+    await service.recordConcepts({
+      libraryID: LIBRARY,
+      concepts: [
+        {
+          primaryTerm: {
+            zh: "界面换热系数",
+            en: "interfacial heat transfer coefficient",
+            abbr: "IHTC",
+          },
+          conceptType: "property",
+          description: "表征铸件与模具接触界面处传热能力的参数。",
+          sources: [{ itemKey: "PAPERONE" }],
+        },
+        {
+          primaryTerm: { zh: "挤压铸造", en: "squeeze casting" },
+          conceptType: "technique",
+          description: "在压力下完成凝固结晶的近净成形工艺。",
+          sources: [{ itemKey: "PAPERONE" }],
+        },
+        {
+          primaryTerm: { zh: "晶粒细化", en: "grain refinement" },
+          conceptType: "phenomenon",
+          description: "初生晶粒由粗大枝晶转变为细小等轴晶。",
+          sources: [{ itemKey: "PAPERONE" }],
+        },
+      ],
+    });
+    const queue = await store.conceptEmbeddingQueue();
+    assert.equal(
+      await queue.pendingCount(),
+      3,
+      "a concept nobody embedded is a concept recall cannot reach",
+    );
+    await service.pumpEmbeddingQueue({ limit: 100 });
+    assert.equal(
+      await queue.pendingCount(),
+      0,
+      "the drain must empty the queue",
+    );
+    assert.equal(
+      rows("SELECT concept_id FROM wiki_concept_embeddings").length,
+      3,
+    );
+    const stored = one(
+      "SELECT dimensions, model FROM wiki_concept_embeddings LIMIT 1",
+    );
+    assert.equal(stored.model, "test-embed-model");
+    assert.equal(stored.dimensions, VOCAB.length + TAIL);
+  },
+);
 
 // --- 3. Concepts that predate the table -----------------------------------
 
-await block("a concept written before vectors existed is backfilled", async () => {
-  sqlite
-    .prepare(
-      `INSERT INTO wiki_concepts
+await block(
+  "a concept written before vectors existed is backfilled",
+  async () => {
+    sqlite
+      .prepare(
+        `INSERT INTO wiki_concepts
          (library_id, canonical_name, normalized_name, concept_type, description)
        VALUES (?, ?, ?, ?, ?)`,
-    )
-    .run(LIBRARY, "旧概念", "旧概念", "concept", "在向量表存在之前写入的。");
-  // Reopening is what a Zotero restart does, and it is where the backfill runs.
-  const reopened = new WikiStore(adapt(sqlite));
-  await reopened.initialize();
-  const queue = await reopened.conceptEmbeddingQueue();
-  assert.equal(
-    await queue.pendingCount(),
-    1,
-    "the backfill is the repair path, not a one-shot migration",
-  );
-  await new WikiService(reopened).pumpEmbeddingQueue({ limit: 100 });
-  assert.equal(await queue.pendingCount(), 0);
-});
+      )
+      .run(LIBRARY, "旧概念", "旧概念", "concept", "在向量表存在之前写入的。");
+    // Reopening is what a Zotero restart does, and it is where the backfill runs.
+    const reopened = new WikiStore(adapt(sqlite));
+    await reopened.initialize();
+    const queue = await reopened.conceptEmbeddingQueue();
+    assert.equal(
+      await queue.pendingCount(),
+      1,
+      "the backfill is the repair path, not a one-shot migration",
+    );
+    await new WikiService(reopened).pumpEmbeddingQueue({ limit: 100 });
+    assert.equal(await queue.pendingCount(), 0);
+  },
+);
 
 // --- 4 & 5. Staleness, and what resync must NOT touch ----------------------
 
-await block("a rewritten concept is re-embedded; a failing one keeps its backoff", async () => {
-  const id = conceptIdOf("晶粒细化");
-  sqlite
-    .prepare("UPDATE wiki_concepts SET description = ? WHERE concept_id = ?")
-    .run("初生晶粒尺寸从 273 µm 降至 101 µm。", id);
-  const { requeued } = await store.resyncConceptEmbeddings(LIBRARY);
-  assert.equal(
-    requeued,
-    1,
-    "found by comparing hashes, not by having been reported",
-  );
-  const queue = await store.conceptEmbeddingQueue();
-  assert.deepEqual(
-    (await queue.list()).map((row) => row.id),
-    [id],
-  );
+await block(
+  "a rewritten concept is re-embedded; a failing one keeps its backoff",
+  async () => {
+    const id = conceptIdOf("晶粒细化");
+    sqlite
+      .prepare("UPDATE wiki_concepts SET description = ? WHERE concept_id = ?")
+      .run("初生晶粒尺寸从 273 µm 降至 101 µm。", id);
+    const { requeued } = await store.resyncConceptEmbeddings(LIBRARY);
+    assert.equal(
+      requeued,
+      1,
+      "found by comparing hashes, not by having been reported",
+    );
+    const queue = await store.conceptEmbeddingQueue();
+    assert.deepEqual(
+      (await queue.list()).map((row) => row.id),
+      [id],
+    );
 
-  // An enqueue resets the backoff, so neither of these may be re-queued: the
-  // one already in the queue has been noticed, and the one with no vector is
-  // the schema backfill's job. Re-queuing either erases the record of how many
-  // times the backend already refused it, and it never reaches "exhausted".
-  sqlite
-    .prepare("DELETE FROM wiki_concept_embeddings WHERE concept_id = ?")
-    .run(conceptIdOf("挤压铸造"));
-  const second = await store.resyncConceptEmbeddings(LIBRARY);
-  assert.equal(
-    second.requeued,
-    0,
-    "resync means stale-and-unnoticed, not missing and not already queued",
-  );
-  const stillQueued = await queue.list();
-  assert.deepEqual(
-    stillQueued.map((row) => row.id),
-    [id],
-    "the second resync must not have added the vector-less concept",
-  );
-  assert.equal(
-    stillQueued[0].attempts,
-    0,
-    "and must not have disturbed the row that was already there",
-  );
+    // An enqueue resets the backoff, so neither of these may be re-queued: the
+    // one already in the queue has been noticed, and the one with no vector is
+    // the schema backfill's job. Re-queuing either erases the record of how many
+    // times the backend already refused it, and it never reaches "exhausted".
+    sqlite
+      .prepare("DELETE FROM wiki_concept_embeddings WHERE concept_id = ?")
+      .run(conceptIdOf("挤压铸造"));
+    const second = await store.resyncConceptEmbeddings(LIBRARY);
+    assert.equal(
+      second.requeued,
+      0,
+      "resync means stale-and-unnoticed, not missing and not already queued",
+    );
+    const stillQueued = await queue.list();
+    assert.deepEqual(
+      stillQueued.map((row) => row.id),
+      [id],
+      "the second resync must not have added the vector-less concept",
+    );
+    assert.equal(
+      stillQueued[0].attempts,
+      0,
+      "and must not have disturbed the row that was already there",
+    );
 
-  await service.pumpEmbeddingQueue({ limit: 100 });
-  const refreshed = one(
-    "SELECT text_hash FROM wiki_concept_embeddings WHERE concept_id = ?",
-    id,
-  );
-  assert.equal(
-    refreshed.text_hash,
-    await hashWikiText(
-      conceptEmbeddingText({
-        canonicalName: "晶粒细化",
-        conceptType: "phenomenon",
-        description: "初生晶粒尺寸从 273 µm 降至 101 µm。",
-        aliases: ["grain refinement"],
-      }),
-    ),
-    "the stored hash is what future staleness checks compare against",
-  );
-  assert.equal(await (await store.resyncConceptEmbeddings(LIBRARY)).requeued, 0);
-});
+    await service.pumpEmbeddingQueue({ limit: 100 });
+    const refreshed = one(
+      "SELECT text_hash FROM wiki_concept_embeddings WHERE concept_id = ?",
+      id,
+    );
+    assert.equal(
+      refreshed.text_hash,
+      await hashWikiText(
+        conceptEmbeddingText({
+          canonicalName: "晶粒细化",
+          conceptType: "phenomenon",
+          description: "初生晶粒尺寸从 273 µm 降至 101 µm。",
+          aliases: ["grain refinement"],
+        }),
+      ),
+      "the stored hash is what future staleness checks compare against",
+    );
+    assert.equal(
+      await (
+        await store.resyncConceptEmbeddings(LIBRARY)
+      ).requeued,
+      0,
+    );
+  },
+);
 
 // --- 5b. A foreign embedding space ----------------------------------------
 
-await block("a vector from another model is discarded, not enthroned", async () => {
-  /*
-   * This is the failure that cost a 30-paper run its entire concept recall.
-   * `getConfig().model` returns the DEFAULT until `embed()` has initialized the
-   * service, and the model name was read BEFORE the embedding - so one concept
-   * was stamped `text-embedding-3-small` while its vector came from the
-   * configured model. The identity guard then rejected all 118 others as
-   * foreign, they exhausted their retries, and the Wiki went on reporting
-   * itself healthy while every neighbourhood came back empty.
-   *
-   * Two things have to hold now: the stale row must not block the write, and
-   * it must be re-queued rather than left as a vector nobody can use.
-   */
-  const victim = conceptIdOf("挤压铸造");
-  sqlite
-    .prepare(
-      `INSERT INTO wiki_concept_embeddings
+await block(
+  "a foreign vector is retained but excluded and durably requeued",
+  async () => {
+    /*
+     * This is the failure that cost a 30-paper run its entire concept recall.
+     * `getConfig().model` returns the DEFAULT until `embed()` has initialized the
+     * service, and the model name was read BEFORE the embedding - so one concept
+     * was stamped `text-embedding-3-small` while its vector came from the
+     * configured model. The identity guard then rejected all 118 others as
+     * foreign, they exhausted their retries, and the Wiki went on reporting
+     * itself healthy while every neighbourhood came back empty.
+     *
+     * Two things have to hold now: the stale row must not block the write, and
+     * it must be re-queued rather than left as a vector nobody can use.
+     */
+    const victim = conceptIdOf("挤压铸造");
+    sqlite
+      .prepare(
+        `INSERT INTO wiki_concept_embeddings
          (concept_id, embedding, dimensions, model, text_hash, updated_at)
        VALUES (?, ?, ?, 'text-embedding-3-small', 'stale', ?)
        ON CONFLICT(concept_id) DO UPDATE SET model = excluded.model,
-         text_hash = excluded.text_hash`,
-    )
-    .run(
-      victim,
-      Buffer.from(new Float32Array(VOCAB.length + TAIL).buffer),
-      VOCAB.length + TAIL,
-      Date.now(),
+         text_hash = excluded.text_hash, embedding_identity = NULL`,
+      )
+      .run(
+        victim,
+        Buffer.from(new Float32Array(VOCAB.length + TAIL).buffer),
+        VOCAB.length + TAIL,
+        Date.now(),
+      );
+
+    const other = conceptIdOf("界面换热系数");
+    await store.saveConceptEmbedding({
+      conceptId: other,
+      vector: fakeVector("界面换热系数"),
+      model: "test-embed-model",
+      identity: embeddingIdentity,
+      textHash: "whatever",
+    });
+
+    const spaces = rows(
+      "SELECT DISTINCT model FROM wiki_concept_embeddings",
+    ).map((row) => row.model);
+    assert.ok(spaces.includes("test-embed-model"));
+    assert.ok(
+      spaces.includes("text-embedding-3-small"),
+      "one new vector must not delete other stored vectors",
     );
-
-  const other = conceptIdOf("界面换热系数");
-  await store.saveConceptEmbedding({
-    conceptId: other,
-    vector: fakeVector("界面换热系数"),
-    model: "test-embed-model",
-    textHash: "whatever",
-  });
-
-  const spaces = rows(
-    "SELECT DISTINCT model FROM wiki_concept_embeddings",
-  ).map((row) => row.model);
-  assert.deepEqual(
-    spaces,
-    ["test-embed-model"],
-    "one foreign row must not survive to reject every future write",
-  );
-  const queue = await store.conceptEmbeddingQueue();
-  assert.ok(
-    (await queue.list()).some((row) => row.id === victim),
-    "the concept whose vector was discarded has to be re-queued for the new space",
-  );
-  await service.pumpEmbeddingQueue({ limit: 100 });
-  assert.equal(await queue.pendingCount(), 0);
-});
+    const warnings = [];
+    await store.conceptNeighbourhood({
+      libraryID: LIBRARY,
+      seedConceptIds: [],
+      seedVectors: [fakeVector("挤压铸造")],
+      model: "test-embed-model",
+      identity: embeddingIdentity,
+      warnings,
+    });
+    assert.ok(warnings.some((warning) => /incompatible/iu.test(warning)));
+    await store.requeueIncompatibleEmbeddings(LIBRARY, embeddingIdentity);
+    const queue = await store.conceptEmbeddingQueue();
+    assert.ok(
+      (await queue.list()).some((row) => row.id === victim),
+      "the incompatible concept must be re-queued for the actual query space",
+    );
+    await service.pumpEmbeddingQueue({ limit: 100 });
+    assert.equal(await queue.pendingCount(), 0);
+  },
+);
 
 // --- 6. Duplicate detection -----------------------------------------------
 
@@ -431,6 +486,7 @@ await block("a near-synonym under another name is caught", async () => {
     libraryID: LIBRARY,
     probes: [{ text: probe, vector: fakeVector(probe) }],
     model: "test-embed-model",
+    identity: embeddingIdentity,
     limit: 5,
   });
   assert.equal(result.probe, probe);
@@ -450,158 +506,175 @@ await block("a near-synonym under another name is caught", async () => {
    * being ranked against, because that ordering is what the write-up reads.
    */
   const unrelated = result.matches.find((match) => match.name === "晶粒细化");
-  assert.ok(unrelated, "the fixture must contain something to be separated from");
+  assert.ok(
+    unrelated,
+    "the fixture must contain something to be separated from",
+  );
   assert.ok(
     top.score > unrelated.score * 1.5,
     `near-synonym ${top.score} must stand clear of unrelated ${unrelated.score}`,
   );
 });
 
-await block("an exact alias is reported as certain, ahead of any guess", async () => {
-  const [result] = await store.matchConcepts({
-    libraryID: LIBRARY,
-    probes: [{ text: "IHTC", vector: fakeVector("IHTC") }],
-    model: "test-embed-model",
-    limit: 5,
-  });
-  const top = result.matches[0];
-  assert.equal(top.name, "界面换热系数");
-  assert.equal(top.matchedBy, "name");
-  assert.equal(top.score, 1, "a name hit is not a similarity");
-  assert.equal(
-    result.matches.filter((match) => match.name === top.name).length,
-    1,
-    "the certain hit must not also appear as a vector guess",
-  );
-});
+await block(
+  "an exact alias is reported as certain, ahead of any guess",
+  async () => {
+    const [result] = await store.matchConcepts({
+      libraryID: LIBRARY,
+      probes: [{ text: "IHTC", vector: fakeVector("IHTC") }],
+      model: "test-embed-model",
+      identity: embeddingIdentity,
+      limit: 5,
+    });
+    const top = result.matches[0];
+    assert.equal(top.name, "界面换热系数");
+    assert.equal(top.matchedBy, "name");
+    assert.equal(top.score, 1, "a name hit is not a similarity");
+    assert.equal(
+      result.matches.filter((match) => match.name === top.name).length,
+      1,
+      "the certain hit must not also appear as a vector guess",
+    );
+  },
+);
 
-await block("without vectors the check degrades to names, it does not fail", async () => {
-  const [result] = await store.matchConcepts({
-    libraryID: LIBRARY,
-    probes: [{ text: "IHTC", vector: null }],
-    model: "test-embed-model",
-  });
-  assert.equal(result.matches.length, 1);
-  assert.equal(result.matches[0].matchedBy, "name");
-});
+await block(
+  "without vectors the check degrades to names, it does not fail",
+  async () => {
+    const [result] = await store.matchConcepts({
+      libraryID: LIBRARY,
+      probes: [{ text: "IHTC", vector: null }],
+      model: "test-embed-model",
+      identity: embeddingIdentity,
+    });
+    assert.equal(result.matches.length, 1);
+    assert.equal(result.matches[0].matchedBy, "name");
+  },
+);
 
 // --- 7 & 8. The neighbourhood ---------------------------------------------
 
-await block("the neighbourhood is bounded by the paper, not the library", async () => {
-  // A second paper's concepts, one of them related to the first paper's.
-  await service.recordConcepts({
-    libraryID: LIBRARY,
-    concepts: [
-      {
-        primaryTerm: { zh: "溶质扩散", en: "solute diffusion" },
-        conceptType: "phenomenon",
-        description: "固液界面前沿的溶质输运。",
-        sources: [{ itemKey: "PAPERTWO" }],
-      },
-      {
-        primaryTerm: { zh: "抗拉强度", en: "ultimate tensile strength" },
-        conceptType: "property",
-        description: "材料断裂前所能承受的最大应力。",
-        sources: [{ itemKey: "PAPERTWO" }],
-      },
-    ],
-  });
-  await service.pumpEmbeddingQueue({ limit: 100 });
+await block(
+  "the neighbourhood is bounded by the paper, not the library",
+  async () => {
+    // A second paper's concepts, one of them related to the first paper's.
+    await service.recordConcepts({
+      libraryID: LIBRARY,
+      concepts: [
+        {
+          primaryTerm: { zh: "溶质扩散", en: "solute diffusion" },
+          conceptType: "phenomenon",
+          description: "固液界面前沿的溶质输运。",
+          sources: [{ itemKey: "PAPERTWO" }],
+        },
+        {
+          primaryTerm: { zh: "抗拉强度", en: "ultimate tensile strength" },
+          conceptType: "property",
+          description: "材料断裂前所能承受的最大应力。",
+          sources: [{ itemKey: "PAPERTWO" }],
+        },
+      ],
+    });
+    await service.pumpEmbeddingQueue({ limit: 100 });
 
-  const squeeze = conceptIdOf("挤压铸造");
-  const refinement = conceptIdOf("晶粒细化");
-  const strength = conceptIdOf("抗拉强度");
-  const now = Date.now();
-  const relate = (source, target, predicate) =>
-    sqlite
-      .prepare(
-        `INSERT INTO wiki_relations
+    const squeeze = conceptIdOf("挤压铸造");
+    const refinement = conceptIdOf("晶粒细化");
+    const strength = conceptIdOf("抗拉强度");
+    const now = Date.now();
+    const relate = (source, target, predicate) =>
+      sqlite
+        .prepare(
+          `INSERT INTO wiki_relations
            (source_concept_id, predicate, normalized_predicate, target_concept_id,
             confidence, created_at)
          VALUES (?, ?, ?, ?, 1, ?)`,
-      )
-      .run(source, predicate, predicate, target, now);
-  relate(squeeze, refinement, "refines");
-  relate(squeeze, strength, "raises");
+        )
+        .run(source, predicate, predicate, target, now);
+    relate(squeeze, refinement, "refines");
+    relate(squeeze, strength, "raises");
 
-  const seeds = await store.conceptIdsForItem(LIBRARY, "PAPERONE");
-  assert.equal(
-    seeds.length,
-    3,
-    "the paper's own concepts come from the term sources, not from the model",
-  );
-
-  const neighbourhood = await store.conceptNeighbourhood({
-    libraryID: LIBRARY,
-    seedConceptIds: seeds,
-    model: "test-embed-model",
-    limit: 10,
-    hubLimit: 3,
-  });
-
-  const names = (list) => list.map((entry) => entry.name).sort();
-  assert.deepEqual(names(neighbourhood.seeds), [
-    "挤压铸造",
-    "晶粒细化",
-    "界面换热系数",
-  ]);
-  for (const seed of neighbourhood.seeds) {
-    assert.ok(
-      !neighbourhood.neighbours.some((n) => n.name === seed.name),
-      `${seed.name} is the paper's own; returning it as a neighbour wastes budget`,
+    const seeds = await store.conceptIdsForItem(LIBRARY, "PAPERONE");
+    assert.equal(
+      seeds.length,
+      3,
+      "the paper's own concepts come from the term sources, not from the model",
     );
-    assert.ok(!neighbourhood.hubs.some((h) => h.name === seed.name));
-  }
-  assert.ok(
-    neighbourhood.neighbours.length > 0,
-    "a paper with no visible neighbourhood cannot propose a relation",
-  );
-  assert.ok(
-    neighbourhood.neighbours.every((entry) => entry.score > 0),
-    "an unscored entry is padding",
-  );
-  assert.deepEqual(
-    neighbourhood.neighbours.map((entry) => entry.score),
-    [...neighbourhood.neighbours.map((entry) => entry.score)].sort(
-      (a, b) => b - a,
-    ),
-    "nearest first, or a truncated list drops the best matches",
-  );
-  assert.equal(neighbourhood.conceptCount, 6);
-  assert.equal(neighbourhood.pendingVectors, 0);
 
-  // 抗拉强度 is one relation from a seed. Whether it also scores as a
-  // neighbour or not, it must be reachable - that is what `related` is for.
-  const reachable = [
-    ...names(neighbourhood.neighbours),
-    ...names(neighbourhood.related),
-  ];
-  assert.ok(
-    reachable.includes("抗拉强度"),
-    "a concept the Wiki already links to this paper must never be invisible",
-  );
+    const neighbourhood = await store.conceptNeighbourhood({
+      libraryID: LIBRARY,
+      seedConceptIds: seeds,
+      model: "test-embed-model",
+      identity: embeddingIdentity,
+      limit: 10,
+      hubLimit: 3,
+    });
 
-  // Relations are restricted to what the response actually named.
-  const mentioned = new Set([
-    ...names(neighbourhood.seeds),
-    ...reachable,
-    ...names(neighbourhood.hubs),
-  ]);
-  for (const relation of neighbourhood.relations) {
-    const [source, , target] = relation.split(/ --| --> |--> /u);
-    for (const end of relation.split(/ --.*?--> /u)) {
+    const names = (list) => list.map((entry) => entry.name).sort();
+    assert.deepEqual(names(neighbourhood.seeds), [
+      "挤压铸造",
+      "晶粒细化",
+      "界面换热系数",
+    ]);
+    for (const seed of neighbourhood.seeds) {
       assert.ok(
-        mentioned.has(end.trim()),
-        `relation "${relation}" names ${end.trim()}, which the response never showed`,
+        !neighbourhood.neighbours.some((n) => n.name === seed.name),
+        `${seed.name} is the paper's own; returning it as a neighbour wastes budget`,
       );
+      assert.ok(!neighbourhood.hubs.some((h) => h.name === seed.name));
     }
-    assert.ok(source && target !== undefined);
-  }
-  assert.ok(
-    neighbourhood.relations.some((line) => /挤压铸造 --refines--> 晶粒细化/u.test(line)),
-    "relations among the in-scope set must still be present",
-  );
-});
+    assert.ok(
+      neighbourhood.neighbours.length > 0,
+      "a paper with no visible neighbourhood cannot propose a relation",
+    );
+    assert.ok(
+      neighbourhood.neighbours.every((entry) => entry.score > 0),
+      "an unscored entry is padding",
+    );
+    assert.deepEqual(
+      neighbourhood.neighbours.map((entry) => entry.score),
+      [...neighbourhood.neighbours.map((entry) => entry.score)].sort(
+        (a, b) => b - a,
+      ),
+      "nearest first, or a truncated list drops the best matches",
+    );
+    assert.equal(neighbourhood.conceptCount, 6);
+    assert.equal(neighbourhood.pendingVectors, 0);
+
+    // 抗拉强度 is one relation from a seed. Whether it also scores as a
+    // neighbour or not, it must be reachable - that is what `related` is for.
+    const reachable = [
+      ...names(neighbourhood.neighbours),
+      ...names(neighbourhood.related),
+    ];
+    assert.ok(
+      reachable.includes("抗拉强度"),
+      "a concept the Wiki already links to this paper must never be invisible",
+    );
+
+    // Relations are restricted to what the response actually named.
+    const mentioned = new Set([
+      ...names(neighbourhood.seeds),
+      ...reachable,
+      ...names(neighbourhood.hubs),
+    ]);
+    for (const relation of neighbourhood.relations) {
+      const [source, , target] = relation.split(/ --| --> |--> /u);
+      for (const end of relation.split(/ --.*?--> /u)) {
+        assert.ok(
+          mentioned.has(end.trim()),
+          `relation "${relation}" names ${end.trim()}, which the response never showed`,
+        );
+      }
+      assert.ok(source && target !== undefined);
+    }
+    assert.ok(
+      neighbourhood.relations.some((line) =>
+        /挤压铸造 --refines--> 晶粒细化/u.test(line),
+      ),
+      "relations among the in-scope set must still be present",
+    );
+  },
+);
 
 // --- 9 & 10. The skeleton and its revision --------------------------------
 
@@ -626,7 +699,9 @@ await block("the revision moves only when the Wiki does", async () => {
   assert.notEqual(afterAdd, first, "a new concept must move it");
 
   sqlite
-    .prepare("UPDATE wiki_concepts SET normalized_name = ? WHERE concept_id = ?")
+    .prepare(
+      "UPDATE wiki_concepts SET normalized_name = ? WHERE concept_id = ?",
+    )
     .run("凝固压力x", conceptIdOf("凝固压力"));
   assert.notEqual(
     await store.wikiRevision(LIBRARY),
@@ -673,6 +748,7 @@ await block("the skeleton is a neighbourhood, and repeats say so", async () => {
     libraryID: LIBRARY,
     itemKey: "PAPERONE",
     query: "挤压铸造对晶粒细化的影响",
+    knownSkeletonRevision: skeleton.revision,
   });
   assert.equal(
     again.wikiSkeleton.unchanged,
@@ -681,6 +757,21 @@ await block("the skeleton is a neighbourhood, and repeats say so", async () => {
   );
   assert.equal(again.wikiSkeleton.revision, skeleton.revision);
   assert.equal(again.wikiSkeleton.pages, undefined);
+
+  const newCaller = await service.prepareUpdate({
+    libraryID: LIBRARY,
+    itemKey: "PAPERONE",
+    query: "挤压铸造对晶粒细化的影响",
+  });
+  assert.ok(Array.isArray(newCaller.wikiSkeleton.pages));
+  const otherQuestion = await service.prepareUpdate({
+    libraryID: LIBRARY,
+    itemKey: "PAPERTWO",
+    query: "thermal gradient",
+    knownSkeletonRevision: skeleton.revision,
+  });
+  assert.notEqual(otherQuestion.wikiSkeleton.unchanged, true);
+  assert.notEqual(otherQuestion.wikiSkeleton.revision, skeleton.revision);
 
   const forced = await service.prepareUpdate({
     libraryID: LIBRARY,
@@ -716,67 +807,73 @@ await block("the skeleton is a neighbourhood, and repeats say so", async () => {
   );
 });
 
-await block("an embedding outage degrades the skeleton, it does not block it", async () => {
-  embedMode = "throw";
-  try {
-    const prepared = await service.prepareUpdate({
-      libraryID: LIBRARY,
-      itemKey: "PAPERONE",
-      query: "缩孔与应力集中",
-      refreshSkeleton: true,
-    });
-    const skeleton = prepared.wikiSkeleton;
-    assert.ok(
-      skeleton.warnings?.some((warning) => /字面匹配/u.test(warning)),
-      "a silently weaker duplicate check is worse than a stated one",
-    );
-    assert.ok(Array.isArray(skeleton.pages), "the rest of it still arrives");
-  } finally {
-    embedMode = "ok";
-  }
-});
+await block(
+  "an embedding outage degrades the skeleton, it does not block it",
+  async () => {
+    embedMode = "throw";
+    try {
+      const prepared = await service.prepareUpdate({
+        libraryID: LIBRARY,
+        itemKey: "PAPERONE",
+        query: "缩孔与应力集中",
+        refreshSkeleton: true,
+      });
+      const skeleton = prepared.wikiSkeleton;
+      assert.ok(
+        skeleton.warnings?.some((warning) => /字面匹配/u.test(warning)),
+        "a silently weaker duplicate check is worse than a stated one",
+      );
+      assert.ok(Array.isArray(skeleton.pages), "the rest of it still arrives");
+    } finally {
+      embedMode = "ok";
+    }
+  },
+);
 
 // --- 5c. Concept names that are really paper titles ------------------------
 
-await block("a paper-shaped concept name is flagged, never refused", async () => {
-  /*
-   * Thirty papers produced 119 concepts and not one was used by a second
-   * paper, because the names were this-paper-only compounds. There is no
-   * string test for "is this a term of the field" - the property lives in
-   * whether another paper would use the name - so this warns and writes.
-   */
-  const recorded = await service.recordConcepts({
-    libraryID: LIBRARY,
-    concepts: [
-      {
-        primaryTerm: { zh: "增材修复熔池柱状晶外延生长与CET抑制" },
-        conceptType: "phenomenon",
-        sources: [{ itemKey: "PAPERTWO" }],
-      },
-      {
-        primaryTerm: { zh: "位错锁高温阻碍效应", en: "Lomer-Cottrell lock" },
-        conceptType: "mechanism",
-        sources: [{ itemKey: "PAPERTWO" }],
-      },
-    ],
-  });
-  assert.ok(recorded.written, "a long name is still recorded, not rejected");
-  assert.deepEqual(
-    recorded.conceptNamesToReview?.names,
-    ["增材修复熔池柱状晶外延生长与CET抑制"],
-    "the paper-shaped one is raised and the real term is left alone",
-  );
-  assert.match(recorded.conceptNamesToReview.note, /领域术语/u);
+await block(
+  "a paper-shaped concept name is flagged, never refused",
+  async () => {
+    /*
+     * Thirty papers produced 119 concepts and not one was used by a second
+     * paper, because the names were this-paper-only compounds. There is no
+     * string test for "is this a term of the field" - the property lives in
+     * whether another paper would use the name - so this warns and writes.
+     */
+    const recorded = await service.recordConcepts({
+      libraryID: LIBRARY,
+      concepts: [
+        {
+          primaryTerm: { zh: "增材修复熔池柱状晶外延生长与CET抑制" },
+          conceptType: "phenomenon",
+          sources: [{ itemKey: "PAPERTWO" }],
+        },
+        {
+          primaryTerm: { zh: "位错锁高温阻碍效应", en: "Lomer-Cottrell lock" },
+          conceptType: "mechanism",
+          sources: [{ itemKey: "PAPERTWO" }],
+        },
+      ],
+    });
+    assert.ok(recorded.written, "a long name is still recorded, not rejected");
+    assert.deepEqual(
+      recorded.conceptNamesToReview?.names,
+      ["增材修复熔池柱状晶外延生长与CET抑制"],
+      "the paper-shaped one is raised and the real term is left alone",
+    );
+    assert.match(recorded.conceptNamesToReview.note, /领域术语/u);
 
-  const { conceptNameUnits } = await import(
-    "../src/modules/wiki/wikiConceptTerms.ts"
-  );
-  assert.ok(
-    conceptNameUnits("Lomer-Cottrell位错锁高温阻碍效应") <
-      conceptNameUnits("柱状晶长度调控二冷优化技术"),
-    "a Latin run counts as one unit, or every foreign term is flagged and every compound cleared",
-  );
-});
+    const { conceptNameUnits } = await import(
+      "../src/modules/wiki/wikiConceptTerms.ts"
+    );
+    assert.ok(
+      conceptNameUnits("Lomer-Cottrell位错锁高温阻碍效应") <
+        conceptNameUnits("柱状晶长度调控二冷优化技术"),
+      "a Latin run counts as one unit, or every foreign term is flagged and every compound cleared",
+    );
+  },
+);
 
 await block("existing pages are ranked as extension candidates", async () => {
   /*
@@ -811,13 +908,17 @@ await block("existing pages are ranked as extension candidates", async () => {
     );
   const claimId = one("SELECT last_insert_rowid() id").id;
   const queue = await store.embeddingQueue();
-  await queue.enqueue(claimId, "挤压铸造压力使初生晶粒由粗大枝晶转变为细小等轴晶。");
+  await queue.enqueue(
+    claimId,
+    "挤压铸造压力使初生晶粒由粗大枝晶转变为细小等轴晶。",
+  );
   await service.pumpEmbeddingQueue({ limit: 100 });
 
   const near = await store.pagesNearVectors({
     libraryID: LIBRARY,
     vectors: [fakeVector("挤压铸造晶粒细化")],
     model: "test-embed-model",
+    identity: embeddingIdentity,
   });
   assert.equal(near.length, 1);
   assert.equal(near[0].title, "压力对凝固组织的调控");
@@ -832,6 +933,7 @@ await block("existing pages are ranked as extension candidates", async () => {
       libraryID: LIBRARY,
       vectors: [],
       model: "test-embed-model",
+      identity: embeddingIdentity,
     }),
     [],
     "no probe is not a reason to recommend every page",

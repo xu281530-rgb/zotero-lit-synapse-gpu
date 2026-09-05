@@ -45,9 +45,7 @@ globalThis.ztoolkit = { log: () => undefined };
 const { KeywordIndexStore } = await import(
   "../src/modules/keyword/keywordIndexStore.ts"
 );
-const { VectorStore } = await import(
-  "../src/modules/semantic/vectorStore.ts"
-);
+const { VectorStore } = await import("../src/modules/semantic/vectorStore.ts");
 const { SemanticSearchService } = await import(
   "../src/modules/semantic/semanticSearchService.ts"
 );
@@ -55,7 +53,10 @@ const { buildToolCatalog, renderToolDoctrine, toolDoctrineUri } = await import(
   "../src/modules/toolCatalog.ts"
 );
 
-const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const rootDir = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+);
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -71,7 +72,8 @@ function adapt(sqlite, beforeQuery = () => {}) {
       const normalised = params.map((value) =>
         typeof value === "boolean" ? (value ? 1 : 0) : value,
       );
-      if (/^\s*(select|pragma)/iu.test(sql)) return statement.all(...normalised);
+      if (/^\s*(select|pragma)/iu.test(sql))
+        return statement.all(...normalised);
       statement.run(...normalised);
       return [];
     },
@@ -440,7 +442,11 @@ test("a keyword SQL failure rolls back the semantic half of one-item deletion", 
     keywordAlive: 1,
   });
   assert.equal(store.vectorCache.has("2:ATOMIC_A_0"), true);
-  assert.deepEqual(events, [], "a rolled-back deletion publishes no completion");
+  assert.deepEqual(
+    events,
+    [],
+    "a rolled-back deletion publishes no completion",
+  );
 });
 
 test("a semantic SQL failure leaves the keyword document alive", async () => {
@@ -582,17 +588,31 @@ function methodBody(text, signature) {
   const start = text.indexOf(signature);
   assert.ok(start >= 0, `could not find ${signature}`);
   const rest = text.slice(start + signature.length);
-  const end = rest.search(/\n {2}(?:\/\*\*|(?:private |protected )?(?:async )?[a-zA-Z])/);
+  const end = rest.search(
+    /\n {2}(?:\/\*\*|(?:private |protected )?(?:async )?[a-zA-Z])/,
+  );
   return rest.slice(0, end === -1 ? rest.length : end);
 }
 
 /** The callback body of a method's first database transaction. */
 function transactionBody(method) {
-  const signature = "await this.db.executeTransaction(async () => {";
+  const signature = method.includes("await this.mutateEmbeddings(async () => {")
+    ? "await this.mutateEmbeddings(async () => {"
+    : "await this.db.executeTransaction(async () => {";
+  if (signature.includes("mutateEmbeddings")) {
+    assert.match(
+      vectorStoreSource,
+      /private async mutateEmbeddings[\s\S]*?await this\.db\.executeTransaction\(write\)/u,
+      "the shared mutation helper must open the transaction",
+    );
+  }
   const start = method.indexOf(signature);
   assert.ok(start >= 0, "method must open a database transaction");
   const bodyStart = start + signature.length;
-  const end = method.indexOf("\n    });", bodyStart);
+  const end = method.indexOf(
+    signature.includes("mutateEmbeddings") ? "\n    }, [" : "\n    });",
+    bodyStart,
+  );
   assert.ok(end >= 0, "could not find the transaction boundary");
   return method.slice(bodyStart, end);
 }
@@ -607,7 +627,10 @@ test("deleting one item's vectors also drops its keyword postings", async () => 
     /keywordStore\.removeItem\(/,
     "deleteItemVectors must tombstone the keyword document in the same transaction",
   );
-  const batchDelete = methodBody(vectorStoreSource, "async deleteItemsVectors(");
+  const batchDelete = methodBody(
+    vectorStoreSource,
+    "async deleteItemsVectors(",
+  );
   assert.match(
     transactionBody(batchDelete),
     /keywordStore\.removeItem\(/,
@@ -628,7 +651,10 @@ test("hooks may delete vectors directly, because that path now covers both", asy
     directSingleDeletes.length + directBatchDeletes.length >= 2,
     "collection and selected-item commands still use atomic vector-store deletion",
   );
-  assert.ok(recoveredDeletes.length >= 2, "notifier deletions must be recoverable");
+  assert.ok(
+    recoveredDeletes.length >= 2,
+    "notifier deletions must be recoverable",
+  );
   assert.match(
     transactionBody(
       methodBody(
@@ -655,7 +681,10 @@ test("collection and selected-item deletion cannot swallow keyword failures", as
   ]) {
     assert.match(handler, /await vectorStore\.deleteItemsVectors\(/);
     assert.doesNotMatch(handler, /deleteItemVectors\(/);
-    assert.doesNotMatch(handler, /Ignore errors for items that weren't indexed/);
+    assert.doesNotMatch(
+      handler,
+      /Ignore errors for items that weren't indexed/,
+    );
     assert.ok(
       handler.indexOf("await vectorStore.deleteItemsVectors(") <
         handler.indexOf(successMessage),
@@ -671,7 +700,10 @@ test("clearing a library clears both indexes", async () => {
   );
   assert.match(clearIndex, /vectorStore\.clear\(libraryID\)/);
   assert.doesNotMatch(clearIndex, /clearKeywordIndex\(/);
-  const atomicClear = methodBody(vectorStoreSource, "async clear(libraryID?: number)");
+  const atomicClear = methodBody(
+    vectorStoreSource,
+    "async clear(libraryID?: number)",
+  );
   assert.match(
     transactionBody(atomicClear),
     /keywordStore\.clearWithoutTransaction\(libraryID\)/,
@@ -705,8 +737,16 @@ test("a build ends by reclaiming superseded keyword postings", async () => {
 test("one statistics refresh updates both indexes and API usage", async () => {
   const serviceStats = methodBody(serviceSource, "async getStats():");
   assert.match(serviceStats, /getStats\(libraryID\)/, "semantic counts");
-  assert.match(serviceStats, /getKeywordIndexReport\(libraryID\)/, "keyword counts");
-  assert.match(serviceStats, /getIndexedDocumentTotals\(libraryID\)/, "combined total");
+  assert.match(
+    serviceStats,
+    /getKeywordIndexReport\(libraryID\)/,
+    "keyword counts",
+  );
+  assert.match(
+    serviceStats,
+    /getIndexedDocumentTotals\(libraryID\)/,
+    "combined total",
+  );
   assert.match(serviceStats, /getIndexStorageBreakdown\(\)/, "storage split");
 
   const refresh = methodBody(
@@ -918,8 +958,9 @@ test("the packaged configuration guides name only tools that exist", async () =>
     const source = fs.readFileSync(file, "utf8");
     const block = /^config-guide-tools-list =\n((?:[ \t]+.*\n)+)/m.exec(source);
     assert.ok(block, `${locale}: the configuration guide must list tools`);
-    const named = Array.from(block[1].matchAll(/^\s+-\s+([a-z][a-z0-9_]+)\s+-/gm))
-      .map((match) => match[1]);
+    const named = Array.from(
+      block[1].matchAll(/^\s+-\s+([a-z][a-z0-9_]+)\s+-/gm),
+    ).map((match) => match[1]);
     assert.ok(named.length >= 5, `${locale}: the list looks empty`);
     for (const name of named) {
       assert.ok(

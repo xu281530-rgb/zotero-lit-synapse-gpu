@@ -155,6 +155,8 @@ for (const [key, title] of [
 }
 
 const vectorStore = getVectorStore();
+// These fixtures keep one stationary source; revision changes are tested in Zotero.
+vectorStore.getDocumentRevision = async () => "";
 vectorStore.initialize = async () => {};
 vectorStore.getChunksForItem = async (key) => CHUNKS.get(key) ?? [];
 vectorStore.getIndexStatus = async (key) => ({

@@ -1436,7 +1436,9 @@ export async function runHybridSearch(
 
   if (
     keywordOutcome.status === "rejected" &&
-    semanticOutcome.status === "rejected"
+    semanticOutcome.status === "rejected" &&
+    !(options.wikiShadowMode !== true && (options.wikiWeight ?? 0) > 0 &&
+      wikiOutcome.status === "fulfilled" && wikiOutcome.value.length > 0)
   ) {
     throw new Error(
       `Hybrid search failed: keyword search: ${errorMessage(keywordOutcome.reason)}; semantic search: ${errorMessage(semanticOutcome.reason)}`,

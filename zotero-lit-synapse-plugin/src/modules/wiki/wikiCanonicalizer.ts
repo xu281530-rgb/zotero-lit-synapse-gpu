@@ -20,12 +20,17 @@ function bytesToHex(bytes: Uint8Array): string {
 }
 
 export async function hashWikiText(value: string): Promise<string> {
-  const normalized = normalizeWikiText(value);
-  const subtle = globalThis.crypto?.subtle;
-  if (subtle && typeof TextEncoder !== "undefined") {
+  return hashExactText(normalizeWikiText(value), false);
+}
+
+export async function hashExactText(value: string, useWindowCrypto = true): Promise<string> {
+  const win = useWindowCrypto && typeof Zotero !== 'undefined' ? Zotero.getMainWindow?.() : undefined;
+  const subtle = globalThis.crypto?.subtle ?? win?.crypto?.subtle;
+  const Encoder = typeof TextEncoder !== 'undefined' ? TextEncoder : win?.TextEncoder;
+  if (subtle && Encoder) {
     const digest = await subtle.digest(
       "SHA-256",
-      new TextEncoder().encode(normalized),
+      new Encoder().encode(value),
     );
     return bytesToHex(new Uint8Array(digest));
   }
@@ -33,8 +38,8 @@ export async function hashWikiText(value: string): Promise<string> {
   // Old Zotero/Firefox builds without WebCrypto still need a stable fingerprint.
   // This fallback is not used as a security primitive, only as a relocation key.
   let hash = 0x811c9dc5;
-  for (let index = 0; index < normalized.length; index += 1) {
-    hash ^= normalized.charCodeAt(index);
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
     hash = Math.imul(hash, 0x01000193);
   }
   return `fnv1a-${(hash >>> 0).toString(16).padStart(8, "0")}`;

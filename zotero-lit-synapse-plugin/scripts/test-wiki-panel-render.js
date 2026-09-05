@@ -115,7 +115,9 @@ function textOf(node) {
 
 function findByClass(node, className) {
   const hit = node.className.split(/\s+/u).includes(className) ? [node] : [];
-  return hit.concat(...node.children.map((child) => findByClass(child, className)));
+  return hit.concat(
+    ...node.children.map((child) => findByClass(child, className)),
+  );
 }
 
 /**
@@ -244,15 +246,21 @@ globalThis.Zotero = {
 const { WikiStore, resetWikiStore } = await import(
   "../src/modules/wiki/wikiStore.ts"
 );
-const { resetWikiService } = await import(
-  "../src/modules/wiki/wikiService.ts"
-);
+const { resetWikiService } = await import("../src/modules/wiki/wikiService.ts");
 const { openWikiPanel, registerWikiPanel } = await import(
   "../src/modules/wiki/wikiPanel.ts"
 );
 const { hashWikiText } = await import(
   "../src/modules/wiki/wikiCanonicalizer.ts"
 );
+const { getVectorStore } = await import(
+  "../src/modules/semantic/vectorStore.ts"
+);
+// These DOM fixtures do not mutate indexed sources; source transitions have separate regressions.
+const vectorStore = getVectorStore();
+vectorStore.getWikiSourceRevision = async () => "stationary-panel-source";
+vectorStore.listPendingWikiSourceChanges = async () => [];
+vectorStore.acknowledgeWikiSourceChange = async () => {};
 
 /**
  * Point the Wiki singletons at `connection` for the next render.
@@ -473,7 +481,11 @@ async function seedCrowded(sqlite) {
         ],
       },
     },
-    { action: "CREATE_PAGE", ref: "page:other", canonicalTitle: "快速热压定型" },
+    {
+      action: "CREATE_PAGE",
+      ref: "page:other",
+      canonicalTitle: "快速热压定型",
+    },
   ];
   for (let index = 0; index < 24; index += 1) {
     actions.push({
@@ -552,7 +564,9 @@ async function seedCrowded(sqlite) {
 
   await openWikiPanel(win);
 
-  const panel = win.containers[0].querySelector("#zotero-lit-synapse-wiki-panel");
+  const panel = win.containers[0].querySelector(
+    "#zotero-lit-synapse-wiki-panel",
+  );
   const entries = findByClass(panel, "zmp-wiki-page-entry");
   assert.equal(entries.length, 2, "every page must appear in the index");
   const activeEntries = entries.filter((entry) =>
@@ -601,7 +615,10 @@ async function seedCrowded(sqlite) {
     );
     const [open] = findByClass(card, "zmp-wiki-claim-open");
     const [remove] = findByClass(card, "zmp-wiki-claim-remove");
-    assert.ok(open && remove, "a claim card carries a body and a delete action");
+    assert.ok(
+      open && remove,
+      "a claim card carries a body and a delete action",
+    );
     assert.equal(
       findByClass(open, "zmp-wiki-claim-remove").length,
       0,
@@ -621,7 +638,10 @@ async function seedCrowded(sqlite) {
     "the summary must sit in its own paper card",
   );
   for (const heading of ["知识摘要", "术语与别名", "核心知识", "知识条目"]) {
-    assert.ok(rendered.includes(heading), `the document must announce ${heading}`);
+    assert.ok(
+      rendered.includes(heading),
+      `the document must announce ${heading}`,
+    );
   }
   // 2.4.3: the page renders the STRUCTURED terms, not a row of alias chips.
   // The seeded concept is 定向凝固 with a bare "DS" and an English full name,
@@ -635,7 +655,11 @@ async function seedCrowded(sqlite) {
   );
   const primaryText = textOf(termRows[0]);
   assert.match(primaryText, /定向凝固/u);
-  assert.match(primaryText, /DS/u, "a bare abbreviation completes the primary term");
+  assert.match(
+    primaryText,
+    /DS/u,
+    "a bare abbreviation completes the primary term",
+  );
   assert.match(
     textOf(termRows[1]),
     /Directional Solidification/u,
@@ -852,9 +876,7 @@ async function settleFor(read, what) {
   );
   assert.equal(
     Number(
-      Object.values(
-        sqlite.prepare("SELECT COUNT(*) FROM wiki_pages").get(),
-      )[0],
+      Object.values(sqlite.prepare("SELECT COUNT(*) FROM wiki_pages").get())[0],
     ),
     2,
     "cancelling must delete nothing",
@@ -891,9 +913,7 @@ async function settleFor(read, what) {
   ]) {
     assert.equal(
       Number(
-        Object.values(
-          sqlite.prepare(`SELECT COUNT(*) FROM ${table}`).get(),
-        )[0],
+        Object.values(sqlite.prepare(`SELECT COUNT(*) FROM ${table}`).get())[0],
       ),
       expected,
       `${table} must keep only the surviving page's rows`,
@@ -922,7 +942,9 @@ async function settleFor(read, what) {
   const errorsBefore = loggedErrors.length;
 
   await openWikiPanel(win);
-  const panel = win.containers[0].querySelector("#zotero-lit-synapse-wiki-panel");
+  const panel = win.containers[0].querySelector(
+    "#zotero-lit-synapse-wiki-panel",
+  );
   const [row] = findByClass(panel, "zmp-wiki-page-row");
   const [entry] = findByClass(row, "zmp-wiki-page-entry");
   const [remove] = findByClass(row, "zmp-wiki-page-delete");
@@ -939,7 +961,11 @@ async function settleFor(read, what) {
   await fire(destroy, "click");
   await pending;
 
-  assert.equal(alerts.length, 1, "a failed delete must be reported to the user");
+  assert.equal(
+    alerts.length,
+    1,
+    "a failed delete must be reported to the user",
+  );
   assert.match(
     alerts[0],
     /删除失败，知识库未发生任何改动/u,
@@ -959,7 +985,9 @@ async function settleFor(read, what) {
   );
   assert.equal(
     Number(
-      Object.values(sqlite.prepare("SELECT COUNT(*) FROM wiki_claims").get())[0],
+      Object.values(
+        sqlite.prepare("SELECT COUNT(*) FROM wiki_claims").get(),
+      )[0],
     ),
     1,
     "with its claim",
@@ -1019,7 +1047,11 @@ async function settleFor(read, what) {
         "chrome://zotero/content/modules/filePicker.mjs",
         "the export must load Zotero 9's own file picker module",
       );
-      return { FilePicker: function () { return picker; } };
+      return {
+        FilePicker: function () {
+          return picker;
+        },
+      };
     },
   };
   const written = [];
@@ -1034,7 +1066,9 @@ async function settleFor(read, what) {
   };
 
   await openWikiPanel(win);
-  const panel = win.containers[0].querySelector("#zotero-lit-synapse-wiki-panel");
+  const panel = win.containers[0].querySelector(
+    "#zotero-lit-synapse-wiki-panel",
+  );
   const exportButton = findByClass(panel, "zmp-wiki-command").find(
     (node) => node.textContent === "导出",
   );
@@ -1052,7 +1086,11 @@ async function settleFor(read, what) {
   picker.outcome = picker.returnOK;
   picker.file = path.join(tempDir, "wiki-export.md");
   await exportOnce();
-  assert.equal(written.length, 1, "accepting the dialog must write the file");
+  assert.equal(
+    written.length,
+    1,
+    `accepting the dialog must write the file: ${JSON.stringify({ alerts, copied, logged: logged.slice(-3) })}`,
+  );
   assert.equal(written[0][0], picker.file, "to the path the user picked");
   assert.match(
     written[0][1],
@@ -1064,7 +1102,11 @@ async function settleFor(read, what) {
     /Columnar band control/u,
     "which must contain the library's page",
   );
-  assert.deepEqual(copied, [], "a successful save must not touch the clipboard");
+  assert.deepEqual(
+    copied,
+    [],
+    "a successful save must not touch the clipboard",
+  );
   assert.deepEqual(alerts, [], "and must not interrupt the user");
   assert.equal(
     picker.initArgs?.[2],
@@ -1118,7 +1160,11 @@ async function settleFor(read, what) {
 
   // --- 5. A write that fails is reported, not papered over ----------------
   globalThis.ChromeUtils = {
-    importESModule: () => ({ FilePicker: function () { return picker; } }),
+    importESModule: () => ({
+      FilePicker: function () {
+        return picker;
+      },
+    }),
   };
   globalThis.IOUtils = {
     writeUTF8: async () => {

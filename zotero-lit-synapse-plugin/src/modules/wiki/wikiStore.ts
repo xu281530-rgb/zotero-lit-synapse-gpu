@@ -16,6 +16,8 @@ import {
   conceptEmbeddingTextFromRow,
 } from "./wikiConceptEmbedding";
 import { cosine, floatVector, vectorBytes } from "./wikiVector";
+import type { EmbeddingIdentity } from "../semantic/embeddingService";
+import { compatibleEmbeddingIdentity, parseEmbeddingIdentity, serializeEmbeddingIdentity } from "../semantic/embeddingIdentity";
 import { WikiConceptLibrary } from "./wikiConceptLibrary";
 import { WikiLinkStore } from "./wikiLinkStore";
 import { classifyLegacyName } from "./wikiConceptTerms";
@@ -147,6 +149,7 @@ export function countWikiPersistentRows(
 }
 
 interface WikiConceptScanRow {
+  identity?: EmbeddingIdentity;
   conceptId: number;
   name: string;
   type: string;
@@ -214,9 +217,26 @@ export interface WikiConceptNeighbourhood {
   relations: string[];
 }
 
+interface WikiSourceChange {
+  libraryID: number;
+  itemKey: string;
+  revision: string;
+}
+
+export interface WikiSourceTracker {
+  listPendingWikiSourceChanges(): Promise<WikiSourceChange[]>;
+  acknowledgeWikiSourceChange(change: WikiSourceChange): Promise<void>;
+  getWikiSourceRevision(): Promise<string>;
+  getDocumentRevision(itemKey: string, libraryID?: number): Promise<string>;
+}
+
 export class WikiStore {
   private initialized = false;
+  private initializing: Promise<void> | null = null;
   private readonly db: WikiDatabase;
+  private readonly sourceTracker?: WikiSourceTracker;
+  private sourceSync: Promise<void> | null = null;
+  private checkedSourceRevision: string | undefined;
 
   /**
    * The reading-session ledger and the embedding queue share this store's
@@ -230,8 +250,9 @@ export class WikiStore {
   private readonly conceptLibrary: WikiConceptLibrary;
   private readonly linkStore: WikiLinkStore;
 
-  constructor(db: WikiDatabase) {
+  constructor(db: WikiDatabase, sourceTracker?: WikiSourceTracker) {
     this.db = db;
+    this.sourceTracker = sourceTracker;
     this.sessions = new WikiReadingSessions(db);
     this.embeddingQueueStore = new WikiEmbeddingQueue(
       db,
@@ -274,8 +295,60 @@ export class WikiStore {
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
-    await ensureWikiSchema(this.db);
-    this.initialized = true;
+    if (!this.initializing) {
+      this.initializing = ensureWikiSchema(this.db).then(() => {
+        this.initialized = true;
+      }).finally(() => {
+        this.initializing = null;
+      });
+    }
+    await this.initializing;
+  }
+
+  async synchronizeSourceChanges(): Promise<void> {
+    await this.initialize();
+    if (!this.sourceTracker) return;
+    if (!this.sourceSync) {
+      this.sourceSync = (async () => {
+        const changes = await this.sourceTracker!.listPendingWikiSourceChanges();
+        for (const change of changes) {
+          await this.db.executeTransaction(async () => {
+            await this.db.queryAsync(
+              "UPDATE wiki_evidence SET link_state = 'pending_relink', read_depth = 'chunk_local' WHERE library_id = ? AND item_key = ? AND link_state != 'source_deleted'",
+              [change.libraryID, change.itemKey],
+            );
+            await this.refreshDerivedForEvidence("e.library_id = ? AND e.item_key = ?", [change.libraryID, change.itemKey]);
+          });
+          // Ack only after the Wiki transaction commits; a crash leaves a retryable outbox.
+          await this.sourceTracker!.acknowledgeWikiSourceChange(change);
+        }
+      })().finally(() => { this.sourceSync = null; });
+    }
+    await this.sourceSync;
+  }
+
+  private async beginEvidenceRead(): Promise<string | undefined> {
+    if (!this.sourceTracker) return undefined;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const revision = await this.sourceTracker.getWikiSourceRevision();
+      if (revision === this.checkedSourceRevision) return revision;
+      await this.synchronizeSourceChanges();
+      if (revision === await this.sourceTracker.getWikiSourceRevision()) {
+        this.checkedSourceRevision = revision;
+        return revision;
+      }
+    }
+    throw new Error("Document sources changed while preparing Wiki evidence. Retry after indexing finishes.");
+  }
+
+  private async finishEvidenceRead(revision: string | undefined): Promise<void> {
+    if (revision !== undefined && revision !== await this.sourceTracker!.getWikiSourceRevision()) {
+      throw new Error("Document sources changed while reading Wiki evidence. Retry to obtain current evidence.");
+    }
+  }
+
+  async evidenceSourceRevision(libraryID: number, itemKey: string): Promise<string | undefined> {
+    return this.sourceTracker?.getDocumentRevision(itemKey, libraryID);
   }
 
   private async lastInsertId(): Promise<number> {
@@ -786,7 +859,36 @@ export class WikiStore {
     await this.refreshPagesForEvidence(whereSql, params);
   }
 
-  async commit(input: WikiCommitInput): Promise<WikiCommitResult> {
+  async getCommitOperation(libraryID: number, operationId: string): Promise<any | null> {
+    await this.initialize();
+    const rows = await this.db.queryAsync('SELECT * FROM wiki_commit_operations WHERE library_id = ? AND operation_id = ?', [libraryID, operationId]);
+    if (!rows.length) return null;
+    const row = rows[0];
+    return {
+      operationId, libraryID, inputHash: String(rowValue(row, 'input_hash', 'inputHash')),
+      payload: JSON.parse(String(rowValue(row, 'payload_json', 'payloadJson'))),
+      result: JSON.parse(String(rowValue(row, 'result_json', 'resultJson'))),
+      steps: JSON.parse(String(rowValue(row, 'steps_json', 'stepsJson'))),
+      response: rowValue(row, 'response_json', 'responseJson') ? JSON.parse(String(rowValue(row, 'response_json', 'responseJson'))) : null,
+    };
+  }
+
+  async updateCommitOperation(libraryID: number, operationId: string, steps: Record<string, any>, response?: unknown): Promise<void> {
+    await this.db.queryAsync('UPDATE wiki_commit_operations SET steps_json = ?, response_json = ?, updated_at = ? WHERE library_id = ? AND operation_id = ?',
+      [JSON.stringify(steps), response === undefined ? null : JSON.stringify(response), Date.now(), libraryID, operationId]);
+  }
+
+  async commitBookkeeping<T>(work: () => Promise<T>): Promise<T> {
+    return this.db.executeTransaction(work);
+  }
+
+  async listPendingCommitOperations(libraryID?: number): Promise<any[]> {
+    await this.initialize();
+    const rows = await this.db.queryAsync(`SELECT library_id, operation_id, steps_json FROM wiki_commit_operations WHERE response_json IS NULL${libraryID === undefined ? '' : ' AND library_id = ?'} ORDER BY updated_at DESC LIMIT 100`, libraryID === undefined ? [] : [libraryID]);
+    return rows.map((row: any) => ({ libraryID: Number(row.library_id), operationId: String(row.operation_id), committed: true, steps: JSON.parse(String(row.steps_json)) }));
+  }
+
+  async commit(input: WikiCommitInput, operation?: { operationId: string; inputHash: string; payload: unknown }): Promise<WikiCommitResult> {
     await this.initialize();
     if (!Number.isInteger(input.libraryID) || input.libraryID <= 0) {
       throw new Error("libraryID must be a positive integer");
@@ -820,6 +922,10 @@ export class WikiStore {
     const evidenceChangedClaimIds = new Set<number>();
 
     await this.db.executeTransaction(async () => {
+      if (operation) {
+        await this.db.queryAsync('INSERT INTO wiki_commit_operations (library_id, operation_id, input_hash, payload_json, result_json, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+          [input.libraryID, operation.operationId, operation.inputHash, JSON.stringify(operation.payload), '{}', Date.now()]);
+      }
       for (let actionIndex = 0; actionIndex < input.actions.length; actionIndex += 1) {
         const action = input.actions[actionIndex];
         if (action.action === "SKIP") continue;
@@ -1269,6 +1375,7 @@ export class WikiStore {
           String(rowValue(claim[0], "claim_text", "claimText")),
         );
       }
+      if (operation) await this.db.queryAsync('UPDATE wiki_commit_operations SET result_json = ? WHERE library_id = ? AND operation_id = ?', [JSON.stringify(result), input.libraryID, operation.operationId]);
     });
     return result;
   }
@@ -1301,6 +1408,7 @@ export class WikiStore {
 
   async getClaim(claimId: number): Promise<WikiClaimRecord | null> {
     await this.initialize();
+    const sourceRevision = await this.beginEvidenceRead();
     const rows = await this.db.queryAsync(
       "SELECT * FROM wiki_claims WHERE claim_id = ?",
       [claimId],
@@ -1311,6 +1419,7 @@ export class WikiStore {
       "SELECT * FROM wiki_evidence WHERE claim_id = ? ORDER BY evidence_id",
       [claimId],
     );
+    await this.finishEvidenceRead(sourceRevision);
     return {
       claimId: Number(rowValue(row, "claim_id", "claimId")),
       pageId: Number(rowValue(row, "page_id", "pageId")),
@@ -1359,6 +1468,7 @@ export class WikiStore {
 
   async getPage(pageId: number): Promise<WikiPageRecord | null> {
     await this.initialize();
+    const sourceRevision = await this.beginEvidenceRead();
     const rows = await this.db.queryAsync(
       "SELECT * FROM wiki_pages WHERE page_id = ?",
       [pageId],
@@ -1376,6 +1486,7 @@ export class WikiStore {
       );
       if (claim) claims.push(claim);
     }
+    await this.finishEvidenceRead(sourceRevision);
     return {
       pageId: Number(rowValue(row, "page_id", "pageId")),
       libraryID: Number(rowValue(row, "library_id", "libraryID")),
@@ -1505,7 +1616,7 @@ export class WikiStore {
     };
   }
 
-  async getRetrievalSnapshot(libraryID: number): Promise<{
+  async getRetrievalSnapshot(libraryID: number, options: { itemKeys?: string[]; includeEmbeddings?: boolean } = {}): Promise<{
     pages: any[];
     claims: any[];
     concepts: any[];
@@ -1515,14 +1626,19 @@ export class WikiStore {
     embeddings: any[];
   }> {
     await this.initialize();
+    const sourceRevision = await this.beginEvidenceRead();
+    const scoped = options.itemKeys !== undefined;
+    const claimScope = scoped ? ` AND c.claim_id IN (SELECT claim_id FROM wiki_evidence
+      WHERE library_id = ? AND item_key IN (SELECT value FROM json_each(?)))` : "";
+    const claimParams = scoped ? [libraryID, libraryID, JSON.stringify(options.itemKeys)] : [libraryID];
     const pages = await this.db.queryAsync(
       "SELECT * FROM wiki_pages WHERE library_id = ? AND status = 'active'",
       [libraryID],
     );
     const claims = await this.db.queryAsync(
       `SELECT c.* FROM wiki_claims c JOIN wiki_pages p ON p.page_id = c.page_id
-       WHERE p.library_id = ? AND p.status = 'active'`,
-      [libraryID],
+       WHERE p.library_id = ? AND p.status = 'active'${claimScope}`,
+      claimParams,
     );
     const concepts = await this.db.queryAsync(
       "SELECT * FROM wiki_concepts WHERE library_id = ?",
@@ -1542,30 +1658,24 @@ export class WikiStore {
     );
     const evidence = await this.db.queryAsync(
       `SELECT e.* FROM wiki_evidence e JOIN wiki_claims c ON c.claim_id = e.claim_id
-       JOIN wiki_pages p ON p.page_id = c.page_id WHERE p.library_id = ?`,
-      [libraryID],
+       JOIN wiki_pages p ON p.page_id = c.page_id WHERE p.library_id = ?${claimScope}`,
+      claimParams,
     );
-    const embeddings = await this.db.queryAsync(
+    const embeddings = options.includeEmbeddings === false ? [] : await this.db.queryAsync(
       `SELECT ce.* FROM wiki_claim_embeddings ce
        JOIN wiki_claims c ON c.claim_id = ce.claim_id
-       JOIN wiki_pages p ON p.page_id = c.page_id WHERE p.library_id = ?`,
-      [libraryID],
+       JOIN wiki_pages p ON p.page_id = c.page_id WHERE p.library_id = ?${claimScope}`,
+      claimParams,
     );
-    return {
-      pages,
-      claims,
-      concepts,
-      aliases,
-      relations,
-      evidence,
-      embeddings,
-    };
+    await this.finishEvidenceRead(sourceRevision);
+    return { pages, claims, concepts, aliases, relations, evidence, embeddings };
   }
 
   async saveClaimEmbedding(options: {
     claimId: number;
     vector: Float32Array;
     model: string;
+    identity?: EmbeddingIdentity;
     textHash: string;
   }): Promise<void> {
     await this.initialize();
@@ -1582,19 +1692,8 @@ export class WikiStore {
         `Claim Embedding text_hash does not match Claim ${options.claimId}`,
       );
     }
-    const identities = await this.db.queryAsync(
-      "SELECT DISTINCT model, dimensions FROM wiki_claim_embeddings",
-    );
-    for (const identity of identities) {
-      if (
-        String(identity.model) !== options.model ||
-        Number(identity.dimensions) !== options.vector.length
-      ) {
-        throw new Error(
-          "Wiki Claim Embeddings already use a different model or dimensions; clear Wiki data before changing the embedding space",
-        );
-      }
-    }
+    const identityJSON = serializeEmbeddingIdentity(options.identity, options.vector.length);
+    if (options.identity && options.identity.model !== options.model) throw new Error("Embedding model does not match its generating identity");
     const bytes = new Uint8Array(
       options.vector.buffer,
       options.vector.byteOffset,
@@ -1602,11 +1701,12 @@ export class WikiStore {
     );
     await this.db.queryAsync(
       `INSERT INTO wiki_claim_embeddings
-       (claim_id, embedding, dimensions, model, text_hash, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)
+       (claim_id, embedding, dimensions, model, text_hash, updated_at, embedding_identity)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(claim_id) DO UPDATE SET embedding = excluded.embedding,
        dimensions = excluded.dimensions, model = excluded.model,
-       text_hash = excluded.text_hash, updated_at = excluded.updated_at`,
+       text_hash = excluded.text_hash, updated_at = excluded.updated_at,
+       embedding_identity = excluded.embedding_identity`,
       [
         options.claimId,
         bytes,
@@ -1614,6 +1714,7 @@ export class WikiStore {
         options.model,
         options.textHash,
         Date.now(),
+        identityJSON,
       ],
     );
   }
@@ -1622,6 +1723,7 @@ export class WikiStore {
     libraryID?: number,
   ): Promise<Record<string, number | string>> {
     await this.initialize();
+    const sourceRevision = await this.beginEvidenceRead();
     const pageWhere = libraryID === undefined ? "" : " WHERE library_id = ?";
     const pageParams = libraryID === undefined ? [] : [libraryID];
     const claimWhere =
@@ -1629,7 +1731,7 @@ export class WikiStore {
         ? ""
         : " JOIN wiki_pages p ON p.page_id = c.page_id WHERE p.library_id = ?";
     const claimParams = pageParams;
-    return {
+    const status = {
       database: "zotero-lit-synapse-wiki.sqlite",
       pages: Number(
         await this.db.valueQueryAsync(
@@ -1783,6 +1885,8 @@ export class WikiStore {
        */
       ...(await this.conceptConnectionStats(libraryID)),
     };
+    await this.finishEvidenceRead(sourceRevision);
+    return status;
   }
 
   /** The three "are concepts connecting papers yet" counts. See getStatus. */
@@ -1977,7 +2081,7 @@ export class WikiStore {
   }
 
   /** Queue one concept for a vector, using its text as it stands now. */
-  private async enqueueConceptEmbedding(conceptId: number): Promise<void> {
+  private async enqueueConceptEmbedding(conceptId: number, preserveExisting = false): Promise<void> {
     const rows = await this.db.queryAsync(
       `SELECT ${CONCEPT_EMBEDDING_COLUMNS}
          FROM wiki_concepts c WHERE c.concept_id = ?`,
@@ -1986,61 +2090,27 @@ export class WikiStore {
     if (!rows?.[0]) return;
     const text = conceptEmbeddingTextFromRow(rows[0]);
     if (!text) return;
-    await this.conceptEmbeddingQueueStore.enqueue(conceptId, text);
+    await this.conceptEmbeddingQueueStore.enqueue(conceptId, text, { preserveExisting });
   }
 
   async saveConceptEmbedding(options: {
     conceptId: number;
     vector: Float32Array;
     model: string;
+    identity?: EmbeddingIdentity;
     textHash: string;
   }): Promise<void> {
     await this.initialize();
-    /*
-     * A vector from another embedding space is DISCARDED, not refused.
-     *
-     * The Claim version of this throws, and has to: a Claim embedding is
-     * expensive to rebuild and the user is told to clear the Wiki deliberately.
-     * A concept vector is derived from the concept and costs one API call, so
-     * refusing here buys nothing and costs everything - it is what turned one
-     * mis-stamped row into a permanent wall. That row said
-     * `text-embedding-3-small`; every one of the other 118 concepts was then
-     * rejected as foreign, exhausted its retries, and the neighbourhood recall
-     * this table exists for was blind for an entire 30-paper run while the
-     * Wiki reported itself healthy.
-     *
-     * So the incoming vector wins and the stale space is cleared and re-queued.
-     * Changing the embedding model becomes a supported operation for concepts
-     * rather than a silent, unrecoverable one.
-     */
-    const foreign = await this.db.queryAsync(
-      `SELECT concept_id FROM wiki_concept_embeddings
-        WHERE model != ? OR dimensions != ?`,
-      [options.model, options.vector.length],
-    );
-    for (const row of foreign ?? []) {
-      const conceptId = Number(rowValue(row, "concept_id", "conceptId"));
-      await this.db.queryAsync(
-        "DELETE FROM wiki_concept_embeddings WHERE concept_id = ?",
-        [conceptId],
-      );
-      if (conceptId !== options.conceptId) {
-        await this.enqueueConceptEmbedding(conceptId);
-      }
-    }
-    if (foreign?.length) {
-      ztoolkit.log(
-        `[WikiStore] ${foreign.length} concept vector(s) were built in a ` +
-          `different embedding space and have been re-queued for ${options.model}`,
-      );
-    }
+    const identityJSON = serializeEmbeddingIdentity(options.identity, options.vector.length);
+    if (options.identity && options.identity.model !== options.model) throw new Error("Embedding model does not match its generating identity");
     await this.db.queryAsync(
       `INSERT INTO wiki_concept_embeddings
-       (concept_id, embedding, dimensions, model, text_hash, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)
+       (concept_id, embedding, dimensions, model, text_hash, updated_at, embedding_identity)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(concept_id) DO UPDATE SET embedding = excluded.embedding,
        dimensions = excluded.dimensions, model = excluded.model,
-       text_hash = excluded.text_hash, updated_at = excluded.updated_at`,
+       text_hash = excluded.text_hash, updated_at = excluded.updated_at,
+       embedding_identity = excluded.embedding_identity`,
       [
         options.conceptId,
         vectorBytes(options.vector),
@@ -2048,6 +2118,7 @@ export class WikiStore {
         options.model,
         options.textHash,
         Date.now(),
+        identityJSON,
       ],
     );
   }
@@ -2132,6 +2203,43 @@ export class WikiStore {
     );
   }
 
+  private warnIncompatibleWikiVectors(warnings?: string[]): void {
+    const warning = "Wiki vectors with an unknown or incompatible generating identity were excluded; queued embeddings will be regenerated. Keyword and relation retrieval remain available.";
+    if (warnings && !warnings.includes(warning)) warnings.push(warning);
+  }
+
+  private warnIncompatibleConcepts(rows: WikiConceptScanRow[], identity?: EmbeddingIdentity, warnings?: string[]): void {
+    if (rows.some((row) => row.vector && !compatibleEmbeddingIdentity(row.identity, identity))) this.warnIncompatibleWikiVectors(warnings);
+  }
+
+  async requeueIncompatibleEmbeddings(libraryID: number, identity: EmbeddingIdentity): Promise<void> {
+    await this.initialize();
+    // Leave queued work and its retry backoff intact. Never delete saved knowledge.
+    const claims = await this.db.queryAsync(
+      `SELECT c.claim_id, c.claim_text, e.embedding_identity FROM wiki_claims c
+       JOIN wiki_pages p ON p.page_id = c.page_id
+       JOIN wiki_claim_embeddings e ON e.claim_id = c.claim_id
+       WHERE p.library_id = ? AND NOT EXISTS
+       (SELECT 1 FROM wiki_embedding_queue q WHERE q.claim_id = c.claim_id)`, [libraryID],
+    );
+    for (const row of claims) {
+      if (!compatibleEmbeddingIdentity(parseEmbeddingIdentity(rowValue(row, "embedding_identity", "embeddingIdentity")), identity)) {
+        await this.embeddingQueueStore.enqueue(Number(rowValue(row, "claim_id", "claimId")), String(rowValue(row, "claim_text", "claimText")), { preserveExisting: true });
+      }
+    }
+    const concepts = await this.db.queryAsync(
+      `SELECT c.concept_id, e.embedding_identity FROM wiki_concepts c
+       JOIN wiki_concept_embeddings e ON e.concept_id = c.concept_id
+       WHERE c.library_id = ? AND NOT EXISTS
+       (SELECT 1 FROM wiki_concept_embedding_queue q WHERE q.concept_id = c.concept_id)`, [libraryID],
+    );
+    for (const row of concepts) {
+      if (!compatibleEmbeddingIdentity(parseEmbeddingIdentity(rowValue(row, "embedding_identity", "embeddingIdentity")), identity)) {
+        await this.enqueueConceptEmbedding(Number(rowValue(row, "concept_id", "conceptId")), true);
+      }
+    }
+  }
+
   private async conceptScanRows(
     libraryID: number,
   ): Promise<WikiConceptScanRow[]> {
@@ -2139,7 +2247,7 @@ export class WikiStore {
       `SELECT c.concept_id AS concept_id, c.canonical_name AS canonical_name,
               c.concept_type AS concept_type, c.description AS description,
               e.embedding AS embedding, e.dimensions AS dimensions,
-              e.model AS model
+              e.model AS model, e.embedding_identity AS embedding_identity
          FROM wiki_concepts c
          LEFT JOIN wiki_concept_embeddings e ON e.concept_id = c.concept_id
         WHERE c.library_id = ?`,
@@ -2155,6 +2263,7 @@ export class WikiStore {
         Number(rowValue(row, "dimensions", "dimensions") ?? 0),
       ),
       model: String(rowValue(row, "model", "model") ?? ""),
+      identity: parseEmbeddingIdentity(rowValue(row, "embedding_identity", "embeddingIdentity")),
     }));
   }
 
@@ -2242,6 +2351,8 @@ export class WikiStore {
     libraryID: number;
     probes: { text: string; vector: Float32Array | null }[];
     model: string;
+    identity?: EmbeddingIdentity;
+    warnings?: string[];
     limit?: number;
     /** The paper being written up; annotates each match with its source state. */
     itemKey?: string;
@@ -2249,6 +2360,7 @@ export class WikiStore {
     await this.initialize();
     const limit = Math.max(1, Math.min(20, options.limit ?? 5));
     const rows = await this.conceptScanRows(options.libraryID);
+    this.warnIncompatibleConcepts(rows, options.identity, options.warnings);
     const byId = new Map(rows.map((row) => [row.conceptId, row]));
     const results: WikiConceptMatch[] = [];
     for (const probe of options.probes) {
@@ -2285,6 +2397,7 @@ export class WikiStore {
             (row) =>
               !seen.has(row.conceptId) &&
               row.vector &&
+              compatibleEmbeddingIdentity(row.identity, options.identity) &&
               row.model === options.model &&
               row.vector.length === probe.vector!.length,
           )
@@ -2384,6 +2497,8 @@ export class WikiStore {
     /** Concepts of the paper being written up; their vectors probe too. */
     seedConceptIds?: number[];
     model: string;
+    identity?: EmbeddingIdentity;
+    warnings?: string[];
     limit?: number;
   }): Promise<
     { pageId: number; title: string; score: number; nearestClaim: string }[]
@@ -2398,13 +2513,13 @@ export class WikiStore {
     const probes = [...options.vectors];
     for (const id of options.seedConceptIds ?? []) {
       const rows = await this.db.queryAsync(
-        `SELECT embedding, dimensions, model FROM wiki_concept_embeddings
+        `SELECT embedding, dimensions, model, embedding_identity FROM wiki_concept_embeddings
           WHERE concept_id = ?`,
         [id],
       );
       const row = rows?.[0];
       if (!row) continue;
-      if (String(rowValue(row, "model", "model") ?? "") !== options.model) {
+      if (!compatibleEmbeddingIdentity(parseEmbeddingIdentity(rowValue(row, "embedding_identity", "embeddingIdentity")), options.identity)) {
         continue;
       }
       const vector = floatVector(
@@ -2418,7 +2533,7 @@ export class WikiStore {
       `SELECT p.page_id AS page_id, p.canonical_title AS title,
               c.claim_text AS claim_text,
               e.embedding AS embedding, e.dimensions AS dimensions,
-              e.model AS model
+              e.model AS model, e.embedding_identity AS embedding_identity
          FROM wiki_claim_embeddings e
          JOIN wiki_claims c ON c.claim_id = e.claim_id
          JOIN wiki_pages p ON p.page_id = c.page_id
@@ -2430,7 +2545,8 @@ export class WikiStore {
       { pageId: number; title: string; score: number; nearestClaim: string }
     >();
     for (const row of rows ?? []) {
-      if (String(rowValue(row, "model", "model") ?? "") !== options.model) {
+      if (!compatibleEmbeddingIdentity(parseEmbeddingIdentity(rowValue(row, "embedding_identity", "embeddingIdentity")), options.identity)) {
+        this.warnIncompatibleWikiVectors(options.warnings);
         continue;
       }
       const vector = floatVector(
@@ -2468,6 +2584,8 @@ export class WikiStore {
     seedConceptIds: number[];
     seedVectors?: Float32Array[];
     model: string;
+    identity?: EmbeddingIdentity;
+    warnings?: string[];
     limit?: number;
     hubLimit?: number;
   }): Promise<WikiConceptNeighbourhood> {
@@ -2475,13 +2593,14 @@ export class WikiStore {
     const limit = Math.max(1, Math.min(200, options.limit ?? 40));
     const hubLimit = Math.max(0, Math.min(50, options.hubLimit ?? 12));
     const rows = await this.conceptScanRows(options.libraryID);
+    this.warnIncompatibleConcepts(rows, options.identity, options.warnings);
     const byId = new Map(rows.map((row) => [row.conceptId, row]));
     const seedIds = new Set(
       options.seedConceptIds.filter((id) => byId.has(id)),
     );
 
     const usable = (row: WikiConceptScanRow): row is WikiConceptScanRow =>
-      Boolean(row.vector) && row.model === options.model;
+      Boolean(row.vector) && compatibleEmbeddingIdentity(row.identity, options.identity);
     const seedVectors = [
       ...(options.seedVectors ?? []),
       ...rows
@@ -2573,6 +2692,7 @@ export class WikiStore {
    */
   async wikiRevision(libraryID: number): Promise<string> {
     await this.initialize();
+    const sourceRevision = await this.beginEvidenceRead();
     /*
      * Seven scalar reads rather than one SELECT with seven subqueries.
      *
@@ -2612,13 +2732,15 @@ export class WikiStore {
     ];
     const fingerprint = await this.db.valueQueryAsync(
       `SELECT group_concat(mark, ' ') FROM (
-         SELECT c.normalized_name || ':' || COALESCE(e.text_hash, '') AS mark
+         SELECT c.normalized_name || ':' || COALESCE(e.text_hash, '') || ':' ||
+                COALESCE(e.embedding_identity, '') AS mark
            FROM wiki_concepts c
            LEFT JOIN wiki_concept_embeddings e ON e.concept_id = c.concept_id
           WHERE c.library_id = ? ORDER BY c.concept_id)`,
       [libraryID],
     );
-    return `${parts.join("-")}-${await hashWikiText(String(fingerprint ?? ""))}`;
+    await this.finishEvidenceRead(sourceRevision);
+    return `${parts.join("-")}-${await hashWikiText(String(fingerprint ?? ""))}${sourceRevision === undefined ? "" : `-${sourceRevision}`}`;
   }
 
 
@@ -3497,6 +3619,7 @@ export class WikiStore {
     itemKeys?: string[],
   ): Promise<WikiEvidenceRecord[]> {
     await this.initialize();
+    await this.synchronizeSourceChanges();
     const scope = this.buildEvidenceScope(
       "link_state IN ('pending_relink','stale')",
       libraryID,
@@ -3542,13 +3665,23 @@ export class WikiStore {
       sourceResetGeneration: string;
       linkState: "valid" | "stale" | "source_deleted";
     },
-    options: { deferDerivedUpdates?: boolean } = {},
+    options: { deferDerivedUpdates?: boolean; expectedSource?: { libraryID: number; itemKey: string; revision: string } } = {},
   ): Promise<void> {
     await this.initialize();
+    const checkSource = async () => {
+      const source = options.expectedSource;
+      if (!source || source.revision === await this.evidenceSourceRevision(source.libraryID, source.itemKey)) return;
+      await this.db.queryAsync("UPDATE wiki_evidence SET link_state = 'pending_relink', read_depth = 'chunk_local' WHERE evidence_id = ?", [evidenceId]);
+      await this.refreshDerivedForEvidence("e.evidence_id = ?", [evidenceId]);
+      throw new Error("Document source changed while verifying Wiki evidence. Verification remains pending.");
+    };
+    await checkSource();
     await this.db.queryAsync(
       `UPDATE wiki_evidence SET chunk_id_snapshot = ?, chunk_text_hash = ?,
        source_content_hash = ?, source_chunk_signature = ?,
-       source_reset_generation = ?, link_state = ?, last_verified_at = ?
+       source_reset_generation = ?, link_state = ?, last_verified_at = ?,
+       read_depth = CASE WHEN source_content_hash <> ? OR source_chunk_signature <> ?
+         OR source_reset_generation <> ? THEN 'chunk_local' ELSE read_depth END
        WHERE evidence_id = ?`,
       [
         update.chunkIdSnapshot,
@@ -3558,9 +3691,13 @@ export class WikiStore {
         update.sourceResetGeneration,
         update.linkState,
         Date.now(),
+        update.sourceContentHash,
+        update.sourceChunkSignature,
+        update.sourceResetGeneration,
         evidenceId,
       ],
     );
+    await checkSource();
     if (!options.deferDerivedUpdates) {
       await this.refreshDerivedForEvidence("e.evidence_id = ?", [evidenceId]);
     }
@@ -3714,7 +3851,9 @@ export class WikiStore {
   }
 
   async close(): Promise<void> {
+    await this.initializing?.catch(() => undefined);
     await this.db.closeDatabase?.();
+    this.initialized = false;
   }
 }
 
@@ -3726,7 +3865,15 @@ export function getWikiStore(): WikiStore {
       Zotero.DataDirectory.dir,
       "zotero-lit-synapse-wiki.sqlite",
     );
-    singleton = new WikiStore(new Zotero.DBConnection(dbPath));
+    let sourceModule: Promise<typeof import('../semantic/vectorStore')> | undefined;
+    const vectors = async () => (await (sourceModule ??= import('../semantic/vectorStore'))).getVectorStore();
+    const sourceTracker: WikiSourceTracker = {
+      listPendingWikiSourceChanges: async () => (await vectors()).listPendingWikiSourceChanges(),
+      acknowledgeWikiSourceChange: async (change) => (await vectors()).acknowledgeWikiSourceChange(change),
+      getWikiSourceRevision: async () => (await vectors()).getWikiSourceRevision(),
+      getDocumentRevision: async (itemKey, libraryID) => (await vectors()).getDocumentRevision(itemKey, libraryID),
+    };
+    singleton = new WikiStore(new Zotero.DBConnection(dbPath), sourceTracker);
     ztoolkit.log(`[WikiStore] independent database: ${dbPath}`);
   }
   return singleton;
