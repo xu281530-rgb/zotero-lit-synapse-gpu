@@ -84,12 +84,11 @@
        values stay available even if Zotero reparents the pane.
        ============================================================ */
     :root, #__addonRef__-preferences {
-      /* The pane sits inside Zotero's preferences window, so it takes that
-         window's background rather than painting a slab of its own colour on
-         top of it. Zotero defines --material-background per theme; the literal
-         is the fallback for a build that does not. Card and row colours below
-         are unchanged — only the ground the cards sit on follows Zotero. */
-      --page: var(--material-background, #fff);
+      /* No ground of our own. The pane shows whatever Zotero's preferences
+         window paints behind it, in either theme and in any theme Zotero
+         gains later, which no colour of ours could track. Card, row and
+         panel colours below are unaffected. */
+      --page: transparent;
       --bg: #fff;
       --bg-hover: #f8fafc;
       --bg-muted: #f2f4f7;
@@ -152,7 +151,6 @@
 
     @media (prefers-color-scheme: dark) {
       :root, #__addonRef__-preferences {
-        --page: var(--material-background, #1e1e1e);
         --bg: #232529;
         --bg-hover: #2a2d32;
         --bg-muted: #2b2e34;
@@ -306,14 +304,12 @@
        one, and a tab whose content needs the server is disabled rather
        than hidden — a missing tab reads as a missing feature.
        ============================================================ */
+    /* Not pinned: the bar has no background of its own now, so pinning it
+       would let the cards scroll through its labels. It scrolls with them. */
     .zmp-tabs {
-      position: sticky;
-      top: 0;
-      z-index: 5;
       display: flex;
       gap: 2px;
       padding: 10px 14px 0;
-      background: var(--page);
       border-bottom: 1px solid var(--border);
     }
     /* Underline rather than a filled shape: the pane now shares its
@@ -436,8 +432,10 @@
       left: -6px;
       z-index: 20;
       box-sizing: border-box;
+      /* Width is fixed so the flip logic in preferenceScript has a stable
+         figure to judge; the vw cap is only for a pane too narrow to hold it. */
       width: 320px;
-      max-width: 90vw;
+      max-width: 92vw;
       padding: 10px 12px;
       background: var(--bg);
       border: 1px solid var(--border-strong);
@@ -573,6 +571,26 @@
       text-align: right;
       font-variant-numeric: tabular-nums;
     }
+    /* Half width, for values that are never longer than four characters.
+       This is what keeps a paired row's label and question mark on one line:
+       the header wraps only once the control beside it has taken more room
+       than the row has to give. Spinners go because at this width they would
+       sit on top of the digits. */
+    .zmp-nb-h {
+      width: 42px;
+      max-width: 42px;
+      padding: 0 6px;
+      -moz-appearance: textfield;
+      appearance: textfield;
+    }
+    /* A dropdown sized by its own longest option — four characters here — so
+       it shows the value and nothing else. Right-aligning a select left the
+       text floating away from the box's left edge. */
+    select.zmp-nb {
+      width: auto;
+      max-width: none;
+      text-align: start;
+    }
 
     /* Warning banner for settings that invalidate the stored index */
     .zmp-warn {
@@ -631,7 +649,12 @@
       gap: 12px 14px;
       align-items: end;
     }
-    .zmp-fact .zmp-fg { min-width: 0; }
+    /* Every cell hands its bottom margin to the grid, so `align-items: end`
+       lines up the boxes themselves. Left as it was, the button cell — being
+       :last-child, and so margin-free — hung a margin's worth below the very
+       inputs it is meant to sit beside. */
+    .zmp-fact { margin-bottom: 14px; }
+    .zmp-fact > .zmp-fg { min-width: 0; margin-bottom: 0; }
     .zmp-fg-act { display: flex; align-items: flex-end; }
     @media (max-width: 620px) { .zmp-fact { grid-template-columns: 1fr; } }
     .zmp-f3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px 14px; }
@@ -1419,7 +1442,7 @@
               <html:span class="zmp-sw-text" data-l10n-id="pref-embedding-timeout-label"></html:span>
               <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-embedding-timeout-hint"></html:span></html:span></html:span>
             </html:div>
-            <html:input type="number" class="zmp-fi zmp-nb"
+            <html:input type="number" class="zmp-fi zmp-nb zmp-nb-h"
               id="zotero-prefpane-__addonRef__-embedding-timeout"
               preference="extensions.zotero.__addonRef__.embedding.timeoutSeconds"
               min="5" max="600" placeholder="30"
@@ -1431,7 +1454,7 @@
               <html:span class="zmp-sw-text" data-l10n-id="pref-embedding-max-batch-items-label"></html:span>
               <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-embedding-max-batch-items-hint"></html:span></html:span></html:span>
             </html:div>
-            <html:input type="number" class="zmp-fi zmp-nb"
+            <html:input type="number" class="zmp-fi zmp-nb zmp-nb-h"
               id="zotero-prefpane-__addonRef__-embedding-max-batch-items"
               preference="extensions.zotero.__addonRef__.embedding.maxBatchItems"
               min="1" max="2048" placeholder="20"
@@ -2003,7 +2026,7 @@
             </html:div>
             <html:input
               type="number"
-              class="zmp-fi zmp-nb"
+              class="zmp-fi zmp-nb zmp-nb-h"
               id="zotero-prefpane-__addonRef__-wiki-min-score"
               preference="extensions.zotero.__addonRef__.wiki.minScore"
               min="0"
@@ -2020,7 +2043,7 @@
             </html:div>
             <html:input
               type="number"
-              class="zmp-fi zmp-nb"
+              class="zmp-fi zmp-nb zmp-nb-h"
               id="zotero-prefpane-__addonRef__-wiki-rrf-weight"
               preference="extensions.zotero.__addonRef__.wiki.rrfWeight"
               min="0"
