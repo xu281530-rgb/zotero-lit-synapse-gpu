@@ -1172,7 +1172,6 @@ assert.equal(
 await bodyAwareService.updateReadingNote({
   libraryID: 1,
   itemKey: "BODY1",
-  readChunkIds: [0],
   readingRecord: [
     "**阅读总结**",
     "本批讲的是冷却行为。",

@@ -96,7 +96,7 @@ async function makeReady(session) {
     [session.sessionId],
   );
   await db.queryAsync(
-    "INSERT INTO wiki_reading_chunks (session_id, chunk_index, chunk_id, delivered_at) VALUES (?, 0, 22, 1)",
+    "INSERT INTO wiki_reading_chunks (session_id, chunk_index, chunk_id, delivered_at, integrated_at) VALUES (?, 0, 22, 1, 1)",
     [session.sessionId],
   );
 }

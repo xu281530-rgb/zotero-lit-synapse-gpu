@@ -8,7 +8,7 @@ import {
 } from "./wikiConceptTerms";
 import { rowColumn } from "./wikiRow";
 
-export const WIKI_SCHEMA_VERSION = 17;
+export const WIKI_SCHEMA_VERSION = 18;
 
 /**
  * Add a column an older database does not have yet.
@@ -163,6 +163,12 @@ async function migrateReadingSessionStates(db: WikiDatabase): Promise<void> {
 
 export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
   await db.queryAsync("PRAGMA foreign_keys = ON");
+  await db.queryAsync(`CREATE TABLE IF NOT EXISTS wiki_note_operations (
+    library_id INTEGER NOT NULL, item_key TEXT NOT NULL, payload_json TEXT NOT NULL,
+    PRIMARY KEY (library_id, item_key))`);
+  await db.queryAsync(`CREATE TABLE IF NOT EXISTS wiki_review_retractions (
+    session_id INTEGER NOT NULL, evidence_id INTEGER NOT NULL, evidence_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL, PRIMARY KEY (session_id, evidence_id))`);
   await db.queryAsync(`CREATE TABLE IF NOT EXISTS wiki_commit_operations (
     library_id INTEGER NOT NULL, operation_id TEXT NOT NULL, input_hash TEXT NOT NULL,
     payload_json TEXT NOT NULL, result_json TEXT NOT NULL, steps_json TEXT NOT NULL DEFAULT '{}',

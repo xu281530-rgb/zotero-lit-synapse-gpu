@@ -244,6 +244,7 @@ export class WikiRetriever {
       if (++scanned % 128 === 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
       checkCancelled();
       const claimId = Number(column(claim, "claim_id", "claimId"));
+      if (column(claim, "epistemic_status", "epistemicStatus") === "unsupported" && !claimEvidence.get(claimId)?.length) continue;
       if (scopedClaimIds && !scopedClaimIds.has(claimId)) continue;
       const pageId = Number(column(claim, "page_id", "pageId"));
       const page = pages.get(pageId);

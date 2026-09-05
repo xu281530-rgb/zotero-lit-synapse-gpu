@@ -835,6 +835,7 @@ export class WikiReadingSessions {
     sessionId: number,
     chunkIds: readonly number[],
     documentChunks: ReadonlyArray<{ chunkId: number }>,
+    newUnderstanding = false,
   ): Promise<{
     newIndexes: number[];
     alreadyRead: number[];
@@ -891,7 +892,7 @@ export class WikiReadingSessions {
         // checking a passage against the source before quoting it is not new
         // knowledge, and charging it would mean a paper could never be quoted
         // from twice without a Claim in between.
-        const owes = settledElsewhere.has(Number(chunk.chunkId)) ? 0 : 1;
+        const owes = newUnderstanding || !settledElsewhere.has(Number(chunk.chunkId)) ? 1 : 0;
         await this.db.queryAsync(
           `INSERT INTO wiki_reading_chunks
              (session_id, chunk_index, chunk_id, delivered_at, owes_wiki)
@@ -909,6 +910,16 @@ export class WikiReadingSessions {
            WHERE session_id = ? AND chunk_index = ?`,
           [now, sessionId, index],
         );
+      }
+      if (newUnderstanding) {
+        for (const index of [...newIndexes, ...alreadyRead]) {
+          await this.db.queryAsync(
+            `UPDATE wiki_reading_chunks SET owes_wiki = 1, settled_at = NULL
+             WHERE session_id = ? AND chunk_index = ?`, [sessionId, index]);
+        }
+        await this.db.queryAsync(`UPDATE wiki_reading_sessions SET
+          final_synthesis_at = NULL, concepts_recorded_at = NULL,
+          wiki_review_at = NULL, wiki_review = '' WHERE session_id = ?`, [sessionId]);
       }
       await this.db.queryAsync(
         "UPDATE wiki_reading_sessions SET updated_at = ? WHERE session_id = ?",
@@ -1149,6 +1160,9 @@ export class WikiReadingSessions {
     },
   ): Promise<void> {
     const session = await this.get(sessionId);
+    if (options.finalSynthesis && (await this.pendingIntegrationIndexes(sessionId)).length) {
+      throw new Error("Cannot synthesize a paper with missing reading records.");
+    }
     const now = Date.now();
     for (const chunkIndex of new Set(options.integratedIndexes.map(Number))) {
       await this.db.queryAsync(
@@ -1171,7 +1185,8 @@ export class WikiReadingSessions {
            final_synthesis_at = ?
        WHERE session_id = ?`,
       [
-        session?.deliveredBatches ?? 0,
+        (await this.pendingIntegrationIndexes(sessionId)).length === 0
+          ? (session?.deliveredBatches ?? 0) : (session?.integratedBatches ?? 0),
         integratedChunks,
         options.unchanged ? 1 : 0,
         now,

@@ -425,6 +425,24 @@ const GATE_HINT =
   "carry it on their own.";
 
 export class WikiService {
+  private static readonly noteWrites = new Map<string, Promise<unknown>>();
+
+  private noteRequestHash(options: unknown): Promise<string> {
+    return hashExactText(JSON.stringify(options, (_key, value) =>
+      value && typeof value === "object" && !Array.isArray(value)
+        ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]])) : value));
+  }
+
+  private async withNoteWrite<T>(libraryID: number, itemKey: string | undefined,
+    run: (queued: boolean) => Promise<T>): Promise<T> {
+    const sessions = await this.store.readingSessions();
+    const key = `${libraryID}:${itemKey || (await sessions.getOpen(libraryID))?.itemKey || ""}`;
+    const previous = WikiService.noteWrites.get(key);
+    const current = (previous ?? Promise.resolve()).catch(() => undefined).then(() => run(Boolean(previous)));
+    WikiService.noteWrites.set(key, current);
+    try { return await current; }
+    finally { if (WikiService.noteWrites.get(key) === current) WikiService.noteWrites.delete(key); }
+  }
   private activeCommitOperations = new Set<string>();
   private readonly store: WikiStore;
   private readonly retriever: WikiRetriever;
@@ -1391,6 +1409,8 @@ export class WikiService {
           "Use UPDATE_CLAIM with expectedVersion, and preserve previousClaimText, replacementClaimText and basis in wikiReview.claimVerdicts.",
         contradicted:
           "Use MARK_CONFLICT with contradicting Evidence; the Claim becomes disputed for human review.",
+        unsupported:
+          "At commit, this paper's SUPPORTS links are archived in the review audit and retracted. Claim status is recomputed from the remaining sources; other papers' support is preserved.",
       },
     };
   }
@@ -3114,6 +3134,8 @@ export class WikiService {
       // left to say so.
       const outstanding = await sessions.pendingWikiChunks(open.sessionId);
       const blockers: string[] = [];
+      const unrecorded = await sessions.pendingIntegrationIndexes(open.sessionId);
+      if (unrecorded.length) blockers.push(`reading records are missing for chunk indexes ${unrecorded.join(", ")}`);
       if (open.finalSynthesisAt === null) {
         blockers.push(
           "the macro summary has not been appended after the reading records — call " +
@@ -3220,12 +3242,35 @@ export class WikiService {
     },
     writeOptions: WikiNoteStatusWriteOptions = {},
   ): Promise<any> {
+    const pending = await this.store.findNoteOperation(options.libraryID, await this.noteRequestHash(options));
+    return this.withNoteWrite(options.libraryID, pending?.session.itemKey ?? options.itemKey, () => this.finishReadingLocked(options, writeOptions));
+  }
+
+  private async finishReadingLocked(
+    options: Parameters<WikiService["finishReading"]>[0], writeOptions: WikiNoteStatusWriteOptions,
+  ): Promise<any> {
     if (options.outcome !== "skipped" && options.outcome !== "failed") {
       throw new Error(
         'finishReading only accepts "skipped" or "failed". A paper becomes "committed" by being read in full and committed, never by being declared finished.',
       );
     }
     const sessions = await this.store.readingSessions();
+    const requestHash = await this.noteRequestHash(options);
+    const pending = await this.store.findNoteOperation(options.libraryID, requestHash);
+    if (pending?.kind === "finish") {
+      const saved = await sessions.get(pending.session.sessionId);
+      if (!saved || saved.sourceVersion !== pending.session.sourceVersion || saved.noteKey !== pending.session.noteKey) {
+        throw new Error("The saved terminal note operation no longer matches its reading session.");
+      }
+      const latest = await sessions.latestForItem(saved.libraryID, saved.itemKey);
+      if (latest?.sessionId !== saved.sessionId && latest?.noteKey === saved.noteKey) {
+        throw new Error("A newer reading now uses this note; the old terminal status requires review.");
+      }
+      if (saved.state !== options.outcome) await sessions.close(saved.sessionId, options.outcome, options.note ?? "");
+      const noteStatusWrite = await this.syncNoteStatusLocked(saved, options.outcome, writeOptions.authorizeNoteStatusWrite);
+      if (noteStatusWrite.updated) await this.store.clearNoteOperation(saved.libraryID, saved.itemKey);
+      return { closed: true, recovered: true, itemKey: saved.itemKey, outcome: options.outcome, noteStatusWrite };
+    }
     // With a key, close THAT paper, whichever mode it is being read in: a
     // round of questions can leave three papers open, none of which holds the
     // full-text slot, and "I read a bit of that one and it is not worth
@@ -3259,15 +3304,20 @@ export class WikiService {
     }
     const coverage = await sessions.coverage(open.sessionId);
     const owedAtClose = await sessions.pendingWikiChunks(open.sessionId);
+    if (await this.store.getNoteOperation(open.libraryID, open.itemKey)) {
+      throw new Error("A reading-note operation needs recovery before closing. Retry its original request.");
+    }
+    await this.store.saveNoteOperation(open.libraryID, open.itemKey, { kind: "finish", requestHash, request: options, session: open });
     await sessions.close(open.sessionId, options.outcome, options.note ?? "");
     // The note stays on the item - it records a real reading even when the
     // paper was not written up - but its status has to stop saying "reading",
     // or a later resume would trust a progress line that nothing is advancing.
-    const noteResult = await this.syncNoteStatus(
+    const noteResult = await this.syncNoteStatusLocked(
       open,
       options.outcome === "skipped" ? "skipped" : "failed",
       writeOptions.authorizeNoteStatusWrite,
     );
+    if (noteResult.updated || !open.noteKey) await this.store.clearNoteOperation(open.libraryID, open.itemKey);
     return {
       closed: true,
       itemKey: open.itemKey,
@@ -3331,8 +3381,17 @@ export class WikiService {
     persona: string;
     focus: string[];
   }): Promise<any> {
+    return this.withNoteWrite(options.libraryID, options.itemKey, () => this.setReadingExpertLocked(options));
+  }
+
+  private async setReadingExpertLocked(options: {
+    libraryID: number; itemKey?: string; persona: string; focus: string[];
+  }): Promise<any> {
     const sessions = await this.store.readingSessions();
     const session = await this.requireOpenSession(options.libraryID, options.itemKey);
+    if (await this.store.getNoteOperation(session.libraryID, session.itemKey)) {
+      throw new Error("Recover the pending reading-note operation before changing the expert.");
+    }
     // A provisional profile is the placeholder a question-driven read assembles
     // from the retrieval call's own domain and expertRole. It is replaceable
     // precisely because it was never composed: the full-text read of a paper
@@ -3367,12 +3426,12 @@ export class WikiService {
       openScopeMandate: WIKI_EXPERT_OPEN_SCOPE_MANDATE,
       createdAt: Date.now(),
     };
-    await sessions.setExpert(session.sessionId, expert);
-
     const item = await this.requirePaperItem(session.libraryID, session.itemKey);
+    const existingBody = await this.readNoteBody(item, session);
+    await sessions.setExpert(session.sessionId, expert);
     const refreshed = (await sessions.get(session.sessionId)) ?? session;
-    const existingBody = await this.readNoteBody(item);
-    const written = await this.writeNote(item, refreshed, existingBody ?? "", "reading");
+    const written = await this.writeNote(item, { ...refreshed, noteKey: session.noteKey }, existingBody ?? "", "reading",
+      { expectedBody: existingBody ?? "" });
 
     return {
       itemKey: session.itemKey,
@@ -3439,15 +3498,36 @@ export class WikiService {
     /** The specialist perspective it was read from, from the same call. */
     expertRole?: string;
   }): Promise<any> {
-    if (Array.isArray(options.readChunkIds) && options.readChunkIds.length) {
-      const sessions = await this.store.readingSessions();
-      const named = String(options.itemKey ?? "").trim();
-      const existing = named
-        ? await sessions.openForItem(options.libraryID, named)
-        : await sessions.getOpen(options.libraryID);
-      if (!existing || existing.mode === "qa") {
-        return this.integrateQuestionReading(options as any);
+    return this.withNoteWrite(options.libraryID, options.itemKey, (queued) =>
+      this.updateReadingNoteLocked(options, queued));
+  }
+
+  private async updateReadingNoteLocked(
+    options: Parameters<WikiService["updateReadingNote"]>[0], queued: boolean,
+  ): Promise<any> {
+    const operationKey = options.itemKey || (await (await this.store.readingSessions()).getOpen(options.libraryID))?.itemKey;
+    const requestHash = await this.noteRequestHash(options);
+    if (operationKey) {
+      const pending = await this.store.getNoteOperation(options.libraryID, operationKey);
+      if (pending) {
+        if (pending.kind !== "integration" || pending.requestHash !== requestHash) {
+          throw new Error(`A reading-note operation for ${operationKey} needs recovery. Retry its original request before submitting new content.`);
+        }
+        const result = await this.resumeNoteIntegration(pending);
+        const debt = await (await this.store.readingSessions()).pendingWikiChunks(pending.session.sessionId);
+        const coverage = await (await this.store.readingSessions()).coverage(pending.session.sessionId);
+        return { itemKey: operationKey, integrated: true, recovered: true,
+          mode: result.refreshed.mode,
+          finalSynthesis: pending.finalSynthesis, readingNote: result.written,
+          reading: { newChunks: result.booked.newIndexes, newChunkCount: result.booked.newIndexes.length,
+            alreadyReadChunks: result.booked.alreadyRead, alreadyReadCount: result.booked.alreadyRead.length,
+            deliveredChunks: coverage.deliveredChunks, totalChunks: coverage.totalChunks, coverageComplete: coverage.complete },
+          readingSession: result.refreshed, wikiDebt: { count: debt.length, chunkIds: debt.map((entry) => entry.chunkId), chunkIndexes: debt.map((entry) => entry.chunkIndex) },
+          nextStep: "The saved reading-note operation is complete. Call wiki_get_reading_note for the current progress and next step." };
       }
+    }
+    if (Array.isArray(options.readChunkIds) && options.readChunkIds.length) {
+      return this.integrateQuestionReading(options as any, queued);
     }
     const sessions = await this.store.readingSessions();
     const session = await this.requireOpenSession(options.libraryID, options.itemKey);
@@ -3486,10 +3566,13 @@ export class WikiService {
       );
     }
 
-    const previousBody = (await this.readNoteBody(item)) ?? "";
+    const previousBody = (await this.readNoteBody(item, session)) ?? "";
     const deliveredIndexes = await sessions.deliveredIndexes(session.sessionId);
     const pendingIntegrationIndexes =
       await sessions.pendingIntegrationIndexes(session.sessionId);
+    if (finalSynthesis && pendingIntegrationIndexes.length) {
+      throw new Error(`Reading records are missing for chunk indexes ${pendingIntegrationIndexes.join(", ")}. Integrate every delivered chunk before the macro summary.`);
+    }
     const readable = await this.readableChunks(
       session.libraryID,
       session.itemKey,
@@ -3631,15 +3714,11 @@ export class WikiService {
     // on - recording it before the synthesised note is on disk would let the
     // deepest claim in the system be backed by a file that does not exist.
     const status = finalSynthesis ? "synthesized" : "reading";
-    const written = await this.writeNote(item, session, body, status);
-
-    await sessions.recordIntegration(session.sessionId, {
-      unchanged,
+    const { written, refreshed } = await this.saveNoteIntegration({
+      item, session, body, status, previousBody, requestHash, request: options,
       integratedIndexes: finalSynthesis ? [] : pendingIntegrationIndexes,
-      finalSynthesis,
+      finalSynthesis, unchanged,
     });
-    const refreshed = (await sessions.get(session.sessionId)) ?? session;
-    await this.refreshNoteHeader(item, refreshed, body, status);
     const wikiReconciliation = finalSynthesis
       ? await this.paperReconciliationSnapshot(refreshed, body)
       : null;
@@ -3729,7 +3808,7 @@ export class WikiService {
     finalSynthesis?: boolean;
     unchanged?: boolean;
     unchangedReason?: string;
-  }): Promise<any> {
+  }, queued = false): Promise<any> {
     const itemKey = String(options.itemKey ?? "").trim();
     if (!itemKey) {
       throw new Error(
@@ -3782,7 +3861,7 @@ export class WikiService {
     // every time, and the Wiki - which is the part that survives the
     // conversation - never learns anything at all.
     const owed = await sessions.pendingWikiChunks(session.sessionId);
-    if (owed.length > 0) {
+    if (owed.length > 0 && session.mode === "qa" && !queued) {
       throw new Error(
         `Chunk(s) ${owed.map((chunk) => chunk.chunkId).join(", ")} of ${itemKey} are in its reading note ` +
           "but not yet in the Wiki, and the note must never run ahead of the Wiki by more than one turn. " +
@@ -3871,6 +3950,7 @@ export class WikiService {
           .map((entry) => entry.index),
       ],
     );
+    const batchChunks = documentChunks.filter((chunk) => options.readChunkIds.includes(Number(chunk.chunkId)));
     if (!unchanged) {
       assertChunkCitations(record);
       const currentAddresses = new Set<number>();
@@ -3888,6 +3968,11 @@ export class WikiService {
         totalChunks: documentChunks.length,
       });
       assertBlockCitations(record);
+      const aliases = await this.chunkAddressAliases(session.libraryID, itemKey);
+      const cited = new Set(citedChunkIds(record));
+      assertBatchChunkCoverage(record, options.readChunkIds.map((id) =>
+        cited.has(id) ? id : (aliases.get(id)?.find((alias) => cited.has(alias)) ?? id)));
+      assertValuesLanded(record, batchChunks, "阅读记录");
       this.assertReadingRecordAudited(
         record,
         citableChunks,
@@ -3895,6 +3980,8 @@ export class WikiService {
         options.readingRecord !== undefined,
         options.synthesisAudit ?? [],
       );
+    } else {
+      assertUnchangedCarriesNothingNew(previousBody, batchChunks, reason);
     }
     // Decided here rather than earlier, because the test is what this turn
     // SAYS and the record only exists once it has passed validation.
@@ -3931,7 +4018,7 @@ export class WikiService {
           chunkIds: options.readChunkIds,
           content: record,
         })
-      : "";
+      : targetBody;
 
     // THE ORDER HERE IS THE POINT, and it used to be the other way round.
     //
@@ -3949,19 +4036,21 @@ export class WikiService {
     // ledger does not credit, so the chunk is offered again and the model
     // rewrites a note that already covers it. That is wasted work. Ledger
     // first OVER-counts, which is silent, permanent data loss.
+    const saved = await this.saveNoteIntegration({
+      item, session, body, previousBody: targetBody, status: "reading",
+      requestHash: await this.noteRequestHash(options), request: options,
+      readChunkIds: options.readChunkIds, documentChunks: documentChunks.map((chunk) => ({ chunkId: Number(chunk.chunkId) })),
+      newUnderstanding: route.write && !unchanged, finalSynthesis: false, unchanged,
+      write: route.write, startNewEpisode: route.startNewEpisode, attachment: route.attachment,
+    });
     const written = route.write
-      ? await this.writeNote(item, session, body, "reading", {
-          startNewEpisode: route.startNewEpisode,
-          attachment: route.attachment,
-        })
+      ? saved.written
       : {
           // The reading still reaches the ledger - see below - so the Evidence
           // gate and the cross-paper mustResolve check both see it. What it
           // does not get is a note of its own, because it said nothing the
           // note does not already say.
-          attachmentKey: session.noteKey ?? "",
-          status: "reading" as WikiReadingNoteStatus,
-          bodyChars: 0,
+          ...saved.written,
           skipped: route.reason,
           similarity: route.similarity,
           // Said in a sentence, not left to be inferred from `bodyChars: 0`.
@@ -3969,25 +4058,16 @@ export class WikiService {
           // it did not, and the chunks ARE booked as read either way, so the
           // difference never shows up as a missing obligation later.
           discarded:
-            "This record was NOT written to any note: it restates what a " +
-            "concluded note already says about these passages. The chunks are " +
+            "This record was NOT written to any note: it restates what an " +
+            "existing note already says about these passages. The chunks are " +
             "booked as read. Nothing needs retrying - write a record only if " +
             "you have something the existing notes do not say, and read them " +
             "first (see `paper.episodes` from wiki_get_reading_note).",
         };
 
     // Durable. Only now is the reading real.
-    const booked = await sessions.recordReadChunkIds(
-      session.sessionId,
-      options.readChunkIds,
-      documentChunks,
-    );
+    const booked = saved.booked;
     const coverage = await sessions.coverage(session.sessionId);
-    await sessions.recordIntegration(session.sessionId, {
-      unchanged: false,
-      integratedIndexes: booked.newIndexes,
-      finalSynthesis: false,
-    });
     // The paper now has a real reading record, which is the trigger for
     // cross-paper candidates - not being imported, and not being returned by
     // retrieval. Queued, never awaited: this answer must not wait on a
@@ -3995,12 +4075,6 @@ export class WikiService {
     // suggestion rather than a lost page of reading.
     void this.links.onPaperRead(options.libraryID, itemKey);
     const refreshed = (await sessions.get(session.sessionId)) ?? session;
-    // The machine block was rendered from the ledger as it stood BEFORE the
-    // booking, so it now understates what has been read. Re-render it. This is
-    // deliberately best-effort: the body is safe and the ledger is right, and
-    // the block is derived from the ledger on every save, so a failure here
-    // costs a stale header until the next write rather than anything real.
-    await this.refreshNoteHeader(item, refreshed, body, "reading");
 
     // The debt is booked by `recordReadChunkIds` itself now - every newly read
     // chunk is written with owes_wiki set - so there is no separate counter to
@@ -4044,7 +4118,7 @@ export class WikiService {
           "paper was read end to end and then synthesised as a whole, which is what wiki_build_from_paper " +
           "does — and it will continue this same note and skip what you have already read.",
       nextStep:
-        newlyRead > 0
+        owedNow.length > 0
           ? `The note now accounts for ${coverage.deliveredChunks} of ${coverage.totalChunks} chunks. Update ` +
             "the Wiki from it now, before the next question: call wiki_prepare_update with what this " +
             "reading established, then wiki_commit. Update the Page, Claims, Concepts and relations that " +
@@ -4054,8 +4128,7 @@ export class WikiService {
             "Evidence excerpt quoting it, or a SKIP action naming it with a reason saying what it " +
             "establishes that the Wiki already holds. Writing up one of them does not settle the others. " +
             "Reading this paper again is refused until they are all settled."
-          : "Every chunk you named had already been read, so the note improved but the Wiki owes nothing " +
-            "new. Carry on; write the Wiki when a turn actually adds something.",
+          : "This reading adds no unsettled Wiki work. Continue with the next question.",
     };
   }
 
@@ -4120,11 +4193,14 @@ export class WikiService {
       session.libraryID,
       session.itemKey,
     );
-    const attachment = item ? await this.notes.findAttachment(item) : null;
+    const attachment = item ? (session.noteKey
+      ? await this.notes.getByKey(session.libraryID, session.noteKey)
+      : await this.notes.findAttachment(item)) : null;
     const raw = attachment ? await this.notes.read(attachment) : null;
     const parsed = raw ? parseReadingNote(raw) : { metadata: null, body: "" };
     const coverage = await sessions.coverage(session.sessionId);
     const delivered = await sessions.deliveredIndexes(session.sessionId);
+    const pendingOperation = await this.store.getNoteOperation(session.libraryID, session.itemKey);
     return {
       found: true,
       itemKey: session.itemKey,
@@ -4138,6 +4214,12 @@ export class WikiService {
       },
       expert: session.expert,
       progress: this.noteProgress(session, coverage, delivered),
+      pendingOperation: pendingOperation ? {
+        kind: pendingOperation.kind, sessionId: pendingOperation.session.sessionId,
+        attachmentKey: pendingOperation.session.noteKey, sourceVersion: pendingOperation.session.sourceVersion,
+        ledgerDone: pendingOperation.ledgerDone ?? false, request: pendingOperation.request,
+        nextStep: "Retry the original request to finish the saved operation without regenerating content.",
+      } : null,
       paper: await this.paperReadingSummary(item, session, coverage.totalChunks),
       readingNote: {
         exists: Boolean(attachment),
@@ -4299,13 +4381,15 @@ export class WikiService {
     item: any,
     session?: WikiReadingSessionRecord,
   ): Promise<string | null> {
-    const attachment =
-      (session?.noteKey
-        ? await this.notes.getByKey(session.libraryID, session.noteKey)
-        : null) ?? (await this.notes.findAttachment(item));
+    const attachment = session?.noteKey
+      ? await this.notes.getByKey(session.libraryID, session.noteKey)
+      : await this.notes.findAttachment(item);
+    if (session?.noteKey && !attachment) throw new Error(`Reading note ${session.noteKey} is unavailable; retry after restoring the attachment.`);
     if (!attachment) return null;
     const raw = await this.notes.read(attachment);
-    return raw === null ? null : parseReadingNote(raw).body;
+    if (raw === null) throw new Error(`Reading note ${attachment.key} could not be read; no content was replaced. Retry when the attachment is readable.`);
+    if (session && !session.noteKey) session.noteKey = String(attachment.key);
+    return parseReadingNote(raw).body;
   }
 
   /**
@@ -4383,6 +4467,9 @@ export class WikiService {
       });
     }
 
+    if (unreadable) throw new Error("A reading note could not be read. Retry before appending content.");
+    const identical = notes.find((note) => note.related === record && [...wanted].every((id) => note.chunkIds.has(id)));
+    if (identical) return { ...routeBySimilarity<any>(1, getWikiNoteEpisodeSimilarity()), attachment: identical.attachment };
     const decided = routeWithoutSimilarity(notes, wanted, { unreadable });
     if (decided) return decided;
 
@@ -4451,6 +4538,86 @@ export class WikiService {
     return parseAppendOnlyReadingNote(body).macroSummary !== null;
   }
 
+  private async saveNoteIntegration(input: {
+    item: any; session: WikiReadingSessionRecord; body: string; previousBody: string;
+    status: WikiReadingNoteStatus; requestHash: string; finalSynthesis: boolean; unchanged: boolean;
+    request: unknown;
+    integratedIndexes?: number[]; readChunkIds?: number[]; documentChunks?: Array<{ chunkId: number }>;
+    newUnderstanding?: boolean; write?: boolean; startNewEpisode?: boolean; attachment?: any;
+  }): Promise<any> {
+    const { item, session } = input;
+    const attachment = input.attachment ?? (input.startNewEpisode
+      ? await this.notes.createNextAttachment(item, "")
+      : session.noteKey ? await this.notes.getByKey(session.libraryID, session.noteKey)
+        : await this.notes.ensureAttachment(item, ""));
+    if (!attachment) throw new Error("The selected reading note is unavailable; retry after restoring it.");
+    const raw = await this.notes.read(attachment);
+    if (raw === null) throw new Error("The selected reading note could not be read; nothing was replaced.");
+    const oldBody = parseReadingNote(raw).body;
+    if (input.write !== false && oldBody !== input.previousBody) {
+      throw new Error("The reading note changed while this record was being prepared. Read it again and retry.");
+    }
+    const operation = {
+      ...input, item: undefined, attachment: undefined, kind: "integration",
+      session: { ...session, noteKey: String(attachment.key) },
+      oldBodyHash: await hashExactText(oldBody), bodyHash: await hashExactText(input.body),
+      ledgerDone: false,
+    };
+    await this.store.saveNoteOperation(session.libraryID, session.itemKey, operation);
+    return this.resumeNoteIntegration(operation);
+  }
+
+  private async resumeNoteIntegration(operation: any): Promise<any> {
+    const sessions = await this.store.readingSessions();
+    const before: WikiReadingSessionRecord = operation.session;
+    const session = await sessions.get(before.sessionId);
+    const latest = await sessions.latestForItem(before.libraryID, before.itemKey);
+    const revision = await getVectorStore().getDocumentRevision(before.itemKey, before.libraryID);
+    if (!session || latest?.sessionId !== before.sessionId || session.sourceVersion !== before.sourceVersion ||
+      (before.sourceVersion && revision !== before.sourceVersion)) {
+      throw new Error("The reading session or source revision changed. The saved note operation requires review before recovery.");
+    }
+    const item = await this.requirePaperItem(before.libraryID, before.itemKey);
+    const attachment = await this.notes.getByKey(before.libraryID, before.noteKey);
+    if (!attachment || (attachment.parentID !== undefined && attachment.parentID !== item.id)) {
+      throw new Error("The saved operation's reading-note attachment is unavailable.");
+    }
+    const raw = await this.notes.read(attachment);
+    if (raw === null) throw new Error("The saved operation's reading note could not be read.");
+    const currentHash = await hashExactText(parseReadingNote(raw).body);
+    if (currentHash !== operation.oldBodyHash && currentHash !== operation.bodyHash) {
+      throw new Error("The reading note changed after this operation was saved. Review its content before retrying.");
+    }
+    if (operation.write !== false && currentHash !== operation.bodyHash) {
+      await this.writeNote(item, before, operation.body, operation.status, { attachment, expectedBody: parseReadingNote(raw).body });
+    }
+    if (!operation.ledgerDone) {
+      assertChunkRevision(revision, await getVectorStore().getDocumentRevision(before.itemKey, before.libraryID));
+      await this.store.commitBookkeeping(async () => {
+        await sessions.setNoteKey(before.sessionId, before.noteKey);
+        const booked = operation.readChunkIds
+          ? await sessions.recordReadChunkIds(before.sessionId, operation.readChunkIds, operation.documentChunks, operation.newUnderstanding)
+          : { newIndexes: [], alreadyRead: [] };
+        await sessions.recordIntegration(before.sessionId, {
+          unchanged: operation.unchanged,
+          integratedIndexes: operation.readChunkIds
+            ? (session.mode === "fulltext" ? booked.newIndexes : [...booked.newIndexes, ...booked.alreadyRead])
+            : operation.integratedIndexes,
+          finalSynthesis: operation.finalSynthesis,
+        });
+        await this.store.saveNoteOperation(before.libraryID, before.itemKey, { ...operation, ledgerDone: true, booked });
+      });
+      operation = await this.store.getNoteOperation(before.libraryID, before.itemKey);
+    }
+    const refreshed = (await sessions.get(before.sessionId))!;
+    const written = operation.write !== false
+      ? await this.writeNote(item, refreshed, operation.body, operation.status, { attachment, expectedBody: operation.body })
+      : { attachmentKey: before.noteKey, bodyChars: parseReadingNote(raw).body.length,
+          status: parseReadingNote(raw).metadata?.status ?? operation.status };
+    await this.store.clearNoteOperation(before.libraryID, before.itemKey);
+    return { written, refreshed, booked: operation.booked };
+  }
+
   /**
    * Write the note: machine block regenerated from the ledger, body as given.
    *
@@ -4463,7 +4630,7 @@ export class WikiService {
     session: WikiReadingSessionRecord,
     body: string,
     status: WikiReadingNoteStatus,
-    options: { startNewEpisode?: boolean; attachment?: any | null } = {},
+    options: { startNewEpisode?: boolean; attachment?: any | null; expectedBody?: string } = {},
   ): Promise<{
     attachmentKey: string;
     status: WikiReadingNoteStatus;
@@ -4501,15 +4668,24 @@ export class WikiService {
     const markdown = renderReadingNote(metadata, body);
     // A session that already owns a note keeps writing to it; only the first
     // write of an episode that follows a concluded note opens a new file.
-    // Default unchanged: the paper's current note, created if absent. Only a
-    // caller that has explicitly routed this record elsewhere overrides it —
-    // consulting session.noteKey here instead would have redirected every
-    // full-text write too, and those must keep landing where they always did.
+    // An explicit route wins; otherwise retain the session's pinned attachment.
+    const pinned = session.noteKey && !options.startNewEpisode && !options.attachment
+      ? await this.notes.getByKey(session.libraryID, session.noteKey) : null;
+    if (session.noteKey && !options.startNewEpisode && !options.attachment && !pinned) {
+      throw new Error(`Reading note ${session.noteKey} is unavailable; refusing to redirect this write.`);
+    }
     const attachment =
       options.attachment ??
+      pinned ??
       (options.startNewEpisode
         ? await this.notes.createNextAttachment(item, markdown)
         : await this.notes.ensureAttachment(item, markdown));
+    if (options.expectedBody !== undefined) {
+      const raw = await this.notes.read(attachment);
+      if (raw === null || parseReadingNote(raw).body !== options.expectedBody) {
+        throw new Error("The reading note changed before saving; retry after reading the current version.");
+      }
+    }
     await this.notes.write(attachment, markdown);
     if (attachment?.key && attachment.key !== session.noteKey) {
       await sessions.setNoteKey(session.sessionId, String(attachment.key));
@@ -4522,37 +4698,6 @@ export class WikiService {
   }
 
   /**
-   * Re-render the machine block after the ledger has moved on.
-   *
-   * The note is written before the ledger is updated, so the block it carries
-   * describes the reading as it stood one step earlier. This brings it level.
-   *
-   * Best-effort ON PURPOSE, and it is the one place in this file where
-   * swallowing an error is right: by the time it runs, the two things that
-   * carry meaning are already safe - the model's text is on disk and the
-   * ledger says what was read - and the block is regenerated from that same
-   * ledger on every subsequent save. Turning a stale header into a thrown
-   * error would fail a call whose real work had entirely succeeded, and the
-   * caller's only sensible response would be to repeat work that is done.
-   */
-  private async refreshNoteHeader(
-    item: any,
-    session: WikiReadingSessionRecord,
-    body: string,
-    status: WikiReadingNoteStatus,
-  ): Promise<void> {
-    try {
-      await this.writeNote(item, session, body, status);
-    } catch (error) {
-      ztoolkit?.log?.(
-        `[WikiService] reading note header for ${session.itemKey} is one step stale; ` +
-          `the body and the ledger are correct and the next save will bring it level: ${error}`,
-        "warn",
-      );
-    }
-  }
-
-  /**
    * Stamp a terminal status onto the note when its session closes.
    *
    * Best effort by design: the Wiki write is already durable when this runs,
@@ -4560,6 +4705,14 @@ export class WikiService {
    * successful commit into an error.
    */
   private async syncNoteStatus(
+    session: WikiReadingSessionRecord,
+    status: WikiReadingNoteStatus,
+    authorizeWrite?: () => Promise<boolean | void>,
+  ): Promise<WikiNoteStatusWriteResult> {
+    return this.withNoteWrite(session.libraryID, session.itemKey, () => this.syncNoteStatusLocked(session, status, authorizeWrite));
+  }
+
+  private async syncNoteStatusLocked(
     session: WikiReadingSessionRecord,
     status: WikiReadingNoteStatus,
     authorizeWrite?: () => Promise<boolean | void>,
@@ -4593,7 +4746,7 @@ export class WikiService {
           return { updated: false, reason: "not_authorized" };
         }
       }
-      const written = await this.writeNote(item, session, body, status, { attachment });
+      const written = await this.writeNote(item, session, body, status, { attachment, expectedBody: body });
       return {
         updated: true,
         attachmentKey: written.attachmentKey,
@@ -4653,6 +4806,9 @@ export class WikiService {
       firstMissingIndex: number | null;
     },
   ): string {
+    if (integrationDebt(session) > 0) {
+      return "Delivered chunks still lack reading records. Call wiki_update_reading_note with a readingRecord for the outstanding fulltext batch before paging or summarizing.";
+    }
     if (!session.expert) {
       return (
         "This paper has no expert reader yet. Call wiki_set_reading_expert with a persona drawn from " +

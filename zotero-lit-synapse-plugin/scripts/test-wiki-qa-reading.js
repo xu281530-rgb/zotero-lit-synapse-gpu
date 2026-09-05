@@ -1798,7 +1798,7 @@ block("a whole turn may be written off, and re-reading is never charged", async 
     "Station 35 is where the series first departs from linear (chunk 35).",
     "Stations 48, 60 and 61 are all on the plateau (chunk 48, chunk 60, chunk 61).",
     "Stations 70 and 71 repeat the plateau reading at the same values, checked again (chunk 70, chunk 71).",
-  ]);
+  ], { unchanged: true, unchangedReason: "Rechecked the same plateau quotation; no additional finding." });
   assert.deepEqual(reread.reading.newChunks, []);
   assert.deepEqual(reread.reading.alreadyReadChunks, [70]);
   assert.equal(reread.wikiDebt.count, 0, "a re-read incurs no debt");
@@ -2154,6 +2154,11 @@ block("a full-text integration that fails to save records nothing either", async
     limit: TINY,
   });
   assert.equal(page.pagination.coverageComplete, true);
+
+  // The final page must have a saved record before a summary can reach I/O.
+  await service.updateReadingNote({ libraryID: 1, itemKey: "PAPERFIV",
+    readingRecord: note(page.chunks.map((chunk) =>
+      `Station ${chunk.chunkIndex} reports depth under its imposed gradient (chunk ${chunk.chunkIndex}).`)) });
 
   const session = await sessions.openForItem(1, "PAPERFIV");
   const integratedBefore = session.integratedChunks;

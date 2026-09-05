@@ -1,7 +1,7 @@
 {
   "name": "zotero-lit-synapse",
   "type": "module",
-  "version": "3.0.2",
+  "version": "3.1.0",
   "description": "Zotero LitSynapse for Zotero 9.0.x with question-driven LLM Wiki memory, independent evidence-linked knowledge storage, cross-paper link candidates with auditable settlement, hybrid keyword/semantic/Wiki retrieval, cursor pagination, and MCP 2025-06-18 Streamable HTTP",
   "config": {
     "addonName": "Zotero LitSynapse",
@@ -9,7 +9,7 @@
     "addonRef": "zotero-lit-synapse",
     "addonInstance": "ZoteroLitSynapse",
     "prefsPrefix": "extensions.zotero.zotero-lit-synapse",
-    "addonVersion": "3.0.2"
+    "addonVersion": "3.1.0"
   },
   "repository": {
     "type": "git",
@@ -147,7 +147,10 @@
     "test:round2-embedding": "node --experimental-transform-types scripts/test-round2-embedding.mjs",
     "test:round2-reading": "node --experimental-transform-types scripts/test-round2-reading.mjs",
     "test:round2-receipts": "node scripts/test-round2-receipts.mjs",
-    "test:round2-mcp-guidance": "node scripts/test-round2-mcp-guidance.mjs"
+    "test:round2-mcp-guidance": "node scripts/test-round2-mcp-guidance.mjs",
+    "test:round3-notes": "node --experimental-transform-types --experimental-sqlite scripts/test-round3-notes.mjs",
+    "test:round3-qa": "node --experimental-transform-types --experimental-sqlite scripts/test-round3-qa.mjs",
+    "test:round3-fulltext": "node --experimental-transform-types --experimental-sqlite scripts/test-round3-fulltext.mjs"
   },
   "dependencies": {
     "zotero-plugin-toolkit": "^5.2.0"

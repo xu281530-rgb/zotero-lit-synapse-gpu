@@ -1815,6 +1815,8 @@ export function buildToolCatalog(): ToolDefinition[] {
       'A QUESTION-DRIVEN RECORD IS NOT HELD TO THOSE SIX SECTIONS, and writing them anyway buys nothing. The six slots answer for a whole page of twenty chunks; a question reads two or three passages for one purpose, and filling 方法 or 概念与术语 out of three passages produces sentences written to occupy a heading. Do NOT emit the headings when the reading was question-driven. What IS checked, and is checked identically in both modes, is the part that carries the value: every chunk you listed in readChunkIds is named somewhere in the record, every sentence carries its own chunk citation, at least 80% of the measured values in those chunks land with their units and conditions, and every sentence is audited against the chunk it cites. Write connected prose that satisfies those four and stop; a question-driven record that does is complete, however short it is.',
       '',
       'ORDINARY CALLS: send readingRecord containing only what this turn established. The server appends and numbers it; earlier prose and records are immutable. If new text corrects an old record, append "Correction to record N" with the new chunk citation. Never resubmit existing content.',
+      'RECOVERY: if a file or progress update fails, retry the original request. Saved operations pin the session, source revision and attachment; the retry completes remaining work without duplicating records. wiki_get_reading_note reports pendingOperation when recovery is needed.',
+      'PATH SELECTION: readChunkIds selects question-driven reading even when this paper has an active fulltext session. It never clears an outstanding fulltext batch. Omit readChunkIds to integrate that batch. New understanding from an old chunk creates fresh Wiki review work; a duplicate or an unchanged quotation check does not.',
       '',
       'AFTER ANSWERING A QUESTION FROM A PAPER, call this once for EVERY paper whose passages you genuinely read and used. Send itemKey, readChunkIds, readingRecord, and the domain and expertRole used by search_fulltext. Three papers read means three calls. Retrieval is not reading: do not list passages merely returned or skimmed past.',
     ].join('\n'),
@@ -1879,7 +1881,7 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         finalSynthesis: {
           type: 'boolean',
-          description: 'Append the macro summary once every chunk is covered. Available for full-text and question-driven reading; a QA session must first reset its provisional expert. The macro summary is audited for citation support and must synthesise the paper rather than repeat the reading records.'
+          description: 'Append the macro summary once every chunk has been delivered AND saved in reading records, including the last page. Available for full-text and question-driven reading; a QA session must first reset its provisional expert. The macro summary is audited for citation support and must synthesise the paper rather than repeat the reading records.'
         },
         synthesisAudit: {
           type: 'array',

@@ -882,6 +882,28 @@ export class WikiStore {
     return this.db.executeTransaction(work);
   }
 
+  async getNoteOperation(libraryID: number, itemKey: string): Promise<any | null> {
+    await this.initialize();
+    const rows = await this.db.queryAsync("SELECT payload_json FROM wiki_note_operations WHERE library_id = ? AND item_key = ?", [libraryID, itemKey]);
+    return rows[0] ? JSON.parse(String(rowValue(rows[0], "payload_json", "payloadJson"))) : null;
+  }
+
+  async saveNoteOperation(libraryID: number, itemKey: string, payload: unknown): Promise<void> {
+    await this.db.queryAsync(`INSERT INTO wiki_note_operations (library_id, item_key, payload_json) VALUES (?, ?, ?)
+      ON CONFLICT(library_id, item_key) DO UPDATE SET payload_json = excluded.payload_json`, [libraryID, itemKey, JSON.stringify(payload)]);
+  }
+
+  async clearNoteOperation(libraryID: number, itemKey: string): Promise<void> {
+    await this.db.queryAsync("DELETE FROM wiki_note_operations WHERE library_id = ? AND item_key = ?", [libraryID, itemKey]);
+  }
+
+  async findNoteOperation(libraryID: number, requestHash: string): Promise<any | null> {
+    await this.initialize();
+    const rows = await this.db.queryAsync("SELECT payload_json FROM wiki_note_operations WHERE library_id = ?", [libraryID]);
+    return rows.map((row) => JSON.parse(String(rowValue(row, "payload_json", "payloadJson"))))
+      .find((entry) => entry.requestHash === requestHash) ?? null;
+  }
+
   async listPendingCommitOperations(libraryID?: number): Promise<any[]> {
     await this.initialize();
     const rows = await this.db.queryAsync(`SELECT library_id, operation_id, steps_json FROM wiki_commit_operations WHERE response_json IS NULL${libraryID === undefined ? '' : ' AND library_id = ?'} ORDER BY updated_at DESC LIMIT 100`, libraryID === undefined ? [] : [libraryID]);
@@ -1351,6 +1373,31 @@ export class WikiStore {
         }
       }
 
+      // A review retracts only this paper's support. Preserve the original
+      // evidence in the audit trail and keep support from other papers intact.
+      if (input.readingSessionId) {
+        const sessions = await this.readingSessions();
+        const review = await sessions.get(input.readingSessionId);
+        if (review?.libraryID === input.libraryID && review.wikiReviewAt !== null) {
+          for (const verdict of review.wikiReview?.claimVerdicts ?? []) {
+            if (verdict.verdict !== "unsupported") continue;
+            const evidence = await this.db.queryAsync(`SELECT * FROM wiki_evidence WHERE claim_id = ? AND library_id = ? AND item_key = ? AND evidence_role = 'SUPPORTS'`, [verdict.claimId, input.libraryID, review.itemKey]);
+            for (const row of evidence) {
+              const evidenceId = Number(rowValue(row, "evidence_id", "evidenceId"));
+              await this.db.queryAsync("INSERT OR IGNORE INTO wiki_review_retractions (session_id, evidence_id, evidence_json, created_at) VALUES (?, ?, ?, ?)", [review.sessionId, evidenceId, JSON.stringify(this.mapEvidence(row)), Date.now()]);
+              await this.db.queryAsync("DELETE FROM wiki_evidence WHERE evidence_id = ?", [evidenceId]);
+            }
+            if (evidence.length) {
+              evidenceChangedClaimIds.add(verdict.claimId);
+              const pageId = await this.db.valueQueryAsync("SELECT page_id FROM wiki_claims WHERE claim_id = ?", [verdict.claimId]);
+              if (pageId) affectedPageIds.add(Number(pageId));
+              await this.db.queryAsync("UPDATE wiki_claims SET version = version + 1 WHERE claim_id = ?", [verdict.claimId]);
+              result.updatedClaims++;
+              if (!result.affectedClaimIds.includes(verdict.claimId)) result.affectedClaimIds.push(verdict.claimId);
+            }
+          }
+        }
+      }
       for (const claimId of evidenceChangedClaimIds) {
         await this.recomputeDerivedClaimFields(claimId);
       }
