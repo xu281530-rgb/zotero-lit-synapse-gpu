@@ -426,3 +426,4 @@ pref-wiki-group-record = 記録
 pref-wiki-group-retrieval = 検索への参加
 pref-wiki-group-data = データ
 pref-recommended-chip = 推奨 { $value }
+pref-enable-short = 有効

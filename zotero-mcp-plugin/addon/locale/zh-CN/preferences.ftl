@@ -426,3 +426,4 @@ pref-wiki-group-record = 记录
 pref-wiki-group-retrieval = 参与检索
 pref-wiki-group-data = 数据
 pref-recommended-chip = 推荐 { $value }
+pref-enable-short = 启用

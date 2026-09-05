@@ -1384,8 +1384,11 @@ function bindTabs(doc: Document) {
  */
 function updateServerDependentUI(doc: Document, enabled: boolean) {
   const serverOffHint = doc?.querySelector('#server-off-hint') as HTMLElement;
-  const portRow = doc?.querySelector('#server-port-row') as HTMLElement;
-  const remoteRow = doc?.querySelector('#server-remote-row') as HTMLElement;
+  // Port and remote-access share a row, so the pair is hidden as a unit —
+  // hiding only its two children would leave the grid's gap behind.
+  const connectionPair = doc?.querySelector(
+    '#server-connection-pair',
+  ) as HTMLElement;
   const tokenRow = doc?.querySelector('#server-token-row') as HTMLElement;
 
   let leavingActiveTab = false;
@@ -1404,8 +1407,7 @@ function updateServerDependentUI(doc: Document, enabled: boolean) {
   }
 
   if (serverOffHint) serverOffHint.style.display = enabled ? 'none' : 'block';
-  if (portRow) portRow.style.display = enabled ? '' : 'none';
-  if (remoteRow) remoteRow.style.display = enabled ? '' : 'none';
+  if (connectionPair) connectionPair.style.display = enabled ? '' : 'none';
   if (tokenRow) tokenRow.style.display = enabled ? '' : 'none';
 }
 

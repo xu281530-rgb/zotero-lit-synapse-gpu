@@ -84,7 +84,12 @@
        values stay available even if Zotero reparents the pane.
        ============================================================ */
     :root, #__addonRef__-preferences {
-      --page: #f4f6f9;
+      /* The pane sits inside Zotero's preferences window, so it takes that
+         window's background rather than painting a slab of its own colour on
+         top of it. Zotero defines --material-background per theme; the literal
+         is the fallback for a build that does not. Card and row colours below
+         are unchanged — only the ground the cards sit on follows Zotero. */
+      --page: var(--material-background, #fff);
       --bg: #fff;
       --bg-hover: #f8fafc;
       --bg-muted: #f2f4f7;
@@ -147,7 +152,7 @@
 
     @media (prefers-color-scheme: dark) {
       :root, #__addonRef__-preferences {
-        --page: #1a1b1e;
+        --page: var(--material-background, #1e1e1e);
         --bg: #232529;
         --bg-hover: #2a2d32;
         --bg-muted: #2b2e34;
@@ -311,34 +316,44 @@
       background: var(--page);
       border-bottom: 1px solid var(--border);
     }
+    /* Underline rather than a filled shape: the pane now shares its
+       background with Zotero's window, so a tab filled with the card colour
+       would be the same colour as the bar behind it. */
     .zmp-tab {
       appearance: none;
       -moz-appearance: none;
-      border: 1px solid transparent;
-      border-bottom: none;
-      border-radius: 8px 8px 0 0;
-      padding: 7px 15px 8px;
-      margin: 0;
+      border: none;
+      border-bottom: 2px solid transparent;
+      border-radius: 5px 5px 0 0;
+      padding: 7px 14px 7px;
+      margin: 0 0 -1px;
       background: transparent;
-      color: var(--text-2);
+      color: var(--text-3);
       font-family: inherit;
       font-size: 12.5px;
       font-weight: 600;
       line-height: 1.3;
       cursor: pointer;
-      transition: background 0.12s, color 0.12s, border-color 0.12s;
+      transition: color 0.12s, border-color 0.12s, background 0.12s;
     }
-    .zmp-tab:hover:not(.is-active):not([disabled]) { background: var(--bg-hover); color: var(--text); }
+    .zmp-tab:hover:not(.is-active):not([disabled]) { color: var(--text); background: var(--bg-hover); }
     .zmp-tab:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
-    .zmp-tab.is-active {
-      background: var(--bg);
-      border-color: var(--border);
-      color: var(--text);
-      /* Sit on top of the bar's own rule so the active tab joins the page */
-      margin-bottom: -1px;
-      padding-bottom: 9px;
-    }
+    .zmp-tab.is-active { color: var(--text); border-bottom-color: var(--blue); }
     .zmp-tab[disabled] { opacity: 0.4; cursor: default; }
+
+    /* Two settings that fit on one line share it. A number box or a switch
+       is narrow; giving each its own full-width row was spending height on
+       nothing. Falls back to one column when the pane is too narrow to read
+       two labels side by side. */
+    .zmp-p2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+    .zmp-p2 > .zmp-sw { margin-bottom: 0; min-width: 0; }
+    .zmp-p2:last-child, .zmp-p2.zmp-last { margin-bottom: 0; }
+    @media (max-width: 620px) { .zmp-p2 { grid-template-columns: 1fr; } }
+
+    /* A card whose whole subject is one switch carries that switch in its
+       title, where the question "is this on?" is actually asked. */
+    .zmp-tt { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+    .zmp-tt-l { font-size: 12px; font-weight: 550; color: var(--text-2); }
 
     .zmp-tp { display: none; padding-bottom: 4px; }
     .zmp-tp.is-active { display: block; }
@@ -607,6 +622,18 @@
     .zmp-dp[hidden] { display: none; }
 
     .zmp-f2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 14px; }
+    /* Two fields plus the button that tests them. The button keeps the fields'
+       baseline instead of starting a row of its own underneath, and the result
+       text goes below the grid where it has the full width to wrap into. */
+    .zmp-fact {
+      display: grid;
+      grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) auto;
+      gap: 12px 14px;
+      align-items: end;
+    }
+    .zmp-fact .zmp-fg { min-width: 0; }
+    .zmp-fg-act { display: flex; align-items: flex-end; }
+    @media (max-width: 620px) { .zmp-fact { grid-template-columns: 1fr; } }
     .zmp-f3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px 14px; }
     .zmp-f2 .zmp-fg, .zmp-f3 .zmp-fg { min-width: 0; }
 
@@ -1141,46 +1168,47 @@
     <html:div class="zmp-tp is-active" data-tabpanel="server">
 
       <html:div class="zmp-s" data-icon="server">
-        <html:div class="zmp-s-title" data-l10n-id="pref-server-title"></html:div>
+        <html:div class="zmp-s-title">
+          <html:span data-l10n-id="pref-server-title"></html:span>
+          <html:span class="zmp-tt">
+            <html:span class="zmp-tt-l" data-l10n-id="pref-enable-short"></html:span>
+            <html:label class="zmp-tog">
+              <html:input type="checkbox"
+                id="zotero-prefpane-__addonRef__-mcp-server-enabled"
+                preference="extensions.zotero.__addonRef__.mcp.server.enabled"
+              />
+              <html:span class="zmp-tog-track"></html:span>
+            </html:label>
+          </html:span>
+        </html:div>
         <html:div class="zmp-s-desc" data-l10n-id="pref-section-server-desc"></html:div>
 
-        <html:div class="zmp-sw">
-          <html:div class="zmp-sw-h">
-            <html:span class="zmp-sw-text" data-l10n-id="pref-server-enable-text"></html:span>
-          </html:div>
-          <html:label class="zmp-tog">
-            <html:input type="checkbox"
-              id="zotero-prefpane-__addonRef__-mcp-server-enabled"
-              preference="extensions.zotero.__addonRef__.mcp.server.enabled"
+        <html:div class="zmp-p2" id="server-connection-pair">
+          <html:div class="zmp-sw zmp-nrow" id="server-port-row">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-server-port"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-server-port-restart-hint"></html:span></html:span></html:span>
+            </html:div>
+            <html:input type="number" class="zmp-fi zmp-nb"
+              id="zotero-prefpane-__addonRef__-mcp-server-port"
+              preference="extensions.zotero.__addonRef__.mcp.server.port"
+              min="1024" max="65535"
             />
-            <html:span class="zmp-tog-track"></html:span>
-          </html:label>
-        </html:div>
-
-        <html:div class="zmp-sw zmp-nrow" id="server-port-row">
-          <html:div class="zmp-sw-h">
-            <html:span class="zmp-sw-text" data-l10n-id="pref-server-port"></html:span>
-            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-server-port-restart-hint"></html:span></html:span></html:span>
           </html:div>
-          <html:input type="number" class="zmp-fi zmp-nb"
-            id="zotero-prefpane-__addonRef__-mcp-server-port"
-            preference="extensions.zotero.__addonRef__.mcp.server.port"
-            min="1024" max="65535"
-          />
-        </html:div>
 
-        <html:div id="server-remote-row" class="zmp-sw">
-          <html:div class="zmp-sw-h">
-            <html:span class="zmp-sw-text" data-l10n-id="pref-server-remote-text"></html:span>
-            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-server-remote-sub"></html:span><html:span data-l10n-id="pref-server-allow-remote-warning"></html:span></html:span></html:span>
+          <html:div id="server-remote-row" class="zmp-sw">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-server-remote-text"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-server-remote-sub"></html:span><html:span data-l10n-id="pref-server-allow-remote-warning"></html:span></html:span></html:span>
+            </html:div>
+            <html:label class="zmp-tog">
+              <html:input type="checkbox"
+                id="zotero-prefpane-__addonRef__-mcp-server-allow-remote"
+                preference="extensions.zotero.__addonRef__.mcp.server.allowRemote"
+              />
+              <html:span class="zmp-tog-track"></html:span>
+            </html:label>
           </html:div>
-          <html:label class="zmp-tog">
-            <html:input type="checkbox"
-              id="zotero-prefpane-__addonRef__-mcp-server-allow-remote"
-              preference="extensions.zotero.__addonRef__.mcp.server.allowRemote"
-            />
-            <html:span class="zmp-tog-track"></html:span>
-          </html:label>
         </html:div>
 
         <html:div id="server-token-row" class="zmp-sw">
@@ -1353,7 +1381,9 @@
           />
         </html:div>
 
-        <html:div class="zmp-f2">
+        <!-- The test button sits with the fields it tests, on their baseline,
+             rather than a row of its own further down. -->
+        <html:div class="zmp-fact">
           <html:div class="zmp-fg">
             <html:label class="zmp-fl" data-l10n-id="pref-embedding-model-label"></html:label>
             <html:input type="text" class="zmp-fi zmp-fi-mono"
@@ -1370,7 +1400,11 @@
               min="64" max="4096" placeholder="512"
             />
           </html:div>
+          <html:div class="zmp-fg zmp-fg-act">
+            <html:button class="zmp-b" id="test-embedding-button" data-l10n-id="pref-embedding-test-button-text"></html:button>
+          </html:div>
         </html:div>
+        <html:div class="zmp-res" id="embedding-test-result"></html:div>
 
         <html:div
           id="embedding-identity-lock-message"
@@ -1379,33 +1413,30 @@
           hidden="hidden"
         ></html:div>
 
-        <html:div class="zmp-sw zmp-nrow">
-          <html:div class="zmp-sw-h">
-            <html:span class="zmp-sw-text" data-l10n-id="pref-embedding-timeout-label"></html:span>
-            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-embedding-timeout-hint"></html:span></html:span></html:span>
+        <html:div class="zmp-p2 zmp-last">
+          <html:div class="zmp-sw zmp-nrow">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-embedding-timeout-label"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-embedding-timeout-hint"></html:span></html:span></html:span>
+            </html:div>
+            <html:input type="number" class="zmp-fi zmp-nb"
+              id="zotero-prefpane-__addonRef__-embedding-timeout"
+              preference="extensions.zotero.__addonRef__.embedding.timeoutSeconds"
+              min="5" max="600" placeholder="30"
+            />
           </html:div>
-          <html:input type="number" class="zmp-fi zmp-nb"
-            id="zotero-prefpane-__addonRef__-embedding-timeout"
-            preference="extensions.zotero.__addonRef__.embedding.timeoutSeconds"
-            min="5" max="600" placeholder="30"
-          />
-        </html:div>
 
-        <html:div class="zmp-sw zmp-nrow zmp-last">
-          <html:div class="zmp-sw-h">
-            <html:span class="zmp-sw-text" data-l10n-id="pref-embedding-max-batch-items-label"></html:span>
-            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-embedding-max-batch-items-hint"></html:span></html:span></html:span>
+          <html:div class="zmp-sw zmp-nrow">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-embedding-max-batch-items-label"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-embedding-max-batch-items-hint"></html:span></html:span></html:span>
+            </html:div>
+            <html:input type="number" class="zmp-fi zmp-nb"
+              id="zotero-prefpane-__addonRef__-embedding-max-batch-items"
+              preference="extensions.zotero.__addonRef__.embedding.maxBatchItems"
+              min="1" max="2048" placeholder="20"
+            />
           </html:div>
-          <html:input type="number" class="zmp-fi zmp-nb"
-            id="zotero-prefpane-__addonRef__-embedding-max-batch-items"
-            preference="extensions.zotero.__addonRef__.embedding.maxBatchItems"
-            min="1" max="2048" placeholder="20"
-          />
-        </html:div>
-
-        <html:div class="zmp-bg">
-          <html:button class="zmp-b" id="test-embedding-button" data-l10n-id="pref-embedding-test-button-text"></html:button>
-          <html:span class="zmp-res" id="embedding-test-result"></html:span>
         </html:div>
 
         <html:div class="zmp-ex" id="rate-limit-panel">
@@ -1788,32 +1819,34 @@
           <html:span data-l10n-id="pref-hybrid-group-performance"></html:span>
         </html:div>
 
-        <html:div class="zmp-sw">
-          <html:div class="zmp-sw-h">
-            <html:span class="zmp-sw-text" data-l10n-id="pref-hybrid-gpu-label"></html:span>
-            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-hybrid-gpu-hint"></html:span></html:span></html:span>
+        <html:div class="zmp-p2">
+          <html:div class="zmp-sw">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-hybrid-gpu-label"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-hybrid-gpu-hint"></html:span></html:span></html:span>
+            </html:div>
+            <html:label class="zmp-tog">
+              <html:input type="checkbox"
+                id="zotero-prefpane-__addonRef__-hybrid-gpu-enabled"
+                preference="extensions.zotero.__addonRef__.hybrid.gpuAccelerationEnabled"
+              />
+              <html:span class="zmp-tog-track"></html:span>
+            </html:label>
           </html:div>
-          <html:label class="zmp-tog">
-            <html:input type="checkbox"
-              id="zotero-prefpane-__addonRef__-hybrid-gpu-enabled"
-              preference="extensions.zotero.__addonRef__.hybrid.gpuAccelerationEnabled"
-            />
-            <html:span class="zmp-tog-track"></html:span>
-          </html:label>
-        </html:div>
 
-        <html:div class="zmp-sw zmp-nrow" id="hybrid-gpu-precision-row">
-          <html:div class="zmp-sw-h">
-            <html:span class="zmp-sw-text" data-l10n-id="pref-hybrid-gpu-precision-label"></html:span>
-            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-hybrid-gpu-precision-hint"></html:span></html:span></html:span>
+          <html:div class="zmp-sw zmp-nrow" id="hybrid-gpu-precision-row">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-hybrid-gpu-precision-label"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-hybrid-gpu-precision-hint"></html:span></html:span></html:span>
+            </html:div>
+            <html:select class="zmp-fi zmp-nb"
+              id="zotero-prefpane-__addonRef__-hybrid-gpu-precision"
+              preference="extensions.zotero.__addonRef__.hybrid.gpuPrecision">
+              <html:option value="auto" data-l10n-id="pref-hybrid-gpu-precision-auto"></html:option>
+              <html:option value="float32">Float32</html:option>
+              <html:option value="int8">Int8</html:option>
+            </html:select>
           </html:div>
-          <html:select class="zmp-fi zmp-nb"
-            id="zotero-prefpane-__addonRef__-hybrid-gpu-precision"
-            preference="extensions.zotero.__addonRef__.hybrid.gpuPrecision">
-            <html:option value="auto" data-l10n-id="pref-hybrid-gpu-precision-auto"></html:option>
-            <html:option value="float32">Float32</html:option>
-            <html:option value="int8">Int8</html:option>
-          </html:select>
         </html:div>
         <html:div class="zmp-res" id="hybrid-gpu-status" aria-live="polite"></html:div>
 
@@ -1870,62 +1903,60 @@
       <html:div class="zmp-s" data-icon="wiki">
         <html:div class="zmp-s-title">
           <html:span data-l10n-id="pref-wiki-title"></html:span>
-          <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-wiki-desc"></html:span><html:span data-l10n-id="pref-wiki-permission-note"></html:span></html:span></html:span>
+          <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-wiki-desc"></html:span><html:span data-l10n-id="pref-wiki-permission-note"></html:span><html:span data-l10n-id="pref-wiki-enabled-sub"></html:span></html:span></html:span>
+          <html:span class="zmp-tt">
+            <html:span class="zmp-tt-l" data-l10n-id="pref-enable-short"></html:span>
+            <html:label class="zmp-tog">
+              <html:input
+                type="checkbox"
+                id="zotero-prefpane-__addonRef__-wiki-enabled"
+                preference="extensions.zotero.__addonRef__.wiki.enabled"
+              />
+              <html:span class="zmp-tog-track"></html:span>
+            </html:label>
+          </html:span>
         </html:div>
 
         <html:div class="zmp-sl">
           <html:span data-l10n-id="pref-wiki-group-record"></html:span>
         </html:div>
 
-        <html:div class="zmp-sw">
-          <html:div class="zmp-sw-h">
-            <html:span class="zmp-sw-text" data-l10n-id="pref-wiki-enabled-text"></html:span>
-            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-wiki-enabled-sub"></html:span></html:span></html:span>
+        <html:div class="zmp-p2">
+          <html:div class="zmp-sw">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-wiki-auto-write-text"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-wiki-auto-write-sub"></html:span></html:span></html:span>
+            </html:div>
+            <html:label class="zmp-tog">
+              <html:input
+                type="checkbox"
+                id="zotero-prefpane-__addonRef__-wiki-auto-write"
+                preference="extensions.zotero.__addonRef__.wiki.autoWrite"
+              />
+              <html:span class="zmp-tog-track"></html:span>
+            </html:label>
           </html:div>
-          <html:label class="zmp-tog">
-            <html:input
-              type="checkbox"
-              id="zotero-prefpane-__addonRef__-wiki-enabled"
-              preference="extensions.zotero.__addonRef__.wiki.enabled"
-            />
-            <html:span class="zmp-tog-track"></html:span>
-          </html:label>
-        </html:div>
 
-        <html:div class="zmp-sw">
-          <html:div class="zmp-sw-h">
-            <html:span class="zmp-sw-text" data-l10n-id="pref-wiki-auto-write-text"></html:span>
-            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-wiki-auto-write-sub"></html:span></html:span></html:span>
+          <html:div class="zmp-sw zmp-nrow">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-wiki-write-mode-label"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-wiki-write-mode-hint"></html:span></html:span></html:span>
+            </html:div>
+            <html:select
+              class="zmp-fi zmp-nb"
+              id="zotero-prefpane-__addonRef__-wiki-write-mode"
+              preference="extensions.zotero.__addonRef__.wiki.writeMode"
+            >
+              <html:option
+                value="confirm"
+                data-l10n-id="pref-wiki-write-mode-confirm"
+              ></html:option>
+              <html:option
+                value="auto"
+                data-l10n-id="pref-wiki-write-mode-auto"
+              ></html:option>
+            </html:select>
           </html:div>
-          <html:label class="zmp-tog">
-            <html:input
-              type="checkbox"
-              id="zotero-prefpane-__addonRef__-wiki-auto-write"
-              preference="extensions.zotero.__addonRef__.wiki.autoWrite"
-            />
-            <html:span class="zmp-tog-track"></html:span>
-          </html:label>
-        </html:div>
-
-        <html:div class="zmp-sw zmp-nrow">
-          <html:div class="zmp-sw-h">
-            <html:span class="zmp-sw-text" data-l10n-id="pref-wiki-write-mode-label"></html:span>
-            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-wiki-write-mode-hint"></html:span></html:span></html:span>
-          </html:div>
-          <html:select
-            class="zmp-fi zmp-nb"
-            id="zotero-prefpane-__addonRef__-wiki-write-mode"
-            preference="extensions.zotero.__addonRef__.wiki.writeMode"
-          >
-            <html:option
-              value="confirm"
-              data-l10n-id="pref-wiki-write-mode-confirm"
-            ></html:option>
-            <html:option
-              value="auto"
-              data-l10n-id="pref-wiki-write-mode-auto"
-            ></html:option>
-          </html:select>
         </html:div>
 
         <html:div class="zmp-sw zmp-nrow zmp-last">
@@ -1964,38 +1995,40 @@
           </html:label>
         </html:div>
 
-        <html:div class="zmp-sw zmp-nrow">
-          <html:div class="zmp-sw-h">
-            <html:span class="zmp-sw-text" data-l10n-id="pref-wiki-min-score-label"></html:span>
-            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-wiki-min-score-hint"></html:span></html:span></html:span>
+        <html:div class="zmp-p2">
+          <html:div class="zmp-sw zmp-nrow">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-wiki-min-score-label"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-wiki-min-score-hint"></html:span></html:span></html:span>
+            </html:div>
+            <html:input
+              type="number"
+              class="zmp-fi zmp-nb"
+              id="zotero-prefpane-__addonRef__-wiki-min-score"
+              preference="extensions.zotero.__addonRef__.wiki.minScore"
+              min="0"
+              max="1"
+              step="0.01"
+              placeholder="0"
+            />
           </html:div>
-          <html:input
-            type="number"
-            class="zmp-fi zmp-nb"
-            id="zotero-prefpane-__addonRef__-wiki-min-score"
-            preference="extensions.zotero.__addonRef__.wiki.minScore"
-            min="0"
-            max="1"
-            step="0.01"
-            placeholder="0"
-          />
-        </html:div>
 
-        <html:div class="zmp-sw zmp-nrow">
-          <html:div class="zmp-sw-h">
-            <html:span class="zmp-sw-text" data-l10n-id="pref-wiki-rrf-weight-label"></html:span>
-            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-wiki-rrf-weight-hint"></html:span></html:span></html:span>
+          <html:div class="zmp-sw zmp-nrow">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-wiki-rrf-weight-label"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-wiki-rrf-weight-hint"></html:span></html:span></html:span>
+            </html:div>
+            <html:input
+              type="number"
+              class="zmp-fi zmp-nb"
+              id="zotero-prefpane-__addonRef__-wiki-rrf-weight"
+              preference="extensions.zotero.__addonRef__.wiki.rrfWeight"
+              min="0"
+              max="10"
+              step="0.1"
+              placeholder="0"
+            />
           </html:div>
-          <html:input
-            type="number"
-            class="zmp-fi zmp-nb"
-            id="zotero-prefpane-__addonRef__-wiki-rrf-weight"
-            preference="extensions.zotero.__addonRef__.wiki.rrfWeight"
-            min="0"
-            max="10"
-            step="0.1"
-            placeholder="0"
-          />
         </html:div>
 
         <html:div class="zmp-sw zmp-nrow zmp-last">
@@ -2085,7 +2118,7 @@
             />
           </html:div>
 
-          <html:div class="zmp-f2">
+          <html:div class="zmp-fact">
             <html:div class="zmp-fg">
               <html:label class="zmp-fl" data-l10n-id="pref-mineru-model-label"></html:label>
               <html:select class="zmp-fi"
@@ -2108,7 +2141,11 @@
                 placeholder="ch"
               />
             </html:div>
+            <html:div class="zmp-fg zmp-fg-act">
+              <html:button class="zmp-b" id="test-mineru-button" data-l10n-id="pref-mineru-test-button-text"></html:button>
+            </html:div>
           </html:div>
+          <html:div class="zmp-res" id="mineru-test-result"></html:div>
 
           <html:div class="zmp-fh" id="mineru-vlm-hint" style="display:none; margin-bottom:10px" data-l10n-id="pref-mineru-vlm-hint"></html:div>
 
@@ -2152,11 +2189,6 @@
               />
               <html:span class="zmp-tog-track"></html:span>
             </html:label>
-          </html:div>
-
-          <html:div class="zmp-bg">
-            <html:button class="zmp-b" id="test-mineru-button" data-l10n-id="pref-mineru-test-button-text"></html:button>
-            <html:span class="zmp-res" id="mineru-test-result"></html:span>
           </html:div>
 
           <html:div class="zmp-ex" id="mineru-advanced-panel">

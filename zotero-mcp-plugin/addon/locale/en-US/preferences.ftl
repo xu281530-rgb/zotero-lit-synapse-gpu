@@ -426,3 +426,4 @@ pref-wiki-group-record = Recording
 pref-wiki-group-retrieval = In retrieval
 pref-wiki-group-data = Data
 pref-recommended-chip = suggested { $value }
+pref-enable-short = Enable

@@ -143,6 +143,7 @@ export type FluentMessageId =
   | 'pref-embedding-timeout-hint'
   | 'pref-embedding-timeout-label'
   | 'pref-embedding-title'
+  | 'pref-enable-short'
   | 'pref-expose-paths-sub'
   | 'pref-expose-paths-text'
   | 'pref-file-import-sub'
