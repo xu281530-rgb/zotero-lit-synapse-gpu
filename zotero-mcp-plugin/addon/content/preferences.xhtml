@@ -641,13 +641,6 @@
       line-height: 15px;
       text-align: center;
     }
-    .zmp-warn-title {
-      font-weight: 650;
-      color: var(--text);
-      margin-bottom: 5px;
-    }
-    .zmp-warn-p { margin-top: 6px; }
-    .zmp-warn-p:first-of-type { margin-top: 0; }
 
     /* The stale-index alert is hidden until the signatures actually disagree */
     .zmp-warn-alert { display: none; margin: 0 0 14px; }
@@ -1599,8 +1592,10 @@
 
           <!-- Advanced: chunking. Lives with the index it defines rather than
                with the query-time retrieval settings: these values decide how
-               the stored vectors were cut up, so changing them invalidates the
-               index above and means rebuilding it with the buttons above. -->
+               the stored vectors were cut up. They are editable only while no
+               search index and no Wiki data exist — once either exists the
+               inputs are locked (see refreshDataCompatibilityLockUI), so there
+               is no "change it, then rebuild" path to warn about here. -->
           <html:div class="zmp-ex" id="hybrid-advanced-panel">
             <html:div class="zmp-ex-h" id="hybrid-advanced-toggle">
               <html:span class="zmp-ex-a">▶</html:span>
@@ -1608,13 +1603,6 @@
               <html:span class="zmp-ex-m" id="hybrid-advanced-summary"></html:span>
             </html:div>
             <html:div class="zmp-ex-b">
-              <html:div class="zmp-warn">
-                <html:div>
-                  <html:div class="zmp-warn-title" data-l10n-id="pref-hybrid-chunk-rebuild-title"></html:div>
-                  <html:div class="zmp-warn-p" data-l10n-id="pref-hybrid-chunk-rebuild-p1"></html:div>
-                </html:div>
-              </html:div>
-
               <html:div
                 id="hybrid-chunk-lock-message"
                 class="zmp-warn zmp-warn-alert"
