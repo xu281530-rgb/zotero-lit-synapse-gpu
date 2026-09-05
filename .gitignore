@@ -47,15 +47,15 @@ logs/
 docs/
 
 # Zotero plugin specific
-zotero-mcp-plugin/addon/
-zotero-mcp-plugin/build/
-zotero-mcp-plugin/.cuda-downloads/
-zotero-mcp-plugin/.cuda-toolkit/
-zotero-mcp-plugin/native/vector-gpu/build/
-zotero-mcp-plugin/native/vector-gpu/.build/
-zotero-mcp-plugin/native/vector-gpu/*.probe.obj
+zotero-lit-synapse-plugin/addon/
+zotero-lit-synapse-plugin/build/
+zotero-lit-synapse-plugin/.cuda-downloads/
+zotero-lit-synapse-plugin/.cuda-toolkit/
+zotero-lit-synapse-plugin/native/vector-gpu/build/
+zotero-lit-synapse-plugin/native/vector-gpu/.build/
+zotero-lit-synapse-plugin/native/vector-gpu/*.probe.obj
 
 # Keyword-scoring fixtures: generated from the user's own Zotero library, so
 # they contain real titles, abstracts and author lists. Reproduce them locally
 # with scripts/build-keyword-fixture.js rather than committing library content.
-zotero-mcp-plugin/scripts/fixtures/
+zotero-lit-synapse-plugin/scripts/fixtures/

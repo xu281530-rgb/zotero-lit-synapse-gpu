@@ -1,0 +1,1514 @@
+/* ==========================================================================
+   Zotero LLM Wiki - "academic paper" surface
+   --------------------------------------------------------------------------
+   One token set drives every region: paper colours, borders, radii and the
+   four type families the Wiki mixes (Hei for navigation, Kai for prose, Song
+   for claims, Times New Roman for Latin text in all three). Nothing below
+   restates a colour or a font stack literally; regions consume the variables.
+
+   CJK/Latin mixing works by ordering: "Times New Roman" first supplies the
+   Latin glyphs, and every CJK codepoint it lacks falls through to the Chinese
+   family that follows it.
+   ========================================================================== */
+
+.zotero-lit-synapse-wiki-toolbarbutton {
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  min-height: 36px;
+  max-width: 36px;
+  max-height: 36px;
+}
+.zotero-lit-synapse-wiki-toolbarbutton .toolbarbutton-icon {
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  min-height: 30px;
+  max-width: 30px;
+  max-height: 30px;
+}
+
+.zotero-lit-synapse-wiki-tab-container {
+  min-width: 0;
+  min-height: 0;
+}
+
+/* The Wiki tab's icon in the tab bar and in the tabs menu. Zotero renders
+   every tab icon as `.icon-item-type[data-item-type=…]` and fills the item
+   type in from `tab.data.icon`, so the tab claims an item type of its own
+   (wikiTabManager) and this rule paints the plugin icon into it. The URLs are
+   relative to this stylesheet, which lives beside the icons in content/. */
+.icon-item-type[data-item-type="zotero-lit-synapse-wiki"] {
+  background: image-set(
+      url("icons/favicon@0.5x.png") 1x,
+      url("icons/favicon.png") 2x
+    )
+    no-repeat center/contain;
+}
+
+/* Zotero sizes every tab icon at 16px, which leaves this one too small to
+   read as the plugin's mark. 24px is 1.5x that, and still well inside the
+   36px tab. The whole `flex` shorthand is restated because the tab lays its
+   icon out as `flex: 0 0 16px`, whose basis would otherwise squeeze the wider
+   image back; `.tab` is in the selector to outweigh that rule. Only the tab
+   bar grows - the tabs menu keeps its list-sized icon. */
+.tab .tab-icon.icon-item-type[data-item-type="zotero-lit-synapse-wiki"] {
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+}
+
+#zotero-lit-synapse-wiki-panel {
+  /* Paper */
+  --wiki-bg: #f3f0e8;
+  --wiki-paper: #fcfbf7;
+  --wiki-paper-alt: #f7f4ec;
+  --wiki-paper-sunk: #efebe0;
+  /* Ink */
+  --wiki-text: #25231f;
+  --wiki-muted: #777168;
+  --wiki-faint: #9a9284;
+  /* Structure */
+  --wiki-border: rgba(90, 78, 60, 0.14);
+  --wiki-border-strong: rgba(90, 78, 60, 0.26);
+  --wiki-shadow:
+    0 1px 1px rgba(64, 54, 38, 0.04), 0 8px 20px -16px rgba(64, 54, 38, 0.5);
+  --wiki-shadow-raised:
+    0 1px 2px rgba(64, 54, 38, 0.06), 0 14px 28px -20px rgba(64, 54, 38, 0.55);
+  --wiki-radius: 10px;
+  --wiki-radius-sm: 7px;
+  --wiki-radius-pill: 999px;
+  /* Accents - low saturation only */
+  --wiki-accent: #536f62;
+  --wiki-accent-soft: rgba(83, 111, 98, 0.1);
+  --wiki-accent-line: rgba(83, 111, 98, 0.32);
+  --wiki-danger: #a4574e;
+  --wiki-danger-soft: rgba(164, 87, 78, 0.1);
+  --wiki-highlight: rgba(120, 104, 74, 0.07);
+  /* Type */
+  --wiki-font-serif-en: "Times New Roman", Times, serif;
+  --wiki-font-hei:
+    "Times New Roman", "Microsoft YaHei", "PingFang SC", "Heiti SC", SimHei,
+    "Noto Sans CJK SC", sans-serif;
+  --wiki-font-kai:
+    "Times New Roman", KaiTi, STKaiti, "Kaiti SC", KaiTi_GB2312,
+    "Noto Serif CJK SC", serif;
+  --wiki-font-song:
+    "Times New Roman", SimSun, NSimSun, "Songti SC", STSong,
+    "Noto Serif CJK SC", serif;
+  --wiki-font-ui: -apple-system, "Segoe UI", system-ui, sans-serif;
+  /* Read back by the 3D graph so its canvas matches the stylesheet. */
+  --wiki-graph-scheme: light;
+
+  position: relative;
+  display: grid;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  box-sizing: border-box;
+  grid-template-rows: 56px minmax(0, 1fr);
+  color: var(--wiki-text);
+  /* Two near-invisible gradients stand in for paper grain without an image. */
+  background-color: var(--wiki-bg);
+  background-image:
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.42),
+      rgba(255, 255, 255, 0) 220px
+    ),
+    repeating-linear-gradient(
+      98deg,
+      rgba(120, 104, 74, 0.018) 0 3px,
+      rgba(120, 104, 74, 0) 3px 7px
+    );
+  font: 13px/1.6 var(--wiki-font-hei);
+  overflow: hidden;
+}
+
+#zotero-lit-synapse-wiki-panel *,
+#zotero-lit-synapse-wiki-panel *::before,
+#zotero-lit-synapse-wiki-panel *::after {
+  box-sizing: border-box;
+}
+
+/* Long CJK strings, DOIs and un-spaced formulae must never widen a column. */
+#zotero-lit-synapse-wiki-panel p,
+#zotero-lit-synapse-wiki-panel span,
+#zotero-lit-synapse-wiki-panel strong,
+#zotero-lit-synapse-wiki-panel small,
+#zotero-lit-synapse-wiki-panel h1,
+#zotero-lit-synapse-wiki-panel h2,
+#zotero-lit-synapse-wiki-panel h3,
+#zotero-lit-synapse-wiki-panel blockquote,
+#zotero-lit-synapse-wiki-panel button {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* ============================ Top bar ==================================== */
+
+.zmp-wiki-header {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-width: 0;
+  padding: 0 16px;
+  background: linear-gradient(
+    180deg,
+    var(--wiki-paper) 0%,
+    var(--wiki-paper-alt) 100%
+  );
+  border-bottom: 1px solid var(--wiki-border);
+}
+.zmp-wiki-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  min-width: 0;
+  overflow: hidden;
+}
+.zmp-wiki-header h1 {
+  margin: 0;
+  flex: none;
+  font-family: var(--wiki-font-hei);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+.zmp-wiki-status {
+  min-width: 0;
+  color: var(--wiki-faint);
+  font-family: var(--wiki-font-ui);
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.zmp-wiki-header-actions {
+  display: flex;
+  flex: none;
+  gap: 7px;
+  margin-left: auto;
+}
+
+/* Real <button> elements stay on one line, always: a button that wraps is a
+   button that collapses in Gecko. Anything that must wrap uses .is-block,
+   which is a div. */
+.zmp-wiki-command {
+  min-height: 27px;
+  padding: 3px 11px;
+  white-space: nowrap;
+  color: var(--wiki-text);
+  background: var(--wiki-paper);
+  border: 1px solid var(--wiki-border-strong);
+  border-radius: var(--wiki-radius-sm);
+  font: 12px/1.5 var(--wiki-font-hei);
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+  -moz-appearance: none;
+  appearance: none;
+}
+.zmp-wiki-command:hover {
+  background: var(--wiki-accent-soft);
+  border-color: var(--wiki-accent-line);
+  color: var(--wiki-accent);
+}
+.zmp-wiki-command:active {
+  background: var(--wiki-paper-sunk);
+}
+.zmp-wiki-command.danger {
+  color: var(--wiki-danger);
+  border-color: transparent;
+  background: transparent;
+}
+.zmp-wiki-command.danger:hover {
+  background: var(--wiki-danger-soft);
+  border-color: rgba(164, 87, 78, 0.34);
+  color: var(--wiki-danger);
+}
+/* A wrapping command: a div, so it grows with its text. */
+.zmp-wiki-command.is-block {
+  display: block;
+  width: 100%;
+  padding: 9px 11px;
+  text-align: left;
+  white-space: normal;
+  font-family: var(--wiki-font-song);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+/* Secondary, text-weight actions: present but never louder than the prose. */
+.zmp-wiki-command.quiet {
+  padding: 2px 8px;
+  color: var(--wiki-muted);
+  background: transparent;
+  border-color: transparent;
+  font-size: 11.5px;
+}
+.zmp-wiki-command.quiet:hover {
+  background: var(--wiki-highlight);
+  border-color: var(--wiki-border);
+  color: var(--wiki-accent);
+}
+
+/* ============================ Three columns ============================== */
+
+.zmp-wiki-body {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  /* Narrow, stable index; generous reading column; annotation rail that stops
+     growing on wide screens instead of eating the middle. */
+  grid-template-columns:
+    clamp(240px, 21%, 280px)
+    minmax(0, 1fr)
+    clamp(320px, 26%, 380px);
+  overflow: hidden;
+}
+.zmp-wiki-body[hidden] {
+  display: none;
+}
+
+.zmp-wiki-pages,
+.zmp-wiki-claims,
+.zmp-wiki-evidence {
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius);
+  box-shadow: var(--wiki-shadow);
+  scrollbar-width: thin;
+}
+.zmp-wiki-pages {
+  padding: 12px 10px;
+  background: var(--wiki-paper-alt);
+}
+.zmp-wiki-claims {
+  padding: 22px 26px 40px;
+  background: var(--wiki-paper);
+}
+.zmp-wiki-evidence {
+  padding: 0;
+  background: var(--wiki-paper-alt);
+}
+
+.zmp-wiki-column-title {
+  display: block;
+  margin: 2px 8px 10px;
+  color: var(--wiki-faint);
+  font-family: var(--wiki-font-hei);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+
+/* ============================ Left: index =============================== */
+
+/* Multi-row controls are divs with role="button", never <button> elements.
+   Gecko lays a button's children out in an anonymous XUL box that does not
+   grow to fit them, so a two-row button renders one row tall and spills its
+   second row over whatever follows - which is exactly what this panel did in
+   Zotero while looking correct in Blink. A wrapper element does not help,
+   because the wrapper sits inside that same box. See `clickable()`. */
+.zmp-wiki-page-entry {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 10px 11px;
+  margin-bottom: 5px;
+  text-align: left;
+  color: var(--wiki-text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--wiki-radius-sm);
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
+  -moz-appearance: none;
+  appearance: none;
+}
+.zmp-wiki-page-entry:hover {
+  background: var(--wiki-highlight);
+  border-color: var(--wiki-border);
+}
+.zmp-wiki-page-entry.is-active {
+  background: var(--wiki-paper);
+  border-color: var(--wiki-border-strong);
+  box-shadow: inset 3px 0 0 var(--wiki-accent);
+}
+/* Explicitly block, so the two rows stack even if the grid above is ever
+   defeated by the host: <strong> and <small> are inline by default, and an
+   inline fallback is what runs them together. */
+.zmp-wiki-page-entry-title {
+  display: block;
+  font-family: var(--wiki-font-hei);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+.zmp-wiki-page-entry.is-active .zmp-wiki-page-entry-title {
+  color: var(--wiki-accent);
+}
+.zmp-wiki-page-entry-meta {
+  display: block;
+  color: var(--wiki-faint);
+  font-family: var(--wiki-font-ui);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+/* ---- The delete drawer -------------------------------------------------
+   The delete control is never on screen at rest. Each index entry sits in a
+   clipping row with the drawer behind its right edge; dragging the entry left
+   uncovers it, clicking anywhere else slides it back. Nothing here is a hover
+   affordance: a control that appears under the pointer is exactly what makes
+   a permanent delete easy to hit by accident. */
+.zmp-wiki-page-row {
+  position: relative;
+  margin-bottom: 5px;
+  border-radius: var(--wiki-radius-sm);
+  overflow: hidden;
+}
+.zmp-wiki-page-drawer {
+  position: absolute;
+  inset: 0 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  background: var(--wiki-danger-soft);
+  /* Nothing in the drawer is reachable until the entry has slid off it. */
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+.zmp-wiki-page-row.is-drawer-open .zmp-wiki-page-drawer {
+  opacity: 1;
+  pointer-events: auto;
+}
+.zmp-wiki-page-delete {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--wiki-danger);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--wiki-radius-sm);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  -moz-appearance: none;
+  appearance: none;
+}
+.zmp-wiki-page-delete:hover {
+  background: var(--wiki-paper);
+  border-color: rgba(164, 87, 78, 0.34);
+}
+.zmp-wiki-page-row .zmp-wiki-page-entry {
+  position: relative;
+  margin-bottom: 0;
+  background: var(--wiki-paper-alt);
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    transform 140ms ease;
+}
+/* While the drawer is open the entry is a lid, not a target: it must not
+   invite a click that would only slide it shut. */
+.zmp-wiki-page-row.is-drawer-open .zmp-wiki-page-entry {
+  cursor: default;
+}
+
+/* ---- The confirmation dialog -------------------------------------------
+   Deleting a knowledge entry is physical and permanent, so the decision gets
+   a modal of its own rather than a line of text in a system prompt: the name,
+   the counts and the warning have to be readable at a glance. */
+.zmp-wiki-modal-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(35, 33, 30, 0.42);
+}
+.zmp-wiki-modal {
+  width: 100%;
+  max-width: 420px;
+  padding: 22px 24px 18px;
+  color: var(--wiki-text);
+  background: var(--wiki-paper);
+  border: 1px solid var(--wiki-border-strong);
+  border-radius: var(--wiki-radius);
+  box-shadow: var(--wiki-shadow-raised);
+}
+.zmp-wiki-modal-title {
+  margin: 0 0 10px;
+  color: var(--wiki-danger);
+  font-family: var(--wiki-font-hei);
+  font-size: 15px;
+  font-weight: 700;
+}
+.zmp-wiki-modal-name {
+  margin: 0 0 14px;
+  font-family: var(--wiki-font-song);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.6;
+}
+.zmp-wiki-modal-facts {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  background: var(--wiki-paper-sunk);
+  border-radius: var(--wiki-radius-sm);
+}
+.zmp-wiki-modal-fact {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  justify-content: space-between;
+  font-family: var(--wiki-font-ui);
+  font-size: 12px;
+}
+.zmp-wiki-modal-fact-label {
+  color: var(--wiki-muted);
+}
+.zmp-wiki-modal-fact-value {
+  flex: none;
+  font-weight: 700;
+}
+.zmp-wiki-modal-warning {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  color: var(--wiki-danger);
+  background: var(--wiki-danger-soft);
+  border-radius: var(--wiki-radius-sm);
+  font-family: var(--wiki-font-kai);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.zmp-wiki-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+/* The destructive choice is the loud one here, because in this dialog it is
+   the answer to the question being asked - not an escape hatch. */
+.zmp-wiki-modal-actions .zmp-wiki-command.danger {
+  color: var(--wiki-paper);
+  background: var(--wiki-danger);
+  border-color: var(--wiki-danger);
+  font-weight: 700;
+}
+.zmp-wiki-modal-actions .zmp-wiki-command.danger:hover {
+  color: var(--wiki-paper);
+  background: #8f4740;
+  border-color: #8f4740;
+}
+
+/* ============================ Middle: the document ====================== */
+
+.zmp-wiki-doc {
+  /* Keeps the measure readable at 2560px without shrinking the column. */
+  max-width: 860px;
+  margin: 0 auto;
+}
+.zmp-wiki-page-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 12px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--wiki-border);
+}
+.zmp-wiki-page-title h2 {
+  margin: 0 auto 0 0;
+  font-family: var(--wiki-font-hei);
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+.zmp-wiki-page-tools {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+
+.zmp-wiki-section {
+  margin-bottom: 22px;
+}
+.zmp-wiki-section-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 10px;
+  color: var(--wiki-muted);
+  font-family: var(--wiki-font-hei);
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+.zmp-wiki-section-title::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--wiki-border);
+}
+.zmp-wiki-section-count {
+  flex: none;
+  color: var(--wiki-faint);
+  font-family: var(--wiki-font-ui);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.zmp-wiki-summary-card {
+  padding: 18px 20px;
+  background: var(--wiki-paper-alt);
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius);
+}
+.zmp-wiki-summary {
+  margin: 0;
+  font-family: var(--wiki-font-kai);
+  font-size: 15px;
+  line-height: 1.85;
+  letter-spacing: 0.01em;
+}
+
+.zmp-wiki-terms {
+  display: grid;
+  gap: 7px;
+}
+.zmp-wiki-term-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.zmp-wiki-term-label {
+  flex: none;
+  width: 4.4em;
+  color: var(--wiki-faint);
+  font-family: var(--wiki-font-hei);
+  font-size: 11.5px;
+  letter-spacing: 0.08em;
+}
+.zmp-wiki-term-value {
+  font-family: var(--wiki-font-hei);
+  font-size: 13.5px;
+  font-weight: 700;
+}
+.zmp-wiki-alias-chip {
+  min-height: 22px;
+  padding: 1px 10px;
+  color: var(--wiki-muted);
+  background: var(--wiki-paper-alt);
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius-pill);
+  font: 11.5px/1.7 var(--wiki-font-hei);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    border-color 120ms ease,
+    background-color 120ms ease;
+  -moz-appearance: none;
+  appearance: none;
+}
+.zmp-wiki-alias-chip:hover {
+  color: var(--wiki-danger);
+  background: var(--wiki-danger-soft);
+  border-color: rgba(164, 87, 78, 0.3);
+}
+.zmp-wiki-alias-empty {
+  color: var(--wiki-faint);
+  font-family: var(--wiki-font-ui);
+  font-size: 11.5px;
+}
+
+/* ---- Claim cards -------------------------------------------------------
+   Each claim is its own container: an independent card, spaced from its
+   neighbours, whose height follows its text. Nothing is clipped, nothing is
+   absolutely positioned over the prose, and the delete control sits in a
+   reserved gutter of the header row rather than on top of the body. */
+
+.zmp-wiki-claim-list {
+  display: grid;
+  gap: 10px;
+}
+.zmp-wiki-claim {
+  position: relative;
+  display: block;
+  background: var(--wiki-paper);
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius);
+  box-shadow: var(--wiki-shadow);
+  transition:
+    border-color 130ms ease,
+    box-shadow 130ms ease,
+    background-color 130ms ease;
+}
+.zmp-wiki-claim:hover {
+  border-color: var(--wiki-border-strong);
+  box-shadow: var(--wiki-shadow-raised);
+}
+.zmp-wiki-claim.is-active {
+  border-color: var(--wiki-accent-line);
+  background: linear-gradient(
+    90deg,
+    var(--wiki-accent-soft) 0 3px,
+    var(--wiki-paper) 3px
+  );
+}
+.zmp-wiki-claim-open {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  padding: 13px 16px 14px;
+  text-align: left;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: var(--wiki-radius);
+  cursor: pointer;
+  -moz-appearance: none;
+  appearance: none;
+}
+.zmp-wiki-claim-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Reserved gutter: the delete control can never cover the type label. */
+  padding-right: 30px;
+}
+.zmp-wiki-claim-type {
+  flex: none;
+  padding: 1px 9px;
+  color: var(--wiki-accent);
+  background: var(--wiki-accent-soft);
+  border: 1px solid var(--wiki-accent-line);
+  border-radius: var(--wiki-radius-pill);
+  font: 700 11px/1.7 var(--wiki-font-hei);
+  letter-spacing: 0.08em;
+}
+.zmp-wiki-claim-id {
+  color: var(--wiki-faint);
+  font: 11px/1.6 var(--wiki-font-ui);
+}
+.zmp-wiki-claim-text {
+  margin: 0;
+  font-family: var(--wiki-font-song);
+  font-size: 14.5px;
+  line-height: 1.75;
+  letter-spacing: 0.01em;
+  white-space: normal;
+}
+.zmp-wiki-claim-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  color: var(--wiki-faint);
+  font: 11px/1.6 var(--wiki-font-ui);
+}
+.zmp-wiki-claim-remove {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: var(--wiki-faint);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--wiki-radius-sm);
+  font: 13px/1 var(--wiki-font-ui);
+  opacity: 0;
+  cursor: pointer;
+  transition:
+    opacity 130ms ease,
+    color 130ms ease,
+    background-color 130ms ease;
+  -moz-appearance: none;
+  appearance: none;
+}
+.zmp-wiki-claim:hover .zmp-wiki-claim-remove,
+.zmp-wiki-claim-remove:focus {
+  opacity: 1;
+}
+.zmp-wiki-claim-remove:hover {
+  color: var(--wiki-danger);
+  background: var(--wiki-danger-soft);
+  border-color: rgba(164, 87, 78, 0.3);
+}
+
+.zmp-wiki-empty {
+  padding: 30px 0;
+  color: var(--wiki-faint);
+  font-family: var(--wiki-font-kai);
+  font-size: 15px;
+  text-align: center;
+}
+
+/* ============================ Right: annotations ======================== */
+
+.zmp-wiki-evidence-head {
+  position: sticky;
+  top: 0;
+  padding: 13px 16px 11px;
+  background: var(--wiki-paper-alt);
+  border-bottom: 1px solid var(--wiki-border);
+}
+.zmp-wiki-evidence-head h2 {
+  margin: 0;
+  color: var(--wiki-muted);
+  font-family: var(--wiki-font-hei);
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+.zmp-wiki-evidence-claim {
+  margin: 0;
+  padding: 14px 16px;
+  background: var(--wiki-paper);
+  border-bottom: 1px solid var(--wiki-border);
+  font-family: var(--wiki-font-song);
+  font-size: 13.5px;
+  line-height: 1.75;
+}
+.zmp-wiki-evidence-list {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+.zmp-wiki-evidence-row {
+  padding: 12px 14px;
+  background: var(--wiki-paper);
+  border: 1px solid var(--wiki-border);
+  border-left: 2px solid var(--wiki-accent-line);
+  border-radius: var(--wiki-radius-sm);
+  box-shadow: var(--wiki-shadow);
+}
+.zmp-wiki-evidence-row.role-contradicts {
+  border-left-color: rgba(164, 87, 78, 0.42);
+}
+.zmp-wiki-evidence-row.role-qualifies,
+.zmp-wiki-evidence-row.role-example {
+  border-left-color: var(--wiki-border-strong);
+}
+.zmp-wiki-evidence-role {
+  display: inline-block;
+  padding: 1px 8px;
+  color: var(--wiki-accent);
+  background: var(--wiki-accent-soft);
+  border-radius: var(--wiki-radius-pill);
+  font: 700 11px/1.7 var(--wiki-font-hei);
+  letter-spacing: 0.08em;
+}
+.role-contradicts .zmp-wiki-evidence-role {
+  color: var(--wiki-danger);
+  background: var(--wiki-danger-soft);
+}
+.zmp-wiki-evidence-meta {
+  display: block;
+  margin-top: 6px;
+  color: var(--wiki-faint);
+  font: 11px/1.6 var(--wiki-font-ui);
+}
+.zmp-wiki-evidence-row blockquote {
+  margin: 9px 0 11px;
+  padding-left: 11px;
+  border-left: 1px solid var(--wiki-border);
+  color: var(--wiki-text);
+  font-family: var(--wiki-font-kai);
+  font-size: 13.5px;
+  line-height: 1.85;
+}
+.zmp-wiki-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.zmp-wiki-chunk {
+  max-height: 220px;
+  margin: 10px 0 0;
+  padding: 9px 10px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--wiki-muted);
+  background: var(--wiki-paper-sunk);
+  border-radius: var(--wiki-radius-sm);
+  font:
+    11.5px/1.65 ui-monospace,
+    "Cascadia Mono",
+    monospace;
+}
+.zmp-wiki-evidence-empty {
+  padding: 24px 16px;
+  color: var(--wiki-faint);
+  font-family: var(--wiki-font-kai);
+  font-size: 14px;
+  text-align: center;
+}
+
+/* ============================ Knowledge space =========================== */
+
+.zmp-wiki-graph-pane {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  grid-template-columns: minmax(0, 1fr) clamp(280px, 25%, 340px);
+  overflow: hidden;
+}
+.zmp-wiki-graph-pane[hidden] {
+  display: none;
+}
+.zmp-wiki-graph-stage {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius);
+  box-shadow: var(--wiki-shadow);
+}
+.zmp-wiki-graph {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.zmp-wiki-graph-toolbar {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: calc(100% - 20px);
+  padding: 6px;
+  background: color-mix(in srgb, var(--wiki-paper) 88%, transparent);
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius-sm);
+  box-shadow: var(--wiki-shadow);
+}
+.zmp-wiki-graph-toolbar .zmp-wiki-command {
+  min-height: 24px;
+  padding: 2px 9px;
+  font-size: 11.5px;
+}
+.zmp-wiki-graph-toolbar .zmp-wiki-command.is-on {
+  color: var(--wiki-accent);
+  background: var(--wiki-accent-soft);
+  border-color: var(--wiki-accent-line);
+}
+.zmp-wiki-graph-toolbar .zmp-wiki-command.is-off {
+  color: var(--wiki-faint);
+  background: transparent;
+  border-color: var(--wiki-border);
+}
+.zmp-wiki-graph-tooltip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: grid;
+  gap: 2px;
+  max-width: 260px;
+  padding: 7px 10px;
+  pointer-events: none;
+  background: var(--wiki-paper);
+  border: 1px solid var(--wiki-border-strong);
+  border-radius: var(--wiki-radius-sm);
+  box-shadow: var(--wiki-shadow-raised);
+}
+.zmp-wiki-graph-tooltip[hidden] {
+  display: none;
+}
+.zmp-wiki-graph-tooltip strong {
+  font: 700 12px/1.5 var(--wiki-font-hei);
+}
+.zmp-wiki-graph-tooltip span {
+  color: var(--wiki-faint);
+  font: 11px/1.5 var(--wiki-font-ui);
+}
+.zmp-wiki-graph-legend {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 6px 10px;
+  color: var(--wiki-muted);
+  background: color-mix(in srgb, var(--wiki-paper) 80%, transparent);
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius-sm);
+  font: 11px/1.6 var(--wiki-font-ui);
+}
+.zmp-wiki-graph-legend span::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 5px;
+  border-radius: 50%;
+  vertical-align: baseline;
+  background: currentColor;
+}
+/* The legend describes links, so its swatch is a line, not a dot. */
+.zmp-wiki-graph-legend span::before {
+  width: 14px;
+  height: 0;
+  margin-bottom: 3px;
+  border-radius: 0;
+  border-top: 2px solid currentColor;
+  background: none;
+}
+.zmp-wiki-graph-legend .legend-solid {
+  color: #67727e;
+}
+.zmp-wiki-graph-legend .legend-dashed {
+  color: #8a8275;
+}
+.zmp-wiki-graph-legend .legend-dashed::before {
+  border-top-style: dashed;
+}
+/* Shared concepts: the weakest of the three links, and the only one that does
+   not come from a claim. Dotted rather than dashed so it does not read as a
+   fainter version of the same-entry line. */
+.zmp-wiki-graph-legend .legend-dotdash {
+  color: #8f8496;
+}
+.zmp-wiki-graph-legend .legend-dotdash::before {
+  border-top-style: dotted;
+}
+/* An unsettled candidate: the faintest line on the canvas, because it is the
+   only one that is not a statement about what the Wiki believes. */
+.zmp-wiki-graph-legend .legend-dotted {
+  color: #9a938a;
+}
+.zmp-wiki-graph-legend .legend-dotted::before {
+  border-top-style: dotted;
+  opacity: 0.7;
+}
+.zmp-wiki-graph-legend .legend-conflict {
+  color: var(--wiki-danger);
+}
+
+/* One knowledge point in the graph rail: what it claims, and whose side the
+   document is on. */
+.zmp-wiki-graph-claim {
+  margin: 8px 0 12px;
+  padding: 9px 10px;
+  background: var(--wiki-paper);
+  border: 1px solid var(--wiki-border);
+  border-left: 2px solid var(--wiki-border-strong);
+  border-radius: var(--wiki-radius-sm);
+}
+.zmp-wiki-graph-claim.is-conflict {
+  border-left-color: rgba(164, 87, 78, 0.5);
+}
+.zmp-wiki-graph-claim-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.zmp-wiki-graph-claim .zmp-wiki-command {
+  margin: 0;
+  padding: 6px 8px;
+  background: transparent;
+  border-color: transparent;
+}
+.zmp-wiki-graph-claim .zmp-wiki-command:hover {
+  background: var(--wiki-highlight);
+  border-color: var(--wiki-border);
+}
+.zmp-wiki-role-chip {
+  flex: none;
+  padding: 1px 8px;
+  color: var(--wiki-accent);
+  background: var(--wiki-accent-soft);
+  border-radius: var(--wiki-radius-pill);
+  font: 700 10.5px/1.7 var(--wiki-font-hei);
+  letter-spacing: 0.06em;
+}
+.zmp-wiki-role-chip.is-conflict {
+  color: var(--wiki-danger);
+  background: var(--wiki-danger-soft);
+}
+.zmp-wiki-graph-stances {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--wiki-border);
+}
+.zmp-wiki-graph-stance {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.zmp-wiki-graph-stance-name {
+  flex: 1;
+  min-width: 0;
+  color: var(--wiki-muted);
+  font: 11.5px/1.6 var(--wiki-font-ui);
+}
+/* A quoted passage from one side of a candidate connection.
+   Block, not flex: this is 150-220 characters of running text and it needs the
+   full width of the rail. `.zmp-wiki-graph-stance` next door is a flex row for
+   a short chip plus a name, and putting a quotation in it collapsed the text to
+   one character per line. */
+.zmp-wiki-graph-quote {
+  display: block;
+  min-width: 0;
+  margin-top: 7px;
+  padding-left: 8px;
+  border-left: 2px solid var(--wiki-border);
+}
+.zmp-wiki-graph-quote-source {
+  color: var(--wiki-muted);
+  font: 11px/1.5 var(--wiki-font-ui);
+  margin-bottom: 2px;
+  overflow-wrap: anywhere;
+}
+.zmp-wiki-graph-quote-text {
+  margin: 0;
+  color: var(--wiki-ink);
+  font: 12px/1.65 var(--wiki-font-ui);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.zmp-wiki-graph-details {
+  min-width: 0;
+  min-height: 0;
+  padding: 14px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: var(--wiki-paper-alt);
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius);
+  box-shadow: var(--wiki-shadow);
+  scrollbar-width: thin;
+}
+.zmp-wiki-graph-details h2 {
+  margin: 0 0 10px;
+  font-family: var(--wiki-font-hei);
+  font-size: 14px;
+  font-weight: 700;
+}
+.zmp-wiki-graph-details p {
+  margin: 0 0 10px;
+  color: var(--wiki-muted);
+  font-family: var(--wiki-font-kai);
+  font-size: 13.5px;
+  line-height: 1.8;
+}
+/* Only the wrapping variant goes full width here; the plain buttons in this
+   rail stay single-line commands. */
+.zmp-wiki-graph-details .zmp-wiki-command.is-block {
+  margin: 6px 0;
+  border-radius: var(--wiki-radius-sm);
+}
+.zmp-wiki-graph-details > .zmp-wiki-command {
+  margin: 10px 0 0;
+}
+.zmp-wiki-graph-context {
+  display: block;
+  margin-top: 12px;
+  color: var(--wiki-faint);
+  font: 11px/1.6 var(--wiki-font-ui);
+}
+.zmp-wiki-graph-hint {
+  color: var(--wiki-faint);
+  font: 11.5px/1.7 var(--wiki-font-ui);
+}
+
+/* ============================ Failure card ==============================
+   Shown in place of the Wiki when its data cannot be loaded, so a storage
+   failure reads as a failure instead of as an empty tab. */
+
+.zmp-wiki-error {
+  max-width: 780px;
+  margin: 22px;
+  padding: 22px 24px;
+  overflow: auto;
+  min-width: 0;
+  min-height: 0;
+  background: var(--wiki-paper);
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius);
+  box-shadow: var(--wiki-shadow);
+}
+.zmp-wiki-error h2 {
+  margin: 0 0 10px;
+  color: var(--wiki-danger);
+  font-family: var(--wiki-font-hei);
+  font-size: 15px;
+  font-weight: 700;
+}
+.zmp-wiki-error-message {
+  margin: 0 0 8px;
+  color: var(--wiki-text);
+  font-family: var(--wiki-font-song);
+  font-size: 13.5px;
+  line-height: 1.75;
+}
+.zmp-wiki-error-hint {
+  margin: 0 0 14px;
+  color: var(--wiki-muted);
+  font-family: var(--wiki-font-kai);
+  font-size: 13px;
+  line-height: 1.8;
+}
+.zmp-wiki-error-detail {
+  margin: 0 0 14px;
+  padding: 11px 13px;
+  max-height: 40vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--wiki-muted);
+  background: var(--wiki-paper-sunk);
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius-sm);
+  font:
+    11.5px/1.6 ui-monospace,
+    monospace;
+}
+
+/* ============================ Terminology library ======================= */
+
+/* Two columns, deliberately the same proportions as the entry view next to
+   it: the index on the left keeps its width when a reader switches views, so
+   the panel does not reflow under them. */
+.zmp-wiki-terms-pane {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  grid-template-columns: clamp(240px, 24%, 320px) minmax(0, 1fr);
+  overflow: hidden;
+}
+.zmp-wiki-terms-pane[hidden] {
+  display: none;
+}
+.zmp-wiki-terms-list,
+.zmp-wiki-terms-detail {
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius);
+  box-shadow: var(--wiki-shadow);
+  scrollbar-width: thin;
+}
+.zmp-wiki-terms-list {
+  padding: 12px 10px;
+  background: var(--wiki-paper-alt);
+}
+.zmp-wiki-terms-detail {
+  padding: 22px 26px 40px;
+  background: var(--wiki-paper);
+}
+.zmp-wiki-terms-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.zmp-wiki-terms-head h2 {
+  margin: 0;
+  font-family: var(--wiki-font-song);
+  font-size: 22px;
+  letter-spacing: 0.02em;
+}
+
+/* The term table. One row per structured term group, primary first. */
+.zmp-wiki-term-table {
+  width: 100%;
+  margin: 12px 0 20px;
+  border-collapse: collapse;
+  font-family: var(--wiki-font-hei);
+  font-size: 13px;
+}
+.zmp-wiki-term-table th {
+  padding: 6px 8px;
+  color: var(--wiki-faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-align: left;
+  border-bottom: 1px solid var(--wiki-border-strong);
+  white-space: nowrap;
+}
+.zmp-wiki-term-table td {
+  padding: 8px;
+  vertical-align: top;
+  border-bottom: 1px solid var(--wiki-border);
+  word-break: break-word;
+}
+.zmp-wiki-term-row-cells.is-primary td {
+  font-weight: 600;
+}
+.zmp-wiki-term-index {
+  width: 3.5em;
+  color: var(--wiki-faint);
+  white-space: nowrap;
+}
+.zmp-wiki-term-badge {
+  margin-left: 5px;
+  padding: 0 5px;
+  color: var(--wiki-accent);
+  background: var(--wiki-accent-soft);
+  border-radius: var(--wiki-radius-pill);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
+/* A migrated 2.4.2 alias that is an abbreviation with no full name. Flagged
+   rather than hidden: it is the one shape the write rules forbid, and only a
+   person can supply what is missing. */
+.zmp-wiki-term-warning {
+  margin-left: 6px;
+  padding: 0 5px;
+  color: var(--wiki-danger);
+  background: var(--wiki-danger-soft);
+  border-radius: var(--wiki-radius-pill);
+  font-size: 10px;
+}
+/* Field provenance, per cell.
+   Three tints from the same low-saturation family the rest of the panel uses:
+   the paper's own words in the sheet green, an inferred value in a warm ochre,
+   a hand-edited one in a cool slate. They sit at the same lightness so no one
+   of them reads as an error state, and each cell also carries its provenance
+   as a tooltip - colour is the fast channel, not the only one. The inset bar
+   on the left edge keeps the distinction visible when the tint itself is too
+   faint, which on a low-contrast display it will be. */
+.zmp-wiki-term-cell.origin-literature {
+  background: rgba(83, 111, 98, 0.11);
+  box-shadow: inset 2px 0 0 rgba(83, 111, 98, 0.45);
+}
+.zmp-wiki-term-cell.origin-ai {
+  background: rgba(176, 133, 61, 0.13);
+  box-shadow: inset 2px 0 0 rgba(176, 133, 61, 0.5);
+}
+.zmp-wiki-term-cell.origin-user {
+  background: rgba(74, 101, 138, 0.12);
+  box-shadow: inset 2px 0 0 rgba(74, 101, 138, 0.5);
+}
+
+/* The key that makes the tints readable. Sits directly above the table so it
+   is read before the colours are, not hunted for afterwards. */
+.zmp-wiki-term-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 0;
+}
+.zmp-wiki-term-legend-key {
+  padding: 1px 8px;
+  border-radius: var(--wiki-radius-pill);
+  color: var(--wiki-muted);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+}
+.zmp-wiki-term-legend-key.origin-literature {
+  background: rgba(83, 111, 98, 0.16);
+}
+.zmp-wiki-term-legend-key.origin-ai {
+  background: rgba(176, 133, 61, 0.18);
+}
+.zmp-wiki-term-legend-key.origin-user {
+  background: rgba(74, 101, 138, 0.17);
+}
+
+/* A primary term a person pinned. Stated rather than implied, because the
+   difference between "this is the title today" and "this is the title until
+   somebody overrules it" is the whole reason the lock exists. */
+.zmp-wiki-term-lock {
+  margin-left: 5px;
+  padding: 0 5px;
+  color: var(--wiki-muted);
+  background: var(--wiki-paper-sunk);
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius-pill);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
+
+/* The terminology search box. */
+.zmp-wiki-terms-search {
+  width: 100%;
+  margin: 8px 0 10px;
+  padding: 6px 9px;
+  box-sizing: border-box;
+  color: var(--wiki-text);
+  background: var(--wiki-paper);
+  border: 1px solid var(--wiki-border);
+  border-radius: var(--wiki-radius-sm);
+  font: 12.5px/1.5 var(--wiki-font-hei);
+}
+.zmp-wiki-terms-search:focus {
+  outline: none;
+  border-color: var(--wiki-accent-line);
+  box-shadow: 0 0 0 2px var(--wiki-accent-soft);
+}
+.zmp-wiki-terms-search::placeholder {
+  color: var(--wiki-faint);
+}
+
+.zmp-wiki-term-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.zmp-wiki-term-sources {
+  margin-top: 18px;
+}
+.zmp-wiki-term-source-group {
+  margin-bottom: 14px;
+}
+.zmp-wiki-term-source-heading {
+  margin: 0 0 6px;
+  color: var(--wiki-muted);
+  font-family: var(--wiki-font-hei);
+  font-size: 12px;
+  font-weight: 600;
+}
+.zmp-wiki-term-source-title {
+  display: block;
+  margin: 4px 0;
+  font-family: var(--wiki-font-hei);
+  font-size: 12.5px;
+}
+
+/* ============================ Narrow windows ============================ */
+
+@media (max-width: 1180px) {
+  .zmp-wiki-claims {
+    padding: 18px 20px 32px;
+  }
+}
+
+@media (max-width: 900px) {
+  .zmp-wiki-body {
+    grid-template-columns: clamp(170px, 26%, 220px) minmax(0, 1fr);
+  }
+  /* Evidence becomes a paper drawer over the reading column. */
+  .zmp-wiki-evidence {
+    position: absolute;
+    right: 14px;
+    top: 70px;
+    width: min(52vw, 360px);
+    height: calc(100% - 84px);
+    background: var(--wiki-paper-alt);
+    border: 1px solid var(--wiki-border-strong);
+    border-radius: var(--wiki-radius);
+    box-shadow: var(--wiki-shadow-raised);
+  }
+  .zmp-wiki-graph-pane {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(120px, 34%);
+  }
+  .zmp-wiki-terms-pane {
+    grid-template-columns: clamp(150px, 30%, 220px) minmax(0, 1fr);
+  }
+  .zmp-wiki-terms-detail {
+    padding: 18px 16px 32px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #zotero-lit-synapse-wiki-panel * {
+    transition: none !important;
+  }
+}
+
+/* ============================ Dark paper ================================
+   Warm dark greys, never pure black: the reading feel survives the theme. */
+
+@media (prefers-color-scheme: dark) {
+  #zotero-lit-synapse-wiki-panel {
+    --wiki-bg: #23211e;
+    --wiki-paper: #2c2a26;
+    --wiki-paper-alt: #322f2a;
+    --wiki-paper-sunk: #1e1c19;
+    --wiki-text: #ece6da;
+    --wiki-muted: #a79e90;
+    --wiki-faint: #8a8275;
+    --wiki-border: rgba(230, 215, 185, 0.13);
+    --wiki-border-strong: rgba(230, 215, 185, 0.24);
+    --wiki-shadow: 0 1px 1px rgba(0, 0, 0, 0.3), 0 10px 24px -18px #000;
+    --wiki-shadow-raised: 0 2px 4px rgba(0, 0, 0, 0.34), 0 18px 34px -22px #000;
+    --wiki-accent: #8fb3a2;
+    --wiki-accent-soft: rgba(143, 179, 162, 0.13);
+    --wiki-accent-line: rgba(143, 179, 162, 0.34);
+    --wiki-danger: #d98c81;
+    --wiki-danger-soft: rgba(217, 140, 129, 0.14);
+    --wiki-highlight: rgba(236, 230, 218, 0.05);
+    --wiki-graph-scheme: dark;
+
+    background-image:
+      linear-gradient(
+        180deg,
+        rgba(255, 250, 236, 0.035),
+        rgba(255, 250, 236, 0) 220px
+      ),
+      repeating-linear-gradient(
+        98deg,
+        rgba(255, 250, 236, 0.014) 0 3px,
+        rgba(255, 250, 236, 0) 3px 7px
+      );
+  }
+  .zmp-wiki-claim.is-active {
+    background: linear-gradient(
+      90deg,
+      var(--wiki-accent-soft) 0 3px,
+      var(--wiki-paper) 3px
+    );
+  }
+  .zmp-wiki-graph-legend .legend-solid {
+    color: #96a2b4;
+  }
+  .zmp-wiki-graph-legend .legend-dashed {
+    color: #a79e90;
+  }
+  .zmp-wiki-graph-legend .legend-dotdash {
+    color: #ab9fb3;
+  }
+  .zmp-wiki-graph-legend .legend-dotted {
+    color: #8d867d;
+  }
+}

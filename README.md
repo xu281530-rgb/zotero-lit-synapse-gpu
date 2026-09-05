@@ -1,6 +1,6 @@
-# Zotero MCP - Model Context Protocol Integration for Zotero
+# Zotero LitSynapse - Model Context Protocol Integration for Zotero
 
-Zotero MCP is an open-source project designed to seamlessly integrate powerful AI capabilities with the leading reference management tool, Zotero, through the Model Context Protocol (MCP). This project consists of two core components: a Zotero plugin and an MCP server, which work together to provide AI assistants (like Claude) with the ability to interact with your local Zotero library.
+Zotero LitSynapse is an open-source project designed to seamlessly integrate powerful AI capabilities with the leading reference management tool, Zotero, through the Model Context Protocol (MCP). This project consists of two core components: a Zotero plugin and an MCP server, which work together to provide AI assistants (like Claude) with the ability to interact with your local Zotero library.
 _This README is also available in: [:cn: 简体中文](./README-zh.md) | :gb: English._
 [![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
@@ -19,7 +19,7 @@ _This README is also available in: [:cn: 简体中文](./README-zh.md) | :gb: En
 
 ## 📚 Project Overview
 
-The Zotero MCP server is a tool server based on the Model Context Protocol that provides seamless integration with the Zotero reference management system for AI applications like Claude Desktop. Through this server, AI assistants can:
+The Zotero LitSynapse server is a tool server based on the Model Context Protocol that provides seamless integration with the Zotero reference management system for AI applications like Claude Desktop. Through this server, AI assistants can:
 
 - 🔍 **Smart Search**: Multi-dimensional library search (title/creator/year/tags/fulltext/semantic) with boolean operators and relevance scoring
 - 📖 **Content Extraction**: Read abstracts, annotations, attachment text, and indexed document chunks through purpose-specific paginated tools
@@ -36,7 +36,7 @@ This enables AI assistants to help you with literature reviews, citation managem
 
 This project now features a **unified architecture** with an integrated MCP server:
 
-- **`zotero-mcp-plugin/`**: A Zotero plugin with **integrated MCP server** that communicates directly with AI clients via Streamable HTTP protocol
+- **`zotero-lit-synapse/`**: A Zotero plugin with **integrated MCP server** that communicates directly with AI clients via Streamable HTTP protocol
 - **`IMG/`**: Screenshots and documentation images
 - **`README.md`** / **`README-zh.md`**: Documentation files
 
@@ -52,23 +52,23 @@ This eliminates the need for a separate MCP server process, providing a more str
 
 ## 🚀 Quick Start Guide
 
-This guide is intended to help general users quickly configure and use Zotero MCP, enabling your AI assistant to work seamlessly with your Zotero library.
+This guide is intended to help general users quickly configure and use Zotero LitSynapse, enabling your AI assistant to work seamlessly with your Zotero library.
 
 ### 1. Installation (For General Users)
 
-**What is Zotero MCP?**
+**What is Zotero LitSynapse?**
 
-Simply put, Zotero MCP is a bridge connecting your AI client (like Cherry Studio, Gemini CLI, Claude Desktop, etc.) and your local Zotero reference management software. It allows your AI assistant to directly search, query, and cite references from your Zotero library, greatly enhancing academic research and writing efficiency.
+Simply put, Zotero LitSynapse is a bridge connecting your AI client (like Cherry Studio, Gemini CLI, Claude Desktop, etc.) and your local Zotero reference management software. It allows your AI assistant to directly search, query, and cite references from your Zotero library, greatly enhancing academic research and writing efficiency.
 
 **Two-Step Quick Start:**
 
 1.  **Install the Plugin**:
-    - Get the latest `zotero-mcp-plugin-x.x.x.xpi` file from whoever provided you this project (or build it yourself, see the Developer Guide below).
+    - Get the latest `zotero-lit-synapse-x.x.x.xpi` file from whoever provided you this project (or build it yourself, see the Developer Guide below).
     - In Zotero, install the `.xpi` file via `Tools -> Add-ons`.
     - Restart Zotero.
 
 2.  **Configure the Plugin**:
-    - In Zotero's `Preferences -> Zotero MCP Plugin` tab, configure your connection settings:
+    - In Zotero's `Preferences -> Zotero LitSynapse` tab, configure your connection settings:
       - **Enable Server**: Start the integrated MCP server
       - **Port**: Default is `23120` (you can change this if needed)
       - **Generate Client Configuration**: Click this button to get configuration for your AI client
@@ -109,19 +109,19 @@ For detailed client-specific configuration instructions, see the [Chinese README
 
 ### Step 1: Install and Configure the Zotero Plugin
 
-1.  Build the plugin yourself (see Step 2) or obtain a prebuilt `zotero-mcp-plugin.xpi`.
+1.  Build the plugin yourself (see Step 2) or obtain a prebuilt `zotero-lit-synapse.xpi`.
 2.  Install it in Zotero via `Tools -> Add-ons`.
-3.  Enable the server in `Preferences -> Zotero MCP Plugin`.
+3.  Enable the server in `Preferences -> Zotero LitSynapse`.
 
 ### Step 2: Development Setup
 
 1.  Get the repository (clone it or copy the project directory), then enter it:
     ```bash
-    cd zotero-mcp
+    cd zotero-lit-synapse
     ```
 2.  Set up the plugin development environment:
     ```bash
-    cd zotero-mcp-plugin
+    cd zotero-lit-synapse
     npm install
     npm run build
     ```
@@ -160,7 +160,7 @@ Example configuration for Claude Desktop:
 
 ## 🧩 Features
 
-### `zotero-mcp-plugin` Features
+### `zotero-lit-synapse` Features
 
 - **Integrated MCP Server**: Built-in MCP server using Streamable HTTP protocol, no separate process needed
 - **Advanced Search Engine**: Full-text search with boolean operators, relevance scoring, filtering by title, creator, year, tags, item type, and more
@@ -173,7 +173,7 @@ Example configuration for Claude Desktop:
   - Index status column in main library view
   - Collection/item context menu for index management
 - **LLM Wiki and Long-Term Memory**:
-  - Stores authoritative Pages, Claims, Concepts, Aliases, Relations and Evidence in the independent `zotero-mcp-wiki.sqlite` database
+  - Stores authoritative Pages, Claims, Concepts, Aliases, Relations and Evidence in the independent `zotero-lit-synapse-wiki.sqlite` database
   - Verifies every Evidence excerpt against a real Zotero document chunk and relinks it after search-index reset or rebuild
   - Exposes controlled prepare/commit/search/read/export/reverify/deep-paper tools without hidden server-side LLM calls
   - Calculates Alias/Concept, Claim embedding, Relation and one-hop retrieval as a third route; 2.0.0 defaults to Shadow Mode, so existing Keyword + Semantic Weighted RRF ranking is unchanged until real-library calibration
@@ -189,7 +189,7 @@ Example configuration for Claude Desktop:
 
 ## 📸 Screenshots
 
-Here are some screenshots demonstrating the functionality of Zotero MCP:
+Here are some screenshots demonstrating the functionality of Zotero LitSynapse:
 
 | Feature                                |                       Screenshot                       |
 | :------------------------------------- | :----------------------------------------------------: |
@@ -911,7 +911,7 @@ This project is licensed under the [MIT License](./LICENSE).
 - [Zotero](https://www.zotero.org/) - An excellent open-source reference management tool.
 - [Model Context Protocol](https://modelcontextprotocol.org/) - The protocol for AI tool integration.
 - [![Using Zotero Plugin Template](https://img.shields.io/badge/Using-Zotero%20Plugin%20Template-blue?style=flat-square&logo=github)](https://github.com/windingwind/zotero-plugin-template)
-- This project builds on the original [zotero-mcp](https://github.com/cookjohn/zotero-mcp) by [cookjohn](https://github.com/cookjohn) - thank you for the original Zotero MCP integration this project is derived from.
+- This project builds on the original [zotero-lit-synapse](https://github.com/cookjohn/zotero-lit-synapse) by [cookjohn](https://github.com/cookjohn) - thank you for the original Zotero LitSynapse integration this project is derived from.
 - Thanks also to the author of [Zotero Mark Reader](PENDING_URL) for the reading/annotation functionality this project draws on.
   Contact us
   ![Contact us](./IMG/0320.jpg)

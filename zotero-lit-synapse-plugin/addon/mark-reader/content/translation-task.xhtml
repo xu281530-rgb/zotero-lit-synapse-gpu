@@ -1,0 +1,87 @@
+<?xml version="1.0"?>
+<?xml-stylesheet href="chrome://global/skin/global.css"?>
+<?xml-stylesheet href="chrome://zotero/skin/zotero.css"?>
+<?xml-stylesheet href="translation-task.css"?>
+<window
+  id="zmr-translation-task-window"
+  title="Zotero LitSynapse - PDF 全文翻译"
+  windowtype="zotero-mark-reader:translation-task"
+  xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+  xmlns:html="http://www.w3.org/1999/xhtml"
+  width="760"
+  height="620"
+  persist="screenX screenY width height sizemode"
+  style="display: flex;"
+  onload="ZMRTranslationTaskWindow.init()"
+  onclose="return ZMRTranslationTaskWindow.onClose(event)"
+  onunload="ZMRTranslationTaskWindow.destroy()"
+>
+  <script src="chrome://zotero/content/include.js"/>
+  <script src="translation-task.js"/>
+
+  <vbox class="zmr-task-host" flex="1">
+    <html:main class="zmr-task-shell">
+      <html:header class="zmr-task-header">
+        <html:div>
+          <html:h1>全文翻译</html:h1>
+          <html:p id="zmr-task-status">正在准备任务...</html:p>
+        </html:div>
+        <html:div class="zmr-task-actions">
+          <html:button id="zmr-task-start" type="button">开始</html:button>
+          <html:button id="zmr-task-pause" type="button">暂停</html:button>
+          <html:button id="zmr-task-cancel" type="button">取消</html:button>
+          <html:button id="zmr-task-retry" type="button" hidden="hidden">重试失败项</html:button>
+        </html:div>
+      </html:header>
+
+      <html:section class="zmr-task-card" aria-labelledby="zmr-progress-title">
+        <html:h2 id="zmr-progress-title">任务进度</html:h2>
+        <html:progress id="zmr-task-progress" max="1" value="0"></html:progress>
+        <html:p id="zmr-task-counts">0 / 0</html:p>
+        <html:p id="zmr-task-activity" class="zmr-activity" aria-live="polite"></html:p>
+        <html:p id="zmr-task-current" class="zmr-muted"></html:p>
+        <html:div class="zmr-stat-grid">
+          <html:div><html:strong id="zmr-stat-pending">0</html:strong><html:span>待翻译</html:span></html:div>
+          <html:div><html:strong id="zmr-stat-active">0</html:strong><html:span>处理中</html:span></html:div>
+          <html:div><html:strong id="zmr-stat-cached">0</html:strong><html:span>有效缓存</html:span></html:div>
+          <html:div><html:strong id="zmr-stat-stale">0</html:strong><html:span>旧配置缓存</html:span></html:div>
+          <html:div><html:strong id="zmr-stat-translated">0</html:strong><html:span>新译文</html:span></html:div>
+          <html:div><html:strong id="zmr-stat-failed">0</html:strong><html:span>失败</html:span></html:div>
+          <html:div><html:strong id="zmr-stat-skipped">0</html:strong><html:span>跳过文档</html:span></html:div>
+        </html:div>
+      </html:section>
+
+      <html:details class="zmr-task-card" open="open">
+        <html:summary>单篇术语表</html:summary>
+        <html:div class="zmr-glossary-toolbar">
+          <html:select id="zmr-glossary-document" aria-label="选择文档"></html:select>
+          <html:input id="zmr-glossary-search" type="search" placeholder="搜索术语" aria-label="搜索术语"/>
+          <html:button id="zmr-glossary-add" type="button">添加</html:button>
+          <html:button id="zmr-glossary-import" type="button">导入</html:button>
+          <html:button id="zmr-glossary-export" type="button">导出</html:button>
+          <html:button id="zmr-glossary-save" type="button">保存人工术语</html:button>
+        </html:div>
+        <html:div class="zmr-table-wrap">
+          <html:table class="zmr-glossary-table">
+            <html:thead>
+              <html:tr>
+                <html:th>启用</html:th>
+                <html:th>原文</html:th>
+                <html:th>译文</html:th>
+                <html:th>目标语言</html:th>
+                <html:th>备注 / 来源</html:th>
+                <html:th></html:th>
+              </html:tr>
+            </html:thead>
+            <html:tbody id="zmr-glossary-body"></html:tbody>
+          </html:table>
+        </html:div>
+      </html:details>
+
+      <html:details class="zmr-task-card">
+        <html:summary>任务日志</html:summary>
+        <html:ol id="zmr-task-log" class="zmr-task-log"></html:ol>
+      </html:details>
+    </html:main>
+  </vbox>
+</window>

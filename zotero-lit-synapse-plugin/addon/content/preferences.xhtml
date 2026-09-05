@@ -1,0 +1,2499 @@
+<linkset>
+  <html:link rel="localization" href="__addonRef__-preferences.ftl" />
+</linkset>
+
+<prefpane id="__addonRef__-preferences" onload="Zotero.ZoteroLitSynapse.hooks.onPrefsEvent('load', { window });">
+  <preferences>
+    <preference id="extensions.zotero.__addonRef__.mcp.server.enabled" name="extensions.zotero.__addonRef__.mcp.server.enabled" type="bool" />
+    <preference id="extensions.zotero.__addonRef__.mcp.server.port" name="extensions.zotero.__addonRef__.mcp.server.port" type="int" />
+    <preference id="extensions.zotero.__addonRef__.mcp.server.allowRemote" name="extensions.zotero.__addonRef__.mcp.server.allowRemote" type="bool" />
+    <preference id="extensions.zotero.__addonRef__.mcp.server.authToken" name="extensions.zotero.__addonRef__.mcp.server.authToken" type="string" />
+    <preference id="extensions.zotero.__addonRef__.write.confirmBeforeMutation" name="extensions.zotero.__addonRef__.write.confirmBeforeMutation" type="bool" />
+    <preference id="extensions.zotero.__addonRef__.write.allowFileImport" name="extensions.zotero.__addonRef__.write.allowFileImport" type="bool" />
+    <preference id="extensions.zotero.__addonRef__.privacy.exposeFilePaths" name="extensions.zotero.__addonRef__.privacy.exposeFilePaths" type="bool" />
+    <preference id="extensions.zotero.__addonRef__.write.enabled" name="extensions.zotero.__addonRef__.write.enabled" type="bool" />
+    <!-- Embedding API settings -->
+    <preference id="extensions.zotero.__addonRef__.embedding.apiBase" name="extensions.zotero.__addonRef__.embedding.apiBase" type="string" />
+    <preference id="extensions.zotero.__addonRef__.embedding.apiKey" name="extensions.zotero.__addonRef__.embedding.apiKey" type="string" />
+    <preference id="extensions.zotero.__addonRef__.embedding.model" name="extensions.zotero.__addonRef__.embedding.model" type="string" />
+    <preference id="extensions.zotero.__addonRef__.embedding.dimensions" name="extensions.zotero.__addonRef__.embedding.dimensions" type="int" />
+    <preference id="extensions.zotero.__addonRef__.embedding.timeoutSeconds" name="extensions.zotero.__addonRef__.embedding.timeoutSeconds" type="int" />
+    <preference id="extensions.zotero.__addonRef__.embedding.maxBatchItems" name="extensions.zotero.__addonRef__.embedding.maxBatchItems" type="int" />
+    <!-- Rate limit settings -->
+    <preference id="extensions.zotero.__addonRef__.embedding.rpm" name="extensions.zotero.__addonRef__.embedding.rpm" type="int" />
+    <preference id="extensions.zotero.__addonRef__.embedding.tpm" name="extensions.zotero.__addonRef__.embedding.tpm" type="int" />
+    <preference id="extensions.zotero.__addonRef__.embedding.costPer1M" name="extensions.zotero.__addonRef__.embedding.costPer1M" type="string" />
+    <!-- Search settings -->
+    <preference id="extensions.zotero.__addonRef__.semantic.autoUpdate" name="extensions.zotero.__addonRef__.semantic.autoUpdate" type="bool" />
+
+    <!-- Hybrid search settings -->
+    <preference id="extensions.zotero.__addonRef__.hybrid.maxDocuments" name="extensions.zotero.__addonRef__.hybrid.maxDocuments" type="int" />
+    <preference id="extensions.zotero.__addonRef__.hybrid.maxChunksPerItem" name="extensions.zotero.__addonRef__.hybrid.maxChunksPerItem" type="int" />
+    <preference id="extensions.zotero.__addonRef__.hybrid.keywordMinScore" name="extensions.zotero.__addonRef__.hybrid.keywordMinScore" type="string" />
+    <preference id="extensions.zotero.__addonRef__.hybrid.semanticMinScore" name="extensions.zotero.__addonRef__.hybrid.semanticMinScore" type="string" />
+    <preference id="extensions.zotero.__addonRef__.hybrid.keywordRrfWeight" name="extensions.zotero.__addonRef__.hybrid.keywordRrfWeight" type="string" />
+    <preference id="extensions.zotero.__addonRef__.hybrid.semanticRrfWeight" name="extensions.zotero.__addonRef__.hybrid.semanticRrfWeight" type="string" />
+    <preference id="extensions.zotero.__addonRef__.hybrid.chunkTargetChars" name="extensions.zotero.__addonRef__.hybrid.chunkTargetChars" type="int" />
+    <preference id="extensions.zotero.__addonRef__.hybrid.chunkAppendToleranceChars" name="extensions.zotero.__addonRef__.hybrid.chunkAppendToleranceChars" type="int" />
+    <preference id="extensions.zotero.__addonRef__.hybrid.neighborRadius" name="extensions.zotero.__addonRef__.hybrid.neighborRadius" type="int" />
+    <preference id="extensions.zotero.__addonRef__.hybrid.gpuAccelerationEnabled" name="extensions.zotero.__addonRef__.hybrid.gpuAccelerationEnabled" type="bool" />
+    <preference id="extensions.zotero.__addonRef__.hybrid.gpuPrecision" name="extensions.zotero.__addonRef__.hybrid.gpuPrecision" type="string" />
+    <!-- Independent LLM Wiki settings -->
+    <preference id="extensions.zotero.__addonRef__.wiki.enabled" name="extensions.zotero.__addonRef__.wiki.enabled" type="bool" />
+    <preference id="extensions.zotero.__addonRef__.wiki.autoWrite" name="extensions.zotero.__addonRef__.wiki.autoWrite" type="bool" />
+    <preference id="extensions.zotero.__addonRef__.wiki.writeMode" name="extensions.zotero.__addonRef__.wiki.writeMode" type="string" />
+    <preference id="extensions.zotero.__addonRef__.wiki.shadowMode" name="extensions.zotero.__addonRef__.wiki.shadowMode" type="bool" />
+    <preference id="extensions.zotero.__addonRef__.wiki.minScore" name="extensions.zotero.__addonRef__.wiki.minScore" type="string" />
+    <preference id="extensions.zotero.__addonRef__.wiki.rrfWeight" name="extensions.zotero.__addonRef__.wiki.rrfWeight" type="string" />
+    <preference id="extensions.zotero.__addonRef__.wiki.note.episodeSimilarity" name="extensions.zotero.__addonRef__.wiki.note.episodeSimilarity" type="string" />
+    <preference id="extensions.zotero.__addonRef__.wiki.searchTimeoutMs" name="extensions.zotero.__addonRef__.wiki.searchTimeoutMs" type="int" />
+    <!-- MinerU high-precision PDF parsing -->
+    <preference id="extensions.zotero.__addonRef__.mineru.mode" name="extensions.zotero.__addonRef__.mineru.mode" type="string" />
+    <preference id="extensions.zotero.__addonRef__.mineru.baseURL" name="extensions.zotero.__addonRef__.mineru.baseURL" type="string" />
+    <preference id="extensions.zotero.__addonRef__.mineru.apiToken" name="extensions.zotero.__addonRef__.mineru.apiToken" type="string" />
+    <preference id="extensions.zotero.__addonRef__.mineru.modelVersion" name="extensions.zotero.__addonRef__.mineru.modelVersion" type="string" />
+    <preference id="extensions.zotero.__addonRef__.mineru.language" name="extensions.zotero.__addonRef__.mineru.language" type="string" />
+    <preference id="extensions.zotero.__addonRef__.mineru.enableOCR" name="extensions.zotero.__addonRef__.mineru.enableOCR" type="bool" />
+    <preference id="extensions.zotero.__addonRef__.mineru.enableFormula" name="extensions.zotero.__addonRef__.mineru.enableFormula" type="bool" />
+    <preference id="extensions.zotero.__addonRef__.mineru.enableTable" name="extensions.zotero.__addonRef__.mineru.enableTable" type="bool" />
+    <preference id="extensions.zotero.__addonRef__.mineru.timeoutSeconds" name="extensions.zotero.__addonRef__.mineru.timeoutSeconds" type="int" />
+    <preference id="extensions.zotero.__addonRef__.mineru.maxFileSizeMB" name="extensions.zotero.__addonRef__.mineru.maxFileSizeMB" type="int" />
+    <preference id="extensions.zotero.__addonRef__.mineru.concurrency" name="extensions.zotero.__addonRef__.mineru.concurrency" type="int" />
+    <preference id="extensions.zotero.__addonRef__.mineru.blockingOnDemand" name="extensions.zotero.__addonRef__.mineru.blockingOnDemand" type="bool" />
+    <!-- Integrated PDF translation settings -->
+    <preference id="extensions.zotero.__addonRef__.llm.provider" name="extensions.zotero.__addonRef__.llm.provider" type="string" />
+    <preference id="extensions.zotero.__addonRef__.llm.baseURL" name="extensions.zotero.__addonRef__.llm.baseURL" type="string" />
+    <preference id="extensions.zotero.__addonRef__.llm.apiKey" name="extensions.zotero.__addonRef__.llm.apiKey" type="string" />
+    <preference id="extensions.zotero.__addonRef__.llm.model" name="extensions.zotero.__addonRef__.llm.model" type="string" />
+    <preference id="extensions.zotero.__addonRef__.llm.targetLanguage" name="extensions.zotero.__addonRef__.llm.targetLanguage" type="string" />
+    <preference id="extensions.zotero.__addonRef__.llm.systemPrompt" name="extensions.zotero.__addonRef__.llm.systemPrompt" type="string" />
+    <preference id="extensions.zotero.__addonRef__.translation.contextEnabled" name="extensions.zotero.__addonRef__.translation.contextEnabled" type="bool" />
+    <preference id="extensions.zotero.__addonRef__.translation.expertMode" name="extensions.zotero.__addonRef__.translation.expertMode" type="string" />
+    <preference id="extensions.zotero.__addonRef__.translation.expertCustom" name="extensions.zotero.__addonRef__.translation.expertCustom" type="string" />
+    <preference id="extensions.zotero.__addonRef__.translation.autoDocumentGlossary" name="extensions.zotero.__addonRef__.translation.autoDocumentGlossary" type="bool" />
+    <preference id="extensions.zotero.__addonRef__.translation.useGlobalGlossary" name="extensions.zotero.__addonRef__.translation.useGlobalGlossary" type="bool" />
+    <preference id="extensions.zotero.__addonRef__.translation.globalGlossary" name="extensions.zotero.__addonRef__.translation.globalGlossary" type="string" />
+    <preference id="extensions.zotero.__addonRef__.translation.batchSize" name="extensions.zotero.__addonRef__.translation.batchSize" type="int" />
+    <preference id="extensions.zotero.__addonRef__.translation.concurrency" name="extensions.zotero.__addonRef__.translation.concurrency" type="int" />
+    <preference id="extensions.zotero.__addonRef__.translation.maxRetries" name="extensions.zotero.__addonRef__.translation.maxRetries" type="int" />
+  </preferences>
+
+  <html:style>
+    /* ============================================================
+       Design tokens. Declared on the pane as well as :root so the
+       values stay available even if Zotero reparents the pane.
+       ============================================================ */
+    :root, #__addonRef__-preferences {
+      /* No ground of our own. The pane shows whatever Zotero's preferences
+         window paints behind it, in either theme and in any theme Zotero
+         gains later, which no colour of ours could track. Card, row and
+         panel colours below are unaffected. */
+      --page: transparent;
+      --bg: #fff;
+      --bg-hover: #f8fafc;
+      --bg-muted: #f2f4f7;
+      --bg-soft: #f8f9fb;
+      --border: #e3e7ec;
+      --border-light: #edeff3;
+      --border-strong: #d4dae1;
+      --text: #14181f;
+      --text-2: #5a6472;
+      --text-3: #98a1ae;
+      --blue: #3b82f6;
+      --blue-dark: #2563eb;
+      --blue-soft: #eef4ff;
+      --red: #ef4444;
+      --green: #10b981;
+      --amber: #b45309;
+      --amber-soft: #fffaf0;
+      --amber-border: #f0c48a;
+      --r: 8px;
+      --r-lg: 12px;
+      --tog-off: #ccd3db;
+      --tog-knob: #fff;
+      --focus-ring: rgba(59,130,246,0.16);
+      --shadow-card: 0 1px 2px rgba(15,23,42,0.04), 0 8px 20px -12px rgba(15,23,42,0.14);
+      --shadow-btn: 0 1px 2px rgba(15,23,42,0.06);
+      --shadow-accent: 0 1px 2px rgba(37,99,235,0.28);
+      --scroll-thumb: #d6dbe2;
+      --pr-bg: #f0fdf6;
+      --pr-border: #cfeedf;
+      --pr-track: #d7f2e5;
+      --bd-bg-hover: #fef2f2;
+      --bd-border: #fbd2d2;
+      --msg-info-bg: #eaf3fe;
+      --msg-info-text: #1565c0;
+      --msg-success-bg: #e9f7ec;
+      --msg-success-text: #2e7d32;
+      --msg-warning-bg: #fff4e5;
+      --msg-warning-text: #ef6c00;
+      --msg-error-bg: #fdeced;
+      --msg-error-text: #c62828;
+      --color-ok: #2e7d32;
+      --color-warn: #ef6c00;
+      --color-error: #d32f2f;
+      --color-muted: #666;
+      --color-default: #333;
+      --copy-ok-bg: #10b981;
+
+      --ic-server: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='4' width='18' height='7' rx='2'/%3E%3Crect x='3' y='13' width='18' height='7' rx='2'/%3E%3Cpath d='M7 7.5h.01M7 16.5h.01'/%3E%3C/svg%3E");
+      --ic-client: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9.5 14.5a4.2 4.2 0 0 0 6.3.45l2.6-2.6a4.2 4.2 0 1 0-5.95-5.95l-1.5 1.5'/%3E%3Cpath d='M14.5 9.5a4.2 4.2 0 0 0-6.3-.45l-2.6 2.6a4.2 4.2 0 1 0 5.95 5.95l1.5-1.5'/%3E%3C/svg%3E");
+      --ic-semantic: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='10.5' cy='10.5' r='6.5'/%3E%3Cpath d='M20 20l-4.2-4.2'/%3E%3Cpath d='M10.5 7l.85 2.15L13.5 10l-2.15.85L10.5 13l-.85-2.15L7.5 10l2.15-.85z' fill='%23000' stroke='none'/%3E%3C/svg%3E");
+      --ic-mineru: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z'/%3E%3Cpath d='M14 3v5h5'/%3E%3Cpath d='M9 13h6M9 17h4'/%3E%3C/svg%3E");
+      --ic-wiki: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 5.5A2.5 2.5 0 0 1 6.5 3H11v16H6.5A2.5 2.5 0 0 0 4 21.5z'/%3E%3Cpath d='M20 5.5A2.5 2.5 0 0 0 17.5 3H13v16h4.5a2.5 2.5 0 0 1 2.5 2.5z'/%3E%3C/svg%3E");
+      --ic-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12' fill='none' stroke='%23000' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4.5 2.5L8 6l-3.5 3.5'/%3E%3C/svg%3E");
+      --ic-privacy: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3l7 3v5.5c0 4.3-2.9 8.2-7 9.5-4.1-1.3-7-5.2-7-9.5V6z'/%3E%3Cpath d='M9.5 12l1.8 1.8 3.4-3.6'/%3E%3C/svg%3E");
+      --ic-model: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='6' cy='7' r='2.4'/%3E%3Ccircle cx='6' cy='17' r='2.4'/%3E%3Ccircle cx='18' cy='12' r='2.4'/%3E%3Cpath d='M8.3 8.2l7.4 2.9M8.3 15.8l7.4-2.9'/%3E%3C/svg%3E");
+      --ic-index: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cellipse cx='12' cy='6' rx='7.5' ry='3'/%3E%3Cpath d='M4.5 6v12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6'/%3E%3Cpath d='M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3'/%3E%3C/svg%3E");
+      --ic-query: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 5h18M6 12h12M10 19h4'/%3E%3C/svg%3E");
+      --ic-translate: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 5.5h8M7 5.5V4M9.2 5.5c-.6 4-3 6.7-6.2 8'/%3E%3Cpath d='M4.6 9.6c1.4 2.3 3.3 3.5 5.4 4.2'/%3E%3Cpath d='M12.5 20l4-10 4 10M14 16.8h5'/%3E%3C/svg%3E");
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root, #__addonRef__-preferences {
+        --bg: #232529;
+        --bg-hover: #2a2d32;
+        --bg-muted: #2b2e34;
+        --bg-soft: #26282d;
+        --border: #383c43;
+        --border-light: #31343a;
+        --border-strong: #474c55;
+        --text: #e7e9ec;
+        --text-2: #a5adb9;
+        --text-3: #79818d;
+        --blue: #5b9cf6;
+        --blue-dark: #4a8af4;
+        --blue-soft: #1e2a3d;
+        --red: #f87171;
+        --green: #34d399;
+        --amber: #fbbf24;
+        --amber-soft: #2a2114;
+        --amber-border: #5a4620;
+        --tog-off: #4b5058;
+        --tog-knob: #f2f4f7;
+        --focus-ring: rgba(91,156,246,0.22);
+        --shadow-card: 0 1px 2px rgba(0,0,0,0.24), 0 8px 20px -12px rgba(0,0,0,0.5);
+        --shadow-btn: 0 1px 2px rgba(0,0,0,0.25);
+        --shadow-accent: 0 1px 2px rgba(0,0,0,0.35);
+        --scroll-thumb: #454a53;
+        --pr-bg: #172a22;
+        --pr-border: #26483a;
+        --pr-track: #1d5c41;
+        --bd-bg-hover: #3a2222;
+        --bd-border: #6b3434;
+        --msg-info-bg: #182838;
+        --msg-info-text: #7ab8f5;
+        --msg-success-bg: #17291b;
+        --msg-success-text: #6bcf7f;
+        --msg-warning-bg: #382718;
+        --msg-warning-text: #f0a050;
+        --msg-error-bg: #381b1b;
+        --msg-error-text: #f07070;
+        --color-ok: #6bcf7f;
+        --color-warn: #f0a050;
+        --color-error: #f07070;
+        --color-muted: #999;
+        --color-default: #e0e0e0;
+        --copy-ok-bg: #2e7d32;
+      }
+    }
+
+    /* ============================================================
+       Pane canvas
+       ============================================================ */
+    #__addonRef__-preferences {
+      background: var(--page);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text",
+                   "Segoe UI", system-ui, "Helvetica Neue", sans-serif;
+      font-size: 13px;
+      line-height: 1.5;
+      min-height: 100%;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    .zmp-p-b, .zmp-ex-b {
+      scrollbar-width: thin;
+      scrollbar-color: var(--scroll-thumb) transparent;
+    }
+
+    /* ============================================================
+       Section card
+       ============================================================ */
+    .zmp-s {
+      padding: 17px 20px 18px;
+      margin: 12px 14px 0;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      box-shadow: var(--shadow-card);
+    }
+
+    .zmp-s-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14.5px;
+      font-weight: 650;
+      letter-spacing: -0.01em;
+      color: var(--text);
+      margin-bottom: 3px;
+    }
+    /* Per-section glyph, drawn as a mask so it follows the theme */
+    .zmp-s-title::before {
+      content: "";
+      flex: none;
+      width: 17px;
+      height: 17px;
+      background-color: var(--blue);
+      mask-repeat: no-repeat;
+      mask-position: center;
+      mask-size: 17px 17px;
+      -webkit-mask-repeat: no-repeat;
+      -webkit-mask-position: center;
+      -webkit-mask-size: 17px 17px;
+    }
+    .zmp-s[data-icon="server"] .zmp-s-title::before {
+      mask-image: var(--ic-server);
+      -webkit-mask-image: var(--ic-server);
+    }
+    .zmp-s[data-icon="client"] .zmp-s-title::before {
+      mask-image: var(--ic-client);
+      -webkit-mask-image: var(--ic-client);
+    }
+    .zmp-s[data-icon="semantic"] .zmp-s-title::before {
+      mask-image: var(--ic-semantic);
+      -webkit-mask-image: var(--ic-semantic);
+    }
+    .zmp-s[data-icon="mineru"] .zmp-s-title::before {
+      mask-image: var(--ic-mineru);
+      -webkit-mask-image: var(--ic-mineru);
+    }
+    .zmp-s[data-icon="wiki"] .zmp-s-title::before {
+      mask-image: var(--ic-wiki);
+      -webkit-mask-image: var(--ic-wiki);
+    }
+    .zmp-s[data-icon="privacy"] .zmp-s-title::before {
+      mask-image: var(--ic-privacy);
+      -webkit-mask-image: var(--ic-privacy);
+    }
+    .zmp-s[data-icon="model"] .zmp-s-title::before {
+      mask-image: var(--ic-model);
+      -webkit-mask-image: var(--ic-model);
+    }
+    .zmp-s[data-icon="index"] .zmp-s-title::before {
+      mask-image: var(--ic-index);
+      -webkit-mask-image: var(--ic-index);
+    }
+    .zmp-s[data-icon="query"] .zmp-s-title::before {
+      mask-image: var(--ic-query);
+      -webkit-mask-image: var(--ic-query);
+    }
+    .zmp-s[data-icon="translate"] .zmp-s-title::before {
+      mask-image: var(--ic-translate);
+      -webkit-mask-image: var(--ic-translate);
+    }
+    .zmp-s-desc {
+      font-size: 12px;
+      color: var(--text-2);
+      margin: 0 0 14px 25px;
+    }
+
+    /* ============================================================
+       Tabs. Four groups of settings, one visible at a time. The bar is
+       sticky so the group you are in stays named while you scroll a long
+       one, and a tab whose content needs the server is disabled rather
+       than hidden — a missing tab reads as a missing feature.
+       ============================================================ */
+    /* Not pinned: the bar has no background of its own now, so pinning it
+       would let the cards scroll through its labels. It scrolls with them. */
+    .zmp-tabs {
+      display: flex;
+      gap: 2px;
+      padding: 10px 14px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    /* Underline rather than a filled shape: the pane now shares its
+       background with Zotero's window, so a tab filled with the card colour
+       would be the same colour as the bar behind it. */
+    .zmp-tab {
+      appearance: none;
+      -moz-appearance: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      border-radius: 5px 5px 0 0;
+      padding: 7px 14px 7px;
+      margin: 0 0 -1px;
+      background: transparent;
+      color: var(--text-3);
+      font-family: inherit;
+      font-size: 12.5px;
+      font-weight: 600;
+      line-height: 1.3;
+      cursor: pointer;
+      transition: color 0.12s, border-color 0.12s, background 0.12s;
+    }
+    .zmp-tab:hover:not(.is-active):not([disabled]) { color: var(--text); background: var(--bg-hover); }
+    .zmp-tab:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
+    .zmp-tab.is-active { color: var(--text); border-bottom-color: var(--blue); }
+    .zmp-tab[disabled] { opacity: 0.4; cursor: default; }
+
+    /* Two settings that fit on one line share it. A number box or a switch
+       is narrow; giving each its own full-width row was spending height on
+       nothing. Falls back to one column when the pane is too narrow to read
+       two labels side by side. */
+    .zmp-p2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 6px; }
+    .zmp-p2 > .zmp-sw { margin-bottom: 0; min-width: 0; }
+    /* A paired row has half a row's width, and the name is what gets squeezed
+       out of it and onto a second line. Hand the name the row's own slack: a
+       tighter box, a tighter gap before the control, and a dropdown carrying
+       less padding than it needs. The control ends up further right, which is
+       the point — nothing here forbids the wrap, it just stops being needed. */
+    .zmp-p2 > .zmp-sw { gap: 8px; padding-inline: 10px 8px; }
+    .zmp-p2 select.zmp-nb { padding-inline: 7px 5px; }
+    /* An even split is not always the right one. Where the right-hand setting
+       has the longer name, it gets the wider half. */
+    .zmp-p2-wide-right { grid-template-columns: 0.9fr 1.1fr; }
+    .zmp-p2:last-child, .zmp-p2.zmp-last { margin-bottom: 0; }
+    @media (max-width: 620px) { .zmp-p2 { grid-template-columns: 1fr; } }
+
+    /* A card whose whole subject is one switch carries that switch in its
+       title, where the question "is this on?" is actually asked. */
+    .zmp-tt { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+    .zmp-tt-l { font-size: 12px; font-weight: 550; color: var(--text-2); }
+
+    .zmp-tp { display: none; padding-bottom: 4px; }
+    .zmp-tp.is-active { display: block; }
+
+    /* ============================================================
+       Toggle row
+       ============================================================ */
+    .zmp-sw {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      /* The boxed row is the pane's unit of height, repeated 35 times, so its
+         padding is worth more than any other. What is left is set by the
+         tallest thing standing in it — the switch, or a number box — and both
+         of those came down with it. */
+      padding: 6px 12px;
+      background: var(--bg-soft);
+      border: 1px solid var(--border-light);
+      border-radius: var(--r);
+      margin-bottom: 6px;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .zmp-sw:hover { background: var(--bg-hover); border-color: var(--border); }
+    /* row whose setting the selected backend ignores */
+    .zmp-sw.zmp-inert, .zmp-fg.zmp-inert { opacity: 0.45; }
+    .zmp-sw.zmp-inert:hover { background: var(--bg-soft); border-color: var(--border-light); }
+    .zmp-sw.zmp-inert .zmp-tog-track { cursor: not-allowed; }
+    .zmp-sw.zmp-inert:hover .zmp-tog-track { box-shadow: none; }
+    .zmp-sw .zmp-sw-text, .zmp-sw .zmp-sw-sub { overflow-wrap: break-word; }
+    .zmp-sw-text { font-size: 13px; font-weight: 550; line-height: 1.35; color: var(--text); }
+    .zmp-sw-sub { font-size: 11.5px; color: var(--text-3); margin-top: 2px; line-height: 1.4; }
+    /* A row is one line: its name, whatever short badge it carries, and the
+       question mark that holds everything that used to be printed underneath. */
+    .zmp-sw-h {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 4px 7px;
+      min-width: 0;
+    }
+    .zmp-sw > .zmp-sw-h { flex: 1; }
+    /* Last row in a card carries no gap of its own; the card's own padding
+       closes the block. Saves a stray 10px under every group. */
+    .zmp-sw.zmp-last { margin-bottom: 0; }
+    /* An input and a button that belong to the same setting */
+    .zmp-inline { display: flex; align-items: center; gap: 8px; flex: none; }
+
+    /* ============================================================
+       Help popover. Every sentence that used to sit permanently under a
+       setting lives in here instead: the row keeps its name, the reasoning
+       is one hover away. Hover OR keyboard focus opens it, so the text is
+       still reachable without a mouse.
+       ============================================================ */
+    .zmp-q {
+      position: relative;
+      flex: none;
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 1px solid var(--border-strong);
+      color: var(--text-3);
+      font-size: 10px;
+      font-weight: 700;
+      line-height: 12px;
+      text-align: center;
+      cursor: help;
+      user-select: none;
+      -moz-user-select: none;
+      transition: color 0.12s, border-color 0.12s, background 0.12s;
+    }
+    .zmp-q::before { content: "?"; }
+    .zmp-q:hover, .zmp-q:focus-visible {
+      color: var(--bg);
+      background: var(--blue);
+      border-color: var(--blue);
+      outline: none;
+    }
+    .zmp-q-p {
+      display: none;
+      position: absolute;
+      /* Hangs straight down from the mark and centred on it. preferenceScript
+         slides it sideways when a pane edge is in the way; the width is fixed
+         so that it has a stable figure to judge. */
+      top: calc(100% + 7px);
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 20;
+      box-sizing: border-box;
+      width: 240px;
+      max-width: 92vw;
+      padding: 10px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 7px;
+      box-shadow: var(--shadow-card);
+      color: var(--text-2);
+      font-size: 11.5px;
+      font-weight: 400;
+      line-height: 1.55;
+      text-align: left;
+      letter-spacing: 0;
+      cursor: auto;
+      white-space: normal;
+      overflow-wrap: break-word;
+    }
+    .zmp-q:hover .zmp-q-p, .zmp-q:focus-within .zmp-q-p { display: block; }
+    /* Each sentence the popover was given becomes its own paragraph */
+    .zmp-q-p > * { display: block; }
+    .zmp-q-p > * + * { margin-top: 6px; }
+    /* The measured default for a parameter, printed where it is needed */
+    .zmp-rc {
+      flex: none;
+      padding: 1px 7px 2px;
+      border-radius: 999px;
+      background: var(--blue-soft);
+      color: var(--blue-dark);
+      font-size: 10.5px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    /* Toggle switch */
+    .zmp-tog {
+      position: relative;
+      display: inline-block;
+      width: 34px;
+      height: 20px;
+      flex-shrink: 0;
+    }
+    .zmp-tog input[type="checkbox"] {
+      opacity: 0; width: 0; height: 0; position: absolute; margin: 0;
+    }
+    .zmp-tog-track {
+      position: absolute;
+      cursor: pointer;
+      inset: 0;
+      background: var(--tog-off);
+      border-radius: 999px;
+      transition: background 0.22s ease, box-shadow 0.15s ease;
+    }
+    .zmp-tog-track::before {
+      content: "";
+      position: absolute;
+      width: 14px;
+      height: 14px;
+      left: 3px;
+      top: 3px;
+      background: var(--tog-knob);
+      border-radius: 50%;
+      box-shadow: 0 1px 3px rgba(15,23,42,0.28);
+      transition: transform 0.22s cubic-bezier(0.32, 0.72, 0, 1);
+    }
+    .zmp-tog:hover .zmp-tog-track { box-shadow: 0 0 0 4px var(--focus-ring); }
+    .zmp-tog input[type="checkbox"]:checked + .zmp-tog-track { background: var(--blue); }
+    .zmp-tog input[type="checkbox"]:checked + .zmp-tog-track::before { transform: translateX(14px); }
+    .zmp-tog input[type="checkbox"]:focus-visible + .zmp-tog-track { box-shadow: 0 0 0 4px var(--focus-ring); }
+
+    /* ============================================================
+       Form controls
+       ============================================================ */
+    .zmp-fg { margin-bottom: 14px; }
+    .zmp-fg:last-child { margin-bottom: 0; }
+    .zmp-fl {
+      display: block;
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--text-2);
+      letter-spacing: 0.01em;
+      margin-bottom: 5px;
+    }
+    /* A field label that carries a help popover: the two sit on one line and
+       the label gives up its own bottom margin to the wrapper. */
+    .zmp-fl-h { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
+    .zmp-fl-h .zmp-fl { margin-bottom: 0; }
+    .zmp-fi {
+      box-sizing: border-box;
+      width: 100%;
+      max-width: 280px;
+      height: 32px;
+      padding: 0 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      font-size: 13px;
+      line-height: 30px;
+      font-family: inherit;
+      color: var(--text);
+      background: var(--bg);
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .zmp-fi:hover:not(:focus):not([disabled]) { border-color: var(--text-3); }
+    .zmp-fi:focus { border-color: var(--blue); box-shadow: 0 0 0 3px var(--focus-ring); }
+    .zmp-fi[disabled] { background: var(--bg-muted); color: var(--text-3); cursor: not-allowed; }
+    .zmp-fi::placeholder { color: var(--text-3); }
+
+    /* Keep the native dropdown widget: with appearance:none Gecko paints the
+       option list with our background over the native menu colours, which makes
+       the options flicker grey/white as the popup opens. */
+    select.zmp-fi { cursor: pointer; }
+
+    .zmp-fi-s { max-width: 96px; }
+    .zmp-fi-m { max-width: 210px; }
+    .zmp-fi-l { max-width: 100%; }
+    .zmp-fi-mono {
+      font-family: "SF Mono", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      letter-spacing: -0.01em;
+    }
+    .zmp-fh { font-size: 11px; color: var(--text-3); margin-top: 4px; line-height: 1.45; }
+    .zmp-fh-mono {
+      font-family: "SF Mono", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+      word-break: break-all;
+    }
+    /* Numeric setting row: the same card as a switch row, with a number box
+       where the toggle would be. Keeps every control in one column so the
+       input width no longer disagrees with the width of its description. */
+    .zmp-nrow > :first-child { flex: 1; min-width: 0; }
+    .zmp-nb {
+      flex: none;
+      width: 84px;
+      max-width: 84px;
+      /* Shorter than a standalone field: this one stands inside a boxed row,
+         and it is what sets that row's height. The fields out in the open
+         keep their full 32px. */
+      height: 28px;
+      line-height: 26px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    /* Half width, for values that are never longer than four characters.
+       This is what keeps a paired row's label and question mark on one line:
+       the header wraps only once the control beside it has taken more room
+       than the row has to give. Spinners go because at this width they would
+       sit on top of the digits. */
+    .zmp-nb-h {
+      width: 42px;
+      max-width: 42px;
+      padding: 0 6px;
+      -moz-appearance: textfield;
+      appearance: textfield;
+    }
+    /* A dropdown sized by its own longest option — four characters here — so
+       it shows the value and nothing else. Right-aligning a select left the
+       text floating away from the box's left edge. */
+    select.zmp-nb {
+      width: auto;
+      max-width: none;
+      text-align: start;
+    }
+
+    /* Warning banner for settings that invalidate the stored index */
+    .zmp-warn {
+      display: flex;
+      gap: 9px;
+      align-items: flex-start;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+      background: var(--amber-soft);
+      border: 1px solid var(--amber-border);
+      border-radius: 6px;
+      color: var(--text-2);
+      font-size: 11.5px;
+      line-height: 1.55;
+    }
+    .zmp-warn::before {
+      content: "!";
+      flex: none;
+      width: 15px;
+      height: 15px;
+      margin-top: 1px;
+      border-radius: 50%;
+      background: var(--amber);
+      color: var(--bg);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 15px;
+      text-align: center;
+    }
+
+    /* The stale-index alert is hidden until the signatures actually disagree */
+    .zmp-warn-alert { display: none; margin: 0 0 14px; }
+    /* The two compatibility locks are shown by clearing `hidden`, not by an
+       inline display, so they need a rule that outranks the one above — an
+       author `display:none` beats the browser's own [hidden] handling. The
+       stale-index banner is not listed here: script sets its display directly. */
+    #hybrid-chunk-lock-message:not([hidden]),
+    #embedding-identity-lock-message:not([hidden]) { display: flex; }
+    /* Same reason, for the client-config output pair, which is a grid. */
+    .zmp-dp[hidden] { display: none; }
+
+    .zmp-f2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 14px; }
+    /* Two fields plus the button that tests them. The button keeps the fields'
+       baseline instead of starting a row of its own underneath, and the result
+       text goes below the grid where it has the full width to wrap into. */
+    .zmp-fact {
+      display: grid;
+      grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) auto;
+      gap: 12px 14px;
+      align-items: end;
+    }
+    /* Every cell hands its bottom margin to the grid, so `align-items: end`
+       lines up the boxes themselves. Left as it was, the button cell — being
+       :last-child, and so margin-free — hung a margin's worth below the very
+       inputs it is meant to sit beside. */
+    .zmp-fact { margin-bottom: 14px; }
+    .zmp-fact > .zmp-fg { min-width: 0; margin-bottom: 0; }
+    .zmp-fg-act { display: flex; align-items: flex-end; }
+    @media (max-width: 620px) { .zmp-fact { grid-template-columns: 1fr; } }
+    .zmp-f3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px 14px; }
+    .zmp-f2 .zmp-fg, .zmp-f3 .zmp-fg { min-width: 0; }
+
+    /* Inline checkbox (non-switch) */
+    .zmp-cbs { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 12px; }
+    .zmp-cb {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text-2);
+      cursor: pointer;
+    }
+    .zmp-cb:hover { color: var(--text); }
+    .zmp-cb input[type="checkbox"] {
+      accent-color: var(--blue);
+      width: 14px;
+      height: 14px;
+      margin: 0;
+      cursor: pointer;
+    }
+
+    /* ============================================================
+       Buttons
+       ============================================================ */
+    .zmp-b {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 32px;
+      padding: 0 14px;
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 550;
+      font-family: inherit;
+      line-height: 1.35;
+      cursor: pointer;
+      background: var(--bg);
+      color: var(--text);
+      box-shadow: var(--shadow-btn);
+      transition: background 0.12s, border-color 0.12s, color 0.12s, box-shadow 0.12s, transform 0.06s;
+    }
+    .zmp-b:hover { background: var(--bg-hover); border-color: var(--text-3); }
+    .zmp-b:active { transform: translateY(1px); box-shadow: none; }
+    .zmp-b:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
+    .zmp-b[disabled] {
+      opacity: 0.45;
+      cursor: default;
+      box-shadow: none;
+      background: var(--bg-muted);
+    }
+    .zmp-b[disabled]:hover { background: var(--bg-muted); border-color: var(--border-strong); }
+    .zmp-bp {
+      background: var(--blue);
+      color: #fff;
+      border-color: var(--blue);
+      box-shadow: var(--shadow-accent);
+    }
+    .zmp-bp:hover { background: var(--blue-dark); border-color: var(--blue-dark); color: #fff; }
+    .zmp-bd { color: var(--red); border-color: var(--bd-border); }
+    .zmp-bd:hover { background: var(--bd-bg-hover); border-color: var(--red); color: var(--red); }
+    .zmp-b-sm { min-height: 26px; padding: 0 10px; font-size: 11px; }
+    .zmp-bg { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+    .zmp-bg-top { margin-top: 0; }
+    /* Inline result text next to a button */
+    .zmp-res {
+      font-size: 12px;
+      color: var(--text-2);
+      line-height: 1.4;
+      /* Never wider than the setting rows above: a long measurement line has
+         to wrap inside the section, not push the pane sideways. */
+      box-sizing: border-box;
+      max-width: 100%;
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    /* ------------------------------------------------------------
+       Borderless result grid (scan test)
+       Reads as a table — aligned columns, centred cells — without any
+       rules or vertical dividers. Columns are minmax(0, ...) so a long
+       label wraps instead of widening the grid past its container.
+       ------------------------------------------------------------ */
+    .zmp-rt {
+      box-sizing: border-box;
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
+      margin-top: 10px;
+      /* Small inset so the outermost column never renders flush against the
+         edge of the setting cards above — the block stays strictly inside
+         their width. */
+      padding: 0 4px;
+    }
+    .zmp-rt-r {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) repeat(3, minmax(0, 1fr));
+      gap: 0 8px;
+      align-items: center;
+    }
+    .zmp-rt-c {
+      box-sizing: border-box;
+      min-width: 0;
+      padding: 5px 2px;
+      text-align: center;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      line-height: 1.4;
+    }
+    .zmp-rt-h .zmp-rt-c {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-3);
+      letter-spacing: 0.02em;
+      padding-bottom: 3px;
+    }
+    .zmp-rt-k { font-size: 12px; font-weight: 550; color: var(--text); }
+    .zmp-rt-n {
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      color: var(--text);
+    }
+    /* Coverage caption under the grid. Left-aligned and a step smaller than
+       the cells: it qualifies the numbers, it is not one of them. */
+    .zmp-rt-scope {
+      box-sizing: border-box;
+      max-width: 100%;
+      padding: 0 4px;
+      margin-top: 8px;
+      font-size: 10.5px;
+      color: var(--text-3);
+      line-height: 1.5;
+      text-align: left;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .zmp-rt-scope-l { font-weight: 600; }
+
+    /* ============================================================
+       Collapsible panel
+       ============================================================ */
+    .zmp-ex {
+      border: 1px solid var(--border-light);
+      border-radius: var(--r);
+      margin: 12px 0 0;
+      background: var(--bg-soft);
+      transition: border-color 0.15s;
+    }
+    .zmp-ex:last-child { margin-bottom: 0; }
+    .zmp-ex.open { border-color: var(--border); }
+    .zmp-ex-h {
+      display: flex;
+      align-items: center;
+      border-radius: var(--r);
+      padding: 9px 13px;
+      cursor: pointer;
+      user-select: none;
+      -moz-user-select: none;
+      font-size: 12.5px;
+      transition: background 0.12s;
+    }
+    .zmp-ex-h:hover { background: var(--bg-hover); }
+    /* The arrow glyph is hidden and redrawn as a crisp chevron */
+    .zmp-ex-a {
+      flex: none;
+      width: 12px;
+      height: 12px;
+      font-size: 0;
+      color: transparent;
+      margin-right: 8px;
+      background-color: var(--text-3);
+      mask-image: var(--ic-chevron);
+      mask-repeat: no-repeat;
+      mask-position: center;
+      mask-size: 12px 12px;
+      -webkit-mask-image: var(--ic-chevron);
+      -webkit-mask-repeat: no-repeat;
+      -webkit-mask-position: center;
+      -webkit-mask-size: 12px 12px;
+      transition: transform 0.2s ease;
+      display: inline-block;
+    }
+    .zmp-ex.open .zmp-ex-a { transform: rotate(90deg); background-color: var(--blue); }
+    .zmp-ex-t { font-weight: 600; color: var(--text); }
+    .zmp-ex-m { margin-left: auto; font-size: 11px; color: var(--text-3); padding-left: 10px; }
+    .zmp-ex-b {
+      display: none;
+      padding: 14px 13px;
+      border-top: 1px solid var(--border-light);
+      border-radius: 0 0 var(--r) var(--r);
+      background: var(--bg);
+    }
+    .zmp-ex.open .zmp-ex-b { display: block; }
+    /* No overflow clipping on the panel: a help popover inside it has to be
+       able to reach past the panel's own edge. The corners are rounded per
+       part instead, which is what the clipping was doing. */
+    .zmp-ex.open .zmp-ex-h { border-radius: var(--r) var(--r) 0 0; }
+
+    /* ============================================================
+       Stats
+       ============================================================ */
+    /* One strip, not four cards. These are four numbers you glance at, and
+       four cards were spending three lines of height to say so. */
+    .zmp-st {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 4px 20px;
+      padding: 9px 13px;
+      margin-bottom: 12px;
+      background: var(--bg-soft);
+      border: 1px solid var(--border-light);
+      border-radius: var(--r);
+    }
+    .zmp-st-i { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+    .zmp-st-v {
+      font-size: 13px;
+      font-weight: 650;
+      letter-spacing: -0.01em;
+      font-variant-numeric: tabular-nums;
+      color: var(--text);
+    }
+    .zmp-st-v.ok { color: var(--green); }
+    .zmp-st-l {
+      font-size: 11px;
+      color: var(--text-3);
+      letter-spacing: 0.02em;
+    }
+
+    /* ============================================================
+       Progress
+       ============================================================ */
+    .zmp-pr {
+      padding: 12px 14px;
+      background: var(--pr-bg);
+      border: 1px solid var(--pr-border);
+      border-radius: var(--r);
+      margin: 12px 0;
+    }
+    .zmp-pr-h {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      margin-bottom: 7px;
+      color: var(--text);
+    }
+    .zmp-pr-t {
+      height: 6px;
+      background: var(--pr-track);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .zmp-pr-f {
+      height: 100%;
+      width: 0%;
+      background: var(--green);
+      border-radius: 999px;
+      transition: width 0.35s ease;
+    }
+    .zmp-pr-d {
+      font-size: 11px;
+      color: var(--text-2);
+      margin-top: 7px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* ============================================================
+       Dual output panels
+       ============================================================ */
+    .zmp-dp { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+    .zmp-dp .zmp-p { min-width: 0; }
+    .zmp-p {
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      overflow: hidden;
+      background: var(--bg-soft);
+    }
+    .zmp-p-h {
+      padding: 7px 12px;
+      background: var(--bg-muted);
+      border-bottom: 1px solid var(--border-light);
+      font-size: 10.5px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--text-3);
+    }
+    .zmp-p-b {
+      padding: 11px 12px;
+      font-family: "SF Mono", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+      font-size: 11px;
+      color: var(--text-2);
+      line-height: 1.6;
+      max-height: 220px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    /* ============================================================
+       Sub-headings
+       ============================================================ */
+    .zmp-sl {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 10.5px;
+      font-weight: 700;
+      color: var(--text-3);
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      margin: 18px 0 10px;
+    }
+    .zmp-sl::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: var(--border-light);
+    }
+    .zmp-sl2 {
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--text-3);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 8px;
+    }
+    .zmp-sl2-mt { margin-top: 18px; }
+
+    /* Key/value grid */
+    .zmp-is { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
+    .zmp-is .zmp-is-r { min-width: 0; }
+    .zmp-is-r {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 12px;
+      padding: 5px 0;
+      border-bottom: 1px dashed var(--border-light);
+    }
+    /* both key/value grids hold an even number of rows, so the last two
+       cells are the bottom row in either column */
+    .zmp-is-r:nth-last-child(-n+2) { border-bottom: none; }
+    .zmp-is-l { color: var(--text-2); }
+    .zmp-is-v { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); }
+
+    /* ============================================================
+       Empty / disabled states
+       ============================================================ */
+    .zmp-server-off-hint {
+      display: none;
+      margin: 12px 14px 0;
+      padding: 13px 16px;
+      text-align: center;
+      color: var(--text-3);
+      font-size: 12.5px;
+      background: var(--bg-soft);
+      border: 1px dashed var(--border-strong);
+      border-radius: var(--r-lg);
+    }
+    .zmp-loading {
+      color: var(--text-3);
+      font-size: 12px;
+      padding: 10px 0;
+    }
+
+    /* ============================================================
+       Integrated PDF translation controls
+       ============================================================ */
+    .zmp-translation-note {
+      margin: -4px 0 14px;
+      color: var(--text-2);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .zmp-ta {
+      box-sizing: border-box;
+      width: 100%;
+      min-height: 130px;
+      padding: 10px 12px;
+      border: 1px solid var(--border-strong);
+      border-radius: 7px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "SF Mono", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+      font-size: 11.5px;
+      line-height: 1.55;
+      resize: vertical;
+    }
+    .zmp-ta:focus {
+      outline: none;
+      border-color: var(--blue);
+      box-shadow: 0 0 0 3px var(--focus-ring);
+    }
+    .zmp-ta.is-locked {
+      color: var(--text-2);
+      background: var(--bg-soft);
+    }
+    .zmp-glossary-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-bottom: 9px;
+    }
+    .zmp-glossary-search {
+      flex: 1 1 180px;
+      min-width: 150px;
+    }
+    .zmp-glossary-wrap {
+      max-height: 240px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--bg);
+      /* 表格的 min-width 会顺着 prefpane 的 XUL box 往上传播（XUL box 按子元素
+         的固有最小宽度撑开，不会收缩），展开术语表时整个设置窗口就多出
+         一条横向滚动条。inline-size 包含让本容器的固有宽度与内容脱钩，
+         横向滚动回到它自己这个框内部。 */
+      width: 100%;
+      max-width: 100%;
+      contain: inline-size;
+    }
+    .zmp-glossary-table {
+      width: 100%;
+      /* 窗口宽度够时完全放得下，不够时在上方滚动框内横向滚动。 */
+      min-width: 560px;
+      border-collapse: collapse;
+      font-size: 11.5px;
+    }
+    .zmp-glossary-table th,
+    .zmp-glossary-table td {
+      padding: 6px;
+      border-bottom: 1px solid var(--border-light);
+      text-align: left;
+      vertical-align: middle;
+    }
+    .zmp-glossary-table th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--bg-muted);
+      color: var(--text-2);
+      font-size: 10.5px;
+      font-weight: 700;
+    }
+    .zmp-glossary-table td input[type="text"] {
+      box-sizing: border-box;
+      width: 100%;
+      min-width: 70px;
+      height: 28px;
+      padding: 0 7px;
+      border: 1px solid var(--border-strong);
+      border-radius: 5px;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .zmp-glossary-table td button {
+      border: 1px solid var(--border-strong);
+      border-radius: 5px;
+      background: var(--bg);
+      color: var(--text-2);
+      cursor: pointer;
+      padding: 4px 7px;
+    }
+    .zmp-glossary-table td button:hover {
+      border-color: var(--red);
+      color: var(--red);
+    }
+
+    /* ============================================================
+       Message banner (colours are set inline by preferenceScript)
+       ============================================================ */
+    .zmp-msg {
+      display: none;
+      margin-top: 12px;
+      padding: 9px 12px;
+      border-radius: 6px;
+      border-left: 3px solid currentColor;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    /* ============================================================
+       Footer
+       ============================================================ */
+    .zmp-ft {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px 28px 26px;
+      margin-top: 16px;
+    }
+    .zmp-ft-text {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 9px;
+      font-size: 11px;
+      color: var(--text-3);
+    }
+    .zmp-ft a { color: var(--blue); text-decoration: none; }
+    .zmp-ft a:hover { text-decoration: underline; }
+    .zmp-ft .zmp-d { color: var(--border-strong); }
+  </html:style>
+
+  <vbox flex="1">
+
+    <!-- ============================================================
+         Tab bar. Four groups, one screen each, so the pane is no longer a
+         single scroll that runs the length of every setting the plugin has.
+         Every tab but the first needs the server running: its content either
+         talks to the server or configures what the server serves.
+         ============================================================ -->
+    <html:div class="zmp-tabs" id="zmp-tabs" role="tablist">
+      <html:button class="zmp-tab is-active" data-tab="server" data-l10n-id="pref-tab-server"></html:button>
+      <html:button class="zmp-tab" data-tab="retrieval" data-needs-server="1" data-l10n-id="pref-tab-retrieval"></html:button>
+      <html:button class="zmp-tab" data-tab="wiki" data-needs-server="1" data-l10n-id="pref-tab-wiki"></html:button>
+      <html:button class="zmp-tab" data-tab="document" data-needs-server="1" data-l10n-id="pref-tab-document"></html:button>
+    </html:div>
+
+    <!-- ============================================================
+         TAB 1 — Server: the connection itself, what the connection is
+         allowed to change, and how a client is pointed at it.
+         ============================================================ -->
+    <html:div class="zmp-tp is-active" data-tabpanel="server">
+
+      <html:div class="zmp-s" data-icon="server">
+        <html:div class="zmp-s-title">
+          <html:span data-l10n-id="pref-server-title"></html:span>
+          <html:span class="zmp-tt">
+            <html:span class="zmp-tt-l" data-l10n-id="pref-enable-short"></html:span>
+            <html:label class="zmp-tog">
+              <html:input type="checkbox"
+                id="zotero-prefpane-__addonRef__-mcp-server-enabled"
+                preference="extensions.zotero.__addonRef__.mcp.server.enabled"
+              />
+              <html:span class="zmp-tog-track"></html:span>
+            </html:label>
+          </html:span>
+        </html:div>
+        <html:div class="zmp-s-desc" data-l10n-id="pref-section-server-desc"></html:div>
+
+        <html:div class="zmp-p2" id="server-connection-pair">
+          <html:div class="zmp-sw zmp-nrow" id="server-port-row">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-server-port"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-server-port-restart-hint"></html:span></html:span></html:span>
+            </html:div>
+            <html:input type="number" class="zmp-fi zmp-nb"
+              id="zotero-prefpane-__addonRef__-mcp-server-port"
+              preference="extensions.zotero.__addonRef__.mcp.server.port"
+              min="1024" max="65535"
+            />
+          </html:div>
+
+          <html:div id="server-remote-row" class="zmp-sw">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-server-remote-text"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-server-remote-sub"></html:span><html:span data-l10n-id="pref-server-allow-remote-warning"></html:span></html:span></html:span>
+            </html:div>
+            <html:label class="zmp-tog">
+              <html:input type="checkbox"
+                id="zotero-prefpane-__addonRef__-mcp-server-allow-remote"
+                preference="extensions.zotero.__addonRef__.mcp.server.allowRemote"
+              />
+              <html:span class="zmp-tog-track"></html:span>
+            </html:label>
+          </html:div>
+        </html:div>
+
+        <html:div id="server-token-row" class="zmp-sw">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-server-token-label"></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-server-token-hint"></html:span></html:span></html:span>
+          </html:div>
+          <html:div class="zmp-inline">
+            <html:input type="password" class="zmp-fi zmp-fi-m" autocomplete="off"
+              id="zotero-prefpane-__addonRef__-mcp-server-auth-token"
+              preference="extensions.zotero.__addonRef__.mcp.server.authToken"
+            />
+            <html:button class="zmp-b zmp-b-sm" id="regenerate-mcp-token-button" data-l10n-id="pref-server-token-regenerate"></html:button>
+          </html:div>
+        </html:div>
+      </html:div>
+
+      <!-- What a connected client is allowed to do to the library. Its own
+           card because it is a different decision from where the server
+           listens, and it applies whether or not a client is configured. -->
+      <html:div class="zmp-s" data-icon="privacy">
+        <html:div class="zmp-s-title" data-l10n-id="pref-privacy-title"></html:div>
+
+        <html:div class="zmp-sw">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-write-enable-text"></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-write-enable-sub"></html:span></html:span></html:span>
+          </html:div>
+          <html:label class="zmp-tog">
+            <html:input type="checkbox"
+              id="zotero-prefpane-__addonRef__-write-enabled"
+              preference="extensions.zotero.__addonRef__.write.enabled"
+            />
+            <html:span class="zmp-tog-track"></html:span>
+          </html:label>
+        </html:div>
+
+        <html:div class="zmp-sw">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-write-confirm-text"></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-write-confirm-sub"></html:span></html:span></html:span>
+          </html:div>
+          <html:label class="zmp-tog">
+            <html:input type="checkbox" id="zotero-prefpane-__addonRef__-write-confirm" preference="extensions.zotero.__addonRef__.write.confirmBeforeMutation" />
+            <html:span class="zmp-tog-track"></html:span>
+          </html:label>
+        </html:div>
+
+        <html:div class="zmp-sw">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-file-import-text"></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-file-import-sub"></html:span></html:span></html:span>
+          </html:div>
+          <html:label class="zmp-tog">
+            <html:input type="checkbox" id="zotero-prefpane-__addonRef__-file-import-enabled" preference="extensions.zotero.__addonRef__.write.allowFileImport" />
+            <html:span class="zmp-tog-track"></html:span>
+          </html:label>
+        </html:div>
+
+        <html:div class="zmp-sw zmp-last">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-expose-paths-text"></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-expose-paths-sub"></html:span></html:span></html:span>
+          </html:div>
+          <html:label class="zmp-tog">
+            <html:input type="checkbox" id="zotero-prefpane-__addonRef__-expose-file-paths" preference="extensions.zotero.__addonRef__.privacy.exposeFilePaths" />
+            <html:span class="zmp-tog-track"></html:span>
+          </html:label>
+        </html:div>
+      </html:div>
+
+      <!-- Client configuration. The two output panels stay out of the layout
+           until there is something to put in them; before the button is
+           pressed they held nothing but a sentence telling you to press it. -->
+      <html:div class="zmp-s zmp-needs-server" data-icon="client" id="client-config-card">
+        <html:div class="zmp-s-title" data-l10n-id="pref-client-config-title"></html:div>
+
+        <html:div class="zmp-f2">
+          <html:div class="zmp-fg">
+            <html:label class="zmp-fl" data-l10n-id="pref-client-type-label"></html:label>
+            <html:select class="zmp-fi" id="client-type-select">
+              <html:option value="claude-code">Claude Code</html:option>
+              <html:option value="codex" data-l10n-id="pref-client-codex-cli"></html:option>
+              <html:option value="claude-desktop">Claude Desktop</html:option>
+              <html:option value="cline-vscode">Cline (VS Code)</html:option>
+              <html:option value="continue-dev">Continue.dev</html:option>
+              <html:option value="cursor">Cursor</html:option>
+              <html:option value="cherry-studio">Cherry Studio</html:option>
+              <html:option value="gemini-cli">Gemini CLI</html:option>
+              <html:option value="chatbox">Chatbox</html:option>
+              <html:option value="workbuddy">WorkBuddy</html:option>
+              <html:option value="trae-ai">Trae AI</html:option>
+              <html:option value="qwen-code">Qwen Code</html:option>
+              <html:option value="custom-http" data-l10n-id="pref-client-custom-http"></html:option>
+            </html:select>
+          </html:div>
+          <html:div class="zmp-fg">
+            <html:label class="zmp-fl" data-l10n-id="pref-server-name-label"></html:label>
+            <html:input type="text" class="zmp-fi" id="server-name-input" value="zotero-lit-synapse" placeholder="zotero-lit-synapse" />
+          </html:div>
+        </html:div>
+
+        <html:div class="zmp-bg" style="margin-top:10px">
+          <html:button class="zmp-b zmp-bp" id="generate-config-button" data-l10n-id="pref-generate-config-button-text"></html:button>
+          <html:button class="zmp-b" id="copy-config-button" disabled="true" data-l10n-id="pref-copy-config-button-text"></html:button>
+          <html:button class="zmp-b" id="copy-instr-button" disabled="true" data-l10n-id="pref-copy-instr-button-text"></html:button>
+        </html:div>
+
+        <html:div class="zmp-dp" id="config-output-panels" hidden="hidden">
+          <html:div class="zmp-p">
+            <html:div class="zmp-p-h" data-l10n-id="pref-config-output-label"></html:div>
+            <html:div class="zmp-p-b" id="config-output"></html:div>
+          </html:div>
+          <html:div class="zmp-p">
+            <html:div class="zmp-p-h" data-l10n-id="pref-config-guide-title"></html:div>
+            <html:div class="zmp-p-b" id="config-guide"></html:div>
+          </html:div>
+        </html:div>
+      </html:div>
+
+      <html:div id="server-off-hint" class="zmp-server-off-hint" data-l10n-id="pref-server-off-hint"></html:div>
+    </html:div>
+
+    <!-- ============================================================
+         TAB 2 — Retrieval. The old "Search" and "Hybrid search" cards were
+         one subject split across two identical-looking sections. They are
+         one tab now, cut where the work actually changes hands: the model
+         that turns text into vectors, the index those vectors are written
+         to, and the query that reads them back.
+         ============================================================ -->
+    <html:div class="zmp-tp zmp-needs-server" data-tabpanel="retrieval">
+
+      <!-- 1/3 — the embedding endpoint -->
+      <html:div class="zmp-s" data-icon="model">
+        <html:div class="zmp-s-title" data-l10n-id="pref-retrieval-model-title"></html:div>
+
+        <html:div class="zmp-fg">
+          <html:label class="zmp-fl" data-l10n-id="pref-embedding-provider-label"></html:label>
+          <html:select class="zmp-fi zmp-fi-m"
+            id="zotero-prefpane-__addonRef__-embedding-provider"
+          >
+            <html:option value="custom" data-l10n-id="pref-embedding-provider-custom"></html:option>
+            <html:option value="openai">OpenAI</html:option>
+            <html:option value="google">Google Gemini</html:option>
+            <html:option value="alibaba">阿里云百炼</html:option>
+            <html:option value="zhipu">智谱 AI</html:option>
+            <html:option value="openrouter">OpenRouter</html:option>
+            <html:option value="siliconflow">硅基流动</html:option>
+            <html:option value="voyage">Voyage AI</html:option>
+            <html:option value="ollama">Ollama (本地)</html:option>
+          </html:select>
+        </html:div>
+
+        <html:div class="zmp-fg">
+          <html:label class="zmp-fl" data-l10n-id="pref-embedding-api-base-label"></html:label>
+          <html:input type="text" class="zmp-fi zmp-fi-l zmp-fi-mono"
+            id="zotero-prefpane-__addonRef__-embedding-api-base"
+            preference="extensions.zotero.__addonRef__.embedding.apiBase"
+            placeholder="https://api.openai.com/v1"
+          />
+          <html:div class="zmp-fh zmp-fh-mono" id="embedding-api-endpoint-preview"></html:div>
+        </html:div>
+
+        <html:div class="zmp-fg">
+          <html:label class="zmp-fl" data-l10n-id="pref-embedding-api-key-label"></html:label>
+          <html:input type="password" class="zmp-fi zmp-fi-l zmp-fi-mono"
+            id="zotero-prefpane-__addonRef__-embedding-api-key"
+            preference="extensions.zotero.__addonRef__.embedding.apiKey"
+            placeholder="sk-..."
+          />
+        </html:div>
+
+        <!-- The test button sits with the fields it tests, on their baseline,
+             rather than a row of its own further down. -->
+        <html:div class="zmp-fact">
+          <html:div class="zmp-fg">
+            <html:label class="zmp-fl" data-l10n-id="pref-embedding-model-label"></html:label>
+            <html:input type="text" class="zmp-fi zmp-fi-mono"
+              id="zotero-prefpane-__addonRef__-embedding-model"
+              preference="extensions.zotero.__addonRef__.embedding.model"
+              placeholder="text-embedding-3-small"
+            />
+          </html:div>
+          <html:div class="zmp-fg">
+            <html:label class="zmp-fl" data-l10n-id="pref-embedding-dimensions-label"></html:label>
+            <html:input type="number" class="zmp-fi zmp-fi-s"
+              id="zotero-prefpane-__addonRef__-embedding-dimensions"
+              preference="extensions.zotero.__addonRef__.embedding.dimensions"
+              min="64" max="4096" placeholder="512"
+            />
+          </html:div>
+          <html:div class="zmp-fg zmp-fg-act">
+            <html:button class="zmp-b" id="test-embedding-button" data-l10n-id="pref-embedding-test-button-text"></html:button>
+          </html:div>
+        </html:div>
+        <html:div class="zmp-res" id="embedding-test-result"></html:div>
+
+        <html:div
+          id="embedding-identity-lock-message"
+          class="zmp-warn zmp-warn-alert"
+          data-l10n-id="pref-embedding-identity-locked"
+          hidden="hidden"
+        ></html:div>
+
+        <html:div class="zmp-p2 zmp-last">
+          <html:div class="zmp-sw zmp-nrow">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-embedding-timeout-label"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-embedding-timeout-hint"></html:span></html:span></html:span>
+            </html:div>
+            <html:input type="number" class="zmp-fi zmp-nb zmp-nb-h"
+              id="zotero-prefpane-__addonRef__-embedding-timeout"
+              preference="extensions.zotero.__addonRef__.embedding.timeoutSeconds"
+              min="5" max="600" placeholder="30"
+            />
+          </html:div>
+
+          <html:div class="zmp-sw zmp-nrow">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-embedding-max-batch-items-label"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-embedding-max-batch-items-hint"></html:span></html:span></html:span>
+            </html:div>
+            <html:input type="number" class="zmp-fi zmp-nb zmp-nb-h"
+              id="zotero-prefpane-__addonRef__-embedding-max-batch-items"
+              preference="extensions.zotero.__addonRef__.embedding.maxBatchItems"
+              min="1" max="2048" placeholder="20"
+            />
+          </html:div>
+        </html:div>
+
+        <html:div class="zmp-ex" id="rate-limit-panel">
+          <html:div class="zmp-ex-h" id="rate-limit-toggle">
+            <html:span class="zmp-ex-a">▶</html:span>
+            <html:span class="zmp-ex-t" data-l10n-id="pref-rate-limit-title"></html:span>
+            <html:span class="zmp-ex-m" id="rate-limit-summary"></html:span>
+          </html:div>
+          <html:div class="zmp-ex-b">
+            <html:div class="zmp-f3">
+              <html:div class="zmp-fg">
+                <html:div class="zmp-fl-h">
+                  <html:label class="zmp-fl">RPM</html:label>
+                  <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-rate-limit-zero-hint"></html:span></html:span></html:span>
+                </html:div>
+                <html:input type="number" class="zmp-fi"
+                  id="zotero-prefpane-__addonRef__-embedding-rpm"
+                  preference="extensions.zotero.__addonRef__.embedding.rpm"
+                  min="0" max="10000" placeholder="60"
+                />
+              </html:div>
+              <html:div class="zmp-fg">
+                <html:label class="zmp-fl">TPM</html:label>
+                <html:input type="number" class="zmp-fi"
+                  id="zotero-prefpane-__addonRef__-embedding-tpm"
+                  preference="extensions.zotero.__addonRef__.embedding.tpm"
+                  min="0" max="10000000" placeholder="150000"
+                />
+              </html:div>
+              <html:div class="zmp-fg">
+                <html:label class="zmp-fl" data-l10n-id="pref-rate-limit-cost-label"></html:label>
+                <html:input type="text" class="zmp-fi"
+                  id="zotero-prefpane-__addonRef__-embedding-cost"
+                  preference="extensions.zotero.__addonRef__.embedding.costPer1M"
+                  placeholder="0.02"
+                />
+              </html:div>
+            </html:div>
+          </html:div>
+        </html:div>
+      </html:div>
+
+      <!-- 2/3 — the stored index -->
+      <html:div class="zmp-s" data-icon="index">
+        <html:div class="zmp-s-title" data-l10n-id="pref-section-index-label"></html:div>
+
+        <html:div class="zmp-loading" id="semantic-stats-loading" data-l10n-id="pref-semantic-stats-loading"></html:div>
+
+        <html:div id="semantic-stats-content" style="display: none;">
+          <!-- One line, not four cards. Same four combined figures; the
+               per-index breakdown is still under "detailed statistics". -->
+          <html:div class="zmp-st">
+            <html:div class="zmp-st-i">
+              <html:span class="zmp-st-l" data-l10n-id="pref-stat-items"></html:span>
+              <html:span class="zmp-st-v" id="semantic-stats-total-items">-</html:span>
+            </html:div>
+            <html:div class="zmp-st-i">
+              <html:span class="zmp-st-l" data-l10n-id="pref-stat-records"></html:span>
+              <html:span class="zmp-st-v" id="semantic-stats-total-records">-</html:span>
+            </html:div>
+            <html:div class="zmp-st-i">
+              <html:span class="zmp-st-l" data-l10n-id="pref-stat-database"></html:span>
+              <html:span class="zmp-st-v" id="semantic-stats-db-size">-</html:span>
+            </html:div>
+            <html:div class="zmp-st-i">
+              <html:span class="zmp-st-l" data-l10n-id="pref-stat-status"></html:span>
+              <html:span class="zmp-st-v" id="semantic-stats-status">-</html:span>
+            </html:div>
+          </html:div>
+
+          <html:div id="semantic-index-progress-container" class="zmp-pr" style="display: none;">
+            <html:div class="zmp-pr-h">
+              <html:strong><html:span id="semantic-index-progress-text">0/0</html:span></html:strong>
+              <html:span><html:span id="semantic-index-progress-percent">0%</html:span> · <html:span id="semantic-index-eta">-</html:span></html:span>
+            </html:div>
+            <html:div class="zmp-pr-t">
+              <html:div class="zmp-pr-f" id="semantic-index-progress-bar"></html:div>
+            </html:div>
+            <html:div class="zmp-pr-d" id="semantic-index-current-item">-</html:div>
+          </html:div>
+
+          <html:div class="zmp-bg zmp-bg-top">
+            <html:button class="zmp-b zmp-bp" id="build-semantic-index-button" data-l10n-id="pref-semantic-index-build-button-text"></html:button>
+            <html:button class="zmp-b" id="rebuild-semantic-index-button" data-l10n-id="pref-semantic-index-rebuild-button-text"></html:button>
+            <html:button class="zmp-b" id="retry-failed-index-button" data-l10n-id="pref-semantic-index-retry-failed-button-text"></html:button>
+            <html:button class="zmp-b zmp-bd" id="clear-semantic-index-button" data-l10n-id="pref-semantic-index-clear-button-text"></html:button>
+            <html:button class="zmp-b" id="pause-semantic-index-button" style="display:none" data-l10n-id="pref-semantic-index-pause-button-text"></html:button>
+            <html:button class="zmp-b" id="resume-semantic-index-button" style="display:none" data-l10n-id="pref-semantic-index-resume-button-text"></html:button>
+            <html:button class="zmp-b zmp-bd" id="abort-semantic-index-button" style="display:none" data-l10n-id="pref-semantic-index-abort-button-text"></html:button>
+          </html:div>
+
+          <!-- Auto update lives with the buttons above because it is the
+               same lifecycle: it decides whether a library change replays
+               build/update automatically. It governs BOTH indexes, which are
+               written in one pass from one parse. -->
+          <html:div class="zmp-sw zmp-last" style="margin-top:12px">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-semantic-auto-update-text"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-semantic-auto-update-sub"></html:span></html:span></html:span>
+            </html:div>
+            <html:label class="zmp-tog">
+              <html:input type="checkbox"
+                id="zotero-prefpane-__addonRef__-semantic-auto-update"
+                preference="extensions.zotero.__addonRef__.semantic.autoUpdate"
+              />
+              <html:span class="zmp-tog-track"></html:span>
+            </html:label>
+          </html:div>
+
+          <html:div id="semantic-index-message" class="zmp-msg"></html:div>
+
+          <!-- Shown only when the stored index no longer matches the chunk
+               settings below; the panel never rebuilds anything on its own. -->
+          <html:div id="hybrid-chunk-stale-warning" class="zmp-warn zmp-warn-alert"
+            data-l10n-id="pref-hybrid-chunk-stale-warning"></html:div>
+
+          <!-- Advanced: chunking. Lives with the index it defines rather than
+               with the query-time retrieval settings: these values decide how
+               the stored vectors were cut up. They are editable only while no
+               search index and no Wiki data exist — once either exists the
+               inputs are locked (see refreshDataCompatibilityLockUI), so there
+               is no "change it, then rebuild" path to warn about here. -->
+          <html:div class="zmp-ex" id="hybrid-advanced-panel">
+            <html:div class="zmp-ex-h" id="hybrid-advanced-toggle">
+              <html:span class="zmp-ex-a">▶</html:span>
+              <html:span class="zmp-ex-t" data-l10n-id="pref-hybrid-advanced-title"></html:span>
+              <html:span class="zmp-ex-m" id="hybrid-advanced-summary"></html:span>
+            </html:div>
+            <html:div class="zmp-ex-b">
+              <html:div
+                id="hybrid-chunk-lock-message"
+                class="zmp-warn zmp-warn-alert"
+                data-l10n-id="pref-hybrid-chunk-locked"
+                hidden="hidden"
+              ></html:div>
+
+              <html:div class="zmp-sw zmp-nrow">
+                <html:div class="zmp-sw-h">
+                  <html:span class="zmp-sw-text" data-l10n-id="pref-hybrid-chunk-target-label"></html:span>
+                  <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-hybrid-chunk-target-hint"></html:span></html:span></html:span>
+                </html:div>
+                <html:input type="number" class="zmp-fi zmp-nb"
+                  id="zotero-prefpane-__addonRef__-hybrid-chunk-target"
+                  preference="extensions.zotero.__addonRef__.hybrid.chunkTargetChars"
+                  min="200" max="4000" step="100" placeholder="1000"
+                />
+              </html:div>
+
+              <html:div class="zmp-sw zmp-nrow zmp-last">
+                <html:div class="zmp-sw-h">
+                  <html:span class="zmp-sw-text" data-l10n-id="pref-hybrid-chunk-tolerance-label"></html:span>
+                  <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-hybrid-chunk-tolerance-hint"></html:span></html:span></html:span>
+                </html:div>
+                <html:input type="number" class="zmp-fi zmp-nb"
+                  id="zotero-prefpane-__addonRef__-hybrid-chunk-tolerance"
+                  preference="extensions.zotero.__addonRef__.hybrid.chunkAppendToleranceChars"
+                  min="0" max="2000" step="50" placeholder="500"
+                />
+              </html:div>
+            </html:div>
+          </html:div>
+
+          <html:div class="zmp-ex" id="detail-stats-panel">
+            <html:div class="zmp-ex-h" id="detail-stats-toggle">
+              <html:span class="zmp-ex-a">▶</html:span>
+              <html:span class="zmp-ex-t" data-l10n-id="pref-detail-stats-title"></html:span>
+              <html:span class="zmp-ex-m" id="detail-stats-summary"></html:span>
+            </html:div>
+            <html:div class="zmp-ex-b">
+              <html:div class="zmp-sl2" data-l10n-id="pref-detail-semantic-section"></html:div>
+              <html:div class="zmp-is">
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-semantic-stats-indexed-items"></html:span>
+                  <html:span class="zmp-is-v" id="semantic-stats-indexed-items">-</html:span>
+                </html:div>
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-semantic-stats-total-vectors"></html:span>
+                  <html:span class="zmp-is-v" id="semantic-stats-total-vectors">-</html:span>
+                </html:div>
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-semantic-stats-zh-vectors"></html:span>
+                  <html:span class="zmp-is-v" id="semantic-stats-zh-vectors">-</html:span>
+                </html:div>
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-semantic-stats-en-vectors"></html:span>
+                  <html:span class="zmp-is-v" id="semantic-stats-en-vectors">-</html:span>
+                </html:div>
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-semantic-stats-cached-items"></html:span>
+                  <html:span class="zmp-is-v" id="semantic-stats-cached-items">-</html:span>
+                </html:div>
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-semantic-stats-cache-size"></html:span>
+                  <html:span class="zmp-is-v" id="semantic-stats-cache-size">-</html:span>
+                </html:div>
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-semantic-stats-dimensions"></html:span>
+                  <html:span class="zmp-is-v" id="semantic-stats-dimensions">-</html:span>
+                </html:div>
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-semantic-stats-int8-status"></html:span>
+                  <html:span class="zmp-is-v" id="semantic-stats-int8-status">-</html:span>
+                </html:div>
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-semantic-stats-db-usage"></html:span>
+                  <html:span class="zmp-is-v" id="semantic-stats-db-usage">-</html:span>
+                </html:div>
+              </html:div>
+
+              <html:div class="zmp-sl2 zmp-sl2-mt" data-l10n-id="pref-detail-api-section"></html:div>
+              <html:div class="zmp-is">
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-api-stat-tokens"></html:span>
+                  <html:span class="zmp-is-v" id="api-usage-total-tokens">-</html:span>
+                </html:div>
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-api-stat-requests"></html:span>
+                  <html:span class="zmp-is-v" id="api-usage-total-requests">-</html:span>
+                </html:div>
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-api-stat-cost"></html:span>
+                  <html:span class="zmp-is-v" id="api-usage-estimated-cost">-</html:span>
+                </html:div>
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-api-stat-rate-hits"></html:span>
+                  <html:span class="zmp-is-v" id="api-usage-rate-limit-hits">-</html:span>
+                </html:div>
+              </html:div>
+
+              <html:div class="zmp-sl2 zmp-sl2-mt" data-l10n-id="pref-detail-keyword-section"></html:div>
+              <html:div class="zmp-is">
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-keyword-stats-documents"></html:span>
+                  <html:span class="zmp-is-v" id="keyword-stats-documents">-</html:span>
+                </html:div>
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-keyword-stats-chunks"></html:span>
+                  <html:span class="zmp-is-v" id="keyword-stats-chunks">-</html:span>
+                </html:div>
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-keyword-stats-terms"></html:span>
+                  <html:span class="zmp-is-v" id="keyword-stats-terms">-</html:span>
+                </html:div>
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-keyword-stats-postings"></html:span>
+                  <html:span class="zmp-is-v" id="keyword-stats-postings">-</html:span>
+                </html:div>
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-keyword-stats-with-body"></html:span>
+                  <html:span class="zmp-is-v" id="keyword-stats-with-body">-</html:span>
+                </html:div>
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-keyword-stats-metadata-only"></html:span>
+                  <html:span class="zmp-is-v" id="keyword-stats-metadata-only">-</html:span>
+                </html:div>
+                <html:div class="zmp-is-r">
+                  <html:span class="zmp-is-l" data-l10n-id="pref-keyword-stats-db-usage"></html:span>
+                  <html:span class="zmp-is-v" id="keyword-stats-db-usage">-</html:span>
+                </html:div>
+              </html:div>
+
+              <!-- Hidden elements for JS compat -->
+              <html:span id="api-usage-total-texts" style="display:none">-</html:span>
+              <html:span id="api-usage-session-tokens" style="display:none">-</html:span>
+              <html:span id="api-usage-session-requests" style="display:none">-</html:span>
+              <html:span id="api-usage-current-rpm" style="display:none">-</html:span>
+              <html:span id="api-usage-current-tpm" style="display:none">-</html:span>
+
+              <html:div class="zmp-bg">
+                <html:button class="zmp-b zmp-b-sm" id="refresh-semantic-stats-button" data-l10n-id="pref-api-usage-refresh-button-text"></html:button>
+                <html:button class="zmp-b zmp-bd zmp-b-sm" id="reset-api-usage-button" data-l10n-id="pref-api-usage-reset-button-text"></html:button>
+              </html:div>
+              <!-- Hidden: JS binds refresh-api-usage-button separately -->
+              <html:button id="refresh-api-usage-button" style="display:none"></html:button>
+            </html:div>
+          </html:div>
+        </html:div>
+      </html:div>
+
+      <!-- 3/3 — what a query does with the index -->
+      <html:div class="zmp-s" data-icon="query">
+        <html:div class="zmp-s-title" data-l10n-id="pref-retrieval-query-title"></html:div>
+
+        <html:div class="zmp-sl">
+          <html:span data-l10n-id="pref-hybrid-group-limits"></html:span>
+        </html:div>
+
+        <html:div class="zmp-sw zmp-nrow">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-hybrid-max-documents-label"></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-hybrid-max-documents-hint"></html:span></html:span></html:span>
+          </html:div>
+          <html:input type="number" class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-hybrid-max-documents"
+            preference="extensions.zotero.__addonRef__.hybrid.maxDocuments"
+            min="1" max="20" placeholder="20"
+          />
+        </html:div>
+
+        <html:div class="zmp-sw zmp-nrow zmp-last">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-hybrid-max-chunks-label"></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-hybrid-max-chunks-hint"></html:span></html:span></html:span>
+          </html:div>
+          <html:input type="number" class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-hybrid-max-chunks"
+            preference="extensions.zotero.__addonRef__.hybrid.maxChunksPerItem"
+            min="1" max="50" placeholder="5"
+          />
+        </html:div>
+
+        <!-- Scoring. The four values below are the ones with a measured
+             recommendation, so each carries its number inline and keeps the
+             reasoning behind the question mark. -->
+        <html:div class="zmp-sl">
+          <html:span data-l10n-id="pref-hybrid-group-scoring"></html:span>
+          <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-hybrid-fusion-explainer"></html:span></html:span></html:span>
+        </html:div>
+
+        <html:div class="zmp-sw zmp-nrow">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-hybrid-keyword-min-score-label"></html:span>
+            <html:span class="zmp-rc" data-l10n-id="pref-recommended-chip" data-l10n-args='{"value": "0.52"}'></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-hybrid-keyword-min-score-hint"></html:span><html:span data-l10n-id="pref-hybrid-keyword-min-score-recommended"></html:span></html:span></html:span>
+          </html:div>
+          <html:input type="number" class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-hybrid-keyword-min-score"
+            preference="extensions.zotero.__addonRef__.hybrid.keywordMinScore"
+            min="0" max="1" step="0.01" placeholder="0.52"
+          />
+        </html:div>
+
+        <html:div class="zmp-sw zmp-nrow">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-hybrid-keyword-rrf-weight-label"></html:span>
+            <html:span class="zmp-rc" data-l10n-id="pref-recommended-chip" data-l10n-args='{"value": "1.0"}'></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-hybrid-keyword-rrf-weight-hint"></html:span><html:span data-l10n-id="pref-hybrid-keyword-rrf-weight-recommended"></html:span></html:span></html:span>
+          </html:div>
+          <html:input type="number" class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-hybrid-keyword-rrf-weight"
+            preference="extensions.zotero.__addonRef__.hybrid.keywordRrfWeight"
+            min="0" max="10" step="0.1" placeholder="1.0"
+          />
+        </html:div>
+
+        <html:div class="zmp-sw zmp-nrow">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-hybrid-semantic-min-score-label"></html:span>
+            <html:span class="zmp-rc" data-l10n-id="pref-recommended-chip" data-l10n-args='{"value": "0.60"}'></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-hybrid-semantic-min-score-hint"></html:span><html:span data-l10n-id="pref-hybrid-semantic-min-score-recommended"></html:span></html:span></html:span>
+          </html:div>
+          <html:input type="number" class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-hybrid-semantic-min-score"
+            preference="extensions.zotero.__addonRef__.hybrid.semanticMinScore"
+            min="0" max="1" step="0.01" placeholder="0.60"
+          />
+        </html:div>
+
+        <html:div class="zmp-sw zmp-nrow zmp-last">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-hybrid-semantic-rrf-weight-label"></html:span>
+            <html:span class="zmp-rc" data-l10n-id="pref-recommended-chip" data-l10n-args='{"value": "1.0"}'></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-hybrid-semantic-rrf-weight-hint"></html:span><html:span data-l10n-id="pref-hybrid-semantic-rrf-weight-recommended"></html:span></html:span></html:span>
+          </html:div>
+          <html:input type="number" class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-hybrid-semantic-rrf-weight"
+            preference="extensions.zotero.__addonRef__.hybrid.semanticRrfWeight"
+            min="0" max="10" step="0.1" placeholder="1.0"
+          />
+        </html:div>
+
+        <!-- Everything below is about how long a query may take and how much
+             hardware it may use — not about which documents come back. -->
+        <html:div class="zmp-sl">
+          <html:span data-l10n-id="pref-hybrid-group-performance"></html:span>
+        </html:div>
+
+        <html:div class="zmp-p2">
+          <html:div class="zmp-sw">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-hybrid-gpu-label"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-hybrid-gpu-hint"></html:span></html:span></html:span>
+            </html:div>
+            <html:label class="zmp-tog">
+              <html:input type="checkbox"
+                id="zotero-prefpane-__addonRef__-hybrid-gpu-enabled"
+                preference="extensions.zotero.__addonRef__.hybrid.gpuAccelerationEnabled"
+              />
+              <html:span class="zmp-tog-track"></html:span>
+            </html:label>
+          </html:div>
+
+          <html:div class="zmp-sw zmp-nrow" id="hybrid-gpu-precision-row">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-hybrid-gpu-precision-label"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-hybrid-gpu-precision-hint"></html:span></html:span></html:span>
+            </html:div>
+            <html:select class="zmp-fi zmp-nb"
+              id="zotero-prefpane-__addonRef__-hybrid-gpu-precision"
+              preference="extensions.zotero.__addonRef__.hybrid.gpuPrecision">
+              <html:option value="auto" data-l10n-id="pref-hybrid-gpu-precision-auto"></html:option>
+              <html:option value="float32">Float32</html:option>
+              <html:option value="int8">Int8</html:option>
+            </html:select>
+          </html:div>
+        </html:div>
+        <html:div class="zmp-res" id="hybrid-gpu-status" aria-live="polite"></html:div>
+
+        <html:div class="zmp-sw zmp-nrow" style="margin-top:10px">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-hybrid-neighbor-radius-label"></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-hybrid-neighbor-radius-hint"></html:span></html:span></html:span>
+          </html:div>
+          <html:input type="number" class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-hybrid-neighbor-radius"
+            preference="extensions.zotero.__addonRef__.hybrid.neighborRadius"
+            min="0" max="10" placeholder="1"
+          />
+        </html:div>
+
+        <html:div class="zmp-sw zmp-nrow">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-hybrid-vector-scan-timeout-label"></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-hybrid-vector-scan-timeout-hint"></html:span></html:span></html:span>
+          </html:div>
+          <html:input type="number" class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-hybrid-search-timeout"
+            preference="extensions.zotero.__addonRef__.hybrid.searchTimeoutMs"
+            min="1" max="3600000" step="1" placeholder="8000"
+          />
+        </html:div>
+
+        <html:div class="zmp-sw zmp-nrow zmp-last">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-hybrid-keyword-search-timeout-label"></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-hybrid-keyword-search-timeout-hint"></html:span></html:span></html:span>
+          </html:div>
+          <html:input type="number" class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-hybrid-keyword-search-timeout"
+            preference="extensions.zotero.__addonRef__.hybrid.keywordSearchTimeoutMs"
+            min="1000" max="3600000" step="1" placeholder="30000"
+          />
+        </html:div>
+
+        <html:div class="zmp-bg">
+          <html:button class="zmp-b" id="hybrid-scan-benchmark-button"
+            data-l10n-id="pref-hybrid-scan-benchmark-button"></html:button>
+          <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-hybrid-scan-benchmark-hint"></html:span></html:span></html:span>
+        </html:div>
+        <html:div class="zmp-res" id="hybrid-scan-benchmark-result"></html:div>
+      </html:div>
+    </html:div>
+
+    <!-- ============================================================
+         TAB 3 — Wiki: what gets recorded, how it is retrieved, how a
+         reading note is kept.
+         ============================================================ -->
+    <html:div class="zmp-tp zmp-needs-server" data-tabpanel="wiki">
+      <html:div class="zmp-s" data-icon="wiki">
+        <html:div class="zmp-s-title">
+          <html:span data-l10n-id="pref-wiki-title"></html:span>
+          <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-wiki-desc"></html:span><html:span data-l10n-id="pref-wiki-permission-note"></html:span><html:span data-l10n-id="pref-wiki-enabled-sub"></html:span></html:span></html:span>
+          <html:span class="zmp-tt">
+            <html:span class="zmp-tt-l" data-l10n-id="pref-enable-short"></html:span>
+            <html:label class="zmp-tog">
+              <html:input
+                type="checkbox"
+                id="zotero-prefpane-__addonRef__-wiki-enabled"
+                preference="extensions.zotero.__addonRef__.wiki.enabled"
+              />
+              <html:span class="zmp-tog-track"></html:span>
+            </html:label>
+          </html:span>
+        </html:div>
+
+        <html:div class="zmp-sl">
+          <html:span data-l10n-id="pref-wiki-group-record"></html:span>
+        </html:div>
+
+        <html:div class="zmp-p2 zmp-p2-wide-right">
+          <html:div class="zmp-sw">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-wiki-auto-write-text"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-wiki-auto-write-sub"></html:span></html:span></html:span>
+            </html:div>
+            <html:label class="zmp-tog">
+              <html:input
+                type="checkbox"
+                id="zotero-prefpane-__addonRef__-wiki-auto-write"
+                preference="extensions.zotero.__addonRef__.wiki.autoWrite"
+              />
+              <html:span class="zmp-tog-track"></html:span>
+            </html:label>
+          </html:div>
+
+          <html:div class="zmp-sw zmp-nrow">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-wiki-write-mode-label"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-wiki-write-mode-hint"></html:span></html:span></html:span>
+            </html:div>
+            <html:select
+              class="zmp-fi zmp-nb"
+              id="zotero-prefpane-__addonRef__-wiki-write-mode"
+              preference="extensions.zotero.__addonRef__.wiki.writeMode"
+            >
+              <html:option
+                value="confirm"
+                data-l10n-id="pref-wiki-write-mode-confirm"
+              ></html:option>
+              <html:option
+                value="auto"
+                data-l10n-id="pref-wiki-write-mode-auto"
+              ></html:option>
+            </html:select>
+          </html:div>
+        </html:div>
+
+        <html:div class="zmp-sw zmp-nrow zmp-last">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-wiki-episode-similarity-label"></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-wiki-episode-similarity-hint"></html:span></html:span></html:span>
+          </html:div>
+          <html:input
+            type="number"
+            class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-wiki-episode-similarity"
+            preference="extensions.zotero.__addonRef__.wiki.note.episodeSimilarity"
+            min="0"
+            max="1"
+            step="0.01"
+            placeholder="0.92"
+          />
+        </html:div>
+
+        <html:div class="zmp-sl">
+          <html:span data-l10n-id="pref-wiki-group-retrieval"></html:span>
+        </html:div>
+
+        <html:div class="zmp-sw">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-wiki-shadow-text"></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-wiki-shadow-sub"></html:span></html:span></html:span>
+          </html:div>
+          <html:label class="zmp-tog">
+            <html:input
+              type="checkbox"
+              id="zotero-prefpane-__addonRef__-wiki-shadow-mode"
+              preference="extensions.zotero.__addonRef__.wiki.shadowMode"
+            />
+            <html:span class="zmp-tog-track"></html:span>
+          </html:label>
+        </html:div>
+
+        <html:div class="zmp-p2">
+          <html:div class="zmp-sw zmp-nrow">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-wiki-min-score-label"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-wiki-min-score-hint"></html:span></html:span></html:span>
+            </html:div>
+            <html:input
+              type="number"
+              class="zmp-fi zmp-nb zmp-nb-h"
+              id="zotero-prefpane-__addonRef__-wiki-min-score"
+              preference="extensions.zotero.__addonRef__.wiki.minScore"
+              min="0"
+              max="1"
+              step="0.01"
+              placeholder="0"
+            />
+          </html:div>
+
+          <html:div class="zmp-sw zmp-nrow">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-wiki-rrf-weight-label"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-wiki-rrf-weight-hint"></html:span></html:span></html:span>
+            </html:div>
+            <html:input
+              type="number"
+              class="zmp-fi zmp-nb zmp-nb-h"
+              id="zotero-prefpane-__addonRef__-wiki-rrf-weight"
+              preference="extensions.zotero.__addonRef__.wiki.rrfWeight"
+              min="0"
+              max="10"
+              step="0.1"
+              placeholder="0"
+            />
+          </html:div>
+        </html:div>
+
+        <html:div class="zmp-sw zmp-nrow zmp-last">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-wiki-timeout-label"></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-wiki-timeout-hint"></html:span></html:span></html:span>
+          </html:div>
+          <html:input
+            type="number"
+            class="zmp-fi zmp-nb"
+            id="zotero-prefpane-__addonRef__-wiki-timeout"
+            preference="extensions.zotero.__addonRef__.wiki.searchTimeoutMs"
+            min="100"
+            max="60000"
+            step="100"
+            placeholder="5000"
+          />
+        </html:div>
+
+        <html:div class="zmp-sl">
+          <html:span data-l10n-id="pref-wiki-group-data"></html:span>
+        </html:div>
+
+        <html:div class="zmp-fh" id="wiki-data-statistics"></html:div>
+        <html:div class="zmp-bg">
+          <html:button
+            class="zmp-b zmp-bd zmp-b-sm"
+            id="clear-wiki-data-button"
+            data-l10n-id="pref-wiki-clear-button"
+          ></html:button>
+          <html:button
+            class="zmp-b zmp-bd zmp-b-sm"
+            id="clear-wiki-reading-notes-button"
+            data-l10n-id="pref-wiki-reading-notes-clear-button"
+          ></html:button>
+        </html:div>
+      </html:div>
+    </html:div>
+
+    <!-- ============================================================
+         TAB 4 — Documents: turning a PDF into Markdown, and translating
+         that same Markdown. Two cards because they are two services with
+         two sets of credentials, one feeding the other.
+         ============================================================ -->
+    <html:div class="zmp-tp zmp-needs-server" data-tabpanel="document">
+
+      <html:div class="zmp-s" data-icon="mineru">
+        <html:div class="zmp-s-title">
+          <html:span data-l10n-id="pref-mineru-title"></html:span>
+          <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-mineru-desc"></html:span><html:span data-l10n-id="pref-mineru-unified-flow"></html:span><html:span data-l10n-id="pref-mineru-reindex-hint"></html:span></html:span></html:span>
+        </html:div>
+
+        <html:div id="mineru-settings-container">
+          <html:div class="zmp-f2">
+            <html:div class="zmp-fg">
+              <html:div class="zmp-fl-h">
+                <html:label class="zmp-fl" data-l10n-id="pref-mineru-mode-label"></html:label>
+                <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-mineru-mode-hint"></html:span></html:span></html:span>
+              </html:div>
+              <html:select class="zmp-fi"
+                id="zotero-prefpane-__addonRef__-mineru-mode"
+                preference="extensions.zotero.__addonRef__.mineru.mode"
+              >
+                <html:option value="cloud" data-l10n-id="pref-mineru-mode-cloud"></html:option>
+                <html:option value="local" data-l10n-id="pref-mineru-mode-local"></html:option>
+              </html:select>
+            </html:div>
+            <html:div class="zmp-fg">
+              <html:label class="zmp-fl" data-l10n-id="pref-mineru-base-url-label"></html:label>
+              <html:input type="text" class="zmp-fi zmp-fi-l zmp-fi-mono"
+                id="zotero-prefpane-__addonRef__-mineru-base-url"
+                preference="extensions.zotero.__addonRef__.mineru.baseURL"
+                placeholder="https://mineru.net"
+              />
+            </html:div>
+          </html:div>
+
+          <html:div class="zmp-fg" id="mineru-token-row">
+            <html:div class="zmp-fl-h">
+              <html:label class="zmp-fl" data-l10n-id="pref-mineru-token-label"></html:label>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-mineru-token-hint"></html:span></html:span></html:span>
+            </html:div>
+            <html:input type="password" class="zmp-fi zmp-fi-l zmp-fi-mono"
+              id="zotero-prefpane-__addonRef__-mineru-api-token"
+              preference="extensions.zotero.__addonRef__.mineru.apiToken"
+              placeholder="eyJ..."
+            />
+          </html:div>
+
+          <html:div class="zmp-fact">
+            <html:div class="zmp-fg">
+              <html:label class="zmp-fl" data-l10n-id="pref-mineru-model-label"></html:label>
+              <html:select class="zmp-fi"
+                id="zotero-prefpane-__addonRef__-mineru-model-version"
+                preference="extensions.zotero.__addonRef__.mineru.modelVersion"
+              >
+                <html:option value="vlm" data-l10n-id="pref-mineru-model-vlm"></html:option>
+                <html:option value="hybrid" id="mineru-model-hybrid-option" data-l10n-id="pref-mineru-model-hybrid"></html:option>
+                <html:option value="pipeline" data-l10n-id="pref-mineru-model-pipeline"></html:option>
+              </html:select>
+            </html:div>
+            <html:div class="zmp-fg" id="mineru-language-row">
+              <html:div class="zmp-fl-h">
+                <html:label class="zmp-fl" data-l10n-id="pref-mineru-language-label"></html:label>
+                <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-mineru-language-hint"></html:span></html:span></html:span>
+              </html:div>
+              <html:input type="text" class="zmp-fi zmp-fi-s zmp-fi-mono"
+                id="zotero-prefpane-__addonRef__-mineru-language"
+                preference="extensions.zotero.__addonRef__.mineru.language"
+                placeholder="ch"
+              />
+            </html:div>
+            <html:div class="zmp-fg zmp-fg-act">
+              <html:button class="zmp-b" id="test-mineru-button" data-l10n-id="pref-mineru-test-button-text"></html:button>
+            </html:div>
+          </html:div>
+          <html:div class="zmp-res" id="mineru-test-result"></html:div>
+
+          <html:div class="zmp-fh" id="mineru-vlm-hint" style="display:none; margin-bottom:10px" data-l10n-id="pref-mineru-vlm-hint"></html:div>
+
+          <html:div class="zmp-sw" id="mineru-ocr-row">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-mineru-ocr-text"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-mineru-ocr-sub"></html:span></html:span></html:span>
+            </html:div>
+            <html:label class="zmp-tog">
+              <html:input type="checkbox"
+                id="zotero-prefpane-__addonRef__-mineru-enable-ocr"
+                preference="extensions.zotero.__addonRef__.mineru.enableOCR"
+              />
+              <html:span class="zmp-tog-track"></html:span>
+            </html:label>
+          </html:div>
+
+          <html:div class="zmp-sw">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-mineru-formula-text"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-mineru-formula-sub"></html:span></html:span></html:span>
+            </html:div>
+            <html:label class="zmp-tog">
+              <html:input type="checkbox"
+                id="zotero-prefpane-__addonRef__-mineru-enable-formula"
+                preference="extensions.zotero.__addonRef__.mineru.enableFormula"
+              />
+              <html:span class="zmp-tog-track"></html:span>
+            </html:label>
+          </html:div>
+
+          <html:div class="zmp-sw zmp-last">
+            <html:div class="zmp-sw-h">
+              <html:span class="zmp-sw-text" data-l10n-id="pref-mineru-table-text"></html:span>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-mineru-table-sub"></html:span></html:span></html:span>
+            </html:div>
+            <html:label class="zmp-tog">
+              <html:input type="checkbox"
+                id="zotero-prefpane-__addonRef__-mineru-enable-table"
+                preference="extensions.zotero.__addonRef__.mineru.enableTable"
+              />
+              <html:span class="zmp-tog-track"></html:span>
+            </html:label>
+          </html:div>
+
+          <html:div class="zmp-ex" id="mineru-advanced-panel">
+            <html:div class="zmp-ex-h" id="mineru-advanced-toggle">
+              <html:span class="zmp-ex-a">▶</html:span>
+              <html:span class="zmp-ex-t" data-l10n-id="pref-mineru-advanced-title"></html:span>
+              <html:span class="zmp-ex-m" id="mineru-cache-summary"></html:span>
+            </html:div>
+            <html:div class="zmp-ex-b">
+              <html:div class="zmp-f3">
+                <html:div class="zmp-fg">
+                  <html:label class="zmp-fl" data-l10n-id="pref-mineru-concurrency-label"></html:label>
+                  <html:input type="number" class="zmp-fi"
+                    id="zotero-prefpane-__addonRef__-mineru-concurrency"
+                    preference="extensions.zotero.__addonRef__.mineru.concurrency"
+                    min="1" max="8" placeholder="2"
+                  />
+                </html:div>
+                <html:div class="zmp-fg">
+                  <html:label class="zmp-fl" data-l10n-id="pref-mineru-timeout-label"></html:label>
+                  <html:input type="number" class="zmp-fi"
+                    id="zotero-prefpane-__addonRef__-mineru-timeout"
+                    preference="extensions.zotero.__addonRef__.mineru.timeoutSeconds"
+                    min="30" max="3600" placeholder="600"
+                  />
+                </html:div>
+                <html:div class="zmp-fg">
+                  <html:label class="zmp-fl" data-l10n-id="pref-mineru-max-size-label"></html:label>
+                  <html:input type="number" class="zmp-fi"
+                    id="zotero-prefpane-__addonRef__-mineru-max-size"
+                    preference="extensions.zotero.__addonRef__.mineru.maxFileSizeMB"
+                    min="1" max="2048" placeholder="200"
+                  />
+                </html:div>
+              </html:div>
+
+              <html:div class="zmp-sw zmp-last">
+                <html:div class="zmp-sw-h">
+                  <html:span class="zmp-sw-text" data-l10n-id="pref-mineru-blocking-text"></html:span>
+                  <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-mineru-blocking-sub"></html:span></html:span></html:span>
+                </html:div>
+                <html:label class="zmp-tog">
+                  <html:input type="checkbox"
+                    id="zotero-prefpane-__addonRef__-mineru-blocking-on-demand"
+                    preference="extensions.zotero.__addonRef__.mineru.blockingOnDemand"
+                  />
+                  <html:span class="zmp-tog-track"></html:span>
+                </html:label>
+              </html:div>
+
+              <html:div class="zmp-bg">
+                <html:button class="zmp-b zmp-b-sm" id="refresh-mineru-cache-button" data-l10n-id="pref-mineru-cache-refresh-button-text"></html:button>
+                <html:button class="zmp-b zmp-bd zmp-b-sm" id="clear-mineru-cache-button" data-l10n-id="pref-mineru-cache-clear-button-text"></html:button>
+                <html:button class="zmp-b zmp-bd zmp-b-sm" id="clear-mineru-markdown-button" data-l10n-id="pref-mineru-markdown-clear-button-text"></html:button>
+                <html:span class="zmp-res" id="mineru-cache-result"></html:span>
+              </html:div>
+            </html:div>
+          </html:div>
+        </html:div>
+      </html:div>
+
+      <html:div class="zmp-s" data-icon="translate">
+        <html:div class="zmp-s-title">
+          <html:span data-l10n-id="pref-translation-title"></html:span>
+          <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-translation-desc"></html:span></html:span></html:span>
+        </html:div>
+
+        <html:div class="zmp-f2">
+          <html:div class="zmp-fg">
+            <html:label class="zmp-fl" data-l10n-id="pref-translation-provider-label"></html:label>
+            <html:input type="text" class="zmp-fi zmp-fi-l"
+              id="zmr-llm-provider"
+              preference="extensions.zotero.__addonRef__.llm.provider"
+              placeholder="OpenRouter"
+            />
+          </html:div>
+          <html:div class="zmp-fg">
+            <html:label class="zmp-fl" data-l10n-id="pref-translation-model-label"></html:label>
+            <html:input type="text" class="zmp-fi zmp-fi-l zmp-fi-mono"
+              id="zmr-llm-model"
+              preference="extensions.zotero.__addonRef__.llm.model"
+              placeholder="openai/gpt-4.1-mini"
+            />
+          </html:div>
+        </html:div>
+
+        <html:div class="zmp-fg">
+          <html:label class="zmp-fl" data-l10n-id="pref-translation-base-url-label"></html:label>
+          <html:input type="text" class="zmp-fi zmp-fi-l zmp-fi-mono"
+            id="zmr-llm-base-url"
+            preference="extensions.zotero.__addonRef__.llm.baseURL"
+            placeholder="https://openrouter.ai/api/v1"
+          />
+        </html:div>
+
+        <html:div class="zmp-f2">
+          <html:div class="zmp-fg">
+            <html:label class="zmp-fl" data-l10n-id="pref-translation-api-key-label"></html:label>
+            <html:input type="password" class="zmp-fi zmp-fi-l zmp-fi-mono"
+              id="zmr-llm-api-key"
+              preference="extensions.zotero.__addonRef__.llm.apiKey"
+              autocomplete="off"
+            />
+          </html:div>
+          <html:div class="zmp-fg">
+            <html:label class="zmp-fl" data-l10n-id="pref-translation-language-label"></html:label>
+            <html:select class="zmp-fi"
+              id="zmr-llm-language"
+              preference="extensions.zotero.__addonRef__.llm.targetLanguage"
+            >
+              <html:option value="简体中文">简体中文</html:option>
+              <html:option value="繁體中文">繁體中文</html:option>
+              <html:option value="English">English</html:option>
+              <html:option value="日本語">日本語</html:option>
+              <html:option value="한국어">한국어</html:option>
+              <html:option value="Français">Français</html:option>
+              <html:option value="Deutsch">Deutsch</html:option>
+              <html:option value="Español">Español</html:option>
+              <html:option value="Português">Português</html:option>
+              <html:option value="Italiano">Italiano</html:option>
+              <html:option value="Русский">Русский</html:option>
+            </html:select>
+          </html:div>
+        </html:div>
+
+        <html:div class="zmp-f2">
+          <html:div class="zmp-fg">
+            <html:label class="zmp-fl" data-l10n-id="pref-translation-expert-label"></html:label>
+            <html:select class="zmp-fi" id="zmr-translation-expert"
+              preference="extensions.zotero.__addonRef__.translation.expertMode">
+              <html:option value="auto" data-l10n-id="pref-translation-expert-auto"></html:option>
+              <html:option value="general" data-l10n-id="pref-translation-expert-general"></html:option>
+              <html:option value="academic" data-l10n-id="pref-translation-expert-academic"></html:option>
+              <html:option value="technical" data-l10n-id="pref-translation-expert-technical"></html:option>
+              <html:option value="legal" data-l10n-id="pref-translation-expert-legal"></html:option>
+              <html:option value="medical" data-l10n-id="pref-translation-expert-medical"></html:option>
+              <html:option value="custom" data-l10n-id="pref-translation-expert-custom"></html:option>
+            </html:select>
+          </html:div>
+          <html:div class="zmp-fg" id="zmr-translation-expert-custom-row">
+            <html:label class="zmp-fl" data-l10n-id="pref-translation-expert-custom-label"></html:label>
+            <html:input type="text" class="zmp-fi zmp-fi-l"
+              id="zmr-translation-expert-custom"
+              preference="extensions.zotero.__addonRef__.translation.expertCustom"
+            />
+          </html:div>
+        </html:div>
+
+        <html:div class="zmp-sw">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-translation-context-text"></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-translation-context-sub"></html:span></html:span></html:span>
+          </html:div>
+          <html:label class="zmp-tog">
+            <html:input type="checkbox" id="zmr-translation-context-enabled"
+              preference="extensions.zotero.__addonRef__.translation.contextEnabled" />
+            <html:span class="zmp-tog-track"></html:span>
+          </html:label>
+        </html:div>
+
+        <html:div class="zmp-sw">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-translation-document-glossary-text"></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-translation-document-glossary-sub"></html:span></html:span></html:span>
+          </html:div>
+          <html:label class="zmp-tog">
+            <html:input type="checkbox" id="zmr-translation-auto-document-glossary"
+              preference="extensions.zotero.__addonRef__.translation.autoDocumentGlossary" />
+            <html:span class="zmp-tog-track"></html:span>
+          </html:label>
+        </html:div>
+
+        <html:div class="zmp-sw zmp-last">
+          <html:div class="zmp-sw-h">
+            <html:span class="zmp-sw-text" data-l10n-id="pref-translation-global-glossary-text"></html:span>
+            <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-translation-global-glossary-sub"></html:span></html:span></html:span>
+          </html:div>
+          <html:label class="zmp-tog">
+            <html:input type="checkbox" id="zmr-translation-use-global-glossary"
+              preference="extensions.zotero.__addonRef__.translation.useGlobalGlossary" />
+            <html:span class="zmp-tog-track"></html:span>
+          </html:label>
+        </html:div>
+
+        <html:div class="zmp-ex" id="translation-prompt-panel">
+          <html:div class="zmp-ex-h" id="translation-prompt-toggle">
+            <html:span class="zmp-ex-a">▶</html:span>
+            <html:span class="zmp-ex-t" data-l10n-id="pref-translation-prompt-title"></html:span>
+          </html:div>
+          <html:div class="zmp-ex-b">
+            <html:div class="zmp-bg" style="margin-top:0;margin-bottom:9px">
+              <html:button class="zmp-b zmp-b-sm" id="zmr-prompt-edit"
+                data-l10n-id="pref-translation-prompt-edit"></html:button>
+              <html:button class="zmp-b zmp-b-sm" id="zmr-prompt-reset"
+                data-l10n-id="pref-translation-prompt-reset"></html:button>
+              <html:span class="zmp-q" tabindex="0"><html:span class="zmp-q-p"><html:span data-l10n-id="pref-translation-prompt-hint"></html:span></html:span></html:span>
+            </html:div>
+            <html:textarea id="zmr-llm-prompt" class="zmp-ta is-locked" readonly="readonly" rows="8"></html:textarea>
+          </html:div>
+        </html:div>
+
+        <html:div class="zmp-ex" id="translation-glossary-panel">
+          <html:div class="zmp-ex-h" id="translation-glossary-toggle">
+            <html:span class="zmp-ex-a">▶</html:span>
+            <html:span class="zmp-ex-t" data-l10n-id="pref-translation-glossary-title"></html:span>
+          </html:div>
+          <html:div class="zmp-ex-b">
+            <html:div class="zmp-glossary-toolbar">
+              <html:input class="zmp-fi zmp-glossary-search" id="zmr-global-glossary-search" type="search"
+                data-l10n-id="pref-translation-glossary-search" />
+              <html:button class="zmp-b zmp-b-sm" id="zmr-global-glossary-add" type="button"
+                data-l10n-id="pref-translation-glossary-add"></html:button>
+              <html:button class="zmp-b zmp-b-sm" id="zmr-global-glossary-import" type="button"
+                data-l10n-id="pref-translation-glossary-import"></html:button>
+              <html:button class="zmp-b zmp-b-sm" id="zmr-global-glossary-export" type="button"
+                data-l10n-id="pref-translation-glossary-export"></html:button>
+              <html:button class="zmp-b zmp-b-sm" id="zmr-global-glossary-save" type="button"
+                data-l10n-id="pref-translation-glossary-save"></html:button>
+            </html:div>
+            <html:div class="zmp-glossary-wrap">
+              <html:table class="zmp-glossary-table">
+                <html:thead>
+                  <html:tr>
+                    <html:th data-l10n-id="pref-translation-glossary-enabled"></html:th>
+                    <html:th data-l10n-id="pref-translation-glossary-source"></html:th>
+                    <html:th data-l10n-id="pref-translation-glossary-target"></html:th>
+                    <html:th data-l10n-id="pref-translation-glossary-language"></html:th>
+                    <html:th data-l10n-id="pref-translation-glossary-note"></html:th>
+                    <html:th></html:th>
+                  </html:tr>
+                </html:thead>
+                <html:tbody id="zmr-global-glossary-body"></html:tbody>
+              </html:table>
+            </html:div>
+          </html:div>
+        </html:div>
+
+        <html:div class="zmp-ex" id="translation-performance-panel">
+          <html:div class="zmp-ex-h" id="translation-performance-toggle">
+            <html:span class="zmp-ex-a">▶</html:span>
+            <html:span class="zmp-ex-t" data-l10n-id="pref-translation-performance-title"></html:span>
+          </html:div>
+          <html:div class="zmp-ex-b">
+            <html:div class="zmp-f3">
+              <html:div class="zmp-fg">
+                <html:label class="zmp-fl" data-l10n-id="pref-translation-batch-label"></html:label>
+                <html:input type="number" class="zmp-fi" id="zmr-translation-batch-size"
+                  preference="extensions.zotero.__addonRef__.translation.batchSize" min="1" max="12" />
+              </html:div>
+              <html:div class="zmp-fg">
+                <html:label class="zmp-fl" data-l10n-id="pref-translation-concurrency-label"></html:label>
+                <html:input type="number" class="zmp-fi" id="zmr-translation-concurrency"
+                  preference="extensions.zotero.__addonRef__.translation.concurrency" min="1" max="6" />
+              </html:div>
+              <html:div class="zmp-fg">
+                <html:label class="zmp-fl" data-l10n-id="pref-translation-retries-label"></html:label>
+                <html:input type="number" class="zmp-fi" id="zmr-translation-retries"
+                  preference="extensions.zotero.__addonRef__.translation.maxRetries" min="0" max="5" />
+              </html:div>
+            </html:div>
+          </html:div>
+        </html:div>
+      </html:div>
+    </html:div>
+
+    <html:div class="zmp-ft">
+      <html:div class="zmp-ft-text">
+        <html:label
+          data-l10n-id="pref-help"
+          data-l10n-args='{"time": "2026-08-10 21:00:42","name": "__addonName__","version":"__addonVersion__"}'
+        ></html:label>
+      </html:div>
+    </html:div>
+
+  </vbox>
+</prefpane>
