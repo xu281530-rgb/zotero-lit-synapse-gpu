@@ -410,3 +410,19 @@ pref-wiki-reading-notes-clear-partial = 已删除 { $count } 条 AI 阅读笔记
 pref-wiki-reading-notes-clear-error = 删除 AI 阅读笔记失败
 pref-wiki-data-statistics = Wiki 数据：{ $pages } 个 Page，{ $claims } 个 Claim，{ $evidence } 条 Evidence，{ $embeddings } 条 Claim Embedding
 pref-wiki-data-statistics-error = 无法读取 Wiki 统计
+
+# --- 设置面板分组（顶部标签与小节标题） ---
+pref-tab-server = 服务器
+pref-tab-retrieval = 检索
+pref-tab-wiki = 知识库
+pref-tab-document = 文档
+pref-privacy-title = 写入与隐私
+pref-retrieval-model-title = 向量模型
+pref-retrieval-query-title = 检索行为
+pref-hybrid-group-limits = 返回数量
+pref-hybrid-group-scoring = 评分与融合
+pref-hybrid-group-performance = 性能
+pref-wiki-group-record = 记录
+pref-wiki-group-retrieval = 参与检索
+pref-wiki-group-data = 数据
+pref-recommended-chip = 推荐 { $value }

@@ -410,3 +410,19 @@ pref-wiki-reading-notes-clear-partial = AI 閲覧ノートを { $count } 件削�
 pref-wiki-reading-notes-clear-error = AI 閲覧ノートを削除できませんでした
 pref-wiki-data-statistics = Wiki データ：Page { $pages } 件、Claim { $claims } 件、Evidence { $evidence } 件、Embedding { $embeddings } 件
 pref-wiki-data-statistics-error = Wiki 統計を取得できません
+
+# --- 設定パネルのグループ（上部タブと小見出し） ---
+pref-tab-server = サーバー
+pref-tab-retrieval = 検索
+pref-tab-wiki = Wiki
+pref-tab-document = ドキュメント
+pref-privacy-title = 書き込みとプライバシー
+pref-retrieval-model-title = 埋め込みモデル
+pref-retrieval-query-title = 検索の挙動
+pref-hybrid-group-limits = 返す件数
+pref-hybrid-group-scoring = スコアと統合
+pref-hybrid-group-performance = パフォーマンス
+pref-wiki-group-record = 記録
+pref-wiki-group-retrieval = 検索への参加
+pref-wiki-group-data = データ
+pref-recommended-chip = 推奨 { $value }

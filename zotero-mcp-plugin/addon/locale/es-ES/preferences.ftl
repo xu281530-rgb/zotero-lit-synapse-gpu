@@ -410,3 +410,19 @@ pref-wiki-reading-notes-clear-partial = Se eliminaron { $count } notas de lectur
 pref-wiki-reading-notes-clear-error = No se pudieron eliminar las notas de lectura de IA
 pref-wiki-data-statistics = Datos de la Wiki: { $pages } páginas, { $claims } afirmaciones, { $evidence } evidencias, { $embeddings } embeddings
 pref-wiki-data-statistics-error = Estadísticas de la Wiki no disponibles
+
+# --- Agrupación del panel de preferencias (pestañas y subtítulos) ---
+pref-tab-server = Servidor
+pref-tab-retrieval = Búsqueda
+pref-tab-wiki = Wiki
+pref-tab-document = Documentos
+pref-privacy-title = Escritura y privacidad
+pref-retrieval-model-title = Modelo de embeddings
+pref-retrieval-query-title = Comportamiento de búsqueda
+pref-hybrid-group-limits = Cuántos resultados
+pref-hybrid-group-scoring = Puntuación y fusión
+pref-hybrid-group-performance = Rendimiento
+pref-wiki-group-record = Registro
+pref-wiki-group-retrieval = En la búsqueda
+pref-wiki-group-data = Datos
+pref-recommended-chip = rec. { $value }

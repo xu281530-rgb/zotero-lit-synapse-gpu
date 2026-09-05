@@ -410,3 +410,19 @@ pref-wiki-reading-notes-clear-partial = { $count } KI-Lesenotizen gelöscht; { $
 pref-wiki-reading-notes-clear-error = KI-Lesenotizen konnten nicht gelöscht werden
 pref-wiki-data-statistics = Wiki-Daten: { $pages } Seiten, { $claims } Aussagen, { $evidence } Belege, { $embeddings } Embeddings
 pref-wiki-data-statistics-error = Wiki-Statistik nicht verfügbar
+
+# --- Gliederung des Einstellungsbereichs (Tabs und Zwischenueberschriften) ---
+pref-tab-server = Server
+pref-tab-retrieval = Suche
+pref-tab-wiki = Wiki
+pref-tab-document = Dokumente
+pref-privacy-title = Schreibzugriff und Datenschutz
+pref-retrieval-model-title = Embedding-Modell
+pref-retrieval-query-title = Suchverhalten
+pref-hybrid-group-limits = Anzahl der Treffer
+pref-hybrid-group-scoring = Bewertung und Fusion
+pref-hybrid-group-performance = Leistung
+pref-wiki-group-record = Aufzeichnung
+pref-wiki-group-retrieval = In der Suche
+pref-wiki-group-data = Daten
+pref-recommended-chip = empf. { $value }

@@ -410,3 +410,19 @@ pref-wiki-reading-notes-clear-partial = Deleted { $count } AI reading notes; { $
 pref-wiki-reading-notes-clear-error = Failed to delete AI reading notes
 pref-wiki-data-statistics = Wiki data: { $pages } pages, { $claims } claims, { $evidence } evidence, { $embeddings } embeddings
 pref-wiki-data-statistics-error = Wiki statistics unavailable
+
+# --- Preference pane grouping (top tabs and sub-headings) ---
+pref-tab-server = Server
+pref-tab-retrieval = Retrieval
+pref-tab-wiki = Wiki
+pref-tab-document = Documents
+pref-privacy-title = Writing and privacy
+pref-retrieval-model-title = Embedding model
+pref-retrieval-query-title = Query behaviour
+pref-hybrid-group-limits = How much comes back
+pref-hybrid-group-scoring = Scoring and fusion
+pref-hybrid-group-performance = Performance
+pref-wiki-group-record = Recording
+pref-wiki-group-retrieval = In retrieval
+pref-wiki-group-data = Data
+pref-recommended-chip = suggested { $value }

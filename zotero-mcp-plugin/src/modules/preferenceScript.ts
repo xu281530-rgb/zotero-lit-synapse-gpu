@@ -249,6 +249,7 @@ function bindPrefEvents() {
   const copyInstrButton = doc?.querySelector("#copy-instr-button") as HTMLButtonElement;
   const configOutput = doc?.querySelector("#config-output") as HTMLElement;
   const configGuide = doc?.querySelector("#config-guide") as HTMLElement;
+  const configPanels = doc?.querySelector("#config-output-panels") as HTMLElement;
 
   let currentConfig = "";
   let currentGuide = "";
@@ -272,6 +273,9 @@ function bindPrefEvents() {
       if (configGuide) {
         configGuide.textContent = currentGuide;
       }
+
+      // The panels are laid out only once there is something in them.
+      if (configPanels) configPanels.hidden = false;
 
       // Enable copy button
       copyConfigButton.disabled = false;
@@ -343,6 +347,7 @@ function bindPrefEvents() {
   });
 
   // ============ Collapsible Panels ============
+  bindTabs(doc);
   bindCollapsiblePanels(doc);
 
   // ============ Embedding API Settings ============
@@ -1334,16 +1339,70 @@ function bindTranslationSettings(doc: Document) {
 }
 
 /**
+ * Show one tab's panel and hide the rest.
+ *
+ * Separate from the click handler because turning the server off has to be
+ * able to move the user back to the server tab, and it should do that through
+ * the same path a click takes rather than a second copy of the same lines.
+ */
+function selectTab(doc: Document, name: string) {
+  for (const tab of Array.from(
+    doc.querySelectorAll('.zmp-tab'),
+  ) as HTMLElement[]) {
+    tab.classList.toggle('is-active', tab.getAttribute('data-tab') === name);
+  }
+  for (const panel of Array.from(
+    doc.querySelectorAll('.zmp-tp'),
+  ) as HTMLElement[]) {
+    panel.classList.toggle(
+      'is-active',
+      panel.getAttribute('data-tabpanel') === name,
+    );
+  }
+}
+
+function bindTabs(doc: Document) {
+  for (const tab of Array.from(
+    doc.querySelectorAll('.zmp-tab'),
+  ) as HTMLElement[]) {
+    tab.addEventListener('click', () => {
+      if ((tab as HTMLButtonElement).disabled) return;
+      const name = tab.getAttribute('data-tab');
+      if (name) selectTab(doc, name);
+    });
+  }
+}
+
+/**
  * Update server-dependent UI visibility (cascade hiding)
+ *
+ * A tab whose content needs the running server is DISABLED, not removed: a
+ * tab that vanishes reads as a feature the plugin does not have, where a
+ * greyed one reads as a feature waiting on the switch above it. If the user
+ * is standing in one when the server goes off, they are walked back to the
+ * server tab, which is where the switch that fixes it lives.
  */
 function updateServerDependentUI(doc: Document, enabled: boolean) {
-  const serverContent = doc?.querySelector('#server-dependent-content') as HTMLElement;
   const serverOffHint = doc?.querySelector('#server-off-hint') as HTMLElement;
   const portRow = doc?.querySelector('#server-port-row') as HTMLElement;
   const remoteRow = doc?.querySelector('#server-remote-row') as HTMLElement;
   const tokenRow = doc?.querySelector('#server-token-row') as HTMLElement;
 
-  if (serverContent) serverContent.style.display = enabled ? '' : 'none';
+  let leavingActiveTab = false;
+  for (const tab of Array.from(
+    doc?.querySelectorAll('.zmp-tab[data-needs-server]') ?? [],
+  ) as HTMLElement[]) {
+    (tab as HTMLButtonElement).disabled = !enabled;
+    if (!enabled && tab.classList.contains('is-active')) leavingActiveTab = true;
+  }
+  if (leavingActiveTab) selectTab(doc, 'server');
+
+  for (const el of Array.from(
+    doc?.querySelectorAll('.zmp-needs-server') ?? [],
+  ) as HTMLElement[]) {
+    (el as HTMLElement).style.display = enabled ? '' : 'none';
+  }
+
   if (serverOffHint) serverOffHint.style.display = enabled ? 'none' : 'block';
   if (portRow) portRow.style.display = enabled ? '' : 'none';
   if (remoteRow) remoteRow.style.display = enabled ? '' : 'none';
