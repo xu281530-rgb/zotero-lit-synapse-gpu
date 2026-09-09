@@ -1,7 +1,7 @@
 {
   "name": "zotero-lit-synapse",
   "type": "module",
-  "version": "3.2.4",
+  "version": "3.2.5",
   "description": "Zotero LitSynapse for Zotero 9.0.x with question-driven LLM Wiki memory, independent evidence-linked knowledge storage, cross-paper link candidates with auditable settlement, hybrid keyword/semantic/Wiki retrieval, cursor pagination, and MCP 2025-06-18 Streamable HTTP",
   "config": {
     "addonName": "Zotero LitSynapse",
@@ -9,7 +9,7 @@
     "addonRef": "zotero-lit-synapse",
     "addonInstance": "ZoteroLitSynapse",
     "prefsPrefix": "extensions.zotero.zotero-lit-synapse",
-    "addonVersion": "3.2.4"
+    "addonVersion": "3.2.5"
   },
   "repository": {
     "type": "git",
