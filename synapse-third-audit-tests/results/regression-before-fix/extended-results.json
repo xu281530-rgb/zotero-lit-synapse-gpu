@@ -1,0 +1,162 @@
+[
+  {
+    "name": "Lifecycle: two rapid rebinds tolerate out-of-order stale callbacks",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Lifecycle: stale accept closes transport without opening streams",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Lifecycle: unexpected active listener termination clears transports and MCP",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Lifecycle: stop closes actual listener even if running flag is false",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Lifecycle: failed bind is cleaned up and next start can succeed",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Lifecycle: repeated stop and start while running are idempotent",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Lifecycle: one transport close failure does not block remaining cleanup",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Reader: invalid cache owner is rejected",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Reader: isolated cache contents survive in-memory reset",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Reader: source change clears stale analysis but preserves manual glossary",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Reader: explicit-owner legacy cache migrates to library-scoped path",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Reader: ownerless legacy cache migrates only with matching metadata and unique database owner",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Reader: ambiguous legacy owner is not imported and original is untouched",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Reader: explicit wrong-library legacy cache is not imported",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Reader: legacy cache with changed source is not imported",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Reader: invalid owner metadata in new cache is not trusted",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Reader: concurrent cross-library writes notify distinct identities and clear queues",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Reader: glossary editor updates only requested library-scoped document",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Index: incoming add and modify remain queued while build is busy",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Index: item arriving during an actual pending batch is drained after completion",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Index: group event during periodic personal-library build is drained afterwards",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Index: unavailable service preserves queue for retry",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Index: build busy result preserves exact forced request",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Index: suspension stops queuing and drains; resume accepts later events",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Index: disabled preference prevents new regular-item queuing",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Index: exhausted retries retain pending data instead of deleting it",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MinerU: ordinary forced parsing imports the matching result for one library",
+    "status": "PASS",
+    "details": {
+      "parseCalls": [
+        "/pdf/a.pdf"
+      ],
+      "importedLibrary": 1
+    }
+  },
+  {
+    "name": "MinerU: same attachment duplicate requests correctly share one parse",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MinerU: different attachment keys do not share their parsing tasks",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "C1a: concurrent same-key PDFs from different libraries parse independently",
+    "status": "FAIL",
+    "error": "AssertionError [ERR_ASSERTION]: The input did not match the regular expression /Paper B/. Input:\n\n'Paper A evidence.'\n\n    at D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\extended.js:88:38\n    at async check (D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\extended.js:7:136)\n    at async D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\extended.js:80:2"
+  },
+  {
+    "name": "C1b: same-key disk caches stay isolated across restart and matching file stats",
+    "status": "FAIL",
+    "error": "SyntaxError: \"undefined\" is not valid JSON\n    at JSON.parse (<anonymous>)\n    at D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\extended.js:98:22\n    at async check (D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\extended.js:7:136)\n    at async D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\extended.js:93:2"
+  }
+]

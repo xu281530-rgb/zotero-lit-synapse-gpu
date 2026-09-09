@@ -122,6 +122,17 @@ async function main() {
   console.log(
     "PASS MCP audit errors expose structured issues and the original call mode",
   );
+  service.getPreparedContext = () => { throw new Error("Prepared context is unavailable or expired."); };
+  const expired = await call("wiki_get_prepared_context", {prepareToken:"expired",section:"crossPaperTasks",offset:7,limit:4});
+  const structured = JSON.parse(expired.content[0].text);
+  assert.equal(expired.isError,true);
+  assert.equal(structured.operation,"wiki_get_prepared_context");
+  assert.equal(structured.request.offset,7);
+  assert.equal(structured.request.limit,4);
+  assert.equal(typeof structured.retryable,"boolean");
+  assert.ok(structured.code);
+  assert.deepEqual(expired.structuredContent,structured);
+  console.log("PASS MCP ordinary errors preserve structured recovery coordinates");
 }
 await main().catch((error) => {
   console.error(`${error.name}: ${error.message}`);

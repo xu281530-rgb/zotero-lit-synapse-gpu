@@ -33,6 +33,8 @@ function lexicalScore(queryTerms: string[], value: string): number {
 
 
 export interface WikiClaimSearchResult {
+  evidenceOverview?: any;
+  scoreKind?: string;
   claimId: number;
   pageId: number;
   claimText: string;
@@ -330,6 +332,8 @@ export class WikiRetriever {
         normalizedWikiScore,
         matchKind: direct > 0 || vectorScore > 0 ? "direct" : "one_hop",
         evidenceConfidence: Number(claim.confidence),
+        scoreKind: "heuristic",
+        evidenceOverview: (await this.store.getClaim(claimId))?.evidenceOverview,
         readDepth,
         epistemicStatus: column(claim, "epistemic_status", "epistemicStatus"),
         evidence,

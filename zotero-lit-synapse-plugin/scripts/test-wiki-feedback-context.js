@@ -31,6 +31,7 @@ const claim = {
   evidence: [{ evidenceId: 1, itemKey: "OTHER", excerpt: source }],
 };
 const store = {
+  crossPaperReviews: async () => ({ relations: async () => [] }),
   getClaim: async () => claim,
   listClaimsByEvidenceSource: async () => [claim],
 };

@@ -4,6 +4,8 @@ import {
   normalizeWikiText,
 } from "./wikiCanonicalizer";
 import { ensureWikiSchema } from "./wikiSchema";
+import { WikiCrossPaperReview } from "./wikiCrossPaperReview";
+import { evidenceOverview, selectSummaryClaims } from "./wikiEvidenceOverview";
 import { mapWikiEvidenceRow } from "./wikiDto";
 import { rowColumn as rowValue } from "./wikiRow";
 import {
@@ -237,6 +239,7 @@ export class WikiStore {
   private readonly sourceTracker?: WikiSourceTracker;
   private sourceSync: Promise<void> | null = null;
   private checkedSourceRevision: string | undefined;
+  private activeEvidenceWrite: { revision: string | undefined } | undefined;
 
   /**
    * The reading-session ledger and the embedding queue share this store's
@@ -296,7 +299,9 @@ export class WikiStore {
   async initialize(): Promise<void> {
     if (this.initialized) return;
     if (!this.initializing) {
-      this.initializing = ensureWikiSchema(this.db).then(() => {
+      this.initializing = ensureWikiSchema(this.db).then(async () => {
+        const pages = await this.db.queryAsync("SELECT page_id FROM wiki_pages WHERE summary_selection_json = '{}' ORDER BY page_id");
+        for (const row of pages) await this.refreshPageSummary(Number(rowValue(row, "page_id", "pageId")));
         this.initialized = true;
       }).finally(() => {
         this.initializing = null;
@@ -308,6 +313,10 @@ export class WikiStore {
   async synchronizeSourceChanges(): Promise<void> {
     await this.initialize();
     if (!this.sourceTracker) return;
+    if (this.activeEvidenceWrite) {
+      await this.finishEvidenceRead(this.activeEvidenceWrite.revision);
+      return;
+    }
     if (!this.sourceSync) {
       this.sourceSync = (async () => {
         const changes = await this.sourceTracker!.listPendingWikiSourceChanges();
@@ -329,6 +338,10 @@ export class WikiStore {
 
   private async beginEvidenceRead(): Promise<string | undefined> {
     if (!this.sourceTracker) return undefined;
+    if (this.activeEvidenceWrite) {
+      await this.finishEvidenceRead(this.activeEvidenceWrite.revision);
+      return this.activeEvidenceWrite.revision;
+    }
     for (let attempt = 0; attempt < 3; attempt++) {
       const revision = await this.sourceTracker.getWikiSourceRevision();
       if (revision === this.checkedSourceRevision) return revision;
@@ -737,8 +750,7 @@ export class WikiStore {
   private async refreshPageSummary(pageId: number): Promise<void> {
     const [claimRows, evidenceRows, relationRows] = await Promise.all([
       this.db.queryAsync(
-        `SELECT claim_text FROM wiki_claims WHERE page_id = ?
-       ORDER BY confidence DESC, updated_at DESC, claim_id LIMIT 5`,
+        `SELECT claim_id, confidence FROM wiki_claims WHERE page_id = ? ORDER BY claim_id`,
         [pageId],
       ),
       this.db.queryAsync(
@@ -764,11 +776,16 @@ export class WikiStore {
         [pageId],
       ),
     ]);
-    const parts = claimRows
-      .map((claim) =>
-        normalizeWikiText(String(rowValue(claim, "claim_text", "claimText"))),
-      )
-      .filter(Boolean);
+    const candidates = [];
+    const reviewStore = new WikiCrossPaperReview(this.db);
+    for (const row of claimRows) {
+      const claim = await reviewStore.claim(Number(rowValue(row, "claim_id", "claimId")));
+      if (claim) candidates.push({ ...claim, confidence: Number(row.confidence) });
+    }
+    const selected = selectSummaryClaims(candidates);
+    const parts = selected.map((claim) => normalizeWikiText(claim.claimText));
+    const selection = { algorithm: "source-type-coverage-v1", claims: selected.map(c => ({
+      claimId: c.claimId, version: c.version, basis: "Valid evidence, source and claim-type coverage, stable ID tie-break." })) };
     if (evidenceRows.length) {
       const roleCounts = new Map<string, number>();
       const stateCounts = new Map<string, number>();
@@ -819,9 +836,9 @@ export class WikiStore {
     }
     const summary = parts.join(" ");
     await this.db.queryAsync(
-      `UPDATE wiki_pages SET summary = ?, updated_at = ?, version = version + 1
+      `UPDATE wiki_pages SET summary = ?, summary_selection_json = ?, updated_at = ?, version = version + 1
        WHERE page_id = ?`,
-      [summary, Date.now(), pageId],
+      [summary, JSON.stringify(selection), Date.now(), pageId],
     );
   }
 
@@ -912,13 +929,14 @@ export class WikiStore {
 
   async commit(input: WikiCommitInput, operation?: { operationId: string; inputHash: string; payload: unknown; beforeCommit?: (result: WikiCommitResult) => Promise<void> }): Promise<WikiCommitResult> {
     await this.initialize();
+    const sourceRevision = await this.beginEvidenceRead();
     if (!Number.isInteger(input.libraryID) || input.libraryID <= 0) {
       throw new Error("libraryID must be a positive integer");
     }
     if (!input.userInitiated) {
       throw new Error("Wiki auto-write is not authorized for this commit");
     }
-    if (!Array.isArray(input.actions) || input.actions.length === 0) {
+    if (!Array.isArray(input.actions) || (input.actions.length === 0 && !input.crossPaperReview?.length && !input.evidenceAssessments?.length)) {
       throw new Error("Wiki commit requires at least one controlled action");
     }
     const createCount = input.actions.filter(
@@ -945,6 +963,12 @@ export class WikiStore {
     const evidenceChangedClaimIds = new Set<number>();
 
     await this.db.executeTransaction(async () => {
+      const reviews = new WikiCrossPaperReview(this.db, () => this.finishEvidenceRead(sourceRevision));
+      // Source notifications must remain pending if this transaction rolls back.
+      const previousWrite = this.activeEvidenceWrite;
+      this.activeEvidenceWrite = { revision: sourceRevision };
+      try {
+      await reviews.validateSnapshots(input.libraryID, input.crossPaperReview ?? []);
       if (operation) {
         await this.db.queryAsync('INSERT INTO wiki_commit_operations (library_id, operation_id, input_hash, payload_json, result_json, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
           [input.libraryID, operation.operationId, operation.inputHash, JSON.stringify(operation.payload), '{}', Date.now()]);
@@ -1379,7 +1403,7 @@ export class WikiStore {
 
       // A review retracts only this paper's support. Preserve the original
       // evidence in the audit trail and keep support from other papers intact.
-      if (input.readingSessionId) {
+      if (input.readingSessionId && !input.checkpoint) {
         const sessions = await this.readingSessions();
         const review = await sessions.get(input.readingSessionId);
         if (review?.libraryID === input.libraryID && review.wikiReviewAt !== null) {
@@ -1426,8 +1450,15 @@ export class WikiStore {
           String(rowValue(claim[0], "claim_text", "claimText")),
         );
       }
+      result.crossPaperReviews = await reviews.commit(input.libraryID, input.operationId ?? operation?.operationId ?? "controlled-store-write", input.crossPaperReview ?? [], result.refs);
+      await reviews.assess(input.libraryID, input.operationId ?? operation?.operationId ?? "controlled-store-write", input.evidenceAssessments ?? [], result.refs);
+      await reviews.refreshAffected(input.libraryID, result.crossPaperReviews.map(r => r.taskId));
       await operation?.beforeCommit?.(result);
+      await this.finishEvidenceRead(sourceRevision);
       if (operation) await this.db.queryAsync('UPDATE wiki_commit_operations SET result_json = ? WHERE library_id = ? AND operation_id = ?', [JSON.stringify(result), input.libraryID, operation.operationId]);
+      } finally {
+        this.activeEvidenceWrite = previousWrite;
+      }
     });
     return result;
   }
@@ -1509,7 +1540,7 @@ export class WikiStore {
       [claimId],
     );
     await this.finishEvidenceRead(sourceRevision);
-    return {
+    const claim: WikiClaimRecord = {
       claimId: Number(rowValue(row, "claim_id", "claimId")),
       pageId: Number(rowValue(row, "page_id", "pageId")),
       claimText: String(rowValue(row, "claim_text", "claimText")),
@@ -1522,6 +1553,17 @@ export class WikiStore {
       version: Number(row.version),
       evidence: evidenceRows.map((item) => this.mapEvidence(item)),
     };
+    const reviews = new WikiCrossPaperReview(this.db);
+    claim.evidenceOverview = evidenceOverview(claim, await reviews.assessment(claimId));
+    claim.claimRelations = await reviews.relations(undefined, claimId);
+    await this.finishEvidenceRead(sourceRevision);
+    return claim;
+  }
+
+  async crossPaperReviews(): Promise<WikiCrossPaperReview> {
+    await this.initialize();
+    const revision = await this.beginEvidenceRead();
+    return new WikiCrossPaperReview(this.db, () => this.finishEvidenceRead(revision));
   }
 
   /** Every Claim whose Evidence cites one paper, independent of query text. */
@@ -1583,6 +1625,7 @@ export class WikiStore {
         rowValue(row, "canonical_title", "canonicalTitle"),
       ),
       summary: String(row.summary ?? ""),
+      summarySelection: JSON.parse(String(rowValue(row, "summary_selection_json", "summarySelectionJson") ?? "{}")),
       primaryConceptId:
         rowValue(row, "primary_concept_id", "primaryConceptId") == null
           ? null
@@ -2038,6 +2081,11 @@ export class WikiStore {
     const deletedRows = countWikiPersistentRows(before);
     await this.db.executeTransaction(async () => {
       for (const table of [
+        "wiki_claim_relations",
+        "wiki_cross_paper_reviews",
+        "wiki_cross_paper_tasks",
+        "wiki_evidence_assessments",
+        "wiki_legacy_review_audit",
         /*
          * Of the link layer, only the SETTLEMENTS.
          *

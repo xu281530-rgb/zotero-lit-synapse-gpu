@@ -5,7 +5,7 @@ _This README is also available in: [:gb: English](./README.md) | :cn: 简体中�
 [![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-3.1.0-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-3.2.4-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -818,6 +818,7 @@ Claim 只能建立在阅读总结已经涵盖的内容之上。该附件也被�
 - `wiki_search` —— 检索 Concept/Alias、Claim、Relation 与一跳 Evidence 关联
 - `wiki_get_page` —— 查看 Page、Claim 与 Evidence
 - `wiki_get_claim` —— 查看一个原子 Claim 及其来源
+- `wiki_get_link_review` —— 恢复持久化跨论文核验任务、目标快照、结果和历史；支持独立分页读取 targets、discovery、verdicts、outcomes 和 history，不依赖十分钟准备令牌。先比较相关旧 Wiki，逐条记录排除理由，缺知识时明确暂缓。通过 `wiki_commit.crossPaperReview` 将结论绑定到真实论断、术语来源或新增论断关系；`checkpoint: true` 保存进度但不结束阅读。图谱每对论文只画一条线，主显示优先级为存在分歧、共享论断、方法差异或限定、同一条目、共享概念；点击任何类型的线均以统一卡片展示全部关系、Claim 和来源摘录。证据概况区分当前支持、历史来源及尚未核验的语义评价；旧分数仅为启发式规则值，不是正确概率。
 - `wiki_status` —— 查看 Wiki 与 Evidence 链接状态
 - `wiki_export` —— 导出派生 Markdown，不改变权威数据库；末尾追加术语库章节
 - `wiki_record_concepts` —— 记录在真正阅读文献时识别出的专业概念：每个概念一个实体，含一个主术语与任意别名术语，每组术语都由中文全称、英文全称、简称三个字段构成，并记录来源文献。未带 `final` 的调用只暂存在当前阅读会话中、不写库也不弹确认；带 `final` 的那一次把全部内容一次写入，因此一篇文献只有一次写入、一次确认。每个字段单独记录来源类型（文献原文 / AI 补全 / 人工修改），AI 可以依据可靠专业知识补全中文、英文或简称，但必须如实标注

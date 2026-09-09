@@ -82,6 +82,8 @@ import {
   assertValuesLanded,
 } from "./wikiRecordTemplate";
 import { describeEvidenceMismatch } from "./wikiEvidenceDiagnostics";
+import { WikiValidation } from "./wikiValidation";
+import { WIKI_CITATION_GUIDE } from "./wikiCitations";
 import type { WikiEmbeddingWorkUnit } from "./wikiEmbeddingQueue";
 import {
   decodeChunkCursor,
@@ -112,7 +114,7 @@ import {
 } from "./wikiLinkService";
 import type { WikiLinkResolutionType, WikiLinkSettlementResult } from "./wikiLinkTypes";
 import { WikiRetriever } from "./wikiRetriever";
-import { boundPreparedContext, compactWikiClaim, fragmentContextText, pagePreparedContext, type WikiPreparedContext } from "./wikiPreparedContext";
+import { boundPreparedContext, compactWikiClaim, compactPreparedResponse, fragmentContextText, pagePreparedContext, WIKI_PREPARE_IDLE_SECONDS, WikiPreparedContextExpired, type WikiPreparedContext } from "./wikiPreparedContext";
 import { findWikiSourceQuote, wikiSourceTextView } from "./wikiSourceText";
 import type {
   WikiClaimSearchResult,
@@ -358,13 +360,16 @@ function assertSynthesisEvidenceClosure(
         "\nOmit an entry for any sentence you rewrote. Sentences you neither prove nor rewrite " +
         "are refused again.\n\n" +
         `SENTENCES TO ANSWER (${flagged.length}):\n${describeFlaggedSentences(flagged)}`,
-      { flagged: flagged.length, issues: flagged, mode: what },
+      { flagged: flagged.length, issues: flagged, activeIssues:flagged, staleAuditIds:[], mode: what },
     );
   }
 
   const problems = verifySynthesisAudit(flagged, submittedAudit, chunks);
   if (!problems.length) return;
   const shown = problems.slice(0, 25);
+  const staleAuditIds = problems.filter(p => p.code === "STALE_AUDIT" && p.auditId).map(p=>p.auditId!);
+  const activeIds = new Set(problems.filter(p=>p.code !== "STALE_AUDIT").map(p=>p.auditId));
+  const activeIssues = flagged.filter(f=>activeIds.has(f.auditId));
   throw new WikiSynthesisAuditRequired(
     `The synthesis audit does not close: ${problems.length} problem(s), so nothing was written. Fix ` +
       (what === "record" ? "these and resubmit readingRecord in the same call mode. " : "these and resubmit macroSummary with finalSynthesis true. ") +
@@ -379,7 +384,7 @@ function assertSynthesisEvidenceClosure(
       (problems.length > shown.length
         ? `\n... and ${problems.length - shown.length} more.`
         : ""),
-    { flagged: flagged.length, problems: problems.length, issues: flagged, auditProblems: problems, mode: what },
+    { flagged: flagged.length, problems: problems.length, issues: activeIssues, activeIssues, staleAuditIds, auditProblems: problems, mode: what },
   );
 }
 
@@ -464,6 +469,7 @@ export class WikiService {
       inFlight?: boolean;
       context?: WikiPreparedContext;
       canCommit?: boolean;
+      reviewScope?: { itemKey: string; topic: string };
     }
   >();
 
@@ -494,10 +500,40 @@ export class WikiService {
    * no real connections, and the ratio is what tells them apart.
    */
   async status(libraryID?: number): Promise<any> {
-    const base = { ...(await this.store.getStatus(libraryID)), pendingCommitOperations: await this.store.listPendingCommitOperations(libraryID) };
-    if (libraryID === undefined) return base;
+    const reviews = await this.store.crossPaperReviews();
+    const base = {
+      ...(await this.store.getStatus(libraryID)),
+      pendingCommitOperations:
+        await this.store.listPendingCommitOperations(libraryID),
+      scope:
+        libraryID === undefined
+          ? { kind: "all_libraries" }
+          : { kind: "library", libraryID },
+      ...(await reviews.statistics(libraryID)),
+    };
     try {
-      return { ...base, ...(await this.links.statistics(libraryID)) };
+      if (libraryID !== undefined)
+        return { ...base, ...(await this.links.statistics(libraryID)) };
+      const totals: Record<string, any> = {};
+      for (const id of await reviews.libraryIDs()) {
+        const stats = await this.links.statistics(id);
+        for (const [key, value] of Object.entries(stats)) {
+          if (key === "linkRejectedRate") continue;
+          if (typeof value === "number")
+            totals[key] = (totals[key] ?? 0) + value;
+          else if (value && typeof value === "object") {
+            totals[key] ??= {};
+            for (const [type, count] of Object.entries(value))
+              totals[key][type] = (totals[key][type] ?? 0) + Number(count);
+          }
+        }
+      }
+      const settled =
+        (totals.linkSignalsAccepted ?? 0) + (totals.linkSignalsRejected ?? 0);
+      totals.linkRejectedRate = settled
+        ? totals.linkSignalsRejected / settled
+        : 0;
+      return { ...base, ...totals };
     } catch (error) {
       // Status must answer. A link layer that cannot be read is itself worth
       // reporting, and is not a reason to withhold the Wiki's own counts.
@@ -513,7 +549,7 @@ export class WikiService {
   private prunePrepareTokens(): void {
     const now = Date.now();
     for (const [token, prepared] of this.prepareTokens) {
-      if (prepared.expiresAt < now) this.prepareTokens.delete(token);
+      if (!prepared.inFlight && prepared.expiresAt < now) this.prepareTokens.delete(token);
     }
   }
 
@@ -528,6 +564,7 @@ export class WikiService {
     knownSkeletonRevision?: string;
     compact?: boolean;
     preview?: boolean;
+    checkpoint?: boolean;
     /**
      * The whole-Wiki review, required once a paper has been read in full.
      * See {@link assertReadyToWriteUp}.
@@ -540,7 +577,7 @@ export class WikiService {
       options.wikiReview,
       options.itemKey,
     );
-    if (!options.preview) await this.assertReadyToWriteUp(options.libraryID, options.itemKey);
+    if (!options.preview && !options.checkpoint) await this.assertReadyToWriteUp(options.libraryID, options.itemKey);
     const exactCandidates = await this.store.prepareUpdate(options);
     const semanticCandidates = await this.search({
       ...options,
@@ -697,7 +734,7 @@ export class WikiService {
       .slice(2, 14)}`;
     this.prepareTokens.set(prepareToken, {
       libraryID: options.libraryID,
-      expiresAt: Date.now() + 10 * 60 * 1000,
+      expiresAt: Date.now() + WIKI_PREPARE_IDLE_SECONDS * 1000,
       preparedPageTitles: new Set(proposedPageTitles.map(normalizeWikiName)),
       canCommit: !options.preview,
       ...(openSession && openSession.wikiReviewAt !== null
@@ -713,7 +750,13 @@ export class WikiService {
       preparedPageTitles: proposedPageTitles,
       pagePreparations,
       prepareToken,
-      prepareTokenExpiresInSeconds: 600,
+      prepareTokenExpiresInSeconds: WIKI_PREPARE_IDLE_SECONDS,
+      crossPaperTasks: await this.prepareCrossPaperTasks(
+        options.libraryID,
+        options.itemKey ?? openSession?.itemKey,
+        options.query,
+        openSession,
+      ),
       ...(wikiReconciliation ? { wikiReconciliation } : {}),
       ...(openSession
         ? {
@@ -738,7 +781,7 @@ export class WikiService {
               "属于同一个主题 Page 但应保持为不同 Claim、在条件相当时给出矛盾结论、" +
               "能形成 concept↔concept 的可证关系、以及「只是套话或条件不可比」。" +
               "最后一种用 DISMISS_LINK_SIGNALS，并且**每一条 signal 各写各的理由**：" +
-              'dismissals: [{ signalId, reason }, ...]，每条理由不少于 40 字并结合该 signal 自己的两段原文。' +
+              "dismissals: [{ signalId, reason }, ...]，每条理由不少于 40 字并结合该 signal 自己的两段原文。" +
               "一条理由套一整批是不行的——同一批里的 signal 指向的是不同段落对，" +
               "一句话描述不了它们，存进去的判断就会挂在它没引用过的段落上。" +
               "推荐用 RESOLVE_LINK_SIGNAL 为每条候选明确填写 resolutionType 和 reason；" +
@@ -773,10 +816,76 @@ export class WikiService {
     const contextSkeleton = response.wikiSkeleton?.unchanged
       ? await this.skeletonFor({ ...options, knownSkeletonRevision: undefined }, proposedPageTitles)
       : response.wikiSkeleton;
+    if (options.itemKey || openSession?.itemKey)
+      this.prepareTokens.get(prepareToken)!.reviewScope = {
+        itemKey: (options.itemKey ?? openSession?.itemKey)!,
+        topic: openSession?.mode === "fulltext" ? "fulltext" : options.query,
+      };
     return this.presentPreparedContext(response, options, contextSkeleton);
   }
 
-  private async presentPreparedContext(response: any, options: { compact?: boolean; preview?: boolean; libraryID: number }, contextSkeleton = response.wikiSkeleton): Promise<any> {
+  private async prepareCrossPaperTasks(
+    libraryID: number,
+    itemKey?: string,
+    query = "question",
+    session?: any,
+  ): Promise<any[]> {
+    if (!itemKey) return [];
+    const reviews = await this.store.crossPaperReviews();
+    return reviews.prepare({
+      libraryID,
+      itemKey,
+      topic: session?.mode === "fulltext" ? "fulltext" : query,
+      readingRevision: String(session?.sourceVersion ?? ""),
+    });
+  }
+
+  private async ensureCommitReviewTasks(input: WikiCommitInput): Promise<void> {
+    const sessions = await this.store.readingSessions();
+    const scope = input.prepareToken
+      ? this.prepareTokens.get(input.prepareToken)?.reviewScope
+      : undefined;
+    const keys = new Set<string>();
+    if (scope) keys.add(scope.itemKey);
+    const selected = input.readingSessionId
+      ? await sessions.get(input.readingSessionId)
+      : await sessions.getOpen(input.libraryID);
+    if (selected?.libraryID === input.libraryID) keys.add(selected.itemKey);
+    for (const action of input.actions)
+      for (const e of (action as any).evidence ?? []) keys.add(e.itemKey);
+    const reviews = await this.store.crossPaperReviews();
+    const submitted = new Set(
+      (input.crossPaperReview ?? []).map((r) => r.taskId),
+    );
+    for (const itemKey of keys) {
+      const session = await sessions.openForItem(input.libraryID, itemKey);
+      if (!session && scope?.itemKey !== itemKey) continue;
+      const taskList = await this.prepareCrossPaperTasks(
+        input.libraryID,
+        itemKey,
+        scope?.itemKey === itemKey ? scope.topic : "question",
+        session,
+      );
+      const pending = taskList.filter(
+        (t) => t.required && !submitted.has(t.taskId),
+      );
+      if (pending.length && !input.checkpoint)
+        throw new Error(
+          `Cross-paper Wiki review required for task(s) ${pending.map((t) => t.taskId).join(", ")}. ` +
+            "Use wiki_prepare_update and page crossPaperTasks. Submit crossPaperReview with explicit exclusions or gaps. Use checkpoint true to save progress without completing reading.",
+        );
+    }
+    await reviews.validateSnapshots(
+      input.libraryID,
+      input.crossPaperReview ?? [],
+    );
+  }
+
+  private async presentPreparedContext(
+    response: any,
+    options: { compact?: boolean; preview?: boolean; libraryID: number },
+    contextSkeleton = response.wikiSkeleton,
+  ): Promise<any> {
     const { prepareToken, wikiReconciliation, pendingLinkSignals = [], wikiSkeleton: skeleton } = response;
     const allClaims = new Map<number, any>();
     for (const claim of [...response.claims, ...response.semanticClaims, ...(wikiReconciliation?.claims ?? []),
@@ -805,51 +914,136 @@ export class WikiService {
       });
     }
     const signals = [...signalViews.values()].sort((a, b) => Number(b.mustResolve) - Number(a.mustResolve) || a.signalId - b.signalId);
+    const reviewTasks = {
+      sourceClaimIds: (wikiReconciliation?.claims ?? []).map(
+        (claim: any) => claim.claimId,
+      ),
+      crossPaperTaskIds: (response.crossPaperTasks ?? [])
+        .filter((task: any) => task.required)
+        .map((task: any) => task.taskId),
+      mandatorySignalIds: signals
+        .filter((signal) => signal.mustResolve)
+        .map((signal) => signal.signalId),
+      note: "Read all obligations from context section reviewTasks. Submit required crossPaperReview entries (or explicitly select empty tasks with deferMissingTargets). Task reviews cover their mapped signals; use RESOLVE_LINK_SIGNAL only for remaining mandatory signals.",
+    };
+    const preparation = [
+      { kind: "skeleton", ...contextSkeleton },
+      {
+        kind: "reconciliation",
+        ...wikiReconciliation,
+        claims: undefined,
+        readingRecords: undefined,
+      },
+      ...response.pagePreparations.map((p: any) => ({
+        kind: "pagePreparation",
+        ...p,
+      })),
+      {
+        kind: "metadata",
+        preparedPageTitles: response.preparedPageTitles,
+        searched: response.searched,
+        semanticWarnings: response.semanticWarnings,
+      },
+    ];
     const context: WikiPreparedContext = boundPreparedContext({
       pages: contextSkeleton?.pages ?? [],
       claims: [...allClaims.values()].map(compactWikiClaim),
-      evidence: fragmentContextText([...allClaims.values()].flatMap((claim) => (claim.evidence ?? []).map((entry: any) => ({ ...entry, claimId: claim.claimId }))), "excerpt"),
-      readingRecords: fragmentContextText(wikiReconciliation?.readingRecords ?? [], "content"),
+      evidence: fragmentContextText(
+        [...allClaims.values()].flatMap((claim) =>
+          (claim.evidence ?? []).map((entry: any) => ({
+            ...entry,
+            claimId: claim.claimId,
+          })),
+        ),
+        "excerpt",
+      ),
+      readingRecords: fragmentContextText(
+        wikiReconciliation?.readingRecords ?? [],
+        "content",
+      ),
       linkSignals: signals,
-      concepts: [...(response.concepts ?? []), ...(contextSkeleton?.nearbyConcepts ?? []), ...(contextSkeleton?.hubConcepts ?? []), ...(contextSkeleton?.duplicateCandidates ?? []),
-        ...response.pagePreparations.flatMap((page: any) => page.concepts ?? [])],
+      concepts: [
+        ...(response.concepts ?? []),
+        ...(contextSkeleton?.nearbyConcepts ?? []),
+        ...(contextSkeleton?.hubConcepts ?? []),
+        ...(contextSkeleton?.duplicateCandidates ?? []),
+        ...response.pagePreparations.flatMap(
+          (page: any) => page.concepts ?? [],
+        ),
+      ],
       relations: contextSkeleton?.relations ?? [],
+      crossPaperTasks: response.crossPaperTasks ?? [],
+      claimRelations: await (
+        await this.store.crossPaperReviews()
+      ).relations(options.libraryID),
+      preparation,
+      reviewTasks: [
+        ...reviewTasks.sourceClaimIds.map((claimId: number) => ({
+          kind: "sourceClaim",
+          claimId,
+        })),
+        ...(response.crossPaperTasks ?? []).map((t: any) => ({
+          kind: "crossPaperTask",
+          taskId: t.taskId,
+          revision: t.revision,
+          required: t.required,
+          targetCount: t.targetCount,
+          relatedItemKey: t.relatedItemKey,
+        })),
+        ...reviewTasks.mandatorySignalIds.map((signalId: number) => ({
+          kind: "mandatorySignal",
+          signalId,
+        })),
+      ],
+      pendingWikiWriteUp: response.pendingWikiWriteUp ?? [],
     });
     this.prepareTokens.get(prepareToken)!.context = context;
-    const contextIndex = { tool: "wiki_get_prepared_context", prepareToken, sections: Object.fromEntries(Object.entries(context).map(([key, values]) => [key, values.length])),
-      fragmentNote: "Join text for each contextFragment.entryIndex in offset order, then JSON.parse to restore that entry. Text fields with textFragment are joined directly in offset order." };
-    const reviewTasks = { sourceClaimIds: (wikiReconciliation?.claims ?? []).map((claim: any) => claim.claimId),
-      mandatorySignalIds: signals.filter((signal) => signal.mustResolve).map((signal) => signal.signalId),
-      note: "claimVerdicts reviews this paper's existing evidence. Separately decide every mandatory cross-paper signal using RESOLVE_LINK_SIGNAL. Independent claims and reasoned no_action are valid outcomes." };
-    if (options.compact === false) return { prepareToken, ...response, preview: options.preview === true, context: contextIndex, crossPaperCandidates, reviewTasks };
-    return {
-      prepareToken, prepareTokenExpiresInSeconds: 600, preview: options.preview === true,
-      context: contextIndex, reviewTasks,
-      ...response,
-      pendingLinkNote: "Decide every mustResolve signal individually. Full passages and further signals are paged through wiki_get_prepared_context, section linkSignals.",
-      pendingLinkSignals: signals.slice(0, 10).map((signal) => ({ ...signal,
-        thisChunk: { ...signal.thisChunk, excerpt: String(signal.thisChunk?.excerpt ?? "").slice(0, 500) },
-        otherChunk: { ...signal.otherChunk, excerpt: String(signal.otherChunk?.excerpt ?? "").slice(0, 500) },
-        priorDismissals: signal.priorDismissals?.map((prior: any) => ({ ...prior, reason: prior.reason.slice(0, 500) })),
-        excerptsTruncated: (signal.thisChunk?.excerpt?.length ?? 0) > 500 || (signal.otherChunk?.excerpt?.length ?? 0) > 500 })),
-      pendingLinkSignalCount: signals.length,
-      claims: response.claims.slice(0, 10).map((claim: any) => compactWikiClaim(allClaims.get(claim.claimId) ?? claim)),
-      semanticClaims: response.semanticClaims.slice(0, 10).map((claim: any) => compactWikiClaim(allClaims.get(claim.claimId) ?? claim)),
-      pagePreparations: response.pagePreparations.map((page: any) => ({ canonicalTitle: page.canonicalTitle, pageIds: page.pages.map((entry: any) => entry.pageId), claimIds: page.claims.map((entry: any) => entry.claimId) })),
-      wikiSkeleton: skeleton && !skeleton.unchanged ? { ...skeleton, pages: (skeleton.pages ?? []).slice(0, 10), pagesTruncated: (skeleton.pages?.length ?? 0) > 10, contextSection: "pages" } : skeleton,
-      ...(wikiReconciliation ? { wikiReconciliation: { ...wikiReconciliation, readingRecords: undefined,
-        readingRecordCount: wikiReconciliation.readingRecords.length, claimCount: wikiReconciliation.claims.length,
-        claims: wikiReconciliation.claims.slice(0, 10).map((claim: any) => compactWikiClaim(allClaims.get(claim.claimId) ?? claim)), contextSection: "readingRecords" } } : {}),
-      crossPaperCandidates: crossPaperCandidates.slice(0, 10),
-      crossPaperCandidateCount: crossPaperCandidates.length,
+    const contextIndex = {
+      tool: "wiki_get_prepared_context",
+      prepareToken,
+      sections: Object.fromEntries(
+        Object.entries(context).map(([key, values]) => [key, values.length]),
+      ),
+      unit: "context_entry",
+      fragmentNote:
+        "Counts and limits refer to stored entries, including fragments, not logical tasks. Pages may stop at the character budget; always use nextOffset. Join text for each contextFragment.entryIndex in offset order, then JSON.parse. Text fields with textFragment are joined directly. For cross-paper tasks prefer wiki_get_link_review with taskId, section targets, and expectedRevision.",
+      recovery:
+        "Successful context reads renew the ten-minute idle timeout. After inactivity or restart, prepare again; recover durable tasks and reviews with wiki_get_link_review.",
     };
+    if (options.compact === false) return { prepareToken, ...response, preview: options.preview === true, context: contextIndex, crossPaperCandidates, reviewTasks };
+    return compactPreparedResponse(
+      { ...response, preview: options.preview === true },
+      contextIndex,
+      reviewTasks,
+      crossPaperCandidates,
+      signals,
+    );
   }
 
-  getPreparedContext(options: { libraryID: number; prepareToken: string; section: string; offset?: number; limit?: number }): any {
+  getPreparedContext(options: {
+    libraryID: number;
+    prepareToken: string;
+    section: string;
+    offset?: number;
+    limit?: number;
+  }): any {
     this.prunePrepareTokens();
     const prepared = this.prepareTokens.get(options.prepareToken);
-    if (!prepared?.context || prepared.libraryID !== options.libraryID) throw new Error("Prepared context is unavailable or expired. Call wiki_prepare_update again.");
-    return { prepareToken: options.prepareToken, ...pagePreparedContext(prepared.context, options.section, options.offset, options.limit) };
+    if (!prepared?.context || prepared.libraryID !== options.libraryID)
+      throw new WikiPreparedContextExpired();
+    const page = pagePreparedContext(
+      prepared.context,
+      options.section,
+      options.offset,
+      options.limit,
+    );
+    prepared.expiresAt = Date.now() + WIKI_PREPARE_IDLE_SECONDS * 1000;
+    return {
+      prepareToken: options.prepareToken,
+      prepareTokenExpiresInSeconds: WIKI_PREPARE_IDLE_SECONDS,
+      prepareTokenExpiresAt: prepared.expiresAt,
+      ...page,
+    };
   }
 
   /**
@@ -1197,6 +1391,74 @@ export class WikiService {
       }
     }
     return out.sort((a, b) => a.chunkId - b.chunkId);
+  }
+
+  private assertReadingRecordValid(
+    record: string,
+    options: {
+      fulltext: boolean;
+      recordChunkIds: number[];
+      allowedChunkIds: Iterable<number>;
+      totalChunks: number;
+      batchChunks: readonly WikiAuditChunk[];
+      readable: readonly WikiAuditChunk[];
+      currentChunkAddresses: ReadonlySet<number>;
+      explicitRecord: boolean;
+      audit: readonly WikiSynthesisAuditEntry[];
+    },
+  ): void {
+    const validation = new WikiValidation({
+      mode: "record",
+      requiredSections: options.fulltext ? WIKI_RECORD_SECTIONS : [],
+    });
+    const path = "/readingRecord";
+    const syntax = validation.check(path, "CHUNK_CITATIONS", () =>
+      assertChunkCitations(record),
+    );
+    const addresses =
+      syntax &&
+      validation.check(path, "CITATION_ADDRESSES", () =>
+        assertChunkCitationsResolvable(record, options),
+      );
+    if (syntax)
+      validation.check(path, "BLOCK_CITATIONS", () =>
+        assertBlockCitations(record),
+      );
+    if (options.fulltext) {
+      validation.check(path, "RECORD_TEMPLATE", () =>
+        assertTemplateSections(record, WIKI_RECORD_SECTIONS, "阅读记录"),
+      );
+      const sections = splitTemplateSections(record, WIKI_RECORD_SECTIONS);
+      for (const label of ["方法", "结果与结论"]) {
+        const body = sections.get(label);
+        if (body?.trim())
+          validation.check(
+            path,
+            "CONNECTED_PROSE",
+            () => assertProseIsConnected(body, `阅读记录的「${label}」`),
+            label,
+          );
+      }
+    }
+    if (syntax) {
+      validation.check(path, "CHUNK_COVERAGE", () =>
+        assertBatchChunkCoverage(record, options.recordChunkIds),
+      );
+      validation.check(path, "MEASURED_VALUES", () =>
+        assertValuesLanded(record, options.batchChunks, "阅读记录"),
+      );
+    }
+    if (addresses)
+      validation.check(path, "SYNTHESIS_AUDIT", () =>
+        this.assertReadingRecordAudited(
+          record,
+          options.readable,
+          options.currentChunkAddresses,
+          options.explicitRecord,
+          options.audit,
+        ),
+      );
+    validation.finish();
   }
 
   private assertReadingRecordAudited(
@@ -1987,7 +2249,10 @@ export class WikiService {
         : 'Resume wiki_commit with the same operationId, resume true, and actions []. Do not submit the saved knowledge as a new operation.' };
   }
 
-  async commit(input: WikiCommitInput, options: WikiNoteStatusWriteOptions = {}): Promise<any> {
+  async commit(
+    input: WikiCommitInput,
+    options: WikiNoteStatusWriteOptions = {},
+  ): Promise<any> {
     const operationId = input.operationId ?? await hashWikiText(`${Date.now()}:${Math.random()}`);
     if (!/^[A-Za-z0-9_-]{8,128}$/.test(operationId)) throw new Error('operationId must contain 8-128 letters, digits, underscores or hyphens');
     const key = `${input.libraryID}:${operationId}`;
@@ -1996,17 +2261,37 @@ export class WikiService {
     try {
       const stable = (value: any): any => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object'
         ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])])) : value;
-      const inputHash = JSON.stringify(stable({ libraryID: input.libraryID, actions: input.actions, readingSessionId: input.readingSessionId }));
+      const inputHash = JSON.stringify(
+        stable({
+          libraryID: input.libraryID,
+          actions: input.actions,
+          readingSessionId: input.readingSessionId,
+          checkpoint: input.checkpoint,
+          crossPaperReview: input.crossPaperReview,
+          deferMissingTargets: input.deferMissingTargets,
+          evidenceAssessments: input.evidenceAssessments,
+        }),
+      );
       const saved = await this.store.getCommitOperation(input.libraryID, operationId);
       if (saved) {
         if (!input.resume && saved.inputHash !== inputHash) throw new Error('This operationId belongs to different actions. Use a new operationId for a different write.');
-        if (input.resume && input.actions?.length) throw new Error('A resume uses saved actions; pass actions [] to avoid ignoring new actions.');
+        if (
+          input.resume &&
+          (input.actions?.length ||
+            input.crossPaperReview?.length ||
+            input.deferMissingTargets?.length ||
+            input.evidenceAssessments?.length)
+        )
+          throw new Error(
+            "A resume uses saved actions and reviews; pass actions [] and omit new review decisions.",
+          );
         if (saved.response) return saved.response;
         return await this.finishCommit(saved.payload.input, saved.payload.actions, saved.payload.warnings, saved.result, saved.payload.writeOffs, options, saved.payload.sessions, saved.payload.dependencies);
       }
       if (input.resume) throw new Error(`Operation ${operationId} was not recorded; no saved write can be resumed.`);
       return await this.commitNew({ ...input, operationId }, options, inputHash);
-    } finally { this.activeCommitOperations.delete(key); }
+    } finally { this.activeCommitOperations.delete(key);
+    }
   }
 
   private async commitNew(
@@ -2075,7 +2360,8 @@ export class WikiService {
     const sessionSnapshot: WikiCommitReadingDependency[] = [];
     let dependencies: WikiCommitDependencies = {};
     try {
-      await this.assertRequiredReconciliationActions(input);
+      if (!input.checkpoint)
+        await this.assertRequiredReconciliationActions(input);
       // Both before the transaction: a write-off whose reason does not argue,
       // or whose chunks owe nothing, must fail the commit rather than let the
       // Claims land while the debt it was meant to settle quietly survives.
@@ -2083,7 +2369,20 @@ export class WikiService {
       // Same reason, one layer along: a dismissal whose reason does not argue
       // must not clear a candidate, and a mandatory candidate this commit
       // ignores must not be able to slip past by being unmentioned.
-      await this.assertLinkSignalsAnswered(input);
+      if (input.deferMissingTargets !== undefined)
+        input = {
+          ...input,
+          crossPaperReview: await (
+            await this.store.crossPaperReviews()
+          ).missingTargetDeferrals(
+            input.libraryID,
+            input.deferMissingTargets,
+            input.crossPaperReview ?? [],
+          ),
+          deferMissingTargets: undefined,
+        };
+      await this.ensureCommitReviewTasks(input);
+      if (!input.checkpoint) await this.assertLinkSignalsAnswered(input);
       await this.assertQuestionTerminologyRecorded(input);
       const hydrated = await this.hydrateActions(
         input.actions,
@@ -2102,6 +2401,11 @@ export class WikiService {
       const openSessions = await sessions.listOpen(input.libraryID);
       const resolvedItemKeys = new Set<string>();
       const linkStore = await this.store.links();
+      const reviewStore = await this.store.crossPaperReviews();
+      for (const review of input.crossPaperReview ?? []) {
+        const task = await reviewStore.task(review.taskId, input.libraryID);
+        if (task) resolvedItemKeys.add(task.currentItemKey);
+      }
       for (const action of actions) {
         const ids = action.action === "RESOLVE_LINK_SIGNAL" ? [action.signalId]
           : action.action === "DISMISS_LINK_SIGNALS" ? normalizeLinkDismissals(action).map((entry) => entry.signalId)
@@ -2132,16 +2436,27 @@ export class WikiService {
         sessionSnapshot.push({ sessionId: session.sessionId, itemKey: session.itemKey, sourceVersion: session.sourceVersion, noteKey: session.noteKey });
       }
       dependencies = this.commitReadingDependencies(input, actions, writeOffs, sessionSnapshot, resolvedItemKeys);
-      result = await this.store.commit({ ...input, actions }, {
-        operationId: input.operationId!, inputHash,
-        payload: { input, actions, warnings, writeOffs, sessions: sessionSnapshot, dependencies },
-        beforeCommit: async (written) => {
-          // Verify final evidence, including earlier and later actions, before
-          // either the knowledge or its link resolutions become durable.
-          await this.assertLinkSignalsAnswered(input);
+      result = await this.store.commit(
+        { ...input, actions },
+        {
+          operationId: input.operationId!,
+          inputHash,
+          payload: {
+            input,
+            actions,
+            warnings,
+            writeOffs,
+            sessions: sessionSnapshot,
+            dependencies,
+          },
+          beforeCommit: async (written) => {
+            // Verify final evidence, including earlier and later actions, before
+            // either the knowledge or its link resolutions become durable.
+            if (!input.checkpoint) await this.assertLinkSignalsAnswered(input);
           written.linkSettlement = await this.settleLinkSignals(input, actions, written);
+          },
         },
-      });
+      );
     } catch (error) {
       // Nothing was written, so hand the token back for a straight retry.
       if (consumedToken) {
@@ -2173,8 +2488,16 @@ export class WikiService {
     };
   }
 
-  private async finishCommit(input: WikiCommitInput, actions: WikiCommitAction[], warnings: string[], result: WikiCommitResult,
-    writeOffs: WikiWikiWriteOff[], options: WikiNoteStatusWriteOptions, sessionSnapshot: WikiCommitReadingDependency[] = [], dependencies?: WikiCommitDependencies): Promise<any> {
+  private async finishCommit(
+    input: WikiCommitInput,
+    actions: WikiCommitAction[],
+    warnings: string[],
+    result: WikiCommitResult,
+    writeOffs: WikiWikiWriteOff[],
+    options: WikiNoteStatusWriteOptions,
+    sessionSnapshot: WikiCommitReadingDependency[] = [],
+    dependencies?: WikiCommitDependencies,
+  ): Promise<any> {
     warnings = [...warnings];
     dependencies ??= this.commitReadingDependencies(input, actions, writeOffs, sessionSnapshot);
     let saved: any;
@@ -2301,12 +2624,18 @@ export class WikiService {
       dependencies.terminology,
     ));
 
-    const questionReading = await afterCommit("question reading settlement", () => this.settleQuestionReading(
-      input.libraryID,
-      citedChunkIdsByItem,
-      writeOffs,
-      dependencies['question reading settlement'],
-    ));
+    const questionReading = await afterCommit(
+      "question reading settlement",
+      () =>
+        input.checkpoint
+          ? Promise.resolve(undefined)
+          : this.settleQuestionReading(
+              input.libraryID,
+              citedChunkIdsByItem,
+              writeOffs,
+              dependencies["question reading settlement"],
+            ),
+    );
     const readingSession = await afterCommit("reading session", () => this.settleReadingSession(
       input,
       actions,
@@ -2633,6 +2962,12 @@ export class WikiService {
     input: WikiCommitInput,
   ): Promise<void> {
     const settled = new Set<number>();
+    const reviews = await this.store.crossPaperReviews();
+    for (const review of input.crossPaperReview ?? []) {
+      const task = await reviews.task(review.taskId, input.libraryID);
+      if (!task) throw new Error(`Unknown cross-paper task ${review.taskId}`);
+      for (const id of task.signalIds) settled.add(id);
+    }
     const add = (id: unknown) => {
       const value = Number(id);
       if (!Number.isSafeInteger(value) || value <= 0 || settled.has(value)) throw new Error(`Invalid or duplicate link signal decision: ${id}`);
@@ -3219,6 +3554,7 @@ export class WikiService {
     | undefined
   > {
     const sessions = await this.store.readingSessions();
+    if (input.checkpoint) return undefined;
     const open = input.readingSessionId ? await sessions.get(input.readingSessionId) : await sessions.getOpen(input.libraryID);
     if (!open) return undefined;
     if (open.libraryID !== input.libraryID) throw new Error('The saved reading session does not belong to this library.');
@@ -3274,6 +3610,13 @@ export class WikiService {
       // left to say so.
       const outstanding = await sessions.pendingWikiChunks(open.sessionId);
       const blockers: string[] = [];
+      const crossPaperPending = await (
+        await this.store.crossPaperReviews()
+      ).pendingForItem(input.libraryID, open.itemKey);
+      if (crossPaperPending.length)
+        blockers.push(
+          `old Wiki knowledge still needs review in task(s): ${crossPaperPending.join(", ")}`,
+        );
       const pendingLinks = await this.links.unsettledMandatory({ libraryID: input.libraryID, itemKeys: new Set([open.itemKey]), settledSignalIds: new Set() });
       if (pendingLinks.length) blockers.push(`cross-paper signals still need individual decisions: ${pendingLinks.map((signal) => signal.signalId).join(", ")}`);
       const unrecorded = await sessions.pendingIntegrationIndexes(open.sessionId);
@@ -3537,7 +3880,10 @@ export class WikiService {
   }
 
   private async setReadingExpertLocked(options: {
-    libraryID: number; itemKey?: string; persona: string; focus: string[];
+    libraryID: number;
+    itemKey?: string;
+    persona: string;
+    focus: string[];
   }): Promise<any> {
     const sessions = await this.store.readingSessions();
     const session = await this.requireOpenSession(options.libraryID, options.itemKey);
@@ -3590,6 +3936,8 @@ export class WikiService {
       expert,
       readingSession: { sessionId: session.sessionId, state: refreshed.state },
       readingNote: written,
+      requiredSections:
+        refreshed.mode === "fulltext" ? WIKI_RECORD_SECTIONS : [],
       nextStep:
         "The reading note now exists on the Zotero item and will survive a restart, a dropped " +
         "connection and a context compaction. Read the body with wiki_build_from_paper, and after " +
@@ -3655,7 +4003,8 @@ export class WikiService {
   }
 
   private async updateReadingNoteLocked(
-    options: Parameters<WikiService["updateReadingNote"]>[0], queued: boolean,
+    options: Parameters<WikiService["updateReadingNote"]>[0],
+    queued: boolean,
   ): Promise<any> {
     const operationKey = options.itemKey || (await (await this.store.readingSessions()).getOpen(options.libraryID))?.itemKey;
     const requestHash = await this.noteRequestHash(options);
@@ -3749,28 +4098,62 @@ export class WikiService {
           "macroSummary is required with finalSynthesis. Send only the whole-paper summary; the server appends it after every immutable reading record.",
         );
       }
-      assertHolisticBody(summary);
-      assertChunkCitations(summary);
-      assertChunkCitationsResolvable(summary, {
-        allowedChunkIds: readable.map((chunk) => chunk.chunkId),
-        totalChunks: coverage.totalChunks,
+      const validation = new WikiValidation({
+        mode: "synthesis",
+        requiredSections:
+          session.mode === "fulltext" ? WIKI_MACRO_SECTIONS : [],
       });
-      assertBlockCitations(summary);
+      const path = "/macroSummary";
+      validation.check(path, "HOLISTIC_BODY", () =>
+        assertHolisticBody(summary),
+      );
+      const syntax = validation.check(path, "CHUNK_CITATIONS", () =>
+        assertChunkCitations(summary),
+      );
+      const addresses =
+        syntax &&
+        validation.check(path, "CITATION_ADDRESSES", () =>
+          assertChunkCitationsResolvable(summary, {
+            allowedChunkIds: readable.map((chunk) => chunk.chunkId),
+            totalChunks: coverage.totalChunks,
+          }),
+        );
+      if (syntax)
+        validation.check(path, "BLOCK_CITATIONS", () =>
+          assertBlockCitations(summary),
+        );
       if (session.mode === "fulltext") {
-        assertTemplateSections(summary, WIKI_MACRO_SECTIONS, "全文总结");
-        assertProseIsConnected(summary, "全文总结");
+        validation.check(path, "SUMMARY_TEMPLATE", () =>
+          assertTemplateSections(summary, WIKI_MACRO_SECTIONS, "全文总结"),
+        );
+        validation.check(path, "CONNECTED_PROSE", () =>
+          assertProseIsConnected(summary, "全文总结"),
+        );
       }
-      assertMacroIsNotPaste(previousBody, summary);
-      assertMacroTouchesEveryRecord(
-        parsedPrevious.records,
-        summary,
-        await this.chunkAddressAliases(session.libraryID, session.itemKey),
+      validation.check(path, "SUMMARY_PASTE", () =>
+        assertMacroIsNotPaste(previousBody, summary),
       );
-      assertSynthesisEvidenceClosure(
-        summary,
-        readable,
-        options.synthesisAudit ?? [],
+      const aliases = await this.chunkAddressAliases(
+        session.libraryID,
+        session.itemKey,
       );
+      if (syntax)
+        validation.check(path, "RECORD_COVERAGE", () =>
+          assertMacroTouchesEveryRecord(
+            parsedPrevious.records,
+            summary,
+            aliases,
+          ),
+        );
+      if (addresses)
+        validation.check(path, "SYNTHESIS_AUDIT", () =>
+          assertSynthesisEvidenceClosure(
+            summary,
+            readable,
+            options.synthesisAudit ?? [],
+          ),
+        );
+      validation.finish();
       body = appendMacroSummary(previousBody, summary);
     } else {
       const reason = String(options.unchangedReason ?? "").trim();
@@ -3808,48 +4191,20 @@ export class WikiService {
         recordChunkIds.includes(chunk.chunkId),
       );
       if (!unchanged) {
-        assertChunkCitations(record);
-        assertChunkCitationsResolvable(record, {
+        this.assertReadingRecordValid(record, {
+          fulltext: session.mode === "fulltext",
+          recordChunkIds,
+          readable,
+          batchChunks,
           allowedChunkIds:
             options.readingRecord !== undefined
               ? recordChunkIds
               : readable.map((chunk) => chunk.chunkId),
           totalChunks: coverage.totalChunks,
+          currentChunkAddresses: new Set(recordChunkIds),
+          explicitRecord: options.readingRecord !== undefined,
+          audit: options.synthesisAudit ?? [],
         });
-        assertBlockCitations(record);
-        // The six-section template belongs to a full-text pass, where one
-        // record answers for a whole page and the slots are what stop the
-        // data sections being eaten by the summarising one. A question-driven
-        // turn reads two or three passages for a specific purpose; holding it
-        // to six headings would be ceremony, and the rules that matter
-        // everywhere - account for what you read, keep the numbers, cite every
-        // sentence - apply to it just the same.
-        //
-        // This guard has been here since the mode split, but the tool
-        // description told every caller the template was "FIXED AND ENFORCED"
-        // without saying where. Models therefore paid for six headings on a
-        // three-passage read and got nothing back for them; toolCatalog now
-        // says which shape belongs to which mode.
-        if (session.mode === "fulltext") {
-          assertTemplateSections(record, WIKI_RECORD_SECTIONS, "阅读记录");
-          // Only the narrative slots. 概念与术语 is a glossary and 本批覆盖 is
-          // an accounting line; both are lists by nature and reading them as
-          // prose would be asking for the wrong thing.
-          const sections = splitTemplateSections(record, WIKI_RECORD_SECTIONS);
-          for (const label of ["方法", "结果与结论"]) {
-            const body = sections.get(label);
-            if (body?.trim()) assertProseIsConnected(body, `阅读记录的「${label}」`);
-          }
-        }
-        assertBatchChunkCoverage(record, recordChunkIds);
-        assertValuesLanded(record, batchChunks, "阅读记录");
-        this.assertReadingRecordAudited(
-          record,
-          readable,
-          new Set(recordChunkIds),
-          options.readingRecord !== undefined,
-          options.synthesisAudit ?? [],
-        );
       } else {
         assertUnchangedCarriesNothingNew(previousBody, batchChunks, reason);
       }
@@ -3882,6 +4237,12 @@ export class WikiService {
       unchanged,
       finalSynthesis,
       readingNote: written,
+      requiredSections:
+        refreshed.mode === "fulltext"
+          ? finalSynthesis
+            ? WIKI_MACRO_SECTIONS
+            : WIKI_RECORD_SECTIONS
+          : [],
       readingSession: {
         sessionId: session.sessionId,
         state: refreshed.state,
@@ -3948,19 +4309,22 @@ export class WikiService {
    * note has nothing to put in the Wiki either, and fails before it has
    * changed anything.
    */
-  private async integrateQuestionReading(options: {
-    libraryID: number;
-    itemKey?: string;
-    readingRecord?: string;
-    markdown?: string;
-    readChunkIds: number[];
-    domain?: string;
-    expertRole?: string;
-    synthesisAudit?: WikiSynthesisAuditEntry[];
-    finalSynthesis?: boolean;
-    unchanged?: boolean;
-    unchangedReason?: string;
-  }, queued = false): Promise<any> {
+  private async integrateQuestionReading(
+    options: {
+      libraryID: number;
+      itemKey?: string;
+      readingRecord?: string;
+      markdown?: string;
+      readChunkIds: number[];
+      domain?: string;
+      expertRole?: string;
+      synthesisAudit?: WikiSynthesisAuditEntry[];
+      finalSynthesis?: boolean;
+      unchanged?: boolean;
+      unchangedReason?: string;
+    },
+    queued = false,
+  ): Promise<any> {
     const itemKey = String(options.itemKey ?? "").trim();
     if (!itemKey) {
       throw new Error(
@@ -4104,7 +4468,6 @@ export class WikiService {
     );
     const batchChunks = documentChunks.filter((chunk) => options.readChunkIds.includes(Number(chunk.chunkId)));
     if (!unchanged) {
-      assertChunkCitations(record);
       const currentAddresses = new Set<number>();
       documentChunks.forEach((chunk, index) => {
         if (options.readChunkIds.includes(Number(chunk.chunkId))) {
@@ -4112,26 +4475,31 @@ export class WikiService {
           currentAddresses.add(Number(chunk.chunkId));
         }
       });
-      assertChunkCitationsResolvable(record, {
+      const aliases = await this.chunkAddressAliases(session.libraryID, itemKey);
+      let cited = new Set<number>();
+      try {
+        cited = new Set(citedChunkIds(record));
+      } catch {
+        /* The validation collector reports malformed ranges. */
+      }
+      this.assertReadingRecordValid(record, {
+        fulltext: false,
+        readable: citableChunks,
+        batchChunks,
+        recordChunkIds: options.readChunkIds.map((id) =>
+          cited.has(id)
+            ? id
+            : (aliases.get(id)?.find((alias) => cited.has(alias)) ?? id),
+        ),
         allowedChunkIds:
           options.readingRecord !== undefined
             ? currentAddresses
             : citableChunks.map((chunk) => chunk.chunkId),
         totalChunks: documentChunks.length,
+        currentChunkAddresses: currentAddresses,
+        explicitRecord: options.readingRecord !== undefined,
+        audit: options.synthesisAudit ?? [],
       });
-      assertBlockCitations(record);
-      const aliases = await this.chunkAddressAliases(session.libraryID, itemKey);
-      const cited = new Set(citedChunkIds(record));
-      assertBatchChunkCoverage(record, options.readChunkIds.map((id) =>
-        cited.has(id) ? id : (aliases.get(id)?.find((alias) => cited.has(alias)) ?? id)));
-      assertValuesLanded(record, batchChunks, "阅读记录");
-      this.assertReadingRecordAudited(
-        record,
-        citableChunks,
-        currentAddresses,
-        options.readingRecord !== undefined,
-        options.synthesisAudit ?? [],
-      );
     } else {
       assertUnchangedCarriesNothingNew(previousBody, batchChunks, reason);
     }
@@ -5060,9 +5428,11 @@ export class WikiService {
    * since every retry hit the same wall. Concept recall was blind for a whole
    * 30-paper run because of the order of two lines.
    */
-  private async embedWithModel(
-    text: string,
-  ): Promise<{ vector: Float32Array; model: string; identity: EmbeddingIdentity }> {
+  private async embedWithModel(text: string): Promise<{
+    vector: Float32Array;
+    model: string;
+    identity: EmbeddingIdentity;
+  }> {
     const embeddingService = getEmbeddingService();
     const embedded = await embeddingService.embed(text, "auto", false);
     return {
@@ -6627,7 +6997,14 @@ export class WikiService {
         ),
         coverageMap: formatCoverageMap(deliveredAfter, chunks.length),
       },
-      chunks: options.includeSourceText ? await Promise.all(rows.map(async (row) => ({ ...row, sourceText: await wikiSourceTextView(row.text) }))) : rows,
+      chunks: options.includeSourceText
+        ? await Promise.all(
+            rows.map(async (row) => ({
+              ...row,
+              sourceText: await wikiSourceTextView(row.text),
+            })),
+          )
+        : rows,
       readingNote: {
         exists: Boolean(noteAttachment),
         attachmentKey: noteAttachment?.key ?? current.noteKey ?? "",
@@ -6635,30 +7012,28 @@ export class WikiService {
         ...this.noteProgress(current, coverage, deliveredAfter),
         ...(includeNote ? await this.readingMarkdownPage(noteBody, {}) : {}),
       },
+      requiredSections: WIKI_RECORD_SECTIONS,
+      citationGrammar: WIKI_CITATION_GUIDE,
       integrationInstruction:
         "Write one readingRecord now, as this paper's expert, containing only what the chunks just " +
         "delivered establish. DISTIL them, do not compress them: the record owes their core reasoning, " +
         "their key data and their conclusions, and someone holding only this record should be able to " +
         "reconstruct what these chunks said.\n" +
-        "用中文写，术语、化学式、数值和单位保留原文形式。六个小节，每个标题单独一行，都不能空。\n" +
+        "用中文写，术语、化学式、数值和单位保留原文形式。\n" +
+        renderTemplateGuide(WIKI_RECORD_SECTIONS) +
+        "\n" +
+        WIKI_CITATION_GUIDE +
+        "\n" +
         "「方法」「结果与结论」两栏写成连贯段落：不要一句一行，也不要用 1. 2. 或 - 分点；" +
         "一句话里可以串联多个 chunk，只要每个分句各自带引用，这不算缝合。" +
         "句子按论证顺序接续；每句仍各自引用自己的 chunk。纯数据可用 Markdown 表格。\n" +
-        "  **阅读总结** —— 本批读到的内容，通俗、连贯地讲清楚。这是唯一允许压缩的地方，" +
-        "句末注明本批范围，例如「（chunk 0-7）」：它是跨 chunk 的概括，没有引用会被逐块引用检查拦下。\n" +
-        "  **方法** —— 实验流程、设备、软件、表征手段，以及理论推导路径与模型、判据的建立方式；" +
-        "参数落值、带单位、带条件，参数表整表转写。\n" +
-        "  **结果与结论** —— 测量值、对比、趋势、推导出的关系式、模型输出、作者的判断；" +
-        "不限于实验数据。数值原样保留、带条件；确实没有时写「本批未得出结果或结论」。\n" +
-        "  **概念与术语** —— 名称 + 一句定义 + chunk 号；没有写「无」。\n" +
-        "  **存疑与未交代** —— 本批说不清、看似矛盾、或推迟到后文的；没有写「无」。\n" +
         "TWO THINGS ARE CHECKED, and both scale with how big a page you asked for. Every chunk on this " +
         "page has to be accounted for - several lines where it carries parameters or a mechanism, a " +
         "clause where it carries little, and a chunk holding nothing still named with what it held; " +
-        "consecutive ones may share a citation, written \"（chunk 44-47）\". And at least 80% of the " +
+        'consecutive ones may share a citation, written "（chunk 44-47）". All recognized ' +
         "measured values in these chunks have to appear, each with its unit and its condition: " +
-        "\"0.1-125 MPa\" and \"1750 +- 7.4 K at 21.6 kW\", never \"selected pressures\" or \"under the " +
-        "stated power\". A block that names a chunk and then says only what it was ABOUT has recorded a " +
+        '"0.1-125 MPa" and "1750 +- 7.4 K at 21.6 kW", never "selected pressures" or "under the ' +
+        'stated power". A block that names a chunk and then says only what it was ABOUT has recorded a ' +
         "table of contents. Detail is the cheap path: the audit flags a number whose condition was " +
         "dropped, so a fully conditioned value is not flagged at all. Cite their chunk ids in every factual block. The " +
         "server audits, numbers and appends it without changing earlier records; if this text corrects " +

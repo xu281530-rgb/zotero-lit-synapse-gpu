@@ -1,0 +1,45 @@
+[
+  {
+    "name": "C1: same-key Markdown imports use separate temporary files in different libraries",
+    "status": "FAIL",
+    "error": "TypeError: Cannot read properties of null (reading 'markdown')\n    at D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:37:28\n    at async check (D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:9:9)\n    at async D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:24:3"
+  },
+  {
+    "name": "C1: matching legacy cache migrates without parsing or removing original files",
+    "status": "FAIL",
+    "error": "Error: ENOENT /test-data/zotero-lit-synapse/mineru/[object Object]/meta.json\n    at Object.readUTF8 (D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\fixtures.js:16:43)\n    at MinerUService.readMeta (evalmachine.<anonymous>:1723:37)\n    at D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:45:29\n    at async check (D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:9:9)\n    at async D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:39:3"
+  },
+  {
+    "name": "C1: legacy cache with unverified owner is ignored {\"attachmentKey\":\"SAMEKEY1\"}",
+    "status": "FAIL",
+    "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n+ actual - expected\n\n+ 'Legacy A evidence.'\n- null\n\n    at D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:54:14\n    at async check (D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:9:9)\n    at async D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:51:5"
+  },
+  {
+    "name": "C1: legacy cache with unverified owner is ignored {\"libraryID\":7,\"attachmentKey\":\"SAMEKEY1\"}",
+    "status": "FAIL",
+    "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n+ actual - expected\n\n+ 'Legacy A evidence.'\n- null\n\n    at D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:54:14\n    at async check (D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:9:9)\n    at async D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:51:5"
+  },
+  {
+    "name": "C1: legacy cache with unverified owner is ignored {\"libraryID\":1,\"attachmentKey\":\"OTHERKEY\"}",
+    "status": "FAIL",
+    "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n+ actual - expected\n\n+ 'Legacy A evidence.'\n- null\n\n    at D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:54:14\n    at async check (D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:9:9)\n    at async D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:51:5"
+  },
+  {
+    "name": "C1: scoped cache still validates metadata owner {\"libraryID\":7,\"attachmentKey\":\"SAMEKEY1\"}",
+    "status": "PASS"
+  },
+  {
+    "name": "C1: scoped cache still validates metadata owner {\"libraryID\":1,\"attachmentKey\":\"OTHERKEY\"}",
+    "status": "PASS"
+  },
+  {
+    "name": "C1: library identity is required for an attachment cache path",
+    "status": "FAIL",
+    "error": "AssertionError [ERR_ASSERTION]: Missing expected exception.\n    at D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:67:37\n    at check (D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:9:15)\n    at D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:66:9"
+  },
+  {
+    "name": "C1: failure cooldown and cache statistics stay scoped to their libraries",
+    "status": "FAIL",
+    "error": "AssertionError [ERR_ASSERTION]: The \"string\" argument must be of type string. Received type object (null)\n    at D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:73:12\n    at async check (D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:9:9)\n    at async D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\cache-isolation.js:69:3"
+  }
+]

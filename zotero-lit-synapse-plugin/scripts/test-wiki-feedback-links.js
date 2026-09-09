@@ -468,7 +468,7 @@ try {
     );
     assert.equal((await links.resolutionsFor(found.linkId)).length, 1);
   });
-  await test("the actual completion gate accepts a decision-only final commit", async () => {
+  await test("the completion gate requires durable cross-paper review and accepts explicit missing-knowledge deferral", async () => {
     const found = await signal("FINAL_A", "FINAL_B");
     fake.createPaper({ key: "FINAL_A", title: "The final paper" });
     const sessions = await store.readingSessions();
@@ -529,21 +529,28 @@ try {
         operationId: "feedback-final-missing",
         actions: [],
       }),
-      /cross-paper candidate/,
+      /Cross-paper Wiki review/,
     );
+    const checkpoint = await runner.commit({
+      libraryID: 1, operationId: "feedback-final-checkpoint", userInitiated: true,
+      readingSessionId: session.sessionId, checkpoint: true,
+      actions: [claim("checkpoint finding", ["FINAL_A"])],
+    });
+    assert.equal(checkpoint.createdClaims, 1);
+    assert.notEqual((await sessions.get(session.sessionId)).state, "committed");
+    assert.equal((await links.getSignal(found.signalId)).state, "pending");
     await signal("FINAL_B", "THIRD_C");
+    const reviewStore = await store.crossPaperReviews();
+    const task = (await reviewStore.prepare({ libraryID: 1, itemKey: "FINAL_A", topic: "fulltext", readingRevision: "" }))[0];
     const result = await runner.commit({
       libraryID: 1,
       operationId: "feedback-final-decided",
       userInitiated: true,
-      actions: [
-        {
-          action: "RESOLVE_LINK_SIGNAL",
-          signalId: found.signalId,
-          resolutionType: "no_action",
-          reason,
-        },
-      ],
+      actions: [],
+      crossPaperReview: [{ taskId: task.taskId, expectedRevision: task.revision, reviewedTargets: [], outcomes: [{
+        outcome: "deferred", targetClaimIds: [], evidenceBindings: [], basis: "The related paper has no Wiki knowledge available for this comparison.",
+        gap: "FINAL_B needs source-backed Wiki claims.", trigger: "target_knowledge_changed",
+      }] }],
     });
     assert.equal(result.readingSession.released, true);
     assert.equal((await sessions.get(session.sessionId)).state, "committed");

@@ -213,6 +213,11 @@ export interface WikiCommitInput {
   userInitiated: boolean;
   operationId?: string;
   resume?: boolean;
+  /** Save progress without declaring reading complete. */
+  checkpoint?: boolean;
+  crossPaperReview?: import("./wikiReviewTypes").CrossPaperReviewInput[];
+  deferMissingTargets?: import("./wikiReviewTypes").MissingTargetSelection[];
+  evidenceAssessments?: import("./wikiReviewTypes").EvidenceAssessmentInput[];
   /** Required by WikiService when CREATE_PAGE is present. */
   prepareToken?: string;
   /**
@@ -227,6 +232,7 @@ export interface WikiCommitInput {
 }
 
 export interface WikiCommitResult {
+  crossPaperReviews?: any[];
   createdPages: number;
   createdClaims: number;
   /**
@@ -287,6 +293,8 @@ export interface WikiEvidenceRecord {
 }
 
 export interface WikiClaimRecord {
+  evidenceOverview?: any;
+  claimRelations?: any[];
   claimId: number;
   pageId: number;
   claimText: string;
@@ -305,6 +313,7 @@ export interface WikiSourceClaimRecord extends WikiClaimRecord {
 }
 
 export interface WikiPageRecord {
+  summarySelection?: any;
   pageId: number;
   libraryID: number;
   canonicalTitle: string;

@@ -12,7 +12,7 @@ function run(c,s){return vm.runInContext(s,c,{timeout:5000});}
 const ticks=async(n=4)=>{for(let i=0;i<n;i++)await new Promise(r=>setImmediate(r));};
 function deferred(){let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return{promise,resolve,reject};}
 function memoryIO(){const disk=new Map(),dirs=new Set(),stats=new Map();return {disk,dirs,stats,io:{
- makeDirectory:async p=>{dirs.add(p);},exists:async p=>disk.has(p)||dirs.has(p),
+ makeDirectory:async(p,o={})=>{dirs.add(p);if(o.createAncestors){for(let parent=path.posix.dirname(p);parent!==path.posix.dirname(parent);parent=path.posix.dirname(parent))dirs.add(parent);}},exists:async p=>disk.has(p)||dirs.has(p),
  readUTF8:async p=>{if(!disk.has(p))throw Error('ENOENT '+p);return disk.get(p);},
  writeUTF8:async(p,s)=>{disk.set(p,s);},move:async(a,b)=>{if(!disk.has(a))throw Error('ENOENT '+a);disk.set(b,disk.get(a));disk.delete(a);},
  remove:async(p,o={})=>{disk.delete(p);dirs.delete(p);if(o.recursive){for(const k of disk.keys())if(k.startsWith(p+'/'))disk.delete(k);for(const k of dirs)if(k.startsWith(p+'/'))dirs.delete(k);}},

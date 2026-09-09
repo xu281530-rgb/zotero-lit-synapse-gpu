@@ -113,6 +113,11 @@ interface CacheMeta {
   failedAt?: number;
 }
 
+interface AttachmentIdentity {
+  key: string;
+  libraryID: number;
+}
+
 export interface GetMarkdownOptions {
   /**
    * Allow a cache miss to start a potentially long parse operation.
@@ -273,7 +278,10 @@ export class MinerUService {
   /** 界面进度监听器；解析是分钟级操作，没有它用户只能盯着一个不动的弹窗 */
   private progressListener: MinerUProgressListener | null = null;
   private attachmentState: MarkdownAttachmentState | null = null;
+  private attachmentStateLoad: Promise<MarkdownAttachmentState> | null = null;
   private attachmentStateWrite: Promise<void> = Promise.resolve();
+  private attachmentStateDirty = false;
+  private cacheMigrations = new Map<string, Promise<void>>();
   private ownReplacementAttachmentKeys = new Set<string>();
 
   /** 注册/注销解析进度监听（同一时刻只有一个索引任务，单个监听器足够） */
@@ -352,12 +360,68 @@ export class MinerUService {
     );
   }
 
-  private getAttachmentDir(attachmentKey: string): string {
-    return PathUtils.join(this.getCacheRoot(), sanitizeFileName(attachmentKey));
+  private getAttachmentDir(attachment: AttachmentIdentity): string {
+    if (!Number.isInteger(attachment.libraryID) || attachment.libraryID <= 0) {
+      throw new Error("MinerU cache requires a valid attachment libraryID");
+    }
+    return PathUtils.join(
+      this.getCacheRoot(),
+      String(attachment.libraryID),
+      sanitizeFileName(attachment.key),
+    );
   }
 
-  private getTmpDir(): string {
-    return PathUtils.join(this.getCacheRoot(), "tmp");
+  private getTmpDir(attachment: AttachmentIdentity): string {
+    return PathUtils.join(this.getAttachmentDir(attachment), "tmp");
+  }
+
+  private async migrateAttachmentCache(
+    attachment: AttachmentIdentity,
+  ): Promise<void> {
+    const identity = this.sourceIdentity(attachment.libraryID, attachment.key);
+    const pending = this.cacheMigrations.get(identity);
+    if (pending) return pending;
+    const migration = (async () => {
+      const dir = this.getAttachmentDir(attachment);
+      const metaPath = PathUtils.join(dir, "meta.json");
+      if (await this.statFile(metaPath)) return;
+      const legacyDir = PathUtils.join(
+        this.getCacheRoot(),
+        sanitizeFileName(attachment.key),
+      );
+      let meta: CacheMeta;
+      try {
+        meta = JSON.parse(
+          await IOUtils.readUTF8(PathUtils.join(legacyDir, "meta.json")),
+        );
+      } catch {
+        return;
+      }
+      if (
+        meta?.libraryID !== attachment.libraryID ||
+        meta?.attachmentKey !== attachment.key
+      ) return;
+      const files = await this.readArtifactFilesFromDir(legacyDir);
+      const rawDir = PathUtils.join(dir, "raw");
+      await IOUtils.makeDirectory(rawDir, {
+        ignoreExisting: true,
+        createAncestors: true,
+      });
+      for (const [name, contents] of Object.entries(files)) {
+        await IOUtils.writeUTF8(
+          PathUtils.join(rawDir, structuredCacheFileName(name)),
+          contents,
+        );
+      }
+      // Publish metadata last; retain legacy files for reader migration and recovery.
+      await IOUtils.writeUTF8(metaPath, JSON.stringify(meta, null, 2), {
+        tmpPath: `${metaPath}.tmp`,
+      });
+    })().finally(() => {
+      this.cacheMigrations.delete(identity);
+    });
+    this.cacheMigrations.set(identity, migration);
+    await migration;
   }
 
   private sourceIdentity(libraryID: number, attachmentKey: string): string {
@@ -366,32 +430,45 @@ export class MinerUService {
 
   private async readAttachmentState(): Promise<MarkdownAttachmentState> {
     if (this.attachmentState) return this.attachmentState;
-    try {
-      const parsed = JSON.parse(
-        await IOUtils.readUTF8(this.getAttachmentStatePath()),
-      );
-      if (parsed?.version === 1 && parsed?.suppressed) {
-        this.attachmentState = parsed as MarkdownAttachmentState;
+    if (!this.attachmentStateLoad) {
+      this.attachmentStateLoad = (async () => {
+        try {
+          const parsed = JSON.parse(
+            await IOUtils.readUTF8(this.getAttachmentStatePath()),
+          );
+          if (parsed?.version === 1 && parsed?.suppressed) {
+            this.attachmentState = parsed as MarkdownAttachmentState;
+            return this.attachmentState;
+          }
+        } catch {
+          // First run or damaged state: rewrite on the next change.
+        }
+        this.attachmentState = { version: 1, suppressed: {} };
         return this.attachmentState;
-      }
-    } catch {
-      // First run or damaged state: start empty and rewrite on the next change.
+      })().finally(() => {
+        this.attachmentStateLoad = null;
+      });
     }
-    this.attachmentState = { version: 1, suppressed: {} };
-    return this.attachmentState;
+    return this.attachmentStateLoad;
   }
 
   private async writeAttachmentState(): Promise<void> {
     const state = await this.readAttachmentState();
-    this.attachmentStateWrite = this.attachmentStateWrite.then(async () => {
+    this.attachmentStateDirty = true;
+    const write = this.attachmentStateWrite.catch(() => {}).then(async () => {
       const path = this.getAttachmentStatePath();
       await IOUtils.makeDirectory(PathUtils.parent(path), {
         ignoreExisting: true,
         createAncestors: true,
       });
-      await IOUtils.writeUTF8(path, JSON.stringify(state, null, 2));
+      const contents = JSON.stringify(state, null, 2);
+      await IOUtils.writeUTF8(path, contents, { tmpPath: `${path}.tmp` });
+      if (contents === JSON.stringify(state, null, 2)) {
+        this.attachmentStateDirty = false;
+      }
     });
-    await this.attachmentStateWrite;
+    this.attachmentStateWrite = write;
+    await write;
   }
 
   async suppressAutomaticMarkdown(
@@ -429,7 +506,7 @@ export class MinerUService {
     if (!sourceAttachmentKey) return;
     const state = await this.readAttachmentState();
     const identity = this.sourceIdentity(libraryID, sourceAttachmentKey);
-    if (!(identity in state.suppressed)) return;
+    if (!(identity in state.suppressed) && !this.attachmentStateDirty) return;
     delete state.suppressed[identity];
     await this.writeAttachmentState();
   }
@@ -457,7 +534,7 @@ export class MinerUService {
         changed = true;
       }
     }
-    if (changed) await this.writeAttachmentState();
+    if (changed || this.attachmentStateDirty) await this.writeAttachmentState();
   }
 
   async isAutomaticMarkdownSuppressed(attachment: any): Promise<boolean> {
@@ -568,7 +645,7 @@ export class MinerUService {
       }
 
       const bridgeMetaPath = PathUtils.join(
-        this.getAttachmentDir(attachment.key),
+        this.getAttachmentDir(attachment),
         "doc2x-meta.json",
       );
       let bridgeMeta: any = null;
@@ -579,7 +656,10 @@ export class MinerUService {
       }
 
       for (const candidate of matches) {
-        const knownSameNote = bridgeMeta?.noteKey === candidate.note.key;
+        const knownSameNote =
+          bridgeMeta?.libraryID === attachment.libraryID &&
+          bridgeMeta?.attachmentKey === attachment.key &&
+          bridgeMeta?.noteKey === candidate.note.key;
         if (
           sourcePDFCount > 1 &&
           !candidate.filenameMatched &&
@@ -623,7 +703,7 @@ export class MinerUService {
         // original Doc2X note once, record the exact fingerprint, and detect
         // real later changes from that baseline.
         try {
-          await IOUtils.makeDirectory(this.getAttachmentDir(attachment.key), {
+          await IOUtils.makeDirectory(this.getAttachmentDir(attachment), {
             ignoreExisting: true,
             createAncestors: true,
           });
@@ -631,6 +711,8 @@ export class MinerUService {
             bridgeMetaPath,
             JSON.stringify(
               {
+                libraryID: attachment.libraryID,
+                attachmentKey: attachment.key,
                 noteKey: candidate.note.key,
                 noteTaskId: candidate.taskId || "",
                 noteModifiedMs: candidate.modifiedMs,
@@ -789,7 +871,7 @@ export class MinerUService {
       const cached =
         options.force === true
           ? null
-          : await this.readStructuredCache(attachment.key, config, stat);
+          : await this.readStructuredCache(attachment, config, stat);
       const structured =
         cached && "assembled" in cached ? cached : null;
       const attachedMinerU =
@@ -813,7 +895,7 @@ export class MinerUService {
           );
           if (!synced) return null;
           await this.updateCacheAttachmentMeta(
-            attachment.key,
+            attachment,
             structured,
             synced,
           );
@@ -843,7 +925,7 @@ export class MinerUService {
         );
         if (!synced) return null;
         await this.updateCacheAttachmentMeta(
-          attachment.key,
+          attachment,
           structured,
           synced,
         );
@@ -877,7 +959,7 @@ export class MinerUService {
             allowParse &&
             cached.discardBeforeRetry
           ) {
-            await IOUtils.remove(this.getAttachmentDir(attachment.key), {
+            await IOUtils.remove(this.getAttachmentDir(attachment), {
               recursive: true,
               ignoreAbsent: true,
             });
@@ -916,7 +998,8 @@ export class MinerUService {
         );
         return null;
       }
-      const existing = this.inFlight.get(attachment.key);
+      const identity = this.sourceIdentity(attachment.libraryID, attachment.key);
+      const existing = this.inFlight.get(identity);
       if (existing) {
         ztoolkit.log(`[MinerU] ${attachment.key} 已在解析中，复用同一任务`);
         options.onOrigin?.("mineru_parsed");
@@ -930,9 +1013,9 @@ export class MinerUService {
         config,
         options,
       ).finally(() => {
-        this.inFlight.delete(attachment.key);
+        this.inFlight.delete(identity);
       });
-      this.inFlight.set(attachment.key, task);
+      this.inFlight.set(identity, task);
       options.onOrigin?.("mineru_parsed");
       return await task;
     } catch (error) {
@@ -976,7 +1059,7 @@ export class MinerUService {
       const doc2x = await this.readFreshDoc2XMarkdown(attachment, stat);
       if (doc2x?.markdown?.trim()) return true;
       const cached = await this.readStructuredCache(
-        attachment.key,
+        attachment,
         this.getConfig(),
         stat,
       );
@@ -1011,7 +1094,10 @@ export class MinerUService {
 
   /** Record that an index build had to use Zotero's built-in PDF extractor. */
   recordIndexFallback(attachment: any, message?: string): void {
-    const key = String(attachment?.key || attachment?.attachmentFilename || "pdf");
+    const key = this.sourceIdentity(
+      attachment?.libraryID,
+      String(attachment?.key || attachment?.attachmentFilename || "pdf"),
+    );
     if (this.runFailures.has(key)) return;
     const fileName = String(
       attachment?.attachmentFilename || attachment?.key || "PDF",
@@ -1156,14 +1242,27 @@ export class MinerUService {
 
   /** Cache entry and disk usage statistics for the preferences UI. */
   async getCacheStats(): Promise<{ entries: number; bytes: number }> {
-    const root = this.getCacheRoot();
     let entries = 0;
     let bytes = 0;
+    const counted = new Set<string>();
     try {
-      const children = await IOUtils.getChildren(root);
+      const children = await this.getCacheDirectories();
       for (const dir of children) {
         const meta = await this.statFile(PathUtils.join(dir, "meta.json"));
         if (!meta) continue;
+        let identity = dir;
+        try {
+          const owner = JSON.parse(
+            await IOUtils.readUTF8(PathUtils.join(dir, "meta.json")),
+          );
+          if (owner?.libraryID && owner?.attachmentKey) {
+            identity = `${owner.libraryID}:${owner.attachmentKey}`;
+          }
+        } catch {
+          // Damaged entries still occupy disk space.
+        }
+        if (counted.has(identity)) continue;
+        counted.add(identity);
         entries++;
         bytes += meta.size;
         try {
@@ -1183,11 +1282,28 @@ export class MinerUService {
     return { entries, bytes };
   }
 
+  private async getCacheDirectories(): Promise<string[]> {
+    const scoped: string[] = [];
+    const legacy: string[] = [];
+    for (const child of await IOUtils.getChildren(this.getCacheRoot())) {
+      if (await this.statFile(PathUtils.join(child, "meta.json"))) {
+        legacy.push(child);
+      } else if (/^[1-9]\d*$/.test(String(child).split(/[\\/]/).pop() || "")) {
+        try {
+          scoped.push(...await IOUtils.getChildren(child));
+        } catch {
+          // Another operation may have removed this library's cache directory.
+        }
+      }
+    }
+    return [...scoped, ...legacy];
+  }
+
   /** Remove legacy Markdown copies and normalize persistent caches to JSON. */
   async migrateLegacyCaches(): Promise<void> {
     let directories: string[] = [];
     try {
-      directories = await IOUtils.getChildren(this.getCacheRoot());
+      directories = await this.getCacheDirectories();
     } catch {
       return;
     }
@@ -1203,6 +1319,15 @@ export class MinerUService {
       } catch {
         continue;
       }
+      if (
+        meta?.attachmentKey !== attachmentKey ||
+        !Number.isInteger(meta.libraryID) ||
+        Number(meta.libraryID) <= 0
+      ) continue;
+      if (
+        dir !== PathUtils.join(this.getCacheRoot(), attachmentKey) &&
+        dir !== this.getAttachmentDir({ key: attachmentKey, libraryID: meta.libraryID! })
+      ) continue;
 
       const removeLegacyCopies = async (): Promise<void> => {
         for (const name of ["full.md", "parse.json"]) {
@@ -1228,7 +1353,7 @@ export class MinerUService {
         continue;
       }
 
-      const files = await this.readArtifactFiles(attachmentKey);
+      const files = await this.readArtifactFilesFromDir(dir);
       let source: StructuredSource | null = null;
       let assembled: AssembledDocument | null = null;
       let migrationError: string | null = null;
@@ -1299,7 +1424,7 @@ export class MinerUService {
       let sourceAttachment: any = null;
       try {
         sourceAttachment = await Zotero.Items.getByLibraryAndKeyAsync?.(
-          meta.libraryID ?? Zotero.Libraries.userLibraryID,
+          meta.libraryID,
           attachmentKey,
         );
         if (sourceAttachment) {
@@ -1339,7 +1464,7 @@ export class MinerUService {
       );
       if (!generated) {
         await this.suppressAutomaticMarkdown(
-          meta.libraryID ?? Zotero.Libraries.userLibraryID,
+          meta.libraryID!,
           attachmentKey,
         );
       }
@@ -1503,6 +1628,7 @@ export class MinerUService {
     const release = await this.semaphore.acquire();
     const started = Date.now();
     const fileName = attachment.attachmentFilename || `${attachment.key}.pdf`;
+    let artifactsReady = false;
 
     try {
       ztoolkit.log(
@@ -1523,7 +1649,7 @@ export class MinerUService {
         enableFormula: config.enableFormula,
         enableTable: config.enableTable,
         timeoutSeconds: config.timeoutSeconds,
-        tmpDir: this.getTmpDir(),
+        tmpDir: this.getTmpDir(attachment),
       });
 
       const result = await client.parseLocalFile(
@@ -1550,13 +1676,20 @@ export class MinerUService {
         throw new Error("Could not create the canonical Zotero Markdown attachment");
       }
       const cached: CachedStructuredResult = {
-        meta: await this.readMeta(attachment.key),
+        meta: await this.readMeta(attachment),
         source: result.structuredSource,
         assembled,
       };
-      await this.updateCacheAttachmentMeta(attachment.key, cached, synced);
+      await this.updateCacheAttachmentMeta(attachment, cached, synced);
+      artifactsReady = true;
       if (options.userInitiated || options.restoreMissingMarkdown) {
-        await this.allowAutomaticMarkdown(attachment.libraryID, attachment.key);
+        try {
+          await this.allowAutomaticMarkdown(attachment.libraryID, attachment.key);
+        } catch (error) {
+          throw new Error(
+            `Markdown was created, but its automatic regeneration state could not be saved: ${error}`,
+          );
+        }
       }
       options.onAttachmentChanged?.();
       ztoolkit.log(
@@ -1573,10 +1706,10 @@ export class MinerUService {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       ztoolkit.log(`[MinerU] 解析失败 ${fileName}: ${message}`, "warn");
-      this.runFailures.set(String(attachment.key || fileName), {
-        fileName,
-        message,
-      });
+      this.runFailures.set(
+        this.sourceIdentity(attachment.libraryID, attachment.key),
+        { fileName, message },
+      );
       this.emitProgress({
         phase: "failed",
         attachmentKey: attachment.key,
@@ -1584,7 +1717,9 @@ export class MinerUService {
         message,
         elapsedMs: Date.now() - started,
       });
-      await this.writeFailure(attachment, config, stat, fileName, message);
+      if (!artifactsReady) {
+        await this.writeFailure(attachment, config, stat, fileName, message);
+      }
       if (options.userInitiated) throw error;
       return null;
     } finally {
@@ -1617,7 +1752,7 @@ export class MinerUService {
     const title = `${MARKDOWN_ATTACHMENT_PREFIX} (${attachment.key}).md`;
     const legacyTitles = new Set([title, `MinerU · ${baseName}`]);
     const tmpPath = PathUtils.join(
-      this.getTmpDir(),
+      this.getTmpDir(attachment),
       `${sanitizeFileName(attachment.key)}-${baseName}.md`,
     );
 
@@ -1672,7 +1807,7 @@ export class MinerUService {
         return { item: keep, key: keep.key, markdown: keepMarkdown };
       }
 
-      await IOUtils.makeDirectory(this.getTmpDir(), {
+      await IOUtils.makeDirectory(this.getTmpDir(attachment), {
         ignoreExisting: true,
         createAncestors: true,
       });
@@ -1778,13 +1913,13 @@ export class MinerUService {
       if (!doc2x?.markdown) {
         const cached = stat
           ? await this.readStructuredCache(
-              attachment.key,
+              attachment,
               this.getConfig(),
               stat,
             )
           : null;
         if (cached && "assembled" in cached) {
-          rawFiles = await this.readArtifactFiles(attachment.key);
+          rawFiles = await this.readArtifactFiles(attachment);
           blocks = cached.assembled.blocks;
           structuredHash = cached.source.structuredHash;
         }
@@ -1811,9 +1946,14 @@ export class MinerUService {
   }
 
   private async readArtifactFiles(
-    attachmentKey: string,
+    attachment: AttachmentIdentity,
   ): Promise<Record<string, string>> {
-    const dir = this.getAttachmentDir(attachmentKey);
+    return this.readArtifactFilesFromDir(this.getAttachmentDir(attachment));
+  }
+
+  private async readArtifactFilesFromDir(
+    dir: string,
+  ): Promise<Record<string, string>> {
     const files: Record<string, string> = {};
     let totalBytes = 0;
 
@@ -1828,9 +1968,12 @@ export class MinerUService {
         const name = String(child).split(/[\\/]/).pop() || "";
         if (!/\.json$/i.test(name)) continue;
         if (
-          ["meta.json", "parse.json", "translation-cache.json"].includes(
-            name.toLowerCase(),
-          )
+          [
+            "meta.json",
+            "parse.json",
+            "translation-cache.json",
+            "doc2x-meta.json",
+          ].includes(name.toLowerCase())
         )
           continue;
         const stat = await this.statFile(child);
@@ -1871,21 +2014,34 @@ export class MinerUService {
     }
   }
 
-  private async readMeta(attachmentKey: string): Promise<CacheMeta> {
-    const raw = await IOUtils.readUTF8(
-      PathUtils.join(this.getAttachmentDir(attachmentKey), "meta.json"),
-    );
-    return JSON.parse(raw) as CacheMeta;
+  private async readMeta(attachment: AttachmentIdentity): Promise<CacheMeta> {
+    const path = PathUtils.join(this.getAttachmentDir(attachment), "meta.json");
+    let raw: string;
+    try {
+      raw = await IOUtils.readUTF8(path);
+    } catch {
+      await this.migrateAttachmentCache(attachment);
+      raw = await IOUtils.readUTF8(path);
+    }
+    const meta = JSON.parse(raw) as CacheMeta;
+    if (
+      meta?.libraryID !== attachment.libraryID ||
+      meta?.attachmentKey !== attachment.key
+    ) {
+      throw new Error("MinerU cache owner does not match the requested attachment");
+    }
+    return meta;
   }
 
   private async readStructuredCache(
-    attachmentKey: string,
+    attachment: AttachmentIdentity,
     config: MinerUServiceConfig,
     stat: { size: number; mtime: number },
   ): Promise<CachedStructuredResult | CachedStructuredFailure | null> {
+    const attachmentKey = attachment.key;
     let meta: CacheMeta | null = null;
     try {
-      meta = await this.readMeta(attachmentKey);
+      meta = await this.readMeta(attachment);
     } catch {
       return null;
     }
@@ -1919,7 +2075,7 @@ export class MinerUService {
     }
 
     try {
-      const files = await this.readArtifactFiles(attachmentKey);
+      const files = await this.readArtifactFiles(attachment);
       const source = selectStructuredSource(files);
       return {
         meta,
@@ -1943,7 +2099,7 @@ export class MinerUService {
     assembled: AssembledDocument,
   ): Promise<void> {
     const attachmentKey = attachment.key;
-    const dir = this.getAttachmentDir(attachmentKey);
+    const dir = this.getAttachmentDir(attachment);
     await IOUtils.makeDirectory(dir, {
       ignoreExisting: true,
       createAncestors: true,
@@ -2017,12 +2173,14 @@ export class MinerUService {
   }
 
   private async updateCacheAttachmentMeta(
-    attachmentKey: string,
+    attachment: AttachmentIdentity,
     cached: CachedStructuredResult,
     attached: GeneratedMarkdownAttachment,
   ): Promise<void> {
     const meta: CacheMeta = {
       ...cached.meta,
+      attachmentKey: attachment.key,
+      libraryID: attachment.libraryID,
       version: CACHE_VERSION,
       parserVersion: cached.source.parserVersion,
       structuredFormat: cached.source.format,
@@ -2035,7 +2193,7 @@ export class MinerUService {
       generatedAt: new Date().toISOString(),
     };
     await IOUtils.writeUTF8(
-      PathUtils.join(this.getAttachmentDir(attachmentKey), "meta.json"),
+      PathUtils.join(this.getAttachmentDir(attachment), "meta.json"),
       JSON.stringify(meta, null, 2),
     );
   }
@@ -2062,7 +2220,7 @@ export class MinerUService {
   ): Promise<void> {
     try {
       const attachmentKey = attachment.key;
-      const dir = this.getAttachmentDir(attachmentKey);
+      const dir = this.getAttachmentDir(attachment);
       await IOUtils.makeDirectory(dir, {
         ignoreExisting: true,
         createAncestors: true,

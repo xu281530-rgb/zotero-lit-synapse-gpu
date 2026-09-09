@@ -1,69 +1,40 @@
-# LitSynapse 修复版回归测试与证据
+# LitSynapse 第二轮审计回归
 
-## 范围
+## 当前源码验证
 
-这不是插件修复包。不会安装 Zotero，不读取用户真实文库，不调用外部 API，不监听真实端口，也不执行 GPU 文件。
-只使用 Node.js 内置模块与 Python 标准库，无需 npm 安装。
-
-## 运行本次修复包
-
-需要 Python 3.9+、Node.js 22（审查使用22.16.0）。
-
-在解压后的测试包根目录运行：
-
-```sh
-python prepare.py "/path/to/zotero-lit-synapse(1).xpi"
-node tests/regression.js
-node tests/extended.js
-```
-
-路径替换为本次实际文件位置。Windows可直接使用实际盘符路径。
-prepare.py 校验 SHA-256，默认把修复包解压到 `new/`。不覆盖已存在的目标目录。
-
-预期：
-- regression.js：34 PASS。
-- extended.js：29 PASS、2 BUG_REPRODUCED。
-- BUG_REPRODUCED是C1两个异常场景的成功复现，不是插件功能通过。
-- 退出0表示测试得到了预期结果（其中包括预期能复现的bug），不是无bug认证。
-- 意外的断言失败标记为FAIL，退出1。
-
-## 旧包对照（可选）
-
-旧包不是复验新版本的必需品。
-
-```sh
-python prepare.py "/path/to/zotero-lit-synapse.xpi" --old
-```
-
-Linux/macOS：
-
-```sh
-XPI_SOURCE="$PWD/old" AUDIT_RESULTS="$PWD/results/old-control" node tests/regression.js
-XPI_SOURCE="$PWD/old" AUDIT_RESULTS="$PWD/results/old-control" AUDIT_FILTER="C1" node tests/extended.js
-```
-
-Windows PowerShell：
+在 `zotero-lit-synapse-plugin` 目录运行：
 
 ```powershell
-$env:XPI_SOURCE = Join-Path $PWD "old"
-$env:AUDIT_RESULTS = Join-Path $PWD "results/old-control"
-node tests/regression.js
-$env:AUDIT_FILTER = "C1"
-node tests/extended.js
-Remove-Item Env:XPI_SOURCE, Env:AUDIT_RESULTS, Env:AUDIT_FILTER
+npm run test:synapse-followup
 ```
 
-旧包基础回归预期31 PASS、3 FAIL，失败恰好是B1/B2/B3旧缺陷。
-旧包C1两场景也会复现，说明C1并非本轮修复引入。
-当前随包结果已保留此对照。
+命令构建当前源码并执行两组审计回归。本目录 `tests/extended.js` 的 C1a/C1b 已改为正确行为断言，预期为 **31 PASS、0 FAIL**。结果写入 `results/current-after-fix/`，原证据保留。
 
-## 被测代码与模拟边界
+如需单独验证已解压的安装包，可在本目录运行：
 
-主脚本按包内模块标记抽取原始函数/类；未使用的外部初始化器为空实现。
-阅读器添加测试导出，不改目标函数。
-Zotero、socket、计时器、文件系统、确认窗口均被模拟。
-MinerU客户端返回合成结构化结果；结果组装、缓存读写、任务去重和附件同步方法来自原始安装包。
-附件导入、删除仅作用于内存模拟接口。
-本测试不覆盖真实GUI、数据库事务、网络服务、MCP客户端集成、Wiki完整工作流、GPU、大文库和长期稳定性。
+```powershell
+$env:XPI_SOURCE = '已解压安装包的绝对路径'
+$env:AUDIT_RESULTS = Join-Path $PWD 'results/current-after-fix'
+node tests/regression.js
+node tests/extended.js
+Remove-Item Env:XPI_SOURCE, Env:AUDIT_RESULTS
+```
 
-完整判断见 `synapse-reaudit-report.md`。
+`XPI_SOURCE` 必须直接包含 `content/scripts/zotero-lit-synapse.js`。基础回归预期 34 PASS，扩展回归预期 31 PASS。
+
+## 历史证据
+
+原报告、原 `results/*.json`、`results/old-control/` 和差异文件记录历史审计结果，不代表修复后的状态。
+
+- `results/current-before-fix/`：本次在基线提交 `016fb38` 的构建上重现 C1a/C1b。
+- `results/regression-before-fix/`：正确行为断言在修复前失败的记录。
+- `results/current-after-fix/`：修复后回归结果。
+- 原始“应复现错误”脚本保存在基线提交 `016fb38`。
+
+`prepare.py` 仍只接受历史审计包的哈希。修复包使用上面的 `XPI_SOURCE` 路径；历史缺陷包在当前正确行为断言下应失败。
+
+## 验证边界
+
+测试执行构建产物的原始逻辑，模拟 Zotero、文件系统、计时器、socket 和解析服务，不访问真实文库或外部 API。
+
+详细修复说明见 [修复验证记录](../synapse-third-audit-tests/fix-verification.md)。真实 Zotero、外部服务和 MCP 客户端集成不在本次自动测试结论内。

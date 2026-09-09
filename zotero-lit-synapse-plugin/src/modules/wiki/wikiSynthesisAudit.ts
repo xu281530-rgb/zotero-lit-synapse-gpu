@@ -61,7 +61,7 @@
  */
 
 import { normalizeWikiText } from "./wikiCanonicalizer";
-import { citedWikiChunkIds, parseWikiCitations } from "./wikiCitations";
+import { citedWikiChunkIds, parseWikiCitations, stripWikiCitations } from "./wikiCitations";
 import { findWikiSourceQuote } from "./wikiSourceText";
 import {
   CJK_TERMINATORS,
@@ -478,6 +478,15 @@ export function splitSentences(block: string): string[] {
     } else if (isFalseSentenceEnd(current, masked.slice(index + 1))) {
       continue;
     }
+    // A citation after a stop still addresses the preceding uncited sentence.
+    if (!citedChunkIds(unmask(current, spans)).length) {
+      while (index + 1 < masked.length) {
+        const trailing = /^[ \t]*(?:\r?\n[ \t]*)?[[(（]\s*(?:chunks?\b|块|段)[^\])）\r\n]*[\])）]/iu.exec(masked.slice(index + 1));
+        if (!trailing || !parseWikiCitations(trailing[0]).length) break;
+        current += trailing[0];
+        index += trailing[0].length;
+      }
+    }
     const sentence = current.trim();
     if (sentence) out.push(unmask(sentence, spans));
     current = "";
@@ -544,9 +553,6 @@ function matches(patterns: readonly RegExp[], text: string): string | null {
  * is now required, and which normally also carries a negation - was flagged
  * for a measurement it never mentioned.
  */
-const CHUNK_REFERENCE_RUN =
-  /(?:chunks?|块|段)\s*#?\s*\d+(?:\s*(?:[-–—]|to|~|、|,|，|and)\s*\d+)*|第\s*\d+\s*(?:块|段)/giu;
-
 /**
  * Are the sentence's numbers the SOURCE's own numbers?
  *
@@ -573,7 +579,7 @@ function quantitiesComeFromSource(
   sources: readonly string[],
 ): boolean {
   if (!sources.length) return false;
-  const stripped = String(sentence).replace(CHUNK_REFERENCE_RUN, " ");
+  const stripped = stripWikiCitations(String(sentence));
   const numbers = [...stripped.matchAll(/\d+(?:\.\d+)?/gu)].map((m) => m[0]);
   if (!numbers.length) return false;
   const haystacks = sources.map((text) => flattenForTermMatch(text));
@@ -584,9 +590,7 @@ function quantitiesComeFromSource(
 
 /** Digits that are neither a chunk citation nor a bibliography bracket. */
 function carriesQuantity(sentence: string): boolean {
-  const stripped = String(sentence)
-    .replace(REFERENCE_BRACKET, " ")
-    .replace(CHUNK_REFERENCE_RUN, " ");
+  const stripped = stripWikiCitations(String(sentence)).replace(REFERENCE_BRACKET, " ");
   return /\d/u.test(stripped);
 }
 
@@ -605,9 +609,18 @@ export function enumerationDepth(text: string): number {
     x: 10,
   };
   let depth = 0;
-  for (const match of String(text ?? "").matchAll(
+  // Retain a marker so a number immediately following math remains an equation label.
+  const input = stripWikiCitations(String(text ?? ""))
+    .replace(/\$\$[\s\S]*?\$\$|\$[^$\n]*\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)/gu, "\uFFFC");
+  for (const match of input.matchAll(
     /\((i{1,3}|iv|vi{0,3}|ix|x|\d{1,2})\)/giu,
   )) {
+    const before = input.slice(0, match.index).trimEnd();
+    const after = input.slice(match.index! + match[0].length);
+    // List markers precede prose. Equation/figure references follow a label or a formula.
+    if (before.endsWith("\uFFFC")) continue;
+    if (/(?:\b(?:eqs?|equations?|figs?|figures?|tables?|sections?|appendix|appendices|refs?)\.?|公式|方程|式|图|表)\s*$/iu.test(before)) continue;
+    if (!/^\s*\p{L}/u.test(after)) continue;
     const token = match[1].toLowerCase();
     const value = roman[token] ?? Number.parseInt(token, 10);
     if (Number.isInteger(value) && value > depth) depth = value;
@@ -828,7 +841,7 @@ export function auditSynthesis(
       const supporting = own.length
         ? citedChunkSpan(sentence)
         : citedChunkSpan(block.text);
-      const assertion = rawSentence.replace(/(?:chunks?|块|段)\s*#?\s*\d+(?:\s*(?:[-–—]|to|~|、|,|，)\s*\d+)*|第\s*\d+\s*(?:块|段)/giu, "")
+      const assertion = stripWikiCitations(rawSentence)
         .replace(/[（(]\s*[)）]/gu, "").trim().replace(/[。.!?]+$/u, "").trim();
       const completeSourceSentence = assertion.length >= 10 && supporting.length === 1 && supporting.every((id) => {
         const source = chunkText.get(id);
@@ -1077,6 +1090,7 @@ export const WIKI_SYNTHESIS_MIN_QUOTE_CHARS = 40;
 export const WIKI_EVIDENCE_MIN_EXCERPT_CHARS = 24;
 
 export interface WikiSynthesisAuditProblem {
+  code?: "STALE_AUDIT";
   auditId?: string;
   sentence: string;
   problem: string;
@@ -1179,6 +1193,7 @@ export function verifySynthesisAudit(
 
   for (const [, entry] of byKey) {
     problems.push({
+      code: "STALE_AUDIT",
       auditId: entry.auditId,
       sentence: normalizeWikiText(String(entry.sentence ?? entry.auditId ?? "")),
       problem:
@@ -1197,7 +1212,7 @@ export function verifySynthesisAudit(
  * try again, exactly like the integration gate - instead of as a server fault.
  */
 export class WikiSynthesisAuditRequired extends Error {
-  readonly details: { flagged: number; problems?: number; issues?: WikiFlaggedSentence[]; auditProblems?: WikiSynthesisAuditProblem[]; mode?: "record" | "synthesis" };
+  readonly details: { flagged: number; problems?: number; issues?: WikiFlaggedSentence[]; activeIssues?: WikiFlaggedSentence[]; staleAuditIds?: string[]; auditProblems?: WikiSynthesisAuditProblem[]; mode?: "record" | "synthesis" };
 
   constructor(message: string, details: WikiSynthesisAuditRequired["details"]) {
     super(message);

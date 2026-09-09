@@ -1,60 +1,41 @@
-# LitSynapse 第三轮补查：复现测试
+# LitSynapse 第三轮审计回归
 
-这是审查证据包，不是插件修复包。不会访问真实 Zotero 文库、调用外部服务、监听端口或运行 GPU 文件。
+## 当前源码验证
 
-## 重现当前安装包
-
-需要 Python 3.9+ 和 Node.js 22。解压后，在此目录运行：
-
-```sh
-python prepare.py "/实际路径/zotero-lit-synapse(1).xpi"
-node tests/regression.js
-node tests/extended.js
-node tests/additional.js
-```
-
-`prepare.py` 校验本次安装包的 SHA-256，拒绝覆盖已经存在的 `new/` 目录。
-
-预期结果：
-- 基础回归：34 PASS。
-- 上轮扩展：29 PASS、2 BUG_REPRODUCED。
-- 本轮新增：12 PASS、3 BUG_REPRODUCED。
-
-**BUG_REPRODUCED 是成功复现缺陷，不是功能通过。** 脚本退出 0 仅表示得到了设计时预期的结果，并不是“无 bug”。
-
-这些脚本针对当前安装包。未来修复后的包应更新哈希并将缺陷复现断言改为“期望正确行为”的回归断言，不能要求修复版继续满足旧缺陷断言。
-
-## 更早旧包对照
-
-```sh
-python prepare.py "/实际路径/zotero-lit-synapse.xpi" --old
-```
-
-Linux/macOS：
-
-```sh
-XPI_SOURCE="$PWD/old" AUDIT_RESULTS="$PWD/results/old-control" node tests/additional.js
-```
-
-Windows PowerShell：
+在 `zotero-lit-synapse-plugin` 目录运行：
 
 ```powershell
-$env:XPI_SOURCE = Join-Path $PWD "old"
-$env:AUDIT_RESULTS = Join-Path $PWD "results/old-control"
-node tests/additional.js
-Remove-Item Env:XPI_SOURCE, Env:AUDIT_RESULTS
+npm run test:synapse-followup
 ```
 
-预期与本轮新增检查相同：12 PASS、3 BUG_REPRODUCED。这说明 D1、D2a、D2b 不是上一轮修复引入的回归。
+命令构建当前源码并运行两组审计回归。结果写入各目录的 `results/current-after-fix/`，原证据保留。
 
-## 测试方法
+| 本目录测试 | 预期结果 |
+| --- | --- |
+| `tests/regression.js` | 34 PASS |
+| `tests/extended.js` | 31 PASS，包含 C1a/C1b 正确行为断言 |
+| `tests/additional.js` | 18 PASS，包含 D1、D2a、D2b 及三个补充场景 |
+| `tests/cache-isolation.js` | 9 PASS，覆盖临时文件、迁移、归属校验、失败冷却与缓存统计 |
 
-`fixtures.js` 从上传包按模块标记加载原始函数/类。未使用的初始化器为空实现；Zotero 对象、保存、文件系统和网络解析返回值被模拟。
+以上合计 92 项不重复检查。一键命令另外运行第二轮目录的 31 项扩展检查，因此控制台合计为 **123 PASS、0 FAIL**。
 
-`additional.js` 的 D1 经过完整 MCP 分发，再进入原始元数据与标签写方法。模拟对象遵循“条目在内存缓存中复用，setField 在保存前修改对象”的契约，该契约通过官方源码核对。
+验证已解压安装包时，在插件目录设置 `XPI_SOURCE` 后运行 `node scripts/test-synapse-followup-audits.js`。该路径必须直接包含 `content/scripts/zotero-lit-synapse.js`。
 
-D2a 同时测试队列恢复和原始解析入口；D2b 通过同文库、不同附件的并发 `getMarkdownForAttachment` 请求复现，不是跨文库同 key 的旧问题。
+## 历史证据
 
-测试没有覆盖真实宿主界面、真实数据库事务、实际文件系统原子性、实际外部服务、完整 Wiki 工作流、GPU 或长期压力。
+原报告和原 `results/*.json` 保留为历史证据。
 
-完整判断、条件与源码位置见 `synapse-third-audit-report.md`。
+- `results/current-before-fix/`：当前基线构建确认 D1、D2a、D2b 的复现结果。
+- `results/regression-before-fix/`：正确行为断言在修复前失败的记录。
+- `results/current-after-fix/`：修复后回归结果。
+- 基线提交 `016fb38` 保存原始缺陷复现断言。
+
+`prepare.py` 只接受历史审计包的哈希；历史包在当前正确行为断言下应失败。
+
+## 验证边界
+
+测试从构建产物提取原始函数与类。元数据测试经过完整 MCP 分发，使用共享条目对象，覆盖字段、作者设置和保存异常。MinerU 测试通过真实服务入口执行缓存、任务去重与状态管理逻辑。
+
+Zotero 数据层、网络解析、计时器及文件系统使用模拟接口。已有结构化服务回归另使用本地临时文件。本次没有真实 Zotero GUI、用户数据库、外部服务、GPU 或完整 Wiki 流程验收。
+
+详细结果见 [修复验证记录](fix-verification.md)。

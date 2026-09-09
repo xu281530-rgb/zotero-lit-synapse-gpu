@@ -106,7 +106,7 @@ function parentItem(id, key) {
 
 async function writeStructuredCache(pdf, markdownAttachmentKey = undefined) {
   const info = await fs.stat(await pdf.getFilePathAsync());
-  const dir = path.join(tempDir, "zotero-lit-synapse", "mineru", pdf.key);
+  const dir = path.join(tempDir, "zotero-lit-synapse", "mineru", String(pdf.libraryID), pdf.key);
   const rawDir = path.join(dir, "raw");
   await fs.mkdir(rawDir, { recursive: true });
   const structured = [[
@@ -196,7 +196,7 @@ assert.equal(changed, 1);
 assert.equal(parent.attachmentIDs.length, 2, "one PDF and one replacement MD remain");
 const upgradedMeta = JSON.parse(
   await fs.readFile(
-    path.join(tempDir, "zotero-lit-synapse", "mineru", pdf.key, "meta.json"),
+    path.join(tempDir, "zotero-lit-synapse", "mineru", String(pdf.libraryID), pdf.key, "meta.json"),
     "utf8",
   ),
 );
@@ -391,6 +391,7 @@ const invalidCacheDir = path.join(
   tempDir,
   "zotero-lit-synapse",
   "mineru",
+  String(invalidPDF.libraryID),
   invalidPDF.key,
 );
 const invalidMetaPath = path.join(invalidCacheDir, "meta.json");
@@ -516,6 +517,7 @@ await fs.access(
     tempDir,
     "zotero-lit-synapse",
     "mineru",
+    String(missingPDF.libraryID),
     missingPDF.key,
     "raw",
     "content_list_v2.json",
@@ -683,7 +685,7 @@ assert.ok(
   "cache filenames preserve the structured source suffix",
 );
 
-const stableMetaPath = path.join(tempDir, "zotero-lit-synapse", "mineru", pdf.key, "meta.json");
+const stableMetaPath = path.join(tempDir, "zotero-lit-synapse", "mineru", String(pdf.libraryID), pdf.key, "meta.json");
 const stableBefore = JSON.parse(await fs.readFile(stableMetaPath, "utf8"));
 await service.migrateLegacyCaches();
 const stableAfter = JSON.parse(await fs.readFile(stableMetaPath, "utf8"));

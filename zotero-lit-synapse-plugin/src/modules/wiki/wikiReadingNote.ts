@@ -448,13 +448,14 @@ export function formatCoverageMap(
  * the two rules pull in opposite directions on purpose. `(chunk 42)` after a
  * measured value is what this is asking for.
  */
-const CHUNK_CITATION =
-  /(?:chunks?|\u5757|\u6bb5)\s*#?\s*\d+|#\s*chunks?\s*\d+|\u7b2c\s*\d+\s*(?:\u5757|\u6bb5)/iu;
+import { invalidWikiCitations, WIKI_CITATION_GUIDE } from "./wikiCitations";
 
 export class WikiReadingNoteCitationError extends Error {
-  constructor(message: string) {
+  readonly details?: { citations: ReturnType<typeof invalidWikiCitations> };
+  constructor(message: string, details?: { citations: ReturnType<typeof invalidWikiCitations> }) {
     super(message);
     this.name = "WikiReadingNoteCitationError";
+    this.details = details;
   }
 }
 
@@ -464,7 +465,12 @@ export class WikiReadingNoteCitationError extends Error {
  * @throws WikiReadingNoteCitationError
  */
 export function assertChunkCitations(body: string): void {
-  if (CHUNK_CITATION.test(String(body ?? ""))) return;
+  const invalid = invalidWikiCitations(body);
+  if (invalid.length) throw new WikiReadingNoteCitationError(
+    `Unrecognized chunk citation(s): ${invalid.map(c => `${c.raw} at character ${c.start}`).join(", ")}. ${WIKI_CITATION_GUIDE}`,
+    { citations: invalid },
+  );
+  if (citedChunkIds(String(body ?? "")).length) return;
   throw new WikiReadingNoteCitationError(
     "The reading note cites no chunk. Every fact, parameter, result and figure in it has to name the " +
       "chunk it came from - write the number in the prose, like \"the melt-pool depth reaches 1.2 mm " +

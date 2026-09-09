@@ -7,8 +7,9 @@ import {
   type WikiTermFields,
 } from "./wikiConceptTerms";
 import { rowColumn } from "./wikiRow";
+import { ensureCrossPaperSchema } from "./wikiCrossPaperReview";
 
-export const WIKI_SCHEMA_VERSION = 19;
+export const WIKI_SCHEMA_VERSION = 20;
 
 /**
  * Add a column an older database does not have yet.
@@ -657,6 +658,8 @@ export async function ensureWikiSchema(db: WikiDatabase): Promise<void> {
   await addColumnIfMissing(db, "wiki_claim_embeddings", "embedding_identity", "TEXT");
   await addColumnIfMissing(db, "wiki_concept_embeddings", "embedding_identity", "TEXT");
   await ensureLinkSchema(db);
+  await ensureCrossPaperSchema(db);
+  await addColumnIfMissing(db, "wiki_pages", "summary_selection_json", "TEXT NOT NULL DEFAULT '{}'");
   await addColumnIfMissing(db, "wiki_link_resolutions", "claim_ids_json", "TEXT NOT NULL DEFAULT '[]'");
   await backfillConceptTerms(db);
   await backfillConceptEmbeddingQueue(db);

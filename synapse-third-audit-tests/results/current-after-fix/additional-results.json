@@ -1,0 +1,115 @@
+[
+  {
+    "name": "Metadata: valid approved write changes requested title once",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Metadata: write disabled prevents even in-memory changes",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Metadata: refusal prevents even in-memory changes",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Metadata: non-string values are rejected before changes",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "D1: rejected metadata leaves cached fields intact before a later tag save",
+    "status": "PASS",
+    "details": {
+      "metadataCallReportedError": true,
+      "laterAction": "add tag only",
+      "persistedTitleAfterTag": "Original title",
+      "saveCount": 1
+    }
+  },
+  {
+    "name": "D1: a save failure restores raw field values and complete creator data",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "D1: a setter failure after staging restores fields and partially changed creators",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Tags: malformed tag string is rejected without removing old tags",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "File import: disabled file-import gate refuses an approved write",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MinerU: sequential suppression state updates preserve both identities",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "D2a: state writes and parsing recover after one transient state-file error",
+    "status": "PASS",
+    "details": {
+      "injectedIOFailures": 1,
+      "actualStateWriteAttempts": 3,
+      "stateFilePersisted": true,
+      "parseRecovered": true
+    }
+  },
+  {
+    "name": "D2a: failure to save post-parse state preserves valid artifacts and can retry the same change",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "D2b: concurrent reads of missing Markdown preserve both same-library suppressions after restart",
+    "status": "PASS",
+    "details": {
+      "publicEntryPoint": "getMarkdownForAttachment",
+      "requestedSuppressions": [
+        "1:SAMEKEY1",
+        "1:OTHERKEY"
+      ],
+      "persistedSuppressions": [
+        "1:SAMEKEY1",
+        "1:OTHERKEY"
+      ],
+      "sameLibrary": true,
+      "differentAttachmentKeys": true,
+      "noIOError": true
+    }
+  },
+  {
+    "name": "MinerU: preloaded shared state preserves concurrent suppression updates",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MinerU: first parse generates readable attached Markdown",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MinerU: replacing Markdown keeps old attachment if importing replacement fails",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MinerU: unreadable replacement is cleaned up, existing attachment retained",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Wiki reading-note file write requests atomic temp-path replacement",
+    "status": "PASS",
+    "details": null
+  }
+]

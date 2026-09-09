@@ -1,0 +1,38 @@
+[
+  {
+    "name": "C1: same-key Markdown imports use separate temporary files in different libraries",
+    "status": "PASS"
+  },
+  {
+    "name": "C1: matching legacy cache migrates without parsing or removing original files",
+    "status": "PASS"
+  },
+  {
+    "name": "C1: legacy cache with unverified owner is ignored {\"attachmentKey\":\"SAMEKEY1\"}",
+    "status": "PASS"
+  },
+  {
+    "name": "C1: legacy cache with unverified owner is ignored {\"libraryID\":7,\"attachmentKey\":\"SAMEKEY1\"}",
+    "status": "PASS"
+  },
+  {
+    "name": "C1: legacy cache with unverified owner is ignored {\"libraryID\":1,\"attachmentKey\":\"OTHERKEY\"}",
+    "status": "PASS"
+  },
+  {
+    "name": "C1: scoped cache still validates metadata owner {\"libraryID\":7,\"attachmentKey\":\"SAMEKEY1\"}",
+    "status": "PASS"
+  },
+  {
+    "name": "C1: scoped cache still validates metadata owner {\"libraryID\":1,\"attachmentKey\":\"OTHERKEY\"}",
+    "status": "PASS"
+  },
+  {
+    "name": "C1: library identity is required for an attachment cache path",
+    "status": "PASS"
+  },
+  {
+    "name": "C1: failure cooldown and cache statistics stay scoped to their libraries",
+    "status": "PASS"
+  }
+]

@@ -1,0 +1,92 @@
+[
+  {
+    "name": "Metadata: valid approved write changes requested title once",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Metadata: write disabled prevents even in-memory changes",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Metadata: refusal prevents even in-memory changes",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Metadata: non-string values are rejected before changes",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "D1: rejected metadata leaves cached fields intact before a later tag save",
+    "status": "FAIL",
+    "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n+ actual - expected\n\n+ 'Uncommitted title'\n- 'Original title'\n\n    at D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\additional.js:69:130\n    at async check (D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\additional.js:9:87)\n    at async D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\additional.js:67:3"
+  },
+  {
+    "name": "D1: a save failure restores raw field values and complete creator data",
+    "status": "FAIL",
+    "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:\n+ actual - expected\n\n  {\n    creators: [\n      {\n+       creatorType: 'author',\n+       name: 'Changed Institute'\n-       creatorTypeID: 1,\n-       fieldMode: 1,\n-       firstName: '',\n-       lastName: 'Research Institute'\n      }\n    ],\n    fields: {\n+     date: '2027',\n+     title: 'Pending'\n-     date: '2026-00-00 September 2026',\n-     title: 'Original title'\n    }\n  }\n\n    at D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\additional.js:84:12\n    at async check (D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\additional.js:9:87)\n    at async D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\additional.js:74:3"
+  },
+  {
+    "name": "D1: a setter failure after staging restores fields and partially changed creators",
+    "status": "FAIL",
+    "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n+ actual - expected\n\n+ 'Pending'\n- 'Original title'\n\n    at D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\additional.js:95:12\n    at async check (D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\additional.js:9:87)\n    at async D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\additional.js:88:3"
+  },
+  {
+    "name": "Tags: malformed tag string is rejected without removing old tags",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "File import: disabled file-import gate refuses an approved write",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MinerU: sequential suppression state updates preserve both identities",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "D2a: state writes and parsing recover after one transient state-file error",
+    "status": "FAIL",
+    "error": "Error: SIMULATED_TRANSIENT_IO_ERROR\n    at f.c.IOUtils.writeUTF8 (D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\additional.js:111:67)\n    at evalmachine.<anonymous>:517:27\n    at async MinerUService.writeAttachmentState (evalmachine.<anonymous>:519:11)\n    at async MinerUService.suppressAutomaticMarkdown (evalmachine.<anonymous>:537:11)\n    at async waitForActual (node:assert:644:5)\n    at async Function.rejects (node:assert:767:25)\n    at async D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\additional.js:112:5\n    at async check (D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\additional.js:9:87)\n    at async D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\additional.js:109:3"
+  },
+  {
+    "name": "D2a: failure to save post-parse state preserves valid artifacts and can retry the same change",
+    "status": "FAIL",
+    "error": "Error: ENOENT /test-data/zotero-lit-synapse/mineru/[object Object]/meta.json\n    at Object.readUTF8 (D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\fixtures.js:16:43)\n    at MinerUService.readMeta (evalmachine.<anonymous>:1723:37)\n    at D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\additional.js:132:29\n    at async check (D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\additional.js:9:87)\n    at async D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\additional.js:126:3"
+  },
+  {
+    "name": "D2b: concurrent reads of missing Markdown preserve both same-library suppressions after restart",
+    "status": "FAIL",
+    "error": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n\n1 !== 2\n\n    at D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\additional.js:147:12\n    at async check (D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\additional.js:9:87)\n    at async D:\\Zotero_Pluging\\zotero-lit-synapse\\synapse-third-audit-tests\\tests\\additional.js:137:3"
+  },
+  {
+    "name": "MinerU: preloaded shared state preserves concurrent suppression updates",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MinerU: first parse generates readable attached Markdown",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MinerU: replacing Markdown keeps old attachment if importing replacement fails",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "MinerU: unreadable replacement is cleaned up, existing attachment retained",
+    "status": "PASS",
+    "details": null
+  },
+  {
+    "name": "Wiki reading-note file write requests atomic temp-path replacement",
+    "status": "PASS",
+    "details": null
+  }
+]

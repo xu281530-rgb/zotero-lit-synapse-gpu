@@ -1,8 +1,6 @@
-/* Zotero's settings window sizes every sidebar pane icon with
- * `#prefs-navigation > richlistitem image { width: 24px }`. LitSynapse's own
- * row gets 36px — 1.5x — matched on the pane ID we register with, so the other
- * panes keep Zotero's size. Height stays automatic to preserve the aspect
- * ratio, exactly as Zotero's own rule does. */
+/* Keep Zotero's native 24px layout slot so icon centers and labels align
+ * across panes. Enlarge only the rendered icon around its center; changing
+ * its width would shift both the icon center and the following label. */
 #prefs-navigation > richlistitem[value="__addonRef__-prefpane"] image {
-  width: 36px;
+  transform: scale(1.5);
 }

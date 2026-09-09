@@ -386,7 +386,7 @@ test("the reading-note templates are advertised as the full-text shape", () => {
   );
   assert.match(
     served(note),
-    /A QUESTION-DRIVEN RECORD IS NOT HELD TO THOSE SIX SECTIONS/,
+    /A QUESTION-DRIVEN RECORD IS NOT HELD TO THE FULL-TEXT TEMPLATE/,
     "the question-driven exemption must be stated, not left to be discovered",
   );
   // The six labels are still named, so a full-text read still knows the shape.
@@ -412,13 +412,13 @@ test("the reading-note templates are advertised as the full-text shape", () => {
   // The whole-paper summary template, under the same guard.
   assert.match(
     served(note),
-    /THE MACRO SUMMARY TEMPLATE IS THE FULL-TEXT SHAPE AND IS ENFORCED ONLY THERE/,
+    /THE MACRO SUMMARY TEMPLATE IS ENFORCED ONLY FOR FULL-TEXT READING/,
     "the macro summary template must be advertised as full-text only",
   );
 
   // The four checks that DO apply in both modes must stay advertised, because
   // they are the quality floor the exemption is safe to sit on.
-  for (const promise of [/readChunkIds/, /80%/, /citation/i, /audit/i]) {
+  for (const promise of [/readChunkIds/, /all recognized measured values/i, /citation/i, /audit/i]) {
     assert.match(
       served(note),
       promise,

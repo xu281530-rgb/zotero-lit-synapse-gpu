@@ -61,6 +61,13 @@ class FakeItem {
     this.creators = creators;
   }
 
+  clone() {
+    const copy = new FakeItem();
+    copy.fields = { ...this.fields };
+    copy.creators = this.creators.map((creator) => ({ ...creator }));
+    return copy;
+  }
+
   async saveTx() {
     saveCount += 1;
   }

@@ -41,7 +41,7 @@
  */
 
 import { normalizeWikiText } from "./wikiCanonicalizer";
-import { citedWikiChunkIds } from "./wikiCitations";
+import { citedWikiChunkIds, stripWikiCitations } from "./wikiCitations";
 import { splitNoteBlocks, splitSentences } from "./wikiSynthesisAudit";
 
 /**
@@ -426,9 +426,6 @@ const UNIT_THEN_VALUES = new RegExp(
 const TABLE_ROW = /^\s{0,3}\|.*\|\s*$/u;
 const BARE_NUMBER = /\d+(?:\.\d+)?/gu;
 
-/** Chunk citations are addresses, never measurements. */
-const CITATION_NUMBER = /(?:chunks?|块|段)\s*#?\s*\d+(?:\s*(?:[-–—]|to|~|、|,|，)\s*\d+)*/giu;
-
 /**
  * The measured values a piece of text carries, as written.
  *
@@ -439,10 +436,7 @@ const CITATION_NUMBER = /(?:chunks?|块|段)\s*#?\s*\d+(?:\s*(?:[-–—]|to|~|�
  * be a check nobody could satisfy honestly.
  */
 export function measurementValues(text: string): Set<string> {
-  const normalized = normalizeMeasurementText(text).replace(
-    CITATION_NUMBER,
-    " ",
-  );
+  const normalized = normalizeMeasurementText(stripWikiCitations(text));
   const values = new Set<string>();
   const add = (raw: string | undefined): void => {
     if (!raw) return;
@@ -477,8 +471,7 @@ export function missingMeasurements(
 ): { missing: WikiMissingValues[]; total: number; landed: number } {
   const present = measurementValues(written);
   const bare = new Set<string>();
-  for (const match of normalizeMeasurementText(written)
-    .replace(CITATION_NUMBER, " ")
+  for (const match of normalizeMeasurementText(stripWikiCitations(written))
     .matchAll(BARE_NUMBER)) {
     bare.add(match[0].replace(/^0+(?=\d)/u, ""));
   }
@@ -532,7 +525,7 @@ export function assertValuesLanded(
       (missing.length > shown.length
         ? `\n  …另有 ${missing.length - shown.length} 个 chunk 有遗漏。`
         : "") +
-      "\n\n把它们写进「**测到了什么**」或「**做了什么**」，每个值带上单位和它的测量条件——" +
+      `\n\n把它们写进「**${WIKI_RECORD_SECTIONS[2].label}**」或「**${WIKI_RECORD_SECTIONS[1].label}**」，每个值带上单位和它的测量条件——` +
       "写「21.6 kW 下锭温 1750 ± 7.4 K，处于单相 β 区」，不要写「在给定功率下发生 β 相变」。" +
       "成分表、工艺参数表、性能表整表转写，不要改写成描述；" +
       "与文献对比的那一组数据也是数据，不要写成「普遍低于 500 MPa」。\n" +

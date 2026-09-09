@@ -1,4 +1,5 @@
 import { TOOL_ABORT_SIGNAL, requestSignal, forwardCancellation, assertNotCancelled, createRequestController } from './requestCancellation';
+import { mcpToolError } from './mcpToolErrors';
 import {
   handleGetLibraries,
   handleSearchLibraries,
@@ -839,9 +840,11 @@ export class StreamableMCPServer {
           ...(request.params.arguments ?? {}), [TOOL_ABORT_SIGNAL]: controller.signal,
         } } }),
         new Promise<MCPResponse>((resolve) => {
-          cancelled = () => resolve(this.createResponse(request.id ?? null, {
-            isError: true, content: [{ type: 'text', text: 'Request cancelled. Retrieval stopped; an already-running database read may finish in the background.' }],
-          }));
+          cancelled = () => resolve(this.createResponse(request.id ?? null,
+            mcpToolError(name, request.params.arguments, Object.assign(
+              new Error('Request cancelled. Retrieval stopped; an already-running database read may finish in the background.'),
+              {code:'REQUEST_CANCELLED',retryable:true},
+            ))));
           controller.signal.addEventListener('abort', cancelled, { once: true });
         }),
       ]);
@@ -1558,6 +1561,7 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
             limit: args.limit,
             compact: args.compact !== false,
             preview: args.preview === true,
+            checkpoint: args.checkpoint === true,
             proposedPageTitles: this.coerceStringArray(args.proposedPageTitles),
             refreshSkeleton: args.refreshSkeleton === true,
             knownSkeletonRevision: typeof args.knownSkeletonRevision === 'string' ? args.knownSkeletonRevision : undefined,
@@ -1582,6 +1586,10 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
               userInitiated: true,
               operationId: args.operationId,
               resume: args.resume === true,
+              checkpoint: args.checkpoint === true,
+              crossPaperReview: args.crossPaperReview,
+              deferMissingTargets: args.deferMissingTargets,
+              evidenceAssessments: args.evidenceAssessments,
               prepareToken: args.prepareToken,
               readingSessionId: Number.isInteger(args.readingSessionId)
                 ? args.readingSessionId
@@ -1617,6 +1625,16 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
             throw new Error('pageId is required');
           result = await getWikiService().getPage(args.pageId);
           break;
+        case 'wiki_get_link_review': {
+          const libraryID = args.libraryID ?? Zotero.Libraries.userLibraryID;
+          const reviews = await getWikiService().getStore().crossPaperReviews();
+          if (args.reviewId && !args.section) {
+            const review = await reviews.review(args.reviewId);
+            if (!review || !await reviews.task(review.taskId, libraryID)) throw new Error('Review does not belong to this library.');
+            result = review;
+          } else result = await reviews.read({ ...args, libraryID });
+          break;
+        }
         case 'wiki_get_claim':
           if (!Number.isInteger(args?.claimId))
             throw new Error('claimId is required');
@@ -1979,12 +1997,7 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
       });
     } catch (error) {
       ztoolkit.log(`[StreamableMCP] Tool call error for ${name}: ${error}`);
-      return this.createResponse(request.id ?? null, {
-        isError: true,
-        content: [{ type: 'text', text: error instanceof Error && error.name === 'WikiSynthesisAuditRequired'
-          ? JSON.stringify({ error: error.name, message: error.message, ...(error as any).details })
-          : `Error executing ${name}: ${error instanceof Error ? error.message : String(error)}` }],
-      });
+      return this.createResponse(request.id ?? null, mcpToolError(name, args, error));
     }
   }
 
@@ -5532,13 +5545,20 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
       let creatorsUpdated = false;
       let beforeCreators: any[] = [];
       let afterCreators: any[] = [];
+      const staged = item.clone(libraryID, { skipTags: true });
+      const originalFields = new Map<string, string>();
+      const originalCreators = Array.isArray(creators)
+        ? item.getCreators().map((creator: any) => ({ ...creator }))
+        : null;
+      let preparedCreators: any[] | null = null;
 
-      // Update fields
+      // Validate the complete update without changing Zotero's shared item.
       if (fields && typeof fields === 'object') {
         for (const [fieldName, value] of Object.entries(fields)) {
           try {
             const before = String(item.getField(fieldName) || '');
-            item.setField(fieldName, String(value));
+            originalFields.set(fieldName, item.getField(fieldName, true));
+            staged.setField(fieldName, String(value));
             updatedFields[fieldName] = { before, after: String(value) };
           } catch (fieldError) {
             throw new Error(
@@ -5550,33 +5570,51 @@ The stages, in order: 0 get_collections (scope, only when it helps) -> 1 hybrid_
 
       // Update creators
       if (creators && Array.isArray(creators)) {
-        beforeCreators = item.getCreators().map((c: any) => ({
+        beforeCreators = originalCreators!.map((c: any) => ({
           creatorType: Zotero.CreatorTypes.getName(c.creatorTypeID),
           firstName: c.firstName,
           lastName: c.lastName,
         }));
 
-        item.setCreators(
-          creators.map((c: any) => {
-            const creatorData: any = {
-              creatorType: c.creatorType || 'author',
-            };
-            if (c.name) {
-              // Organization / single-field name
-              creatorData.name = c.name;
-            } else {
-              creatorData.firstName = c.firstName || '';
-              creatorData.lastName = c.lastName || '';
-            }
-            return creatorData;
-          }),
-        );
+        preparedCreators = creators.map((c: any) => {
+          const creatorData: any = {
+            creatorType: c.creatorType || 'author',
+          };
+          if (c.name) {
+            // Organization / single-field name
+            creatorData.name = c.name;
+          } else {
+            creatorData.firstName = c.firstName || '';
+            creatorData.lastName = c.lastName || '';
+          }
+          return creatorData;
+        });
+        staged.setCreators(preparedCreators);
 
         creatorsUpdated = true;
         afterCreators = creators;
       }
 
-      await item.saveTx();
+      const appliedFields: string[] = [];
+      let creatorsTouched = false;
+      try {
+        for (const [fieldName, update] of Object.entries(updatedFields)) {
+          appliedFields.push(fieldName);
+          item.setField(fieldName, update.after);
+        }
+        if (preparedCreators) {
+          creatorsTouched = true;
+          item.setCreators(preparedCreators);
+        }
+        await item.saveTx();
+      } catch (error) {
+        // Preserve raw dates and single-field creators, including unsaved data.
+        for (const fieldName of appliedFields.reverse()) {
+          item.setField(fieldName, originalFields.get(fieldName)!);
+        }
+        if (creatorsTouched) item.setCreators(originalCreators!);
+        throw error;
+      }
 
       ztoolkit.log(
         `[StreamableMCP] Updated metadata on ${itemKey}: fields=[${Object.keys(updatedFields).join(', ')}], creators=${creatorsUpdated}`,

@@ -77,7 +77,33 @@ function minerFixture(){const io=memoryIO(),items=new Map(),imports=[],parseCall
  await check('MinerU: ordinary forced parsing imports the matching result for one library',async()=>{const f=minerFixture();const text=await f.s.getMarkdownForAttachment(f.a,{force:true,allowParse:true,userInitiated:true});assert.match(text,/Paper A/);assert.equal(f.parseCalls.length,1);assert.equal(f.imports.length,1);assert.equal(f.imports[0].libraryID,1);return{parseCalls:f.parseCalls,importedLibrary:1};});
  await check('MinerU: same attachment duplicate requests correctly share one parse',async()=>{const f=minerFixture(),gate=deferred();f.setParse(async()=>{await gate.promise;return f.result('Paper A evidence.');});const p1=f.s.getMarkdownForAttachment(f.a,{force:true,allowParse:true,userInitiated:true});await ticks();const p2=f.s.getMarkdownForAttachment(f.a,{force:true,allowParse:true,userInitiated:true});await ticks();gate.resolve();const [r1,r2]=await Promise.all([p1,p2]);assert.equal(r1,r2);assert.equal(f.parseCalls.length,1);});
  await check('MinerU: different attachment keys do not share their parsing tasks',async()=>{const f=minerFixture(),gate=deferred();f.b.key='OTHERKEY';f.setParse(async p=>{if(p==='/pdf/a.pdf')await gate.promise;return f.result(p==='/pdf/a.pdf'?'Paper A evidence.':'Paper B evidence.');});const p1=f.s.getMarkdownForAttachment(f.a,{force:true,allowParse:true,userInitiated:true});await ticks();const p2=f.s.getMarkdownForAttachment(f.b,{force:true,allowParse:true,userInitiated:true});await ticks();gate.resolve();const [r1,r2]=await Promise.all([p1,p2]);assert.match(r1,/Paper A/);assert.match(r2,/Paper B/);assert.equal(f.parseCalls.length,2);assert.equal(f.imports.length,2);});
- await check('C1a confirmed: concurrent same-key PDFs from different libraries share the first parse result',async()=>{const f=minerFixture(),gate=deferred();f.setParse(async p=>{if(p==='/pdf/a.pdf')await gate.promise;return f.result(p==='/pdf/a.pdf'?'Paper A evidence.':'Paper B evidence.');});const p1=f.s.getMarkdownForAttachment(f.a,{force:true,allowParse:true,userInitiated:true});await ticks();const p2=f.s.getMarkdownForAttachment(f.b,{force:true,allowParse:true,userInitiated:true});await ticks();gate.resolve();const [r1,r2]=await Promise.all([p1,p2]);assert.match(r1,/Paper A/);assert.equal(r1,r2);assert.equal(f.parseCalls.length,1);assert.equal(f.imports.length,1);assert.equal(f.imports[0].libraryID,1);return{libraries:[1,7],sameAttachmentKey:f.a.key,differentFileStats:true,parseCalls:f.parseCalls,library7Received:r2,library7OwnPDFParsed:false};},true);
- await check('C1b confirmed: later library parse overwrites shared artifact path; freshness ignores cached library owner',async()=>{const f=minerFixture();await f.s.getMarkdownForAttachment(f.a,{force:true,allowParse:true,userInitiated:true});await f.s.getMarkdownForAttachment(f.b,{force:true,allowParse:true,userInitiated:true});const sameDir=f.s.getAttachmentDir(f.a.key);const meta=JSON.parse(f.disk.get(sameDir+'/meta.json'));assert.equal(meta.libraryID,7);f.stats.set('/pdf/a.pdf',{size:2000,lastModified:2000});const readA=await f.s.getMarkdownForAttachment(f.a,{allowParse:false});assert.match(readA,/Paper B/);assert.match(f.imports.at(-1).markdown,/Paper B/);assert.equal(f.imports.at(-1).libraryID,1);return{sharedArtifactDirectory:sameDir,cachedOwnerAfterB:meta.libraryID,statCollisionAddedForDiskReuse:true,library1ReadAfterB:readA,wrongMarkdownImportedToLibrary1:true};},true);
+ await check('C1a: concurrent same-key PDFs from different libraries parse independently',async()=>{
+   const f=minerFixture(),gate=deferred();
+   f.setParse(async p=>{if(p==='/pdf/a.pdf')await gate.promise;return f.result(p==='/pdf/a.pdf'?'Paper A evidence.':'Paper B evidence.');});
+   const p1=f.s.getMarkdownForAttachment(f.a,{force:true,allowParse:true,userInitiated:true});
+   await ticks();
+   const p2=f.s.getMarkdownForAttachment(f.b,{force:true,allowParse:true,userInitiated:true});
+   await ticks();gate.resolve();
+   const [r1,r2]=await Promise.all([p1,p2]);
+   assert.match(r1,/Paper A/);assert.match(r2,/Paper B/);
+   assert.equal(f.parseCalls.length,2);assert.equal(f.imports.length,2);
+   assert.deepEqual(f.imports.map(i=>i.libraryID).sort((a,b)=>a-b),[1,7]);
+   return {libraries:[1,7],parseCalls:f.parseCalls,library7Received:r2};
+ });
+ await check('C1b: same-key disk caches stay isolated across restart and matching file stats',async()=>{
+   const f=minerFixture();f.stats.set('/pdf/b.pdf',{size:1000,lastModified:1000});
+   await f.s.getMarkdownForAttachment(f.a,{force:true,allowParse:true,userInitiated:true});
+   await f.s.getMarkdownForAttachment(f.b,{force:true,allowParse:true,userInitiated:true});
+   const dirA='/test-data/zotero-lit-synapse/mineru/1/SAMEKEY1',dirB='/test-data/zotero-lit-synapse/mineru/7/SAMEKEY1';
+   assert.equal(JSON.parse(f.disk.get(dirA+'/meta.json')).libraryID,1);
+   assert.equal(JSON.parse(f.disk.get(dirB+'/meta.json')).libraryID,7);
+   const fresh=new f.c.MinerUService();
+   const readA=await fresh.getRichParseForAttachment(f.a,{allowParse:false});
+   const readB=await fresh.getRichParseForAttachment(f.b,{allowParse:false});
+   assert.match(readA.markdown,/Paper A/);assert.match(readB.markdown,/Paper B/);
+   assert.match(JSON.stringify(readA.rawFiles),/Paper A/);assert.match(JSON.stringify(readB.rawFiles),/Paper B/);
+   assert.equal(f.imports.length,2);
+   return {directories:[dirA,dirB],library1ReadAfterB:readA.markdown,library7ReadAfterRestart:readB.markdown};
+ });
  const out=path.join(resultsRoot,'extended-results.json');fs.writeFileSync(out,JSON.stringify(checks,null,2));console.log(JSON.stringify(checks,null,2));if(checks.some(x=>x.status==='FAIL'))process.exitCode=1;
 })().catch(e=>{console.error(e);process.exitCode=1;});

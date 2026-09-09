@@ -52,7 +52,8 @@ export function renderWikiMarkdown(
         "",
         claim.claimText,
         "",
-        `Status: ${claim.epistemicStatus}; coverage: ${claim.coverageLevel}; confidence: ${claim.confidence}`,
+        `Status: ${claim.epistemicStatus}; coverage: ${claim.coverageLevel}; legacy heuristic score: ${claim.confidence} (not a probability)`,
+        `Current supporting sources: ${claim.evidenceOverview?.supportingSources ?? "unknown"}; contradicting sources: ${claim.evidenceOverview?.contradictingSources ?? "unknown"}; source independence: ${claim.evidenceOverview?.independence ?? "unknown"}; semantic support assessment: ${claim.evidenceOverview?.supportCompleteness ?? "unverified"}`,
         "",
       );
       for (const evidence of claim.evidence) {
@@ -60,6 +61,8 @@ export function renderWikiMarkdown(
           `- ${evidence.evidenceRole} [${evidence.readDepth}, ${evidence.linkState}] Zotero ${evidence.libraryID}:${evidence.itemKey} chunk ${evidence.chunkIdSnapshot}: ${evidence.excerpt}`,
         );
       }
+      for (const relation of claim.claimRelations ?? []) output.push(
+        `- Claim relation ${relation.relationId} [${relation.validity}]: Claim ${relation.sourceClaimId} ${relation.relationType} Claim ${relation.targetClaimId}. ${relation.statement} Conditions: ${relation.conditions}. Review ${relation.reviewId}. Evidence: ${relation.evidenceBindings.map((e:any)=>e.evidenceId).join(", ")}`);
       output.push("");
     }
   }

@@ -513,4 +513,61 @@ function mixedLibrary() {
   graph.dispose();
 }
 
+// Fixed spatial curves must keep their control points when nodes overlap on screen.
+{
+  const win = createWin(), canvas = createCanvas();
+  const graph = createGraph3D({ win, canvas });
+  graph.setData(mixedLibrary());
+  graph.setMode("2d");
+  win.flush();
+  for (const deltaY of [0, 1800]) {
+    canvas.dispatch("wheel", { deltaY });
+    win.flush();
+    graph.setAutoRotate(true);
+    for (let i = 0; i < 500; i++) {
+      canvas.context.record.curves.length = 0;
+      win.flush(1);
+      for (const curve of canvas.context.record.curves) {
+        // Orthographic projection is affine, including for the control point.
+        const expectedX = 500 + (curve.ax + curve.x - 1000) * 0.57;
+        const expectedY = 300 + (curve.ay + curve.y - 600) * 0.57;
+        assert.ok(Math.hypot(curve.cx - expectedX, curve.cy - expectedY) < 1e-7,
+          "rotation or overlapping endpoints must not push a curve out of its fixed geometry");
+      }
+    }
+    graph.setAutoRotate(false);
+    win.flush();
+  }
+  graph.dispose();
+}
+
+// A complete orbit in perspective must not produce a sudden curve displacement.
+{
+  const win = createWin(), canvas = createCanvas();
+  const graph = createGraph3D({ win, canvas });
+  graph.setData(mixedLibrary());
+  win.flush();
+  for (const verticalDrag of [0, 400]) {
+    canvas.dispatch("mousedown", { clientX: 300, clientY: 100 });
+    canvas.dispatch("mousemove", { clientX: 300, clientY: 100 + verticalDrag });
+    canvas.dispatch("mouseup");
+    win.flush();
+    const previous = new Map();
+    graph.setAutoRotate(true);
+    for (let frame = 0; frame < 2000; frame++) {
+      canvas.context.record.curves.length = 0;
+      win.flush(1);
+      for (const curve of canvas.context.record.curves) {
+        const before = previous.get(curve.dashed);
+        if (before) assert.ok(Math.hypot(curve.cx - before.cx, curve.cy - before.cy) < 5,
+          "perspective rotation must not suddenly displace a curve to avoid occlusion");
+        previous.set(curve.dashed, curve);
+      }
+    }
+    graph.setAutoRotate(false);
+    win.flush();
+  }
+  graph.dispose();
+}
+
 console.log("wiki 3D graph tests passed");

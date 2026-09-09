@@ -36,7 +36,7 @@ export type GraphMode = "2d" | "3d";
  * spanning two papers - so it is the one that has to be distinguishable at a
  * glance rather than blended in.
  */
-export type GraphLinkStyle = "solid" | "dashed" | "dotdash" | "dotted";
+export type GraphLinkStyle = "solid" | "dashed" | "dotdash" | "dotted" | "comparison";
 
 /**
  * How much of a document the reader has actually seen.
@@ -189,7 +189,7 @@ const LIGHT_PALETTE: Palette = {
   text: "#25231F",
   muted: "#777168",
   neutral: "rgba(103, 114, 126, 0.42)",
-  conflict: "rgba(164, 87, 78, 0.6)",
+  conflict: "rgba(176, 48, 48, 0.95)",
   halo: "rgba(255, 255, 255, 0.72)",
   groups: [
     "#536F62",
@@ -209,7 +209,7 @@ const DARK_PALETTE: Palette = {
   text: "#ECE6DA",
   muted: "#A79E90",
   neutral: "rgba(150, 162, 180, 0.38)",
-  conflict: "rgba(217, 140, 129, 0.58)",
+  conflict: "rgba(244, 125, 117, 0.95)",
   halo: "rgba(255, 255, 255, 0.34)",
   groups: [
     "#8FB3A2",
@@ -281,6 +281,11 @@ function layout(nodes: RuntimeNode[], links: RuntimeLink[]): void {
   });
 
   const iterations = Math.round(clamp(320 - count * 0.4, 90, 320));
+  const layoutPairs = new Map<string, RuntimeLink>();
+  for (const link of links) {
+    const key = [link.input.source, link.input.target].sort().join("\u0000");
+    if (!layoutPairs.has(key)) layoutPairs.set(key, link);
+  }
   const repulsion = 1900;
   const damping = 0.82;
   for (let step = 0; step < iterations; step += 1) {
@@ -312,7 +317,7 @@ function layout(nodes: RuntimeNode[], links: RuntimeLink[]): void {
         b.vz -= uz;
       }
     }
-    for (const link of links) {
+    for (const link of layoutPairs.values()) {
       const a = link.source;
       const b = link.target;
       // A shared claim is a stronger tie than a shared knowledge entry, and a
@@ -409,6 +414,7 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
   let links: RuntimeLink[] = [];
   let byId = new Map<string, RuntimeNode>();
   let visibleStyles = new Set<GraphLinkStyle>([
+    "comparison",
     "solid",
     "dashed",
     "dotdash",
@@ -630,9 +636,8 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
         selectedNode === b;
       const alpha =
         depthAlpha((a.depth + b.depth) / 2, cameraDistance) *
-        (focused ? 1 : 0.68);
-      // Bow the link away from the origin so parallel relations stay legible
-      // and the space reads as curved rather than as a wire cage.
+        (focused || link.tone === "conflict" ? 1 : 0.68);
+      // Project a fixed spatial control point; occlusion never changes the curve.
       projectPoint(
         (a.x + b.x) * 0.57,
         (a.y + b.y) * 0.57,
@@ -647,9 +652,9 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
       link.cy = control.y;
       context.globalAlpha = alpha;
       context.strokeStyle =
-        link.tone === "conflict" ? palette.conflict : palette.neutral;
+        link.tone === "conflict" ? palette.conflict : link.style === "comparison" ? palette.groups[2] : palette.neutral;
       context.lineWidth = clamp(
-        (0.7 + link.strength * 0.45) * (focused ? 2.2 : 1),
+        (0.7 + link.strength * 0.45 + (link.tone === "conflict" ? 0.8 : 0)) * (focused ? 2.2 : 1),
         0.6,
         5,
       );
@@ -660,7 +665,7 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
             ? [7, 4, 1.5, 4]
             : link.style === "dotted"
               ? [1.5, 4]
-              : [],
+              : link.style === "comparison" ? [10, 3] : [],
       );
       context.beginPath();
       context.moveTo(a.sx, a.sy);
@@ -845,7 +850,15 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
     }
     // A transform keeps the overlay off the layout path, so hovering a node
     // never reflows the graph pane.
-    tooltip.style.transform = `translate(${Math.round(clientX - bounds.left + 14)}px, ${Math.round(clientY - bounds.top + 14)}px)`;
+    const width = bounds.width || canvas.clientWidth;
+    const height = bounds.height || canvas.clientHeight;
+    tooltip.style.maxWidth = `${Math.max(0, Math.min(260, width - 16))}px`;
+    tooltip.style.maxHeight = `${Math.max(0, height - 16)}px`;
+    tooltip.style.overflow = "hidden";
+    tooltip.style.overflowWrap = "anywhere";
+    const x = Math.max(8, Math.min(clientX - bounds.left + 14, width - (tooltip.offsetWidth || 0) - 8));
+    const y = Math.max(8, Math.min(clientY - bounds.top + 14, height - (tooltip.offsetHeight || 0) - 8));
+    tooltip.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
   }
 
   const onMouseDown = (event: MouseEvent) => {
@@ -890,7 +903,7 @@ export function createGraph3D(options: Graph3DOptions): Graph3DController {
           `${link.source.input.label} ↔ ${link.target.input.label}`,
           link.style === "dashed"
             ? "同属一个知识条目"
-            : link.style === "dotdash" || link.style === "dotted"
+            : link.input.label || link.style === "dotdash" || link.style === "dotted"
               ? (link.input.label ?? "候选连接")
               : `共享 ${link.strength} 条论断${link.tone === "conflict" ? " · 含分歧" : ""}`,
         ],

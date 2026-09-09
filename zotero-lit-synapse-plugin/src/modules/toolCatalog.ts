@@ -15,6 +15,11 @@ import { MAX_SEARCH_INDEX_BUILD_ITEMS } from "./semantic/searchIndexBuilder";
 // The leaf again, never ./wiki: the barrel pulls in the whole Wiki service.
 // The number here and the number the server enforces must be ONE number.
 import { WIKI_EVIDENCE_MIN_EXCERPT_CHARS } from "./wiki/wikiSynthesisAudit";
+import { crossPaperReviewSchema, evidenceAssessmentSchema } from "./wiki/wikiReviewSchemas";
+import { withWikiActionVariants, wikiKnowledgeRefSchema, deferMissingTargetsSchema, WIKI_COMMIT_EXAMPLE } from "./wiki/wikiCommitSchema";
+import { WIKI_CONTEXT_SECTIONS } from "./wiki/wikiPreparedContext";
+import { WIKI_CITATION_GUIDE } from "./wiki/wikiCitations";
+import { WIKI_RECORD_SECTIONS, WIKI_MACRO_SECTIONS, renderTemplateGuide } from "./wiki/wikiRecordTemplate";
 
 /**
  * The one and only description of what this server can do.
@@ -61,6 +66,8 @@ export interface ToolDefinition {
    * server enforces is a different rule.
    */
   doctrine?: string;
+  /** Complete examples served with the method, not repeated in tools/list. */
+  examples?: unknown[];
   inputSchema: Record<string, any>;
 }
 
@@ -79,6 +86,7 @@ export const WIKI_TOOL_NAMES: ReadonlySet<string> = new Set([
   "wiki_search",
   "wiki_get_page",
   "wiki_get_claim",
+  "wiki_get_link_review",
   "wiki_status",
   "wiki_export",
   "wiki_record_concepts",
@@ -1225,6 +1233,7 @@ export function buildToolCatalog(): ToolDefinition[] {
       type: 'object',
       properties: {
         compact: { type: 'boolean', default: true, description: 'Return concise candidates and a prepared context index. Full records, evidence, pages and signals are available with wiki_get_prepared_context. Set false for the legacy expanded response.' },
+        checkpoint: { type:'boolean',default:false,description:'Prepare a progress checkpoint before final synthesis. Commit with checkpoint true to save knowledge without closing reading.' },
         preview: { type: 'boolean', default: false, description: 'Read candidates before composing the five-axis review. A preview does not mark the reading prepared and its token cannot authorize CREATE_PAGE. After comparing related papers, prepare again with wikiReview.' },
         libraryID: { type: 'number' },
         itemKey: {
@@ -1308,13 +1317,13 @@ export function buildToolCatalog(): ToolDefinition[] {
   {
     name: 'wiki_get_prepared_context',
     category: 'wiki',
-    description: 'Page through the immutable context captured by wiki_prepare_update. Use the same prepareToken and pagination.nextOffset. Large reading records or excerpts arrive as textFragment parts; concatenate the named field in offset order. Large nested entries arrive as contextFragment parts: join text for each entryIndex in offset order, then JSON.parse it. The token expires after ten minutes or when consumed by a page-creating commit.',
+    description: 'Page the immutable context from wiki_prepare_update using the same prepareToken and pagination.nextOffset. Each successful read renews the ten-minute idle timeout; invalid reads do not. A page-creating commit consumes the token. After inactivity or restart, prepare again and recover durable reviews with wiki_get_link_review. Counts and limit use context entries, including fragments; the character budget may return fewer than limit. Join textFragment fields or contextFragment.text by entryIndex and offset. For cross-paper tasks prefer wiki_get_link_review with taskId, section targets and expectedRevision.',
     inputSchema: {
       type: 'object',
       properties: {
         libraryID: { type: 'number' },
         prepareToken: { type: 'string' },
-        section: { type: 'string', enum: ['pages', 'claims', 'evidence', 'readingRecords', 'linkSignals', 'concepts', 'relations'] },
+        section: { type: 'string', enum: [...WIKI_CONTEXT_SECTIONS] },
         offset: { type: 'integer', minimum: 0, default: 0 },
         limit: { type: 'integer', minimum: 1, maximum: 50, default: 10 }
       },
@@ -1325,18 +1334,27 @@ export function buildToolCatalog(): ToolDefinition[] {
     name: 'wiki_commit',
     category: 'wiki',
     description: [
+      'Review old Wiki knowledge first. crossPaperTasks persist across token expiry and restarts; recover through wiki_get_link_review or prepare again. Submit crossPaperReview for required tasks, with reasons for excluded targets and explicit deferred gaps. Existing Evidence can be reused without rereading old chunks. Claim-to-Claim relations are written from each outcome relation, independently of Concept relations. checkpoint true saves progress without completing reading.',
       'Supply a unique operationId before submission. Query wiki_status with it after a timeout; resume saved postprocessing with the same operationId, resume true and actions []. The committed knowledge is never submitted again by a resume.',
       'Apply only controlled Wiki actions. The plugin validates pages, claims, Zotero documents, actual indexed chunks, excerpts, duplicates, versions and the two-page creation ceiling. It never accepts SQL. When automatic Wiki writing is disabled, Zotero asks the user to confirm this Wiki-only database update.',
-      'Every screened current cross-paper candidate with BOTH passages read needs an individual decision. RESOLVE_LINK_SIGNAL records shared_claim, same_page with two independent claimIds, conflict, concept_relation, or a reasoned no_action. Merging is never required. Outcomes are checked against the final stored evidence in the same transaction; invalid decisions roll back the knowledge write.',
+      'Account for outstanding read chunks with Evidence or reasoned SKIP actions. Unsettled reading stays open. Wiki writes and Zotero note status use separate permissions; see the method for review and settlement rules.',
+    ].join('\n'),
+    doctrine: [
+      'Required crossPaperTasks must have crossPaperReview even when the new paper has no previous Wiki Claims. A task decision covers its mapped signals without duplicate per-signal actions. Legacy screened candidates with BOTH passages read still require an individual decision when not covered by a task. RESOLVE_LINK_SIGNAL alone cannot replace the required knowledge review. Outcomes are checked against final stored evidence in the same transaction; invalid decisions roll back the knowledge write.',
+      'resolvesSignalIds: Compatibility shorthand for signals settled by this action. Final stored evidence is verified in the knowledge transaction: shared Claims need valid SUPPORTS evidence from both papers. Prefer a separate RESOLVE_LINK_SIGNAL action to state the outcome explicitly, especially when retaining distinct Claims on an existing Page. Each signal is decided once.',
+      'resolutionType: RESOLVE_LINK_SIGNAL outcome. shared_claim/conflict require claimId; same_page requires pageId and two claimIds; concept_relation requires relationId; no_action needs only its reason. Every outcome requires a reason comparing both passages.',
+      'UPDATE_CLAIM requires the current expectedVersion. Changing knowledge text or type, or promoting coverage/status, also requires the Evidence used for that change. An unchanged or downgraded Claim may omit Evidence.',
       '',
       'ZOTERO NOTE STATUS IS SEPARATE. A commit that completes an open full-text reading session also tries to mark its Markdown reading note completed. That small Zotero write uses the Zotero write permission and confirmation; if it is not authorized, the Wiki commit and session close still succeed and noteStatusWrite reports not_authorized.',
       '',
       'SETTLING WHAT WAS READ. A chunk owes the Wiki something until this call accounts for it, ONE BY ONE. WHICH chunks owe differs by how they were read: a full-text page charges every chunk it DELIVERED, because a page you were handed and did not account for is a page you skipped; a question charges only the chunks you DECLARED in readChunkIds, so a passage retrieval returned and you did not use was never charged and needs no SKIP. Do not write SKIP actions to dismiss passages a search merely surfaced — they are not on the ledger, and a reason filed against text nobody read is worse than none. A chunk is settled by an Evidence excerpt quoting it, or by a SKIP action naming it with a reason; citing one chunk of the twenty a page delivered settles that one only. Whatever is left unsettled keeps the paper OPEN: the Claims you did write are committed and permanent, but the paper is not finished and does not release the reading slot. wiki_prepare_update lists exactly which chunk ids are outstanding.',
-    ].join('\n'),
-    doctrine: [
       'ONE SKIP CAN NAME MANY CHUNKS, and for a whole-paper read most of them will be settled that way — a derivation, a bibliography, a run of routine measurements. Give it one reason that argues rather than asserts: say what those passages establish and what the Wiki already holds that covers it. Name chunks by chunkId, the id the index assigned, not by the position a note citation uses. A paper read end to end used to produce four Claims resting on four of its 186 chunks with nothing anywhere asking what became of the other 182; this is the call that asks.',
-      'A SKIP that carries itemKey, chunkIds and reason is how you record that read text established nothing the Wiki did not already hold — a restated definition, a caption confirming a known number, a paragraph of related work. That is a legitimate and common outcome, and a whole turn may be settled this way. What it is not is a formality: the reason must say what those passages actually establish and which Page, Claim, Concept or relation already covers it. "Nothing new" is refused, because it is exactly what a reader who checked nothing would also write. One reason may cover a group of chunks; you are never asked to explain each chunk separately. Every reason is kept in the reading ledger permanently.'
+      'A SKIP that carries itemKey, chunkIds and reason is how you record that read text established nothing the Wiki did not already hold — a restated definition, a caption confirming a known number, a paragraph of related work. That is a legitimate and common outcome, and a whole turn may be settled this way. What it is not is a formality: the reason must say what those passages actually establish and which Page, Claim, Concept or relation already covers it. "Nothing new" is refused, because it is exactly what a reader who checked nothing would also write. One reason may cover a group of chunks; you are never asked to explain each chunk separately. Every reason is kept in the reading ledger permanently.',
+      'DISMISS_LINK_SIGNALS: the candidate signals that establish nothing, each with its OWN reason. Every signal is a different pair of passages, so one sentence cannot describe several of them — a reason filed against text it does not quote is worse than no reason at all, because the next reviewer believes it. Use signalIds + reason only when dismissing a single signal.',
+      'REASON: SKIP (with chunkIds) or DISMISS_LINK_SIGNALS. For SKIP: what those passages establish, and which existing Page, Claim, Concept or relation already holds it. For DISMISS_LINK_SIGNALS: what each side actually claims, and why they cannot support one Claim, sit under one Page, contradict each other or form a concept relation — argued from the two excerpts the signal carries. At least 40 characters either way, and it must argue rather than assert: "nothing new", "not related" and their equivalents are refused. For SKIP one reason covers the chunkIds it names; for DISMISS_LINK_SIGNALS it covers exactly ONE signal, and a batch sends dismissals instead. Kept permanently either way.',
+      `EVIDENCE: The exact chunks actually used for this Claim in this turn, quoted from the paper itself. An excerpt must be a PASSAGE, not a term: at least ${WIKI_EVIDENCE_MIN_EXCERPT_CHARS} characters, and long enough to occur in only one chunk of the paper. A bare term proves the paper mentions those words, which is never what the Claim asserts, and a phrase repeated across chunks cannot say which passage the Claim rests on — both are refused. Quote the clause the Claim actually stands on, with the conditions or the definiendum attached. Every chunk cited here must already be recorded as READ — delivered by wiki_build_from_paper, or named in a wiki_update_reading_note readChunkIds call — because a Claim may only rest on something the paper's reading note already accounts for. An excerpt from an unread chunk is refused by name. Never quote a reading note as Evidence: the note is your memory of the paper, the chunk is the paper. Do not claim paper_reviewed unless every ordered document chunk was actually read in a full-text pass.`
     ].join('\n'),
+    examples: [WIKI_COMMIT_EXAMPLE],
     inputSchema: {
       type: 'object',
       properties: {
@@ -1347,10 +1365,15 @@ export function buildToolCatalog(): ToolDefinition[] {
         },
         operationId: { type: 'string', pattern: '^[A-Za-z0-9_-]{8,128}$', description: 'Stable identifier for this exact write, retained across retries and restarts.' },
         resume: { type: 'boolean', description: 'Resume only saved postprocessing; requires operationId and actions [].' },
+        checkpoint: { type: 'boolean', default: false },
+        readingSessionId: { type: 'integer', minimum: 1, description: 'The reading session this commit accounts for.' },
+        crossPaperReview: crossPaperReviewSchema,
+        deferMissingTargets: deferMissingTargetsSchema,
+        evidenceAssessments: evidenceAssessmentSchema,
         actions: {
           type: 'array',
           minItems: 0,
-          items: {
+          items: withWikiActionVariants({
             type: 'object',
             properties: {
               action: {
@@ -1372,16 +1395,16 @@ export function buildToolCatalog(): ToolDefinition[] {
               resolvesSignalIds: {
                 type: 'array',
                 items: { type: 'integer', minimum: 1 },
-                description: 'Compatibility shorthand for signals settled by this action. Final stored evidence is verified in the knowledge transaction: shared Claims need valid SUPPORTS evidence from both papers. Prefer a separate RESOLVE_LINK_SIGNAL action to state the outcome explicitly, especially when retaining distinct Claims on an existing Page. Each signal is decided once.'
+                description: 'Compatibility shorthand for signals settled by this action; see the method.'
               },
               signalId: { type: 'integer', minimum: 1, description: 'RESOLVE_LINK_SIGNAL: one candidate to decide.' },
-              resolutionType: { type: 'string', enum: ['shared_claim', 'same_page', 'conflict', 'concept_relation', 'no_action'], description: 'RESOLVE_LINK_SIGNAL outcome. shared_claim/conflict require claimId; same_page requires pageId and two claimIds; concept_relation requires relationId; no_action needs only its reason. Every outcome requires a reason comparing both passages.' },
+              resolutionType: { type: 'string', enum: ['shared_claim', 'same_page', 'conflict', 'concept_relation', 'no_action'], description: 'Outcome with a reason comparing both passages; required references depend on the outcome.' },
               claimIds: { type: 'array', minItems: 2, maxItems: 2, uniqueItems: true, items: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string' }] }, description: 'Two distinct Claims retained under one Page. Numeric ids or refs assigned earlier in this commit.' },
               relationId: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string' }] },
               dismissals: {
                 type: 'array',
                 minItems: 1,
-                description: 'DISMISS_LINK_SIGNALS: the candidate signals that establish nothing, each with its OWN reason. Every signal is a different pair of passages, so one sentence cannot describe several of them — a reason filed against text it does not quote is worse than no reason at all, because the next reviewer believes it. Use signalIds + reason only when dismissing a single signal.',
+                description: 'DISMISS_LINK_SIGNALS: each candidate needs its own reason comparing both passages; see the method.',
                 items: {
                   type: 'object',
                   properties: {
@@ -1403,15 +1426,18 @@ export function buildToolCatalog(): ToolDefinition[] {
               },
               reason: {
                 type: 'string',
-                description: 'SKIP (with chunkIds) or DISMISS_LINK_SIGNALS. For SKIP: what those passages establish, and which existing Page, Claim, Concept or relation already holds it. For DISMISS_LINK_SIGNALS: what each side actually claims, and why they cannot support one Claim, sit under one Page, contradict each other or form a concept relation — argued from the two excerpts the signal carries. At least 40 characters either way, and it must argue rather than assert: "nothing new", "not related" and their equivalents are refused. For SKIP one reason covers the chunkIds it names; for DISMISS_LINK_SIGNALS it covers exactly ONE signal, and a batch sends dismissals instead. Kept permanently either way.'
+                description: 'At least 40 characters explaining the decision from the passages; see the method. SKIP may group chunks; a dismissal covers only one signal.'
               },
-              pageId: {},
-              claimId: {},
-              expectedVersion: { type: 'integer' },
-              canonicalTitle: { type: 'string' },
+              pageId: wikiKnowledgeRefSchema,
+              claimId: wikiKnowledgeRefSchema,
+              expectedVersion: { type: 'integer', minimum: 1 },
+              canonicalTitle: { type: 'string', minLength: 1 },
               primaryConceptRef: { type: 'string' },
-              primaryConcept: { type: 'object' },
-              claimText: { type: 'string' },
+              primaryConcept: { type: 'object', properties: {
+                canonicalName: {type:'string',minLength:1}, conceptType:{type:'string'}, description:{type:'string'},
+                aliases:{type:'array',items:{type:'object',properties:{alias:{type:'string',minLength:1},language:{type:'string'},source:{type:'string'},confidence:{type:'number',minimum:0,maximum:1}},required:['alias']}},
+              }, required:['canonicalName'] },
+              claimText: { type: 'string', minLength: 1 },
               claimType: {
                 type: 'string',
                 enum: [
@@ -1447,15 +1473,14 @@ export function buildToolCatalog(): ToolDefinition[] {
               },
               evidence: {
                 type: 'array',
-                minItems: 1,
-                description: `The exact chunks actually used for this Claim in this turn, quoted from the paper itself. An excerpt must be a PASSAGE, not a term: at least ${WIKI_EVIDENCE_MIN_EXCERPT_CHARS} characters, and long enough to occur in only one chunk of the paper. A bare term proves the paper mentions those words, which is never what the Claim asserts, and a phrase repeated across chunks cannot say which passage the Claim rests on — both are refused. Quote the clause the Claim actually stands on, with the conditions or the definiendum attached. Every chunk cited here must already be recorded as READ — delivered by wiki_build_from_paper, or named in a wiki_update_reading_note readChunkIds call — because a Claim may only rest on something the paper's reading note already accounts for. An excerpt from an unread chunk is refused by name. Never quote a reading note as Evidence: the note is your memory of the paper, the chunk is the paper. Do not claim paper_reviewed unless every ordered document chunk was actually read in a full-text pass.`,
+                description: 'Unique source passages from chunks already recorded as read, retaining the Claim conditions. Never quote a reading note; see the method.',
                 items: {
                   type: 'object',
                   properties: {
                     libraryID: { type: 'number' },
                     itemKey: { type: 'string' },
                     chunkIdSnapshot: { type: 'integer', minimum: 0 },
-                    excerpt: { type: 'string' },
+                    excerpt: { type: 'string', minLength: WIKI_EVIDENCE_MIN_EXCERPT_CHARS, description: 'One continuous substring of the cited source chunk, allowing the documented typography normalization. Nonadjacent sentences must be separate Evidence entries; do not join them into one excerpt.' },
                     evidenceRole: {
                       type: 'string',
                       enum: ['SUPPORTS', 'CONTRADICTS', 'QUALIFIES', 'EXAMPLE']
@@ -1479,17 +1504,13 @@ export function buildToolCatalog(): ToolDefinition[] {
                   ]
                 }
               },
-              sourceConceptId: {},
-              targetConceptId: {},
+              sourceConceptId: wikiKnowledgeRefSchema,
+              targetConceptId: wikiKnowledgeRefSchema,
               confidence: { type: 'number', minimum: 0, maximum: 1, description: 'Required for LINK_RELATION. Claim confidence is derived from evidence.' },
               predicate: { type: 'string' }
             },
-            required: ['action'],
-            allOf: [
-              { if: { properties: { action: { const: 'LINK_RELATION' } }, required: ['action'] }, then: { required: ['sourceConceptId', 'targetConceptId', 'predicate', 'confidence'] } },
-              { if: { properties: { action: { const: 'RESOLVE_LINK_SIGNAL' } }, required: ['action'] }, then: { required: ['signalId', 'resolutionType', 'reason'] } }
-            ]
-          }
+            required: ['action']
+          })
         }
       },
       required: ['actions']
@@ -1521,6 +1542,16 @@ export function buildToolCatalog(): ToolDefinition[] {
       properties: { pageId: { type: 'integer' } },
       required: ['pageId']
     }
+  },
+  {
+    name: 'wiki_get_link_review',
+    category: 'wiki',
+    description: 'Recover durable cross-paper tasks, snapshots, decisions, bound evidence and superseded history. Reading this tool never changes decisions. Filter by task, either paper, signal or operation; use reviewId for a specific historical revision. Missing evidence means deferred, not no_relation. Current dependency validity is reported separately from completion. Without a task filter the result is paginated.',
+    inputSchema: { type:'object',properties:{ libraryID:{type:'integer',minimum:1},taskId:{type:'integer',minimum:1},reviewId:{type:'integer',minimum:1},
+      itemKey:{type:'string'},relatedItemKey:{type:'string'},signalId:{type:'integer',minimum:1},operationId:{type:'string'},
+      section:{type:'string',enum:['targets','discovery','outcomes','verdicts','history'],description:'With taskId, page one durable section. Large records use contextFragment; reconstruct JSON as with prepared context.'},
+      expectedRevision:{type:'string',description:'Use the revision returned with this task on every page; mismatches require a fresh task read.'},
+      offset:{type:'integer',minimum:0},limit:{type:'integer',minimum:1,maximum:50} } }
   },
   {
     name: 'wiki_get_claim',
@@ -1846,7 +1877,7 @@ export function buildToolCatalog(): ToolDefinition[] {
     description: [
       'Append to a paper\'s persistent reading note. Each ordinary call adds ONE immutable reading record for this turn; once every chunk is covered, one final call appends the whole-paper macro summary after all records. This is used both while paging with wiki_build_from_paper and after answering from retrieved passages.',
       '',
-      'A QUESTION-DRIVEN RECORD IS NOT HELD TO THOSE SIX SECTIONS, and writing them anyway buys nothing. The six slots answer for a whole page of twenty chunks; a question reads two or three passages for one purpose, and filling 方法 or 概念与术语 out of three passages produces sentences written to occupy a heading. Do NOT emit the headings when the reading was question-driven. What IS checked, and is checked identically in both modes, is the part that carries the value: every chunk you listed in readChunkIds is named somewhere in the record, every sentence carries its own chunk citation, at least 80% of the measured values in those chunks land with their units and conditions, and every sentence is audited against the chunk it cites. Write connected prose that satisfies those four and stop; a question-driven record that does is complete, however short it is.',
+      'A QUESTION-DRIVEN RECORD IS NOT HELD TO THE FULL-TEXT TEMPLATE. Write connected prose for the passages actually used. Both modes require coverage of every declared chunk, citations for factual statements, and all recognized measured values with their units and conditions. Statements are checked against their cited chunks by the synthesis audit. Independent validation issues arrive together in validationIssues; path is a JSON Pointer to the submitted text, and section identifies a heading within that text. activeIssues applies to the current text; staleAuditIds identifies obsolete submissions.',
       '',
       'ORDINARY CALLS: send readingRecord containing only what this turn established. The server appends and numbers it; earlier prose and records are immutable. If new text corrects an old record, append "Correction to record N" with the new chunk citation. Never resubmit existing content.',
       'RECOVERY: if a file or progress update fails, retry the original request. Saved operations pin the session, source revision and attachment; the retry completes remaining work without duplicating records. wiki_get_reading_note reports pendingOperation when recovery is needed.',
@@ -1855,19 +1886,16 @@ export function buildToolCatalog(): ToolDefinition[] {
       'AFTER ANSWERING A QUESTION FROM A PAPER, call this once for EVERY paper whose passages you genuinely read and used. Send itemKey, readChunkIds, readingRecord, and the domain and expertRole used by search_fulltext. Three papers read means three calls. Retrieval is not reading: do not list passages merely returned or skimmed past.',
     ].join('\n'),
     doctrine: [
-      'THE RECORD TEMPLATE IS THE FULL-TEXT SHAPE, AND IT IS ENFORCED ONLY THERE. Write in Chinese, keeping terms, formulae, numbers and units in their original form. Six sections, each a line of its own reading `**标签**`, each non-empty:',
-      '  **阅读总结** - 本批读到的内容，通俗、连贯地讲清楚。这是唯一允许压缩的地方。句末注明本批范围，例如「（chunk 0-7）」：这一栏按定义是跨 chunk 的概括，没有引用会被逐块引用检查拦下。',
-      '  **方法** - 本批涉及的做法：实验流程、设备、软件、表征手段，以及理论推导路径与模型、判据的建立方式——理论文章的推导过程同样是方法。参数落值、带单位、带条件；工艺参数表整表转写。写成连贯段落。',
-      '  **结果与结论** - 本批得出的东西：测量值、对比、趋势、推导出的关系式、模型输出、作者下的判断。不限于实验数据，理论推导与模拟的产出同样算。数值原样保留、带条件。确实什么都没得出时写明「本批未得出结果或结论」。写成连贯段落。',
-      '  **概念与术语** - 准备写进 Wiki 的术语：名称 + 一句定义 + chunk 号。没有写「无」。',
-      '  **本批覆盖** - 逐 chunk 点名只在这里做，按内容分组，三五行：「chunk 56-59 建立形核过冷度模型；chunk 60-63 推导生长速率与稳定性判据；chunk 3、16 为元数据与装置示意图，无独立数据」。',
-      '  **存疑与未交代** - 本批说不清楚、看似矛盾、或被推迟到后文的东西。没有写「无」。三种情形必须写：同一个量出现两个不同的数（两个都记，各自注明出处，不要替论文挑一个），表格里量级明显反常的值（照抄原值并注明可疑），论文自己说「后文讨论」的。',
+      'THE RECORD TEMPLATE IS THE FULL-TEXT SHAPE, AND IT IS ENFORCED ONLY THERE. Write in Chinese, keeping terms, formulae, numbers and units in their original form.',
+      renderTemplateGuide(WIKI_RECORD_SECTIONS),
+      WIKI_CITATION_GUIDE,
       'The first section exists so that the urge to be brief has somewhere legitimate to go; without it that urge spends itself on the sections holding the data, which is how a chunk stating "a decrease by 63% from 273 µm to 101 µm at 100 MPa" becomes "grains were refined with increasing pressure".',
       'A SENTENCE MAY CHAIN SEVERAL CHUNKS, as long as each clause carries its own citation: 加压抬高了相变自由能差（chunk 46），因而形核激活能随之下降（chunk 53）。 That is a chain of attributed facts and is NOT a fusion. Only citations piled behind one assertion - "A and B jointly cause C (chunk 46, chunk 53)" - are, because neither chunk states that on its own. This is what makes connected prose affordable; writing one fact per sentence was never the requirement, only the cheapest way to avoid a rule that no longer applies.',
       'WRITE PARAGRAPHS - NOT LINES, AND NOT NUMBERED POINTS. BOTH ARE CHECKED. A narrative slot refuses `1.` `2.` and `- ` outright: an enumeration hands the reader a set of facts and leaves the relations between them to be guessed, and those relations are the only thing this slot adds to the paper. Every sentence still carries its own chunk citation; what changes is that related sentences go in the SAME paragraph, joined by cause and contrast - which one is the mechanism behind another, which are the same phenomenon measured under different conditions, which one bounds the one before it. A section that comes back as one fact per line is refused as a list. Keeping a citation on every sentence is also what makes a paragraph safe: a sentence with no citation of its own inherits the whole block and is then read as a cross-chunk assertion. So it is one citation per SENTENCE and several sentences per PARAGRAPH, never one sentence per line. Pure data may go in a Markdown table, which is not prose and is not held to this.',
       'PAGE SIZE IS YOURS TO CHOOSE, AND IT IS NOT FREE. There is no small-page rule: ask for as many chunks as you want to see at once, because seeing more at once is how connections across a section get noticed. What scales with the page is the OBLIGATION - twenty chunks means twenty chunks to account for and every measurement in all twenty to land. Take a large page and owe a long record; take a small page and owe a short one. Choose the trade deliberately rather than always asking for the maximum.',
       'CARRYING THE CONDITION IS THE CHEAP PATH, NOT THE EXPENSIVE ONE. The audit does not flag numbers; it flags a number whose conditions were dropped. A value written together with the condition it was measured under is not flagged at all, so a dense, fully conditioned record passes more easily than a vague one. Writing around a value to stay safe is the one strategy that fails both the audit and this note.',
-      'THE MACRO SUMMARY TEMPLATE IS THE FULL-TEXT SHAPE AND IS ENFORCED ONLY THERE — a question-driven summary is held to the citation and audit rules alone, so do not emit these headings for one. Seven sections, each `## 标签`, each non-empty, in Chinese: **本篇讲了什么**（3-5 句通俗话，每句引用它依据的 chunk，跨多处可用范围如「（chunk 88-89）」）; **研究对象与材料**（理解结论所需的对象与材料特征）; **核心方法**（研究设计、关键工艺路线与分析思路）; **主要结果**（核心发现、趋势与比较）; **机理解释**（论文自己的因果链，按它自己的强度）; **结论**（凝练核心结论）; **边界与局限**（适用范围、缺的对照、作者自陈不足）.',
+      'THE MACRO SUMMARY TEMPLATE IS ENFORCED ONLY FOR FULL-TEXT READING:',
+      renderTemplateGuide(WIKI_MACRO_SECTIONS),
       'CORE SYNTHESIS IS SELECTIVE: values are optional, not a coverage target. Keep one when the core conclusion depends on its magnitude or when an important condition would otherwise be ambiguous; leave supporting measurements and parameter tables in the immutable records. The summary is still audited sentence by sentence against cited chunks before being written. Both full-text and question-driven readings may do this; a question-driven reading must first replace its provisional expert from metadata and abstract, and still cannot claim paper_reviewed depth.',
       'AFTER THE MACRO SUMMARY, the response places every reading record beside every Wiki Claim whose Evidence cites this paper. Run wiki_record_concepts final true, then wiki_prepare_update with one claimVerdict per listed Claim. An overstated verdict requires UPDATE_CLAIM with the reviewed replacement; a contradiction requires MARK_CONFLICT and becomes disputed for human review.',
       'A PAPER CAN HAVE MORE THAN ONE NOTE, and which one your record lands in is decided for you. A note is CONCLUDED once its whole-paper summary is written, and a concluded note is never appended to again - so reading that arrives afterwards opens a new note beside it, numbered #2, #3, and so on. The server routes each record: to the open note when there is one, and otherwise, when every note is concluded, by comparing this record against the CLOSEST existing account of the same passages. Below the similarity threshold it opens a new note; at or above it the record is DISCARDED and the response says so in a `discarded` field, with the chunks still booked as read. That is not an error and must not be retried — it means the notes already say this. What it does mean is that you should have read them: wiki_get_reading_note returns `paper.episodes` listing every note with whether it is concluded, and `paper.readChunkRanges` for what the paper as a whole has had read. `progress` beside it describes only the note being written, so on a paper read cover to cover in an earlier episode it will say most of the paper is unread. Trust `paper` for what the paper has had read, and `progress` for what THIS note owes.',
@@ -2255,7 +2283,14 @@ export function renderToolDoctrine(
 ): string | null {
   const tool = tools.find((entry) => toolDoctrineUri(entry.name) === uri);
   if (!tool?.doctrine) return null;
-  return `# ${tool.name}\n\n${tool.description}\n\n${tool.doctrine}`;
+  const examples = tool.examples;
+  const exampleText = examples?.length
+    ? "\n\nExamples below use illustrative IDs, revisions and source text. Replace them with the current library records and passages actually read before submitting.\n\n" +
+      examples
+        .map((value) => "```json\n" + JSON.stringify(value, null, 2) + "\n```")
+        .join("\n\n")
+    : "";
+  return `# ${tool.name}\n\n${tool.description}\n\n${tool.doctrine}${exampleText}`;
 }
 
 export function filterToolCatalog(options: {

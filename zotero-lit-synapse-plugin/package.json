@@ -1,7 +1,7 @@
 {
   "name": "zotero-lit-synapse",
   "type": "module",
-  "version": "3.1.0",
+  "version": "3.2.4",
   "description": "Zotero LitSynapse for Zotero 9.0.x with question-driven LLM Wiki memory, independent evidence-linked knowledge storage, cross-paper link candidates with auditable settlement, hybrid keyword/semantic/Wiki retrieval, cursor pagination, and MCP 2025-06-18 Streamable HTTP",
   "config": {
     "addonName": "Zotero LitSynapse",
@@ -9,7 +9,7 @@
     "addonRef": "zotero-lit-synapse",
     "addonInstance": "ZoteroLitSynapse",
     "prefsPrefix": "extensions.zotero.zotero-lit-synapse",
-    "addonVersion": "3.1.0"
+    "addonVersion": "3.2.4"
   },
   "repository": {
     "type": "git",
@@ -17,6 +17,9 @@
   },
   "license": "MIT",
   "scripts": {
+    "test:wiki-general-workflow": "node --experimental-strip-types scripts/test-wiki-general-workflow.js",
+    "test:wiki-cross-paper-review": "node --experimental-strip-types --experimental-sqlite scripts/test-wiki-cross-paper-review.js",
+    "test:wiki-review-release": "node scripts/test-wiki-review-release.mjs",
     "start": "zotero-plugin serve",
     "build": "zotero-plugin build && tsc --noEmit",
     "build:gpu-native": "native\\vector-gpu\\build-local.cmd",
@@ -138,6 +141,7 @@
     "test:deep-dive": "node --experimental-strip-types scripts/test-deep-dive.js",
     "test:semantic-autoupdate": "node scripts/test-semantic-autoupdate.js",
     "test:synapse-audit": "node scripts/test-synapse-audit-regressions.js",
+    "test:synapse-followup": "npm run build && node scripts/test-synapse-followup-audits.js",
     "test:mineru-prefs": "node scripts/test-mineru-pref-persistence.js",
     "test:write-item-atomicity": "node scripts/test-write-item-atomicity.js",
     "test:batch-preflight-errors": "node scripts/test-batch-preflight-errors.js",
@@ -165,6 +169,7 @@
     "@types/mocha": "^10.0.10",
     "@types/node": "^24.2.0",
     "@zotero-plugin/eslint-config": "^0.6.7",
+    "ajv": "^6.12.6",
     "chai": "^5.2.1",
     "esbuild": "^0.28.0",
     "eslint": "^9.32.0",

@@ -23,6 +23,9 @@ register("./ts-ext-hooks.mjs", import.meta.url);
 const { assignDocumentGroups } = await import(
   "../src/modules/wiki/wikiGraphGroups.ts"
 );
+const { aggregateDocumentLinks } = await import(
+  "../src/modules/wiki/wikiGraphLinks.ts"
+);
 
 const results = [];
 function block(name, fn) {
@@ -126,10 +129,7 @@ block("the grouping is stable and does not depend on database ids", () => {
     "group is the claim's POSITION, never its id",
   );
   // And it is deterministic across repeated calls.
-  assert.deepEqual(
-    Array.from(assignDocumentGroups(REAL)),
-    Array.from(groups),
-  );
+  assert.deepEqual(Array.from(assignDocumentGroups(REAL)), Array.from(groups));
 });
 
 block("a document with no Claims is group 0", () => {
@@ -206,6 +206,171 @@ block("equal counts draw equal nodes, and never a field of dots", () => {
   assert.equal(radius(1, 1), 13, "no range to speak of: the middle");
   assert.notEqual(radius(3, 3), 5, "never the floor - that was the bug");
 });
+
+const relationLinks = [
+  {
+    source: "a",
+    target: "b",
+    style: "dotted",
+    strength: 100,
+    payload: { id: "candidate", signals: [4] },
+  },
+  {
+    source: "a",
+    target: "b",
+    style: "dotdash",
+    payload: { id: "concept", concepts: [5] },
+  },
+  {
+    source: "a",
+    target: "b",
+    style: "dashed",
+    payload: { id: "page", pageId: 6 },
+  },
+  {
+    source: "a",
+    target: "b",
+    style: "comparison",
+    payload: { id: "comparison", relationId: 7 },
+  },
+  {
+    source: "a",
+    target: "b",
+    style: "solid",
+    payload: { id: "support", claimIds: [8] },
+  },
+  {
+    source: "b",
+    target: "a",
+    style: "solid",
+    tone: "conflict",
+    payload: { id: "conflict", claimIds: [9] },
+  },
+];
+block(
+  "one line preserves every relation and gives disagreement highest priority",
+  () => {
+    const [line, ...extra] = aggregateDocumentLinks(relationLinks);
+    assert.equal(extra.length, 0);
+    assert.equal(line.tone, "conflict");
+    assert.equal(line.payload.kind, "document-pair");
+    assert.deepEqual(
+      line.payload.relations.map((r) => r.payload.id),
+      ["conflict", "support", "comparison", "page", "concept", "candidate"],
+    );
+    assert.match(line.label, /存在分歧/);
+    assert.deepEqual(
+      new Set(line.payload.relations.map((r) => r.payload)),
+      new Set(relationLinks.map((r) => r.payload)),
+    );
+  },
+);
+block(
+  "each remaining relation category becomes primary in the requested order",
+  () => {
+    for (let length = 1; length <= relationLinks.length; length++) {
+      const [line] = aggregateDocumentLinks(relationLinks.slice(0, length));
+      assert.equal(
+        line.payload.relations[0].payload.id,
+        relationLinks[length - 1].payload.id,
+      );
+      assert.equal(line.payload.relations.length, length);
+    }
+  },
+);
+block(
+  "aggregation is stable across input order and counts pairs rather than relations",
+  () => {
+    const snapshot = structuredClone(relationLinks);
+    assert.deepEqual(
+      aggregateDocumentLinks(relationLinks),
+      aggregateDocumentLinks(relationLinks.slice().reverse()),
+    );
+    assert.deepEqual(relationLinks, snapshot);
+    const links = aggregateDocumentLinks([
+      ...relationLinks,
+      { source: "b", target: "c", style: "dotted" },
+    ]);
+    assert.equal(links.length, 2);
+    assert.equal(links.filter((l) => l.style === "dotted").length, 1);
+  },
+);
+block(
+  "different Claims and shared pages remain available behind one support line",
+  () => {
+    const links = aggregateDocumentLinks([
+      ...relationLinks.slice(0, 5),
+      {
+        source: "b",
+        target: "a",
+        style: "solid",
+        payload: { id: "support-2", claimIds: [10] },
+      },
+      {
+        source: "b",
+        target: "a",
+        style: "dashed",
+        payload: { id: "page-2", pageId: 11 },
+      },
+    ]);
+    assert.equal(links.length, 1);
+    assert.equal(links[0].style, "solid");
+    assert.notEqual(links[0].tone, "conflict");
+    assert.equal(links[0].payload.relations.length, 7);
+  },
+);
+
+block(
+  "drawing limits never remove common pages or concepts from an existing pair's details",
+  () => {
+    const context = {
+      pages: [
+        {
+          pageId: 20,
+          claims: [
+            { claimId: 21, evidence: [{ itemKey: "a", linkState: "valid" }] },
+            { claimId: 22, evidence: [{ itemKey: "b", linkState: "valid" }] },
+          ],
+        },
+        {
+          pageId: 30,
+          claims: [
+            {
+              claimId: 31,
+              evidence: [
+                { itemKey: "a", linkState: "stale" },
+                { itemKey: "b", linkState: "valid" },
+              ],
+            },
+          ],
+        },
+      ],
+      concepts: [
+        {
+          conceptId: 40,
+          name: "Common term",
+          idf: 0.01,
+          df: 80,
+          itemKeys: [
+            "a",
+            "b",
+            ...Array.from({ length: 78 }, (_, i) => `other${i}`),
+          ],
+        },
+      ],
+    };
+    const [line, ...rest] = aggregateDocumentLinks([relationLinks[4]], context);
+    assert.equal(rest.length, 0);
+    assert.equal(line.style, "solid");
+    assert.deepEqual(
+      line.payload.relations.map((r) => r.style),
+      ["solid", "dashed", "dotdash"],
+    );
+    assert.equal(line.payload.relations[1].payload.pageId, 20);
+    assert.equal(line.payload.relations[2].payload.concepts[0].conceptId, 40);
+    assert.deepEqual(aggregateDocumentLinks([], context), []);
+  },
+);
 
 const failed = results.filter(([ok]) => !ok);
 console.log(`\n${results.length - failed.length}/${results.length} passed`);

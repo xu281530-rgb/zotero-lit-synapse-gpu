@@ -1,0 +1,128 @@
+{
+  "libraryID": 1,
+  "scope": "Stress-field construction, path extraction and manufacturing conditions; no cross-specimen performance ranking or inferred academic inheritance.",
+  "pairs": [
+    {
+      "currentItemKey": "TPW2E4FJ",
+      "relatedItemKey": "IRGQ2DD8",
+      "comparisons": [
+        {
+          "old": 2,
+          "current": 33,
+          "oldEvidence": [2],
+          "currentEvidence": [80, 83],
+          "dimension": "方向场与路径流程",
+          "statement": "IRGQ2DD8 的论断 2 记录最小二乘方向场优化及权重；TPW2E4FJ 的论断 33 记录纯基体主应力轨迹经 Tecplot 流线提取的流程。这是优化场与轨迹提取步骤的比较，不能据此认定两者使用相同目标函数或存在直接继承。"
+        },
+        {
+          "old": 3,
+          "current": 33,
+          "oldEvidence": [3],
+          "currentEvidence": [83, 84],
+          "dimension": "路径参数化与密度",
+          "statement": "IRGQ2DD8 使用 spinning-form 周期参数化允许路径出现和消失，以得到近等间距刀路；TPW2E4FJ 通过 Tecplot 流线的起点、间隔及数量构建路径，并改变路径数量调节纤维体积分数。两种路径构建机制可比较，但不等价。"
+        },
+        {
+          "old": 4,
+          "current": 39,
+          "oldEvidence": [4],
+          "currentEvidence": [104, 105],
+          "dimension": "可制造性处理",
+          "statement": "IRGQ2DD8 的刀路后处理给出 4 mm 急转半径和 70 mm 硬件最短路径限制；TPW2E4FJ 的高体积分数数值扩展假设孔边可无基体打印，并把重叠及实际打印挑战留待研究。前者的硬件阈值不能直接移用于后者算例。"
+        },
+        {
+          "old": 8,
+          "current": 39,
+          "oldEvidence": [8],
+          "currentEvidence": [105],
+          "dimension": "各自报告的制造局限",
+          "statement": "IRGQ2DD8 明确说明未在优化框架中显式考虑纤维连续性，且硬件最短纤维长度限制覆盖率；TPW2E4FJ 明确说明重叠后优化效果下降、打印技术挑战仍需研究。这些是各自工作不同层面的局限，不构成彼此反驳。"
+        }
+      ]
+    },
+    {
+      "currentItemKey": "TPW2E4FJ",
+      "relatedItemKey": "6DGLE2VE",
+      "comparisons": [
+        {
+          "old": 19,
+          "current": 39,
+          "oldEvidence": [21, 23],
+          "currentEvidence": [105],
+          "dimension": "重叠问题的认识",
+          "statement": "6DGLE2VE 从沉积缺陷角度识别纤维屈曲和重叠，并描述间距小于纤维宽度的后果；TPW2E4FJ 的选用摘录报告重叠出现后数值优化效果下降。两者讨论重叠的层面不同，数值效果不能替代工艺缺陷实验。"
+        },
+        {
+          "old": 20,
+          "current": 39,
+          "oldEvidence": [24, 25],
+          "currentEvidence": [104, 105],
+          "dimension": "实验工艺窗口与数值假设",
+          "statement": "6DGLE2VE 以定制 CFFF 实验标定转向与路径间距的工艺窗口；TPW2E4FJ 的扩展算例使用未来打印能力和孔边无基体打印假设。所选依据区分已标定工艺约束与数值假设，不证明后者在该硬件上可制造。"
+        },
+        {
+          "old": 23,
+          "current": 33,
+          "oldEvidence": [41, 42, 46],
+          "currentEvidence": [80, 83],
+          "dimension": "应力对齐场构建",
+          "statement": "6DGLE2VE 的 MCSAF 联合平滑、关键区域忠实度和制造惩罚构建方向场；TPW2E4FJ 的已记录流程由纯基体 FEA 的主应力轨迹生成 Tecplot 流线。该比较保留两篇各自流程，不把 MCSAF 的目标函数归于 TPW2E4FJ，也不推断直接方法继承。"
+        },
+        {
+          "old": 24,
+          "current": 33,
+          "oldEvidence": [51, 52],
+          "currentEvidence": [83, 84],
+          "dimension": "从方向场提取路径",
+          "statement": "6DGLE2VE 将 MCSAF 与层法向叉乘形成梯度场，解 Poisson 方程后取标量场等值线；TPW2E4FJ 使用 Tecplot 流线并通过路径数量控制体积分数。两者都生成曲线纤维路径，但提取机制和密度控制表述不同。"
+        },
+        {
+          "old": 25,
+          "current": 39,
+          "oldEvidence": [53, 54, 55],
+          "currentEvidence": [105],
+          "dimension": "路径重叠处理",
+          "statement": "6DGLE2VE 用最小 side-step refinement 删除过近路径，并按曲率与应力确定移除优先级；TPW2E4FJ 的选用结论指出重叠使优化效果下降且需要后续研究。前者提供具体间距处理算法，后者记录数值局限，不能据此断言其定量结果可直接比较。"
+        },
+        {
+          "old": 31,
+          "current": 34,
+          "oldEvidence": [78],
+          "currentEvidence": [86, 87, 88],
+          "dimension": "各向同性近似的层次",
+          "statement": "6DGLE2VE 以等效各向同性线弹性实体获取初始应力场，并承认与最终各向异性零件存在偏差；TPW2E4FJ 把纤维和基体分别定义为各向同性材料，并限制与均质 lamina 模型的应力分布比较。两种近似处于不同建模层次，不能统称为相同均质假设。"
+        }
+      ]
+    },
+    {
+      "currentItemKey": "6DGLE2VE",
+      "relatedItemKey": "IRGQ2DD8",
+      "comparisons": [
+        {
+          "old": 2,
+          "current": 23,
+          "oldEvidence": [2],
+          "currentEvidence": [41, 42, 46],
+          "dimension": "方向场目标函数",
+          "statement": "IRGQ2DD8 的论断 2 记录最小二乘方向场优化及平衡权重；6DGLE2VE 的论断 23 记录 MCSAF 的平滑、忠实度与制造惩罚目标。当前证据支持比较这两种场构建方式，不支持把 MCSAF 的完整目标函数作为两篇共同支持的同一论断。历史 shared_claim 记录因此需要被新的比较核验取代。"
+        },
+        {
+          "old": 3,
+          "current": 24,
+          "oldEvidence": [3],
+          "currentEvidence": [51, 52],
+          "dimension": "参数化与等值线提取",
+          "statement": "IRGQ2DD8 采用 spinning-form 周期参数化生成近等间距刀路；6DGLE2VE 从 MCSAF 构造梯度并解 Poisson 方程，以标量场等值线生成路径。两者的参数化与密度机制不同，本次不主张直接继承。"
+        },
+        {
+          "old": 4,
+          "current": 20,
+          "oldEvidence": [4],
+          "currentEvidence": [24, 25],
+          "dimension": "制造约束的度量与标定",
+          "statement": "IRGQ2DD8 使用急转曲率半径和硬件最短路径长度限制；6DGLE2VE 在自己的 CFFF 条件下标定最大转向角及最小 side-step。半径、离散转向角和间距属于不同量，未统一离散步长与硬件条件前不能把阈值直接换算或排序。"
+        }
+      ]
+    }
+  ]
+}

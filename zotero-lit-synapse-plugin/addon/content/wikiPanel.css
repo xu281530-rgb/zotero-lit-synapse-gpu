@@ -990,6 +990,12 @@
 .zmp-wiki-graph-legend .legend-solid {
   color: #67727e;
 }
+.zmp-wiki-graph-legend .legend-comparison {
+  color: #71849a;
+}
+.zmp-wiki-graph-legend .legend-comparison::before {
+  border-top-style: dashed;
+}
 .zmp-wiki-graph-legend .legend-dashed {
   color: #8a8275;
 }
@@ -1029,7 +1035,10 @@
   border-radius: var(--wiki-radius-sm);
 }
 .zmp-wiki-graph-claim.is-conflict {
-  border-left-color: rgba(164, 87, 78, 0.5);
+  border-left-color: var(--wiki-danger);
+}
+.zmp-wiki-graph-claim.is-conflict .zmp-wiki-claim-type {
+  color: var(--wiki-danger);
 }
 .zmp-wiki-graph-claim-head {
   display: flex;
@@ -1037,6 +1046,9 @@
   align-items: center;
   gap: 6px;
   margin-bottom: 6px;
+}
+.zmp-wiki-graph-claim-head .zmp-wiki-graph-context {
+  margin-top: 0;
 }
 .zmp-wiki-graph-claim .zmp-wiki-command {
   margin: 0;
@@ -1080,11 +1092,7 @@
   color: var(--wiki-muted);
   font: 11.5px/1.6 var(--wiki-font-ui);
 }
-/* A quoted passage from one side of a candidate connection.
-   Block, not flex: this is 150-220 characters of running text and it needs the
-   full width of the rail. `.zmp-wiki-graph-stance` next door is a flex row for
-   a short chip plus a name, and putting a quotation in it collapsed the text to
-   one character per line. */
+/* All relation excerpts share a native disclosure with a full-width body. */
 .zmp-wiki-graph-quote {
   display: block;
   min-width: 0;
@@ -1093,10 +1101,27 @@
   border-left: 2px solid var(--wiki-border);
 }
 .zmp-wiki-graph-quote-source {
+  cursor: pointer;
+  color: var(--wiki-muted);
+  font: 11px/1.5 var(--wiki-font-ui);
+  overflow-wrap: anywhere;
+}
+.zmp-wiki-graph-quote-source:focus-visible {
+  outline: 2px solid var(--wiki-muted);
+  outline-offset: 2px;
+}
+.zmp-wiki-graph-quote[open] > .zmp-wiki-graph-quote-source {
+  margin-bottom: 4px;
+}
+.zmp-wiki-graph-passage + .zmp-wiki-graph-passage {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--wiki-border);
+}
+.zmp-wiki-graph-passage-reference {
   color: var(--wiki-muted);
   font: 11px/1.5 var(--wiki-font-ui);
   margin-bottom: 2px;
-  overflow-wrap: anywhere;
 }
 .zmp-wiki-graph-quote-text {
   margin: 0;
@@ -1106,6 +1131,7 @@
   white-space: normal;
 }
 .zmp-wiki-graph-details {
+  overflow-wrap: anywhere;
   min-width: 0;
   min-height: 0;
   padding: 14px;
@@ -1123,12 +1149,32 @@
   font-size: 14px;
   font-weight: 700;
 }
+.zmp-wiki-graph-document {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
+}
+.zmp-wiki-graph-document + .zmp-wiki-graph-document {
+  margin-top: 6px;
+}
+.zmp-wiki-graph-item-key {
+  padding: 2px 4px;
+  color: var(--wiki-accent);
+  background: var(--wiki-accent-soft);
+  font: 700 13px/1.5 monospace;
+}
 .zmp-wiki-graph-details p {
   margin: 0 0 10px;
   color: var(--wiki-muted);
   font-family: var(--wiki-font-kai);
   font-size: 13.5px;
   line-height: 1.8;
+}
+.zmp-wiki-graph-details .zmp-wiki-graph-quote-text {
+  margin: 0;
+  color: var(--wiki-text);
+  font: 12px/1.65 var(--wiki-font-ui);
 }
 /* Only the wrapping variant goes full width here; the plain buttons in this
    rail stay single-line commands. */

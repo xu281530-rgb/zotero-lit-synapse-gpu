@@ -29,7 +29,7 @@ import { normalize, tokenizeForIndex } from "../keyword/scientificTokenizer";
 import { lexicalIdf } from "./wikiLinkScoring";
 
 /** 词法信号的算法版本。切词、停用规则或打分改动都必须改这里。 */
-export const LEXICAL_ALGORITHM_VERSION = "link-lex-v5";
+export const LEXICAL_ALGORITHM_VERSION = "link-lex-v6";
 // v5 excludes bare prose and figure-color labels, keeping technical phrases
 // and curated concepts available through the other candidate channels.
 // v4: v3 left the PDF pipeline's own residue — LaTeX command names (mathtt,
@@ -146,6 +146,10 @@ const UNIT_SHAPED = /^[a-z]{1,3}[/·-][a-z]{1,4}[0-9]*$/u;
 const JOINED_UNIT = /^[a-z]{0,3}(min|sec|hr|hrs|mpa|gpa|kpa|mol|rpm)$/u;
 
 const NON_TERM_LABELS = new Set([
+  "newly", "almost", "already", "however", "therefore", "furthermore", "moreover",
+  "typically", "generally", "usually", "mainly", "largely", "previously", "recently",
+  "herein", "therein", "whereas", "respectively", "supplementary", "copyright",
+  "publisher", "permissions", "acknowledgements", "acknowledgments",
   "arise", "arises", "arising", "ambiguity", "shown", "showing", "respectively",
   "black", "white", "red", "green", "blue", "yellow",
 ]);

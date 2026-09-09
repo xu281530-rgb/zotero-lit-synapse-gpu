@@ -5,7 +5,7 @@ _This README is also available in: [:cn: 简体中文](./README-zh.md) | :gb: En
 [![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Version](https://img.shields.io/badge/Version-3.1.0-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-3.2.4-brightgreen)]()
 [![EN doc](https://img.shields.io/badge/Document-English-blue.svg)](README.md)
 [![中文文档](https://img.shields.io/badge/文档-中文-blue.svg)](README-zh.md)
 
@@ -788,6 +788,7 @@ retrieved as if it were the paper.
 - `wiki_search` — search Concept/Alias, Claim, Relation and one-hop Evidence links
 - `wiki_get_page` — read a Page with its Claims and Evidence
 - `wiki_get_claim` — read one atomic Claim and its provenance
+- `wiki_get_link_review` — recover durable cross-paper tasks, target snapshots, outcomes and history. Page targets, discovery, verdicts, outcomes or history independently of prepare tokens. Compare selected old Wiki knowledge, record every exclusion, and defer missing knowledge explicitly. `wiki_commit.crossPaperReview` binds conclusions to actual Claims, term sources or new Claim relations; `checkpoint: true` saves progress without ending reading. The graph draws one line per paper pair, prioritizing disagreement, shared Claims, method comparisons or qualifications, shared pages, then shared concepts. Clicking any line shows every relationship in consistent cards with Claims and source excerpts. Evidence summaries distinguish current support, archived sources and unverified semantic assessments; the retained legacy score is heuristic, not a correctness probability.
 - `wiki_status` — report Wiki and Evidence-link status
 - `wiki_export` — render derived Markdown without changing the authoritative database; the concept library is appended as a final section
 - `wiki_record_concepts` — record the professional concepts recognised while actually reading a paper, each as one entity with one primary term and any number of alias terms (Chinese full name / English full name / abbreviation), with the source documents they were recognised in. Calls without `final` are staged on the open reading session and write nothing; the one call with `final` writes everything at once, so a paper costs one database write and one confirmation instead of one per batch. Every field carries its own provenance — quoted from the paper, completed by the model, or edited by a person — and the model may complete a term from its own knowledge as long as it says so

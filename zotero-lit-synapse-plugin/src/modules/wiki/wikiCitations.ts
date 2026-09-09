@@ -4,11 +4,16 @@ export interface WikiCitationGroup {
   chunkIds: number[];
 }
 
+export const WIKI_CITATION_GUIDE =
+  "Cite chunk addresses as (chunk 12), [chunk:12], or (chunks 12-14, 18). " +
+  "Put citations before the sentence's final punctuation. A bracketed citation immediately after a sentence stop belongs to that sentence when it has no citation yet. " +
+  "Use a new paragraph for a leading citation when the previous sentence is uncited. Ranges must be ascending; every cited chunk must have been read.";
+
 /** Shared addresses for coverage, source validation and sentence audits. */
 export function parseWikiCitations(text: string): WikiCitationGroup[] {
   const input = String(text ?? "");
   const pattern =
-    /(?:chunks?|块|段)\s*#?\s*(\d+(?:\s*(?:[-–—]|to|~|、|,|，)\s*\d+)*)|第\s*(\d+)\s*(?:块|段)/giu;
+    /(?:\bchunks?|块|段)\s*[:：#]?\s*(\d+(?:\s*(?:[-–—]|to|~|、|,|，)\s*\d+)*)|第\s*(\d+)\s*(?:块|段)/giu;
   const groups: WikiCitationGroup[] = [];
   for (const match of input.matchAll(pattern)) {
     const chunkIds = new Set<number>();
@@ -36,6 +41,53 @@ export function parseWikiCitations(text: string): WikiCitationGroup[] {
     });
   }
   return groups;
+}
+
+export function invalidWikiCitations(text: string): Array<{
+  raw: string;
+  start: number;
+  end: number;
+}> {
+  const issues = [];
+  for (const match of String(text ?? "").matchAll(
+    /[[(（]\s*(?:chunks?\b|块|段)[^\])）\r\n]*[\])）]/giu,
+  )) {
+    const inner = match[0].slice(1, -1).trim();
+    try {
+      const groups = parseWikiCitations(inner);
+      if (
+        groups.length &&
+        groups[0].start === 0 &&
+        groups.at(-1)!.end === inner.length &&
+        groups
+          .slice(1)
+          .every((group, index) =>
+            /^(?:[,，、;；]|and|&)\s*$/iu.test(
+              inner.slice(groups[index].end, group.start).trim(),
+            ),
+          )
+      )
+        continue;
+    } catch {
+      /* Invalid ranges are reported at the original citation. */
+    }
+    issues.push({
+      raw: match[0],
+      start: match.index!,
+      end: match.index! + match[0].length,
+    });
+  }
+  return issues;
+}
+
+export function stripWikiCitations(text: string): string {
+  let result = String(text ?? "");
+  for (const group of parseWikiCitations(result).reverse())
+    result =
+      result.slice(0, group.start) +
+      " ".repeat(group.end - group.start) +
+      result.slice(group.end);
+  return result;
 }
 
 export function citedWikiChunkIds(text: string): number[] {

@@ -35,6 +35,7 @@ function mcpFixture() {
       getField(n) { if (!['title','abstractNote','date'].includes(n)) throw Error(`Invalid field '${n}'`); return this.fields[n] || ''; },
       setField(n,v) { if (!['title','abstractNote','date'].includes(n)) throw Error(`Invalid field '${n}'`); this.fields[n]=v; },
       getCreators(){return this.creators;},setCreators(v){this.creators=v;},
+      clone(){return {...this,fields:{...this.fields},creators:this.creators.map(c=>({...c}))};},
       getTags(){return this.tags.map(tag=>({tag}));},addTag(v){if(!this.tags.includes(v))this.tags.push(v);},removeTag(v){this.tags=this.tags.filter(t=>t!==v);},
       async saveTx(){this.persisted={...this.fields};saveLog.push({fields:{...this.fields},tags:[...this.tags]});}
     };
@@ -63,13 +64,36 @@ function mcpFixture() {
     const f=mcpFixture();f.enableWrites();const i=f.makeItem();const r=await f.rpc('write_metadata',{itemKey:i.key,fields:{title:'New title',date:2026}});
     assert.equal(r.result.isError,true);assert.equal(i.fields.title,'Original title');assert.equal(f.saveLog.length,0);
   });
-  await check('D1: rejected multi-field metadata write contaminates cached item and later tag save persists it',async()=>{
+  await check('D1: rejected metadata leaves cached fields intact before a later tag save',async()=>{
     const f=mcpFixture();f.enableWrites();const i=f.makeItem();const r=await f.rpc('write_metadata',{itemKey:i.key,fields:{title:'Uncommitted title',notARealField:'bad'}});
-    assert.equal(r.result.isError,true);assert.equal(f.saveLog.length,0);assert.equal(i.persisted.title,'Original title');assert.equal(i.fields.title,'Uncommitted title');
+    assert.equal(r.result.isError,true);assert.equal(f.saveLog.length,0);assert.equal(i.persisted.title,'Original title');assert.equal(i.fields.title,'Original title');
     const r2=await f.rpc('write_tag',{action:'add',itemKey:i.key,tags:['reviewed']});
-    assert.ok(!r2.result.isError,JSON.stringify(r2));assert.equal(i.persisted.title,'Uncommitted title');
-    return {metadataCallReportedError:true,immediateDatabaseWrite:false,cachedTitleAfterError:'Uncommitted title',laterAction:'add tag only',persistedTitleAfterTag:i.persisted.title,saveCount:f.saveLog.length};
-  },true);
+    assert.ok(!r2.result.isError,JSON.stringify(r2));assert.equal(i.persisted.title,'Original title');
+    return {metadataCallReportedError:true,laterAction:'add tag only',persistedTitleAfterTag:i.persisted.title,saveCount:f.saveLog.length};
+  });
+  await check('D1: a save failure restores raw field values and complete creator data',async()=>{
+    const f=mcpFixture();f.enableWrites();const i=f.makeItem();
+    i.fields.date='2026-00-00 September 2026';
+    i.creators=[{creatorTypeID:1,firstName:'',lastName:'Research Institute',fieldMode:1}];
+    const before=JSON.parse(JSON.stringify({fields:i.fields,creators:i.creators}));
+    const getField=i.getField;
+    i.getField=function(name,raw){return name==='date'&&!raw?'September 2026':getField.call(this,name);};
+    const save=i.saveTx;i.saveTx=async()=>{throw Error('SAVE_FAILED');};
+    const r=await f.rpc('write_metadata',{itemKey:i.key,fields:{title:'Pending',date:'2027'},creators:[{creatorType:'author',name:'Changed Institute'}]});
+    assert.equal(r.result.isError,true);assert.match(JSON.stringify(r),/SAVE_FAILED/);
+    assert.deepEqual(JSON.parse(JSON.stringify({fields:i.fields,creators:i.creators})),before);
+    i.saveTx=save;await f.rpc('write_tag',{action:'add',itemKey:i.key,tags:['reviewed']});
+    assert.deepEqual(i.persisted,before.fields);
+  });
+  await check('D1: a setter failure after staging restores fields and partially changed creators',async()=>{
+    const f=mcpFixture();f.enableWrites();const i=f.makeItem();
+    i.creators=[{creatorTypeID:1,lastName:'Original',firstName:'Author'}];
+    const before=JSON.parse(JSON.stringify(i.creators));
+    i.setCreators=function(creators){this.creators=creators;if(this===i&&creators[0]?.name==='Reject')throw Error('CREATOR_SET_FAILED');};
+    const r=await f.rpc('write_metadata',{itemKey:i.key,fields:{title:'Pending'},creators:[{creatorType:'author',name:'Reject'}]});
+    assert.equal(r.result.isError,true);assert.match(JSON.stringify(r),/CREATOR_SET_FAILED/);
+    assert.equal(i.fields.title,'Original title');assert.deepEqual(JSON.parse(JSON.stringify(i.creators)),before);assert.equal(f.saveLog.length,0);
+  });
   await check('Tags: malformed tag string is rejected without removing old tags',async()=>{
     const f=mcpFixture();f.enableWrites();const i=f.makeItem();const r=await f.rpc('write_tag',{action:'set',itemKey:i.key,tags:'reviewed'});
     assert.equal(r.result.isError,true);assert.deepEqual(i.tags,['existing']);assert.equal(f.saveLog.length,0);
@@ -82,22 +106,35 @@ function mcpFixture() {
     const f=F.minerFixture();await f.s.suppressAutomaticMarkdown(1,'SOURCE01');await f.s.suppressAutomaticMarkdown(1,'SOURCE02');
     const state=JSON.parse(f.disk.get(f.s.getAttachmentStatePath()));assert.ok(state.suppressed['1:SOURCE01']);assert.ok(state.suppressed['1:SOURCE02']);
   });
-  await check('D2a: one transient state-file write error prevents all subsequent state writes in same service',async()=>{
+  await check('D2a: state writes and parsing recover after one transient state-file error',async()=>{
     const f=F.minerFixture(),original=f.c.IOUtils.writeUTF8;let calls=0;
     f.c.IOUtils.writeUTF8=async(p,s)=>{calls++;if(calls===1)throw Error('SIMULATED_TRANSIENT_IO_ERROR');return original(p,s);};
     await assert.rejects(()=>f.s.suppressAutomaticMarkdown(1,'SOURCE01'),/SIMULATED_TRANSIENT_IO_ERROR/);
-    await assert.rejects(()=>f.s.suppressAutomaticMarkdown(1,'SOURCE02'),/SIMULATED_TRANSIENT_IO_ERROR/);
-    await assert.rejects(()=>f.s.allowAutomaticMarkdown(1,'SOURCE01'),/SIMULATED_TRANSIENT_IO_ERROR/);
-    assert.equal(calls,1);assert.equal(f.disk.has(f.s.getAttachmentStatePath()),false);
+    await f.s.suppressAutomaticMarkdown(1,'SOURCE02');
+    await f.s.allowAutomaticMarkdown(1,'SOURCE01');
+    assert.equal(calls,3);
+    const state=JSON.parse(f.disk.get(f.s.getAttachmentStatePath()));
+    assert.deepEqual(Object.keys(state.suppressed),['1:SOURCE02']);
     const g=F.minerFixture(),originalG=g.c.IOUtils.writeUTF8;let totalIO=0;
     g.c.IOUtils.writeUTF8=async(p,s)=>{totalIO++;if(totalIO===1)throw Error('SIMULATED_TRANSIENT_IO_ERROR');return originalG(p,s);};
     await assert.rejects(()=>g.s.suppressAutomaticMarkdown(1,g.a.key),/SIMULATED_TRANSIENT_IO_ERROR/);
-    await assert.rejects(()=>g.s.getMarkdownForAttachment(g.a,{force:true,allowParse:true,userInitiated:true}),/SIMULATED_TRANSIENT_IO_ERROR/);
+    assert.match(await g.s.getMarkdownForAttachment(g.a,{force:true,allowParse:true,userInitiated:true}),/Paper A/);
     assert.equal(g.imports.length,1);assert.match(g.imports[0].markdown,/Paper A/);
-    const meta=await g.s.readMeta(g.a.key);assert.match(meta.error,/SIMULATED_TRANSIENT_IO_ERROR/);
-    return {injectedIOFailures:1,totalLaterStateOperations:2,actualStateWriteAttempts:calls,stateFilePersisted:false,ioWouldSucceedOnRetry:true,publicParseCase:{markdownCreated:true,parseReportedError:true,failureCacheWritten:true,totalWriteCalls:totalIO}};
-  },true);
-  await check('D2b: concurrent reads of missing Markdown on a fresh service lose one same-library suppression',async()=>{
+    const meta=await g.s.readMeta(g.a);assert.equal(meta.error,undefined);
+    return {injectedIOFailures:1,actualStateWriteAttempts:calls,stateFilePersisted:true,parseRecovered:true};
+  });
+  await check('D2a: failure to save post-parse state preserves valid artifacts and can retry the same change',async()=>{
+    const f=F.minerFixture();await f.s.suppressAutomaticMarkdown(1,f.a.key);
+    const write=f.c.IOUtils.writeUTF8;let failed=false;
+    f.c.IOUtils.writeUTF8=async(p,s,options)=>{if(p===f.s.getAttachmentStatePath()&&!failed){failed=true;throw Error('STATE_FINALIZE_FAILED');}return write(p,s,options);};
+    await assert.rejects(()=>f.s.getMarkdownForAttachment(f.a,{force:true,allowParse:true,userInitiated:true}),/STATE_FINALIZE_FAILED/);
+    assert.equal(f.imports.length,1);assert.match(f.imports[0].markdown,/Paper A/);
+    assert.equal((await f.s.readMeta(f.a)).error,undefined);
+    assert.equal(await f.s.hasFreshMarkdownForAttachment(f.a),true);
+    await f.s.allowAutomaticMarkdown(1,f.a.key);
+    assert.deepEqual(Object.keys(JSON.parse(f.disk.get(f.s.getAttachmentStatePath())).suppressed),[]);
+  });
+  await check('D2b: concurrent reads of missing Markdown preserve both same-library suppressions after restart',async()=>{
     const f=F.minerFixture();f.b.key='OTHERKEY';f.b.libraryID=1;
     const secondParent=await f.c.Zotero.Items.getAsync(f.b.parentItemID);secondParent.libraryID=1;
     await f.s.getMarkdownForAttachment(f.a,{force:true,allowParse:true,userInitiated:true});
@@ -107,9 +144,11 @@ function mcpFixture() {
     const outputs=await Promise.all([fresh.getMarkdownForAttachment(f.a,{allowParse:false}),fresh.getMarkdownForAttachment(f.b,{allowParse:false})]);
     assert.deepEqual(outputs,[null,null]);
     const state=JSON.parse(f.disk.get(fresh.getAttachmentStatePath()));
-    assert.equal(Object.keys(state.suppressed).length,1);assert.equal(Boolean(state.suppressed['1:SAMEKEY1']),false);assert.ok(state.suppressed['1:OTHERKEY']);
+    assert.equal(Object.keys(state.suppressed).length,2);assert.ok(state.suppressed['1:SAMEKEY1']);assert.ok(state.suppressed['1:OTHERKEY']);
+    const restarted=new f.c.MinerUService();
+    assert.equal(await restarted.isAutomaticMarkdownSuppressed(f.a),true);assert.equal(await restarted.isAutomaticMarkdownSuppressed(f.b),true);
     return {publicEntryPoint:'getMarkdownForAttachment',requestedSuppressions:['1:SAMEKEY1','1:OTHERKEY'],persistedSuppressions:Object.keys(state.suppressed),sameLibrary:true,differentAttachmentKeys:true,noIOError:true};
-  },true);
+  });
   await check('MinerU: preloaded shared state preserves concurrent suppression updates',async()=>{
     const f=F.minerFixture();await f.s.readAttachmentState();
     await Promise.all([f.s.suppressAutomaticMarkdown(1,'SOURCE01'),f.s.suppressAutomaticMarkdown(1,'SOURCE02')]);
