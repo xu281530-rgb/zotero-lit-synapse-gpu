@@ -675,11 +675,30 @@ export class EmbeddingService {
       const detectedDims = Zotero.Prefs.get(PREF_DETECTED_DIMENSIONS, true);
       const timeoutSeconds = Zotero.Prefs.get(PREF_TIMEOUT_SECONDS, true);
 
-      if (apiBase) this.config.apiBase = apiBase;
-      if (apiKey) this.config.apiKey = apiKey;
-      if (model) this.config.model = model;
-      if (dimensions) this.config.dimensions = parseInt(dimensions, 10);
-      if (detectedDims) this.detectedDimensions = parseInt(String(detectedDims), 10);
+      // "Never set" and "deliberately cleared" are different answers, and the
+      // difference had teeth. These three used to be applied only when truthy,
+      // so emptying the API Base box — the obvious way to say "stop calling
+      // anything" — left the pref at "" while the next restart fell back to
+      // DEFAULT_CONFIG. The plugin then reported itself as configured and
+      // pointed at api.openai.com, an endpoint the user had just removed. An
+      // empty pref is now honoured as empty; only an absent pref defaults.
+      if (apiBase !== undefined && apiBase !== null)
+        this.config.apiBase = String(apiBase);
+      if (apiKey !== undefined && apiKey !== null)
+        this.config.apiKey = String(apiKey);
+      if (model !== undefined && model !== null)
+        this.config.model = String(model);
+      // Dimensions stay truthiness-guarded, and must survive a non-numeric
+      // pref: 0 and "" both mean "let the model decide", and NaN written into
+      // the request body would be serialised as null and rejected by the API.
+      if (dimensions) {
+        const parsed = parseInt(String(dimensions), 10);
+        if (Number.isFinite(parsed) && parsed > 0) this.config.dimensions = parsed;
+      }
+      if (detectedDims) {
+        const parsed = parseInt(String(detectedDims), 10);
+        if (Number.isFinite(parsed) && parsed > 0) this.detectedDimensions = parsed;
+      }
       if (timeoutSeconds) {
         const seconds = parseInt(String(timeoutSeconds), 10);
         if (!isNaN(seconds)) {

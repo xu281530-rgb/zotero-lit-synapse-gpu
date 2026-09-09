@@ -1734,7 +1734,17 @@ function bindEmbeddingSettings(doc: Document) {
         await refreshDataCompatibilityLockUI(doc);
         return;
       }
-      const value = isNumber ? parseInt(input.value, 10) : input.value;
+      // Clearing a numeric box used to store NaN, which the pref layer turns
+      // into a meaningless 0. An emptied box means "use the default", and 0 is
+      // how every reader of these prefs already spells that, so write it
+      // deliberately rather than arriving there through NaN.
+      let value: string | number;
+      if (isNumber) {
+        const parsed = parseInt(input.value, 10);
+        value = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+      } else {
+        value = input.value;
+      }
       Zotero.Prefs.set(prefKey, value, true);
       ztoolkit.log(`[PreferenceScript] Saved embedding pref: ${prefKey} = ${value}`);
 
