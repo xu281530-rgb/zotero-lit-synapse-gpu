@@ -16,10 +16,13 @@ const {
 } = await import("../src/modules/toolCatalog.ts");
 const {
   WIKI_CONTEXT_SECTIONS,
+  WIKI_PREPARE_IDLE_SECONDS,
   boundPreparedContext,
   fragmentContextText,
   pagePreparedContext,
 } = await import("../src/modules/wiki/wikiPreparedContext.ts");
+/** The idle window in milliseconds, read from the source of truth. */
+const IDLE_MS = WIKI_PREPARE_IDLE_SECONDS * 1000;
 let failed = 0;
 let passed = 0;
 async function test(name, fn) {
@@ -254,7 +257,7 @@ await test("record validation returns independent citation, section and prose is
 await test("compact prepare stays bounded while full claims remain recoverable", async () => {
   service.prepareTokens.set("large", {
     libraryID: 1,
-    expiresAt: Date.now() + 600000,
+    expiresAt: Date.now() + IDLE_MS,
     preparedPageTitles: new Set(),
   });
   const result = await service.presentPreparedContext(
@@ -298,12 +301,14 @@ await test("successful reads renew the idle timeout; invalid reads do not", () =
     );
     const token = {
       libraryID: 1,
-      expiresAt: now + 600000,
+      expiresAt: now + IDLE_MS,
       preparedPageTitles: new Set(),
       context,
     };
     service.prepareTokens.set("renew", token);
-    now += 590000;
+    // Wind almost the whole window away, leaving a tenth of it.
+    const remaining = IDLE_MS / 10;
+    now += IDLE_MS - remaining;
     assert.throws(() =>
       service.getPreparedContext({
         libraryID: 2,
@@ -311,7 +316,7 @@ await test("successful reads renew the idle timeout; invalid reads do not", () =
         section: "claims",
       }),
     );
-    assert.equal(token.expiresAt, now + 10000);
+    assert.equal(token.expiresAt, now + remaining);
     assert.throws(() =>
       service.getPreparedContext({
         libraryID: 1,
@@ -319,20 +324,23 @@ await test("successful reads renew the idle timeout; invalid reads do not", () =
         section: "unknown",
       }),
     );
-    assert.equal(token.expiresAt, now + 10000);
+    assert.equal(token.expiresAt, now + remaining);
     service.getPreparedContext({
       libraryID: 1,
       prepareToken: "renew",
       section: "claims",
     });
-    now += 590000;
+    now += IDLE_MS - remaining;
     const page = service.getPreparedContext({
       libraryID: 1,
       prepareToken: "renew",
       section: "claims",
     });
-    assert.equal(page.prepareTokenExpiresInSeconds, 600);
-    now += 600001;
+    // Read from the constant, never spelled out again: a test that repeats the
+    // number it is checking goes stale the moment the number is tuned, and
+    // then reports the tuning as a defect.
+    assert.equal(page.prepareTokenExpiresInSeconds, WIKI_PREPARE_IDLE_SECONDS);
+    now += IDLE_MS + 1;
     assert.throws(
       () =>
         service.getPreparedContext({

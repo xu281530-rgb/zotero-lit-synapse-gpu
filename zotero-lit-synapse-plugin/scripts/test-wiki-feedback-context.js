@@ -249,4 +249,84 @@ await test("lexical labels exclude bare prose while retaining specific scientifi
   ])
     assert.equal(isUsableLexicalTerm(value), true, value);
 });
+/*
+ * The prepare token is an IDLE timer, and the work it gates is long.
+ *
+ * It used to be renewed by exactly one tool, wiki_get_prepared_context, while
+ * the workflow it belongs to spends its time elsewhere entirely — reading the
+ * paper, recording concepts, reviewing cross-paper links. A caller who
+ * followed the prescribed order found the token dead at the one moment it is
+ * needed, at wiki_commit, and lost the prepared page titles it had drafted
+ * against. These tests pin both halves of the answer: using a token renews it,
+ * and the map of live tokens is bounded so that a longer window cannot turn
+ * into an unbounded pile of prepared context.
+ */
+await test("using a prepare token renews it, and a lapsed one is refused", async () => {
+  const { WIKI_PREPARE_IDLE_SECONDS, WIKI_PREPARE_MAX_TOKENS } = await import(
+    "../src/modules/wiki/wikiPreparedContext.ts"
+  );
+  assert.ok(
+    WIKI_PREPARE_IDLE_SECONDS >= 1800,
+    "the window has to outlast reading a paper, not just skimming one",
+  );
+
+  const scoped = new WikiService(store);
+  scoped.prepareTokens.set("idle-token", {
+    libraryID: 1,
+    // Nearly lapsed: a renewal on use is the only thing that can save it.
+    expiresAt: Date.now() + 50,
+    preparedPageTitles: new Set(),
+    context: { pages: [], claims: [] },
+  });
+
+  const before = scoped.prepareTokens.get("idle-token").expiresAt;
+  scoped.getPreparedContext({
+    libraryID: 1,
+    prepareToken: "idle-token",
+    section: "pages",
+  });
+  const afterPaging = scoped.prepareTokens.get("idle-token").expiresAt;
+  assert.ok(afterPaging > before, "a successful read must restart the clock");
+
+  // The commit path reads the token too, and must renew it the same way.
+  scoped.prepareTokens.get("idle-token").expiresAt = Date.now() + 50;
+  assert.ok(scoped.touchPrepareToken("idle-token"), "a live token resolves");
+  assert.ok(
+    scoped.prepareTokens.get("idle-token").expiresAt > Date.now() + 1000,
+    "the commit path renews the token it uses",
+  );
+
+  scoped.prepareTokens.get("idle-token").expiresAt = 0;
+  assert.equal(
+    scoped.touchPrepareToken("idle-token"),
+    undefined,
+    "a genuinely idle token is refused",
+  );
+  assert.equal(
+    scoped.prepareTokens.has("idle-token"),
+    false,
+    "and dropped rather than left to accumulate",
+  );
+
+  // A longer window is only affordable with a bound on how many are held.
+  const many = new WikiService(store);
+  for (let i = 0; i < WIKI_PREPARE_MAX_TOKENS + 8; i += 1) {
+    many.prepareTokens.set(`token-${i}`, {
+      libraryID: 1,
+      expiresAt: Date.now() + WIKI_PREPARE_IDLE_SECONDS * 1000,
+      preparedPageTitles: new Set(),
+    });
+    many.prunePrepareTokens();
+  }
+  assert.equal(
+    many.prepareTokens.size,
+    WIKI_PREPARE_MAX_TOKENS,
+    "live prepare tokens are capped",
+  );
+  assert.ok(
+    many.prepareTokens.has(`token-${WIKI_PREPARE_MAX_TOKENS + 7}`),
+    "the most recent token survives; the least recently used goes first",
+  );
+});
+
 process.exitCode = failed ? 1 : 0;

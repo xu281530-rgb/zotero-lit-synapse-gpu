@@ -14,7 +14,31 @@ export const WIKI_CONTEXT_SECTIONS = [
 ] as const;
 export type WikiContextSection = (typeof WIKI_CONTEXT_SECTIONS)[number];
 export type WikiPreparedContext = Record<WikiContextSection, any[]>;
-export const WIKI_PREPARE_IDLE_SECONDS = 600;
+/**
+ * How long a prepare token survives without being touched.
+ *
+ * This is an IDLE timer, and it has to be long enough for the work the token
+ * gates. That work is "prepare, then read the paper, then write it up", and
+ * reading a paper in full takes far longer than the ten minutes this used to
+ * allow. Worse, the only tool that renewed the token was
+ * `wiki_get_prepared_context` — none of the steps in between (search_fulltext,
+ * wiki_update_reading_note, wiki_record_concepts, wiki_get_link_review) touch
+ * it at all — so a caller following the prescribed workflow exactly would find
+ * the token dead at the one moment it is needed, and lose the prepared page
+ * titles it had been drafting against.
+ *
+ * An hour is the honest length of a reading session. It is affordable because
+ * the live tokens are now capped (see WIKI_PREPARE_MAX_TOKENS): the ceiling on
+ * memory is the cap, not the clock.
+ */
+export const WIKI_PREPARE_IDLE_SECONDS = 3600;
+
+/**
+ * How many prepare tokens may be alive at once; the least recently used goes
+ * first. Without a cap, lengthening the idle window would let a long agent run
+ * accumulate one prepared context per prepare call for an hour each.
+ */
+export const WIKI_PREPARE_MAX_TOKENS = 16;
 export const WIKI_COMPACT_MAX_CHARS = 20000;
 
 export class WikiPreparedContextExpired extends Error {

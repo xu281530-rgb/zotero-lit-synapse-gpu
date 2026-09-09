@@ -114,7 +114,7 @@ import {
 } from "./wikiLinkService";
 import type { WikiLinkResolutionType, WikiLinkSettlementResult } from "./wikiLinkTypes";
 import { WikiRetriever } from "./wikiRetriever";
-import { boundPreparedContext, compactWikiClaim, compactPreparedResponse, fragmentContextText, pagePreparedContext, WIKI_PREPARE_IDLE_SECONDS, WikiPreparedContextExpired, type WikiPreparedContext } from "./wikiPreparedContext";
+import { boundPreparedContext, compactWikiClaim, compactPreparedResponse, fragmentContextText, pagePreparedContext, WIKI_PREPARE_IDLE_SECONDS, WIKI_PREPARE_MAX_TOKENS, WikiPreparedContextExpired, type WikiPreparedContext } from "./wikiPreparedContext";
 import { findWikiSourceQuote, wikiSourceTextView } from "./wikiSourceText";
 import type {
   WikiClaimSearchResult,
@@ -551,6 +551,49 @@ export class WikiService {
     for (const [token, prepared] of this.prepareTokens) {
       if (!prepared.inFlight && prepared.expiresAt < now) this.prepareTokens.delete(token);
     }
+    // The idle window is an hour, so the ceiling on how much prepared context
+    // is held has to be a count, not the clock. Insertion order is close
+    // enough to least-recently-used here because every touch re-inserts.
+    if (this.prepareTokens.size <= WIKI_PREPARE_MAX_TOKENS) return;
+    for (const [token, prepared] of this.prepareTokens) {
+      if (this.prepareTokens.size <= WIKI_PREPARE_MAX_TOKENS) break;
+      if (!prepared.inFlight) this.prepareTokens.delete(token);
+    }
+  }
+
+  /** Look a token up without renewing it, dropping it if it has lapsed. */
+  private readPrepareToken(token: string | undefined) {
+    if (!token) return undefined;
+    const prepared = this.prepareTokens.get(token);
+    if (!prepared) return undefined;
+    if (!prepared.inFlight && prepared.expiresAt < Date.now()) {
+      this.prepareTokens.delete(token);
+      return undefined;
+    }
+    return prepared;
+  }
+
+  /**
+   * Restart a token's idle clock, and mark it as most recently used.
+   *
+   * Renewal on use is what makes the window an idle timeout rather than a
+   * stopwatch started at `wiki_prepare_update`; the re-insertion is what makes
+   * the eviction order above least-recently-used.
+   */
+  private renewPrepareToken(token: string): number {
+    const prepared = this.prepareTokens.get(token);
+    if (!prepared) return 0;
+    prepared.expiresAt = Date.now() + WIKI_PREPARE_IDLE_SECONDS * 1000;
+    this.prepareTokens.delete(token);
+    this.prepareTokens.set(token, prepared);
+    return prepared.expiresAt;
+  }
+
+  /** Look a token up AND renew it: the shape every non-paging caller wants. */
+  private touchPrepareToken(token: string | undefined) {
+    const prepared = this.readPrepareToken(token);
+    if (prepared) this.renewPrepareToken(token!);
+    return prepared;
   }
 
   async prepareUpdate(options: {
@@ -843,7 +886,7 @@ export class WikiService {
   private async ensureCommitReviewTasks(input: WikiCommitInput): Promise<void> {
     const sessions = await this.store.readingSessions();
     const scope = input.prepareToken
-      ? this.prepareTokens.get(input.prepareToken)?.reviewScope
+      ? this.touchPrepareToken(input.prepareToken)?.reviewScope
       : undefined;
     const keys = new Set<string>();
     if (scope) keys.add(scope.itemKey);
@@ -1028,7 +1071,10 @@ export class WikiService {
     limit?: number;
   }): any {
     this.prunePrepareTokens();
-    const prepared = this.prepareTokens.get(options.prepareToken);
+    // Deliberately the non-renewing lookup: the renewal below happens only
+    // after the page was actually produced, so a read for a section that does
+    // not exist cannot keep a token alive.
+    const prepared = this.readPrepareToken(options.prepareToken);
     if (!prepared?.context || prepared.libraryID !== options.libraryID)
       throw new WikiPreparedContextExpired();
     const page = pagePreparedContext(
@@ -1037,11 +1083,11 @@ export class WikiService {
       options.offset,
       options.limit,
     );
-    prepared.expiresAt = Date.now() + WIKI_PREPARE_IDLE_SECONDS * 1000;
+    const expiresAt = this.renewPrepareToken(options.prepareToken);
     return {
       prepareToken: options.prepareToken,
       prepareTokenExpiresInSeconds: WIKI_PREPARE_IDLE_SECONDS,
-      prepareTokenExpiresAt: prepared.expiresAt,
+      prepareTokenExpiresAt: expiresAt,
       ...page,
     };
   }
@@ -2178,9 +2224,7 @@ export class WikiService {
     input: WikiCommitInput,
   ): Promise<void> {
     const sessions = await this.store.readingSessions();
-    const prepared = input.prepareToken
-      ? this.prepareTokens.get(input.prepareToken)
-      : undefined;
+    const prepared = this.touchPrepareToken(input.prepareToken);
     let session = prepared?.reconciliationSessionId
       ? await sessions.get(prepared.reconciliationSessionId)
       : input.readingSessionId
@@ -2313,14 +2357,14 @@ export class WikiService {
     let actions: WikiCommitAction[];
     let warnings: string[];
     if (input.actions.some((action) => action.action === "CREATE_PAGE")) {
-      const prepared = input.prepareToken
-        ? this.prepareTokens.get(input.prepareToken)
-        : undefined;
+      const prepared = this.touchPrepareToken(input.prepareToken);
+      // Expiry is not re-checked here: touchPrepareToken has already dropped a
+      // lapsed token and answered undefined, and it renewed a live one, so
+      // testing `expiresAt` again could only ever contradict itself.
       if (
         !prepared ||
         prepared.libraryID !== input.libraryID ||
-        prepared.canCommit === false ||
-        prepared.expiresAt < Date.now()
+        prepared.canCommit === false
       ) {
         throw new Error(
           "CREATE_PAGE requires a current wiki_prepare_update token for this library",

@@ -1317,7 +1317,7 @@ export function buildToolCatalog(): ToolDefinition[] {
   {
     name: 'wiki_get_prepared_context',
     category: 'wiki',
-    description: 'Page the immutable context from wiki_prepare_update using the same prepareToken and pagination.nextOffset. Each successful read renews the ten-minute idle timeout; invalid reads do not. A page-creating commit consumes the token. After inactivity or restart, prepare again and recover durable reviews with wiki_get_link_review. Counts and limit use context entries, including fragments; the character budget may return fewer than limit. Join textFragment fields or contextFragment.text by entryIndex and offset. For cross-paper tasks prefer wiki_get_link_review with taskId, section targets and expectedRevision.',
+    description: 'Page the immutable context from wiki_prepare_update using the same prepareToken and pagination.nextOffset. Each successful use renews the token idle timeout; invalid reads do not. A page-creating commit consumes the token. After inactivity or restart, prepare again and recover durable reviews with wiki_get_link_review. Counts and limit use context entries, including fragments; the character budget may return fewer than limit. Join textFragment fields or contextFragment.text by entryIndex and offset. For cross-paper tasks prefer wiki_get_link_review with taskId, section targets and expectedRevision.',
     inputSchema: {
       type: 'object',
       properties: {
