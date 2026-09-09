@@ -18,9 +18,15 @@
  * 纯函数 + 显式时钟，不依赖 XPCOM，可以直接在 Node 下跑单测。
  */
 
-/** 分页状态的存活时间：够一次文献综述的翻阅，不够长到把内存变成缓存。 */
+/**
+ * 分页状态的闲置存活时间：够一次文献综述的翻阅，不够长到把内存变成缓存。
+ *
+ * 计时从「最后一次翻页」开始，不是从「这次检索建立」开始。持续翻页的人不该
+ * 被计时器打断——把上限加在闲置时长上，才既回收得掉没人再看的名单，又不会
+ * 在正翻着的时候把名单抽走。
+ */
 export const PAGE_STATE_TTL_MS = 15 * 60 * 1000;
-/** 同时保留的检索会话数上限，超出时淘汰最旧的。 */
+/** 同时保留的检索会话数上限，超出时淘汰最久未访问的。 */
 export const MAX_PAGE_STATES = 5;
 /** cursor 的格式版本；换格式时旧 cursor 会干净地失败而不是被误读。 */
 const CURSOR_PREFIX = "hs1";
@@ -381,7 +387,12 @@ export class HybridSearchPageStore<TRow, TMeta = Record<string, unknown>> {
   private evict(): void {
     const now = this.now();
     for (const [id, state] of this.states) {
-      if (now - state.createdAt > this.ttlMs) this.states.delete(id);
+      // 以「最后一次访问」计时，不是「创建时刻」。这两者的差别正是一个真实
+      // 故障：一次命中几十篇的检索需要连续翻页，而按创建时刻计时的话，无论
+      // 调用方翻得多勤，第 15 分钟一到 cursor 照样作废——翻到一半被要求重新
+      // 检索，而重新检索会重排序，于是出现重复与遗漏。state.lastAccessAt
+      // 本来就在维护，却只用于 LRU 淘汰，没有用在它最该用的地方。
+      if (now - state.lastAccessAt > this.ttlMs) this.states.delete(id);
     }
     if (this.states.size <= this.maxStates) return;
     const byAge = [...this.states.values()].sort(

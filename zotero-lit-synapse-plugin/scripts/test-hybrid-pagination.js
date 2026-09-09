@@ -309,6 +309,28 @@ const FINGERPRINT = {
     "an expired cursor must say so and say what to do instead",
   );
 
+  // The TTL is an IDLE timer: a caller who keeps paging keeps its ranking.
+  // Measured from creation instead, a long review would lose its cursor
+  // mid-way through, and re-running the search reorders the list.
+  {
+    let clock = 1_000_000;
+    const paging = new HybridSearchPageStore(() => clock, 60_000, 2);
+    const id = paging.create(FINGERPRINT, ranked, {});
+    for (let step = 0; step < 5; step += 1) {
+      clock += 50_000; // under the TTL each time, 250s total: past it in sum
+      assert.doesNotThrow(
+        () => paging.read(encodeCursor(id, 2), {}, 2),
+        "steady paging must not expire the ranking it is walking",
+      );
+    }
+    clock += 61_000; // now genuinely idle
+    assert.throws(
+      () => paging.read(encodeCursor(id, 2), {}, 2),
+      CursorError,
+      "a ranking nobody has paged for longer than the TTL is still collected",
+    );
+  }
+
   // Oldest search is evicted once the cap is exceeded.
   const first = store.create(FINGERPRINT, ranked, {});
   now += 1;
