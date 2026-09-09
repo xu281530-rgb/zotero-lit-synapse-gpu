@@ -188,7 +188,6 @@ async function seedCombined(store, sqlite, libraryID, itemKey) {
     .run(key);
   sqlite.prepare(`INSERT INTO index_status (item_key) VALUES (?)`).run(key);
   await store.getKeywordIndexStore().writeItem(PAPER(libraryID, itemKey));
-  store.vectorCache.set(`${key}_0`, new Float32Array([1, 0]));
 }
 
 function combinedState(sqlite, libraryID, itemKey) {
@@ -441,7 +440,6 @@ test("a keyword SQL failure rolls back the semantic half of one-item deletion", 
     status: 1,
     keywordAlive: 1,
   });
-  assert.equal(store.vectorCache.has("2:ATOMIC_A_0"), true);
   assert.deepEqual(
     events,
     [],
@@ -465,7 +463,6 @@ test("a semantic SQL failure leaves the keyword document alive", async () => {
     status: 1,
     keywordAlive: 1,
   });
-  assert.equal(store.vectorCache.has("2:ATOMIC_B_0"), true);
   assert.deepEqual(events, []);
 });
 
@@ -556,7 +553,6 @@ test("a keyword failure rolls back clearIndex before cache and GPU completion", 
       keywordAlive: 1,
     });
   }
-  assert.equal(store.vectorCache.has("2:CLEAR_A_0"), true);
   assert.deepEqual(events, [], "a rolled-back clear publishes no completion");
 });
 

@@ -36,11 +36,11 @@ describe("Round 3 question-driven Wiki audit in real Zotero", function () {
     await persist();
     try {
       vector = getVectorStore();
-      originalVectorState = Object.fromEntries(["db", "dbPath", "initialized", "initPromise", "keywordStore", "vectorCache", "gpuBackend"].map((key) => [key, vector[key]]));
+      originalVectorState = Object.fromEntries(["db", "dbPath", "initialized", "initPromise", "keywordStore", "gpuBackend"].map((key) => [key, vector[key]]));
       const dbPath = PathUtils.join(Zotero.DataDirectory.dir, `round3-qa-vector-${Date.now()}.sqlite`);
       vectorDB = new Zotero.DBConnection(dbPath);
       Object.assign(vector, {
-        db: vectorDB, dbPath, initialized: false, initPromise: null, keywordStore: null, vectorCache: new Map(),
+        db: vectorDB, dbPath, initialized: false, initPromise: null, keywordStore: null,
         gpuBackend: { registerProvider() {}, isEnabled: () => false, publishMutation: async () => undefined, fallback() {} },
       });
       // createTables also creates the persistent document revision triggers.

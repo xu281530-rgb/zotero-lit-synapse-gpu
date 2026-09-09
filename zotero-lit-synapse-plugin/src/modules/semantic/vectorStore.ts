@@ -446,9 +446,19 @@ export class VectorStore {
   private activeEmbeddingWrites = 0;
   private initPromise: Promise<void> | null = null;
 
-  // In-memory cache for frequently accessed vectors
-  private vectorCache: Map<string, Float32Array> = new Map();
-  private cacheMaxSize: number = 1000;
+  /*
+   * There is deliberately no in-memory vector cache here.
+   *
+   * There used to be one: every insert put its Float32Array into a 1000-entry
+   * map, and five separate call sites carefully invalidated it on delete, on
+   * re-index, on library clear and on close. Nothing ever read it. It bought
+   * no lookup it could serve -- searches scan the quantised column, and
+   * `getFloat32VectorsByEmbeddingIDs` fetches by row id -- so its whole effect
+   * was to hold a few megabytes of vectors alive for the rest of the session
+   * after an index build, and to make five other methods look as though they
+   * were maintaining something. Searching is fast because of the Int8 scan and
+   * the GPU backend, not because of this.
+   */
 
   // Debug: instance ID for tracking multiple instances
   private instanceId: number;
@@ -1149,10 +1159,6 @@ export class VectorStore {
         vectorBlob
       ]);
     }, [{ kind: 'itemChanged', libraryID: record.libraryID ?? Zotero.Libraries.userLibraryID, itemKey: record.itemKey }]);
-
-    // Update cache
-    const cacheKey = `${storageKey}_${record.chunkId}`;
-    this.updateCache(cacheKey, record.vector);
   }
 
   /**
@@ -1272,13 +1278,6 @@ export class VectorStore {
         ],
       );
     }, [{ kind: 'itemChanged', itemKey: options.itemKey, libraryID: options.libraryID }]);
-
-    for (const key of this.vectorCache.keys()) {
-      if (key.startsWith(`${storageKey}_`)) this.vectorCache.delete(key);
-    }
-    for (const record of options.records) {
-      this.updateCache(`${storageKey}_${record.chunkId}`, record.vector);
-    }
   }
 
   private async mutateEmbeddings(write: () => Promise<void>, mutations: GpuVectorMutation[]): Promise<void> {
@@ -2970,11 +2969,6 @@ export class VectorStore {
         [buildID],
       );
     }, [{ kind: 'libraryCleared', libraryID }]);
-
-    for (const key of this.vectorCache.keys()) {
-      const identity = this.fromStorageKey(key.slice(0, key.lastIndexOf('_')));
-      if (identity.libraryID === libraryID) this.vectorCache.delete(key);
-    }
   }
 
   /**
@@ -3217,13 +3211,6 @@ export class VectorStore {
       await keywordStore.removeItem(effectiveLibraryID, itemKey);
     }, [{ kind: 'itemsDeleted', items: [{ libraryID: effectiveLibraryID, itemKey }] }]);
 
-    // Clear cache entries
-    for (const key of this.vectorCache.keys()) {
-      if (key.startsWith(`${storageKey}_`)) {
-        this.vectorCache.delete(key);
-      }
-    }
-
     ztoolkit.log(`[VectorStore] Deleted vectors for item: ${itemKey}`);
   }
 
@@ -3281,12 +3268,6 @@ export class VectorStore {
         );
       }
     }, [{ kind: 'itemsDeleted', items: identities }]);
-
-    for (const key of this.vectorCache.keys()) {
-      if (storageKeys.some((storageKey) => key.startsWith(`${storageKey}_`))) {
-        this.vectorCache.delete(key);
-      }
-    }
 
     ztoolkit.log(
       `[VectorStore] Deleted vectors for ${storageKeys.length} targeted items`,
@@ -3404,7 +3385,6 @@ export class VectorStore {
 
     ztoolkit.log(`[VectorStore] clear() transaction committed`);
 
-    this.vectorCache.clear();
     // VACUUM to reclaim disk space (DELETE only marks pages as free)
     try {
       ztoolkit.log(`[VectorStore] Running VACUUM to reclaim disk space...`);
@@ -3438,7 +3418,6 @@ export class VectorStore {
   /** Idempotent post-COMMIT work, also used to finish an interrupted reset. */
   async finalizeCommittedReset(): Promise<CommittedResetDiagnostics> {
     await this.ensureInitialized();
-    this.vectorCache.clear();
     await this.gpuBackend.shutdown();
 
     await this.db.queryAsync(`PRAGMA wal_checkpoint(TRUNCATE)`);
@@ -4518,19 +4497,6 @@ export class VectorStore {
     return { normalized, norm };
   }
 
-  /**
-   * Update LRU cache
-   */
-  private updateCache(key: string, vector: Float32Array): void {
-    // Simple LRU: remove oldest when cache is full
-    if (this.vectorCache.size >= this.cacheMaxSize) {
-      const firstKey = this.vectorCache.keys().next().value;
-      if (firstKey) {
-        this.vectorCache.delete(firstKey);
-      }
-    }
-    this.vectorCache.set(key, vector);
-  }
 
   /**
    * Migrate existing vectors to Int8 format
@@ -4690,7 +4656,6 @@ export class VectorStore {
     this.db = null;
     this.initialized = false;
     this.initPromise = null;
-    this.vectorCache.clear();
     void this.gpuBackend.shutdown();
 
     // Close database asynchronously (fire and forget)

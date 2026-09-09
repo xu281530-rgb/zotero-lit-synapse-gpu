@@ -32,7 +32,7 @@ describe("Round 3 full-text Wiki diagnostic in real Zotero", function () {
     originalVector = {
       db: vector.db, dbPath: vector.dbPath, initialized: vector.initialized,
       initPromise: vector.initPromise, gpuBackend: vector.gpuBackend,
-      vectorCache: vector.vectorCache, keywordStore: vector.keywordStore,
+      keywordStore: vector.keywordStore,
     };
     const vectorPath = PathUtils.join(Zotero.DataDirectory.dir, `round3-fulltext-vector-${Date.now()}.sqlite`);
     vectorDB = new Zotero.DBConnection(vectorPath);
@@ -40,7 +40,6 @@ describe("Round 3 full-text Wiki diagnostic in real Zotero", function () {
     vector.dbPath = vectorPath;
     vector.initialized = false;
     vector.initPromise = null;
-    vector.vectorCache = new Map();
     vector.keywordStore = null;
     vector.gpuBackend = { registerProvider() {}, isEnabled: () => false, publishMutation: async () => {}, fallback() {} };
     await vector.createTables();

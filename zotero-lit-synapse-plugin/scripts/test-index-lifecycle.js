@@ -341,8 +341,6 @@ const indexBusinessTables = [
   const store = new VectorStore();
   store.initialized = true;
   store.db = db;
-  store.vectorCache.set("2:ITEM_0", new Float32Array([1, 0]));
-  store.vectorCache.set("2:ITEM_1", new Float32Array([0, 1]));
   const replacement = {
     itemKey: "ITEM",
     libraryID: 2,
@@ -369,7 +367,6 @@ const indexBusinessTables = [
   assert.equal(state.status.get("2:ITEM"), "old-hash");
   assert.equal(state.failures.has("2:ITEM"), true);
   assert.equal(state.failures.has("1:ITEM"), true);
-  assert.equal(store.vectorCache.has("2:ITEM_1"), true);
 
   failEmbeddingInsert = false;
   await store.replaceItemIndex(replacement);
@@ -378,7 +375,10 @@ const indexBusinessTables = [
   assert.equal(state.failures.has("2:ITEM"), true);
   assert.equal(state.failures.has("1:ITEM"), true);
   assert.equal(state.targets.get("build:2:ITEM"), "failed");
-  assert.equal(store.vectorCache.has("2:ITEM_1"), false);
+  // There is no in-memory vector cache left to check: it was written on every
+  // insert and never once read, so it has been removed. What a re-index has to
+  // get right is the durable state asserted above -- the rows that survive a
+  // failed attempt, and the rows that replace them when it succeeds.
 }
 
 // Failed retries retain the original Library identity even when both
@@ -601,10 +601,6 @@ const indexBusinessTables = [
 // non-target item untouched.
 {
   const { store, calls } = mockStore();
-  store.vectorCache.set("2:TARGET_A_0", new Float32Array([1]));
-  store.vectorCache.set("2:TARGET_WITH_UNDERSCORE_4", new Float32Array([1]));
-  store.vectorCache.set("2:OTHER_0", new Float32Array([1]));
-  store.vectorCache.set("3:TARGET_A_0", new Float32Array([1]));
 
   await store.deleteItemsVectors(
     ["TARGET_A", "TARGET_WITH_UNDERSCORE"],
@@ -626,10 +622,10 @@ const indexBusinessTables = [
     assert.deepEqual(call.params, [2, itemKey]);
     assert.match(call.sql, /index_(?:failures|build_targets)/);
   }
-  assert.equal(store.vectorCache.has("2:TARGET_A_0"), false);
-  assert.equal(store.vectorCache.has("2:TARGET_WITH_UNDERSCORE_4"), false);
-  assert.equal(store.vectorCache.has("2:OTHER_0"), true);
-  assert.equal(store.vectorCache.has("3:TARGET_A_0"), true);
+  // The scoping this block exists to prove -- only the named items, only in
+  // the named Library -- is asserted on the SQL above. It used to be asserted
+  // a second time against an in-memory cache that nothing ever read; that
+  // cache is gone, and the deletes are the part that was always load-bearing.
 }
 
 // An explicitly empty target list is a no-op, never a full-Library delete.
