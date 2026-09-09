@@ -19,12 +19,15 @@ import {
   unregisterWikiPanel,
 } from "./modules/wiki/wikiPanel";
 import { getWikiService } from "./modules/wiki/wikiService";
+import { getWikiSettings } from "./modules/wiki/wikiSettings";
 import {
   registerPrefsWindowStyle,
   unregisterPrefsWindowStyle,
 } from "./modules/prefsWindowStyle";
 
 const PREF_SEMANTIC_AUTO_UPDATE = 'extensions.zotero.zotero-lit-synapse.semantic.autoUpdate';
+const PREF_FIRST_INSTALL_PROMPT_SHOWN =
+  'extensions.zotero.zotero-lit-synapse.firstInstallPromptShown';
 const GENERATED_MINERU_MARKDOWN_TITLE =
   /^MinerU Markdown \(([A-Z0-9]+)\)\.md$/i;
 
@@ -85,6 +88,16 @@ let autoIndexCheckTimer: ReturnType<typeof setInterval> | null = null;
  * claim has a current vector".
  */
 let wikiEmbeddingQueueTimer: ReturnType<typeof setInterval> | null = null;
+/**
+ * The one-off pass shortly after startup, held so that it can be cancelled.
+ *
+ * Its sibling `autoIndexInitialTimer` was always kept; this one was not, and a
+ * timer nobody holds cannot be stopped. Disabling the plugin or quitting
+ * Zotero inside the first twenty seconds therefore still fired it, at which
+ * point it reached for a Wiki service that had already been torn down and a
+ * database that was closing.
+ */
+let wikiEmbeddingInitialTimer: ReturnType<typeof setTimeout> | null = null;
 const WIKI_EMBEDDING_QUEUE_INTERVAL_MS = 60_000;
 let autoIndexInitialTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -901,11 +914,15 @@ function startAutoIndexCheck() {
 }
 
 function startWikiEmbeddingQueueDrain() {
-  if (wikiEmbeddingQueueTimer) {
-    clearInterval(wikiEmbeddingQueueTimer);
-    wikiEmbeddingQueueTimer = null;
-  }
+  stopWikiEmbeddingQueueDrain();
   const pump = () => {
+    // Two guards the timer callback cannot do without. Shutdown, because a
+    // pass that starts while the plugin is being torn down writes into a
+    // closing database. And the Wiki pref, because this queue belongs to a
+    // feature the user can switch off: with it off there is nothing to drain,
+    // and opening the Wiki store every minute to confirm that would create the
+    // database of a feature they declined.
+    if (isShuttingDown || !getWikiSettings().enabled) return;
     void getWikiService()
       .pumpEmbeddingQueue()
       .catch((error: unknown) => {
@@ -913,12 +930,19 @@ function startWikiEmbeddingQueueDrain() {
       });
   };
   // One pass shortly after startup clears whatever the last session left.
-  setTimeout(pump, 20000);
+  wikiEmbeddingInitialTimer = setTimeout(() => {
+    wikiEmbeddingInitialTimer = null;
+    pump();
+  }, 20000);
   wikiEmbeddingQueueTimer = setInterval(pump, WIKI_EMBEDDING_QUEUE_INTERVAL_MS);
   ztoolkit.log("[MCP Plugin] Wiki embedding queue drain started");
 }
 
 function stopWikiEmbeddingQueueDrain() {
+  if (wikiEmbeddingInitialTimer) {
+    clearTimeout(wikiEmbeddingInitialTimer);
+    wikiEmbeddingInitialTimer = null;
+  }
   if (wikiEmbeddingQueueTimer) {
     clearInterval(wikiEmbeddingQueueTimer);
     wikiEmbeddingQueueTimer = null;
@@ -1492,14 +1516,23 @@ async function onPrefsEvent(type: string, data: { [key: string]: any }) {
  */
 function checkFirstInstallation() {
   try {
-    const hasShownPrompt = Zotero.Prefs.get("extensions.zotero.zotero-lit-synapse.firstInstallPromptShown", false);
+    // The second argument says the name is already fully qualified. Both calls
+    // here used to omit it, so Zotero prefixed the name a second time and the
+    // flag came to rest at
+    // extensions.zotero.extensions.zotero.zotero-lit-synapse.firstInstallPromptShown
+    // — outside the plugin's own branch, where resetting the plugin's settings
+    // cannot reach it. Read the old place once so that an existing install is
+    // not greeted a second time, then keep the flag where it belongs.
+    const hasShownPrompt =
+      Zotero.Prefs.get(PREF_FIRST_INSTALL_PROMPT_SHOWN, true) ??
+      Zotero.Prefs.get(PREF_FIRST_INSTALL_PROMPT_SHOWN, false);
     if (!hasShownPrompt) {
       // Mark as shown immediately to prevent multiple prompts
-      Zotero.Prefs.set("extensions.zotero.zotero-lit-synapse.firstInstallPromptShown", true);
-      
+      Zotero.Prefs.set(PREF_FIRST_INSTALL_PROMPT_SHOWN, true, true);
+
       // Show prompt after a short delay to ensure UI is ready
       trackedSetTimeout(() => {
-        showFirstInstallPrompt();
+        void showFirstInstallPrompt();
       }, 3000);
     }
   } catch (error) {
@@ -1508,33 +1541,74 @@ function checkFirstInstallation() {
 }
 
 /**
- * Show first installation configuration prompt
+ * Show first installation configuration prompt.
+ *
+ * Nobody asked for this dialog: it is fired by a timer a few seconds after
+ * Zotero starts. `window.confirm` is application-modal, so the version that
+ * used it froze the whole main window — every menu, the items tree, any sync
+ * in progress — until a user who had not yet done anything clicked it away.
+ *
+ * `asyncConfirmEx` shows the same two choices as a sheet on the main window:
+ * still unmissable, but the application keeps running underneath and this
+ * function no longer blocks the startup path it is called from. Where it is
+ * unavailable the plugin's own notification is used instead, because a missed
+ * toast is a far smaller failure than a frozen window.
  */
-function showFirstInstallPrompt() {
+async function showFirstInstallPrompt() {
+  const title = "欢迎使用 Zotero LitSynapse / Welcome to Zotero LitSynapse";
+  const promptText =
+    "感谢安装 Zotero LitSynapse！为了开始使用，您需要为您的 AI 客户端生成配置文件。是否现在打开设置页面来生成配置？\n使用技巧请关注设置页面公众号。\n\nThank you for installing Zotero LitSynapse! To get started, you need to generate configuration files for your AI clients. Would you like to open the settings page now to generate configurations?";
+  const openPrefsText = "打开设置 / Open Settings";
+  const laterText = "稍后配置 / Configure Later";
+
+  const mainWindow = Zotero.getMainWindow();
+  if (!mainWindow) {
+    ztoolkit.log("[MCP Plugin] No main window available", "error");
+    return;
+  }
+
   try {
-    // Use bilingual text for first install prompt
-    const title = "欢迎使用 Zotero LitSynapse / Welcome to Zotero LitSynapse";
-    const promptText = "感谢安装 Zotero LitSynapse！为了开始使用，您需要为您的 AI 客户端生成配置文件。是否现在打开设置页面来生成配置？\n使用技巧请关注设置页面公众号。\n\nThank you for installing Zotero LitSynapse! To get started, you need to generate configuration files for your AI clients. Would you like to open the settings page now to generate configurations?";
-    const openPrefsText = "打开设置 / Open Settings";
-    const laterText = "稍后配置 / Configure Later";
-    
-    // Use a simple window confirm instead of Services.prompt for compatibility
-    const message = `${title}\n\n${promptText}\n\n${openPrefsText} (OK) / ${laterText} (Cancel)`;
-    
-    const mainWindow = Zotero.getMainWindow();
-    if (!mainWindow) {
-      ztoolkit.log("[MCP Plugin] No main window available", "error");
-      return;
+    const services = (globalThis as any).Services;
+    const prompt = services?.prompt;
+    if (typeof prompt?.asyncConfirmEx !== "function") {
+      throw new Error("asyncConfirmEx unavailable");
     }
-    
-    const result = mainWindow.confirm(message);
-    
-    if (result) {
-      // User chose to open preferences
-      trackedSetTimeout(() => {
-        openPreferencesWindow();
-      }, 100);
+    const flags =
+      prompt.BUTTON_POS_0 * prompt.BUTTON_TITLE_IS_STRING +
+      prompt.BUTTON_POS_1 * prompt.BUTTON_TITLE_IS_STRING;
+    const answer = await prompt.asyncConfirmEx(
+      (mainWindow as any).browsingContext,
+      Ci.nsIPrompt.MODAL_TYPE_WINDOW,
+      title,
+      promptText,
+      flags,
+      openPrefsText,
+      laterText,
+      null,
+      null,
+      false,
+      {},
+    );
+    if (answer?.QueryInterface(Ci.nsIPropertyBag2)?.get("buttonNumClicked") === 0) {
+      trackedSetTimeout(() => openPreferencesWindow(), 100);
     }
+    return;
+  } catch (error) {
+    ztoolkit.log(
+      `[MCP Plugin] Async first-install prompt unavailable, showing a notice instead: ${error}`,
+      "warn",
+    );
+  }
+
+  try {
+    showNotice(mainWindow as unknown as _ZoteroTypes.MainWindow, {
+      title,
+      lines: [
+        promptText,
+        `${openPrefsText}: Zotero → 编辑/Edit → 设置/Settings → LitSynapse`,
+      ],
+      type: "info",
+    });
   } catch (error) {
     ztoolkit.log(`[MCP Plugin] Error showing first install prompt: ${error}`, "error");
   }
