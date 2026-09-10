@@ -188,7 +188,11 @@ async function test(name, fn) {
 }
 try {
   await test("a new paper with no old Evidence still receives complete old Wiki targets", async () => {
-    assert.equal(task.required, true);
+    // Unreviewed, and advisory: `required` is false by design so an unrelated
+    // paper's Claims cannot block writing this one down. See
+    // `ensureCommitReviewTasks`.
+    assert.equal(task.pending, true);
+    assert.equal(task.required, false);
     assert.equal(task.targetClaims.length, 2);
     assert.equal(
       (await store.listClaimsByEvidenceSource(1, "PAPER_B")).length,

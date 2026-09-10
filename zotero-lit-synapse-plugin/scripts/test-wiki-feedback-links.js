@@ -523,14 +523,30 @@ try {
       runner.assertSkippedLinksDecided(1, "FINAL_A", "skipped"),
       /RESOLVE_LINK_SIGNAL/,
     );
+    // What still refuses this commit is the LINK SIGNAL gate: a candidate whose
+    // two passages have both been read, neither used nor dismissed. The
+    // unreviewed cross-paper TASK no longer refuses anything - it is advisory,
+    // so a paper is never held up by Claims belonging to a different paper.
     await assert.rejects(
       runner.commit({
         libraryID: 1,
         operationId: "feedback-final-missing",
         actions: [],
       }),
-      /Cross-paper Wiki review/,
+      /cross-paper candidate signal/,
     );
+    const advisory = (
+      await (
+        await store.crossPaperReviews()
+      ).prepare({
+        libraryID: 1,
+        itemKey: "FINAL_A",
+        topic: "fulltext",
+        readingRevision: "",
+      })
+    )[0];
+    assert.equal(advisory.pending, true, "the review really is outstanding");
+    assert.equal(advisory.required, false, "and it still does not block");
     const checkpoint = await runner.commit({
       libraryID: 1, operationId: "feedback-final-checkpoint", userInitiated: true,
       readingSessionId: session.sessionId, checkpoint: true,

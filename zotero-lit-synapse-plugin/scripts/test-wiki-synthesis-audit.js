@@ -935,5 +935,91 @@ test("a comma-separated citation list reaches every chunk it names", () => {
 });
 
 
+// ---------------------------------------------------------------------------
+// Translation is not overstatement
+// ---------------------------------------------------------------------------
+
+section("A Chinese note read out of an English paper");
+
+const GLOSS_CHUNKS = [
+  {
+    chunkId: 41,
+    text:
+      "The interleaved core path ensures a reliable bond between adjacent honeycomb cells, " +
+      "and the effective bonding length increases with the number of interlacing points.",
+  },
+  {
+    chunkId: 42,
+    text: "Both specimens were printed with the same honeycomb core size.",
+  },
+];
+
+test("a flagged word glossed with the source's own English is not asked to prove itself again", () => {
+  // 确保 is in ABSOLUTE_LANGUAGE and 增大 is in DIRECTION_WORDS. Both are here
+  // as faithful renderings of "ensures" and "increases", and both say so.
+  const note =
+    "# 论文\n\n作者称交错路径“确保了（ensures）”相邻蜂窝芯单元之间的粘接可靠性（chunk 41）。\n";
+  assert.deepEqual(flagsOf(note, GLOSS_CHUNKS), []);
+});
+
+test("a gloss the cited chunk does not contain proves nothing", () => {
+  const note =
+    "# 论文\n\n作者称交错路径“确保了（guarantees）”相邻蜂窝芯单元之间的粘接可靠性（chunk 41）。\n";
+  assertFlagged(note, GLOSS_CHUNKS, "absolute-language", "the chunk says ensures, not guarantees");
+});
+
+test("a gloss must sit beside the word it excuses, not elsewhere in the sentence", () => {
+  // "ensures" IS in chunk 41 - but it is glossing 粘接, not 确保, and one true
+  // parenthetical must not launder every strong word in the sentence.
+  const note =
+    "# 论文\n\n交错路径确保了相邻蜂窝芯单元之间的粘接（ensures）可靠性（chunk 41）。\n";
+  assertFlagged(note, GLOSS_CHUNKS, "absolute-language");
+});
+
+test("one true gloss does not launder a second strong word in the same sentence", () => {
+  // The risk lists are bilingual, so this sentence matches twice over: the
+  // English pattern on the quoted proof and the Chinese one on 完全消除, which
+  // the paper never says. Excusing the class on the first match would wave the
+  // second through.
+  const note =
+    "# 论文\n\n该方法完全消除了伪影，作者对粘接的用词为“确保（ensures）”（chunk 41）。\n";
+  assertFlagged(note, GLOSS_CHUNKS, "absolute-language", "完全消除 is unglossed");
+});
+
+test("a chunk address is not a gloss", () => {
+  const note = "# 论文\n\n交错路径确保了单元间的粘接可靠性（chunk 41）。\n";
+  assertFlagged(note, GLOSS_CHUNKS, "absolute-language");
+});
+
+test("a relation word carries its gloss the same way", () => {
+  const note = "# 论文\n\n两组试样采用相同（the same）的蜂窝芯尺寸（chunk 42）。\n";
+  assert.deepEqual(
+    flagsOf(note, GLOSS_CHUNKS).filter((f) => f.reasons.includes("relation-word")),
+    [],
+  );
+});
+
+// ---------------------------------------------------------------------------
+// An audit id names the obligation, not the delivery
+// ---------------------------------------------------------------------------
+
+section("Audit id stability");
+
+test("re-delivering the same chunks with more text keeps the id", () => {
+  const note = "# Paper\n\nThe extinction distances of the two reflections are 35 nm and 175 nm (chunk 7).\n";
+  const before = auditSynthesis(note, { chunks: CHUNKS })[0].auditId;
+  const grown = CHUNKS.map((chunk) =>
+    chunk.chunkId === 7 ? { ...chunk, text: `${chunk.text} A later sentence.` } : chunk,
+  );
+  assert.equal(auditSynthesis(note, { chunks: grown })[0].auditId, before);
+});
+
+test("changing the statement or its citations changes the id", () => {
+  const note = "# Paper\n\nThe extinction distances of the two reflections are 35 nm and 175 nm (chunk 7).\n";
+  const before = auditSynthesis(note, { chunks: CHUNKS })[0].auditId;
+  const reworded = note.replace("two reflections", "two superlattice reflections");
+  assert.notEqual(auditSynthesis(reworded, { chunks: CHUNKS })[0].auditId, before);
+});
+
 console.log(`\n${passed}/${passed + failed} passed`);
 if (failed) process.exit(1);

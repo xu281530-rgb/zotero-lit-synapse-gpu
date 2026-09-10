@@ -1106,8 +1106,13 @@ block("a full-text read inherits the chunks and the note the questions left", as
   // whose sentences are checked against the chunks, and this note has the
   // shape that check exists for: one sentence generalising across every chunk
   // of the paper. Sent without proof it is refused, and nothing is written.
+  //
+  // Deliberately NOT the sentence the question-driven pass already proved
+  // ("Every station of this short paper reports the same depth..."): a sentence
+  // this reading has verified once is not asked for again, so reusing it here
+  // would test the memory rather than the audit. Same shape, new statement.
   const acrossEveryChunk =
-    "Every station of this short paper reports the same depth to within the stated uncertainty (chunk 0, chunk 1, chunk 2, chunk 3, chunk 4, chunk 5).";
+    "Taken together the six stations describe one uninterrupted plateau across the whole traverse (chunk 0, chunk 1, chunk 2, chunk 3, chunk 4, chunk 5).";
   const bounded =
     "Read as a whole the paper is a single-condition confirmation, bounded by the one gradient range it covers (chunk 0).";
   // A full-text macro summary arrives in the seven-section template, so the

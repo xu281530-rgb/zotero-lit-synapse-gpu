@@ -7,7 +7,8 @@ export interface WikiCitationGroup {
 export const WIKI_CITATION_GUIDE =
   "Cite chunk addresses as (chunk 12), [chunk:12], or (chunks 12-14, 18). " +
   "Put citations before the sentence's final punctuation. A bracketed citation immediately after a sentence stop belongs to that sentence when it has no citation yet. " +
-  "Use a new paragraph for a leading citation when the previous sentence is uncited. Ranges must be ascending; every cited chunk must have been read.";
+  "Use a new paragraph for a leading citation when the previous sentence is uncited. Ranges must be ascending; every cited chunk must have been read. " +
+  "A bracket that opens with an address may also carry your own words - (chunk 43, 呼应 chunk 2 的存疑) is read as citing 43 and 2 - but it must contain at least one address the server can parse, so write the number, never a word for it.";
 
 /** Shared addresses for coverage, source validation and sentence audits. */
 export function parseWikiCitations(text: string): WikiCitationGroup[] {
@@ -43,6 +44,26 @@ export function parseWikiCitations(text: string): WikiCitationGroup[] {
   return groups;
 }
 
+/**
+ * Parentheticals that OPEN with a chunk address but do not carry one.
+ *
+ * The rule used to be that such a bracket may contain NOTHING but addresses and
+ * commas, so a note writing
+ *
+ *     （chunk 43，呼应第一批记录中 chunk 2 的存疑）
+ *
+ * was refused - every address in it parses, and the prose between them is the
+ * writer saying something true about their own reading. There is no ambiguity
+ * to protect against: the addresses are read by {@link parseWikiCitations},
+ * which finds them wherever they sit, and whether they were really delivered is
+ * a separate check that still runs. All the strictness bought was a refusal on
+ * the first attempt for a shape nobody had been warned about.
+ *
+ * What remains worth catching is a bracket that ANNOUNCES an address and then
+ * fails to give one - `(chunk twelve)`, `(chunks 14-)`, `(chunk )`. Those are
+ * citations the reader meant to make and the server cannot resolve, and they
+ * would otherwise pass silently as decoration.
+ */
 export function invalidWikiCitations(text: string): Array<{
   raw: string;
   start: number;
@@ -55,19 +76,7 @@ export function invalidWikiCitations(text: string): Array<{
     const inner = match[0].slice(1, -1).trim();
     try {
       const groups = parseWikiCitations(inner);
-      if (
-        groups.length &&
-        groups[0].start === 0 &&
-        groups.at(-1)!.end === inner.length &&
-        groups
-          .slice(1)
-          .every((group, index) =>
-            /^(?:[,，、;；]|and|&)\s*$/iu.test(
-              inner.slice(groups[index].end, group.start).trim(),
-            ),
-          )
-      )
-        continue;
+      if (groups.length && groups[0].start === 0) continue;
     } catch {
       /* Invalid ranges are reported at the original citation. */
     }

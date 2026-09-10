@@ -1,4 +1,4 @@
-/**
+﻿/**
  * The evidence-closure check that stands between a finished reading and the
  * Markdown written down as the paper's account of itself.
  *
@@ -543,6 +543,26 @@ function matches(patterns: readonly RegExp[], text: string): string | null {
 }
 
 /**
+ * EVERY word of a risk class in this sentence, not just the first.
+ *
+ * `matches` answers "is this sentence at risk", which is all the flag needs.
+ * The gloss exemption needs more: a sentence excused because one word was
+ * glossed must not carry a second, unglossed word of the same class. The risk
+ * lists are bilingual, so this is not hypothetical - "该方法完全消除了伪影，作者
+ * 用词为（ensures）" matches the English pattern on the quoted proof and the
+ * Chinese pattern on the invented claim, and excusing it on the first would
+ * wave the second through.
+ */
+function allMatches(patterns: readonly RegExp[], text: string): string[] {
+  const found: string[] = [];
+  for (const pattern of patterns) {
+    const hit = pattern.exec(text);
+    if (hit) found.push(hit[0]);
+  }
+  return found;
+}
+
+/**
  * A citation naming SEVERAL chunks, for stripping only.
  *
  * `CHUNK_REFERENCE` reads one id per citation, which is what an Evidence
@@ -713,6 +733,73 @@ export function flattenForTermMatch(text: string): string {
  * from an invention: three or more capitals in order, against the first
  * letters of consecutive words.
  */
+/**
+ * Did the writer already show the source's own word for this one?
+ *
+ * The wording checks - `absolute-language`, `relation-word`, `direction-word`,
+ * `negation` - exist to catch a paraphrase that quietly gained strength. They
+ * cannot tell a strengthened paraphrase from an honest TRANSLATION, and the
+ * Wiki is written in Chinese from papers written in English, so a faithful
+ * rendering of "ensures" as 确保 tripped the same wire as an invented 确保. Every
+ * emphatic sentence the authors wrote themselves then cost a round trip:
+ * re-read the chunk, copy 40 characters out of it, resubmit.
+ *
+ * There is a cheaper proof, and a reader writing carefully already produces it:
+ *
+ *     作者称这"确保了（ensures）"蜂窝芯单元间的粘接质量（chunk 41）。
+ *
+ * The English word sits right beside the Chinese one, in parentheses, and it
+ * either occurs in the cited chunk or it does not. That is the same question
+ * `verifySynthesisAudit` asks of a 40-character quotation, asked of the one
+ * word that carries the strength - checkable here, with no round trip at all.
+ *
+ * Deliberately narrow. The gloss must FOLLOW the flagged word closely (a few
+ * characters of Chinese particles or quote marks at most), so an unrelated
+ * parenthetical elsewhere in the sentence excuses nothing, and it must appear
+ * in the chunks this sentence cites, not merely somewhere in the paper.
+ */
+const GLOSS_MAX_GAP = 8;
+
+export function glossesFlaggedWord(
+  sentence: string,
+  word: string,
+  sourceTexts: readonly string[],
+): boolean {
+  if (!word || !sourceTexts.length) return false;
+  const at = sentence.indexOf(word);
+  if (at < 0) return false;
+  const after = at + word.length;
+  for (const found of sentence.matchAll(/[（(]([^（()）]{2,80})[)）]/gu)) {
+    const start = found.index ?? -1;
+    if (start < 0) continue;
+    const end = start + found[0].length;
+    // Two ways this parenthetical can belong to the flagged word.
+    //
+    // It FOLLOWS it - 确保（ensures） - which is the Chinese-word case; or the
+    // flagged word is INSIDE it, because the risk lists are bilingual and the
+    // English pattern matched the gloss rather than the term it glosses. In
+    // "确保了（ensures）" the word reported is "ensures", sitting in the bracket,
+    // and refusing that sentence refused the proof along with the claim.
+    const inside = at >= start && after <= end;
+    if (!inside) {
+      if (start < after || start - after > GLOSS_MAX_GAP) continue;
+      // Only the characters a translator leaves between a term and its gloss.
+      // Anything else means the parenthetical belongs to something else.
+      if (!/^[\s"'“”'‘’「」『』的了地得，,、]*$/u.test(sentence.slice(after, start)))
+        continue;
+    }
+    const gloss = found[1].trim();
+    // A chunk address is not a gloss, and neither is a bare number.
+    if (!/[A-Za-z]{3}/u.test(gloss)) continue;
+    if (/^\s*(?:chunks?|块|段)\b/iu.test(gloss)) continue;
+    const needle = flattenForTermMatch(gloss);
+    if (!needle) continue;
+    if (sourceTexts.some((text) => flattenForTermMatch(text).includes(needle)))
+      return true;
+  }
+  return false;
+}
+
 export function chunkIntroducesAcronym(token: string, chunkText: string): boolean {
   const letters = token.replace(/[^A-Za-z]/gu, "").toLowerCase();
   if (letters.length < 3) return false;
@@ -854,28 +941,41 @@ export function auditSynthesis(
       const reasons: WikiSynthesisRisk[] = [];
       const details: string[] = [];
 
-      const absolute = matches(ABSOLUTE_LANGUAGE, sentence);
-      if (absolute && !completeSourceSentence) {
-        reasons.push("absolute-language");
-        details.push(
-          `states "${absolute}" - show the passage that states it that strongly, or write the strength the paper used`,
-        );
-      }
-      const relation = matches(RELATION_WORDS, sentence);
-      if (relation && !completeSourceSentence) {
-        reasons.push("relation-word");
-        details.push(
-          `asserts the relation "${relation}", whose opposite would read almost identically - quote the passage that fixes it`,
-        );
-      }
-      const direction = matches(DIRECTION_WORDS, sentence);
-      if (direction && !completeSourceSentence) {
-        reasons.push("direction-word");
-        details.push(`carries the direction word "${direction}"`);
-      }
       const sourceTexts = supporting
         .map((id) => chunkText.get(id))
         .filter((text): text is string => typeof text === "string");
+      // A word the writer already glossed with the source's own English needs
+      // no further proof - see `glossesFlaggedWord`. Every word of the class
+      // has to be glossed, or the sentence is still reaching somewhere.
+      const glossed = (patterns: readonly RegExp[]) => {
+        const words = allMatches(patterns, sentence);
+        return (
+          words.length > 0 &&
+          words.every((word) =>
+            glossesFlaggedWord(sentence, word, sourceTexts),
+          )
+        );
+      };
+
+      const absolute = matches(ABSOLUTE_LANGUAGE, sentence);
+      if (absolute && !completeSourceSentence && !glossed(ABSOLUTE_LANGUAGE)) {
+        reasons.push("absolute-language");
+        details.push(
+          `states "${absolute}" - show the passage that states it that strongly, write the strength the paper used, or gloss it with the source's own word in parentheses, e.g. 确保（ensures）`,
+        );
+      }
+      const relation = matches(RELATION_WORDS, sentence);
+      if (relation && !completeSourceSentence && !glossed(RELATION_WORDS)) {
+        reasons.push("relation-word");
+        details.push(
+          `asserts the relation "${relation}", whose opposite would read almost identically - quote the passage that fixes it, or gloss it with the source's own word in parentheses`,
+        );
+      }
+      const direction = matches(DIRECTION_WORDS, sentence);
+      if (direction && !completeSourceSentence && !glossed(DIRECTION_WORDS)) {
+        reasons.push("direction-word");
+        details.push(`carries the direction word "${direction}"`);
+      }
       // `hasQuantity` stays raw: `condition-dropped` below is a STRONG check
       // and keys on it, and "the number lost its conditions" is a risk whether
       // or not the number came from the source. Only the WEAK signal is
@@ -888,7 +988,7 @@ export function auditSynthesis(
         );
       }
       const negation = matches(NEGATION, sentence);
-      if (negation && !completeSourceSentence) {
+      if (negation && !completeSourceSentence && !glossed(NEGATION)) {
         reasons.push("negation");
         details.push(`carries the negation "${negation}"`);
       }
@@ -1052,9 +1152,28 @@ export interface WikiSynthesisAuditEntry {
   support: WikiSynthesisSupport[];
 }
 
-function synthesisAuditId(sentence: string, ids: number[], chunks: Map<number, string>): string {
+/**
+ * Name a flagged sentence by the two things the model can see.
+ *
+ * The id used to fold in the CHUNK TEXT of every cited address as well. That
+ * made it unpredictable from the caller's side: the same sentence, unchanged to
+ * the character, would come back under a new id whenever the delivered slice of
+ * the paper differed - a different batch, a re-read, an alias address resolving
+ * to a longer chunk - and the `synthesisAudit` entry prepared against the
+ * previous response was then rejected as `STALE_AUDIT` for no reason the caller
+ * could observe. Measured on a real run: `audit-v2-6418efd7...` became
+ * `audit-v2-7c39b018...` between two consecutive responses with identical text.
+ *
+ * Sentence plus cited addresses is enough to identify the obligation, and it is
+ * stable exactly when the obligation is. Re-chunking the source no longer
+ * invalidates an id on its own - but `verifySynthesisAudit` still reads every
+ * quotation out of the CURRENT chunk text, so a quotation that stopped being
+ * true stops verifying. The id names the question; the check still re-answers
+ * it against the source every time.
+ */
+function synthesisAuditId(sentence: string, ids: number[], _chunks: Map<number, string>): string {
   const stableText = (text: string) => text.replace(/\s+/gu, " ").trim();
-  const value = JSON.stringify([stableText(sentence), ids.map((id) => [id, stableText(chunks.get(id) ?? "")])]);
+  const value = JSON.stringify([stableText(sentence), [...ids].sort((a, b) => a - b)]);
   let a = 0x811c9dc5;
   let b = 0x9e3779b9;
   for (let index = 0; index < value.length; index++) {

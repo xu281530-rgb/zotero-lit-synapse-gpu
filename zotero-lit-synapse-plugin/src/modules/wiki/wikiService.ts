@@ -310,6 +310,10 @@ function clampCoverageToVerifiedEvidence(
  * quote the source, or write the sentence at the strength the source used, at
  * which point it stops being flagged and costs nothing at all.
  */
+/** How many readings keep a proved-sentence bank, and how big each one gets. */
+const WIKI_AUDIT_MEMORY_SCOPES = 32;
+const WIKI_AUDIT_MEMORY_SENTENCES = 2000;
+
 function assertSynthesisEvidenceClosure(
   body: string,
   chunks: readonly WikiAuditChunk[],
@@ -325,11 +329,62 @@ function assertSynthesisEvidenceClosure(
    * out of it was misdescribed, which is its own kind of wrong.
    */
   what: "record" | "synthesis" = "synthesis",
+  /**
+   * Sentences this reading has already proved, and where to file new ones.
+   *
+   * The check itself is stateless, and that was the whole cost. One sentence
+   * left unproved failed the WHOLE submission, including every sentence proved
+   * in the same call - and the next response listed them all again, so the
+   * caller had to resend every quotation to make any of them stick. Two
+   * batches of one paper took five to seven round trips each for that reason
+   * alone, most of them re-proving sentences that had already verified.
+   *
+   * `proven` holds the auditIds this reading has verified. They are safe to
+   * carry: an auditId names a sentence and the addresses it cites, so any edit
+   * to either produces a different id and the sentence is asked again.
+   */
+  memory?: { proven: Set<string>; remember(auditIds: readonly string[]): void },
 ): void {
   const flagged = auditSynthesis(body, { chunks });
   if (!flagged.length) return;
 
-  if (!submittedAudit.length) {
+  const proven = memory?.proven ?? new Set<string>();
+  const settled = proven.size
+    ? flagged.filter((flag) => flag.auditId && proven.has(flag.auditId))
+    : [];
+  const outstanding = settled.length
+    ? flagged.filter((flag) => !flag.auditId || !proven.has(flag.auditId))
+    : flagged;
+  if (!outstanding.length) return;
+  // Entries answering an already-proved sentence are not stale, they are
+  // redundant. Dropping them here keeps a caller that resends its whole audit -
+  // which is exactly what the old error message told it to do - from being
+  // refused for saying something true twice.
+  //
+  // Matched the way `verifySynthesisAudit` matches: an entry may be keyed by
+  // auditId OR by sentence, and dropping only the id-keyed ones left every
+  // sentence-keyed entry behind with no flag to consume it - which is precisely
+  // the STALE_AUDIT this whole change exists to stop causing.
+  const settledSentences = new Set(
+    settled.map((flag) => flag.sentence.toLowerCase()),
+  );
+  const relevant = settled.length
+    ? submittedAudit.filter((entry) => {
+        if (entry.auditId && proven.has(entry.auditId)) return false;
+        const sentence = normalizeWikiText(
+          String(entry.sentence ?? ""),
+        ).toLowerCase();
+        return !sentence || !settledSentences.has(sentence);
+      })
+    : submittedAudit;
+  const settle = () =>
+    memory?.remember(
+      outstanding
+        .map((flag) => flag.auditId)
+        .filter((id): id is string => Boolean(id)),
+    );
+
+  if (!relevant.length) {
     throw new WikiSynthesisAuditRequired(
       `${what === "record" ? "This reading record" : "The whole-paper synthesis"} has ` +
         `${flagged.length} sentence(s) that reach past what the chunks they ` +
@@ -359,21 +414,31 @@ function assertSynthesisEvidenceClosure(
         '"support": [{ "chunkId": 18, "quote": "<verbatim from chunk 18>" }, ...] }]' +
         "\nOmit an entry for any sentence you rewrote. Sentences you neither prove nor rewrite " +
         "are refused again.\n\n" +
-        `SENTENCES TO ANSWER (${flagged.length}):\n${describeFlaggedSentences(flagged)}`,
-      { flagged: flagged.length, issues: flagged, activeIssues:flagged, staleAuditIds:[], mode: what },
+        "THIS LIST IS ALREADY INCREMENTAL. Sentences this reading proved earlier are not asked " +
+        "again and must not be resent; answer exactly the ones below.\n\n" +
+        `SENTENCES TO ANSWER (${outstanding.length}):\n${describeFlaggedSentences(outstanding)}`,
+      { flagged: outstanding.length, issues: outstanding, activeIssues: outstanding, staleAuditIds: [], mode: what },
     );
   }
 
-  const problems = verifySynthesisAudit(flagged, submittedAudit, chunks);
-  if (!problems.length) return;
+  const problems = verifySynthesisAudit(outstanding, relevant, chunks);
+  if (!problems.length) {
+    settle();
+    return;
+  }
   const shown = problems.slice(0, 25);
   const staleAuditIds = problems.filter(p => p.code === "STALE_AUDIT" && p.auditId).map(p=>p.auditId!);
   const activeIds = new Set(problems.filter(p=>p.code !== "STALE_AUDIT").map(p=>p.auditId));
-  const activeIssues = flagged.filter(f=>activeIds.has(f.auditId));
+  const activeIssues = outstanding.filter(f=>activeIds.has(f.auditId));
+  // Whatever DID verify is banked even though the call fails, so the next
+  // attempt only has to answer what is still open.
+  const failedIds = new Set(problems.map((problem) => problem.auditId));
+  settle();
+  for (const id of failedIds) if (id) memory?.proven.delete(id);
   throw new WikiSynthesisAuditRequired(
     `The synthesis audit does not close: ${problems.length} problem(s), so nothing was written. Fix ` +
       (what === "record" ? "these and resubmit readingRecord in the same call mode. " : "these and resubmit macroSummary with finalSynthesis true. ") +
-      "Remember that rewriting a " +
+      "Sentences that DID verify in this call are banked - do not resend them. Remember that rewriting a " +
       "sentence to the paper's own strength removes the need to justify it at all.\n\n" +
       shown
         .map(
@@ -384,7 +449,7 @@ function assertSynthesisEvidenceClosure(
       (problems.length > shown.length
         ? `\n... and ${problems.length - shown.length} more.`
         : ""),
-    { flagged: flagged.length, problems: problems.length, issues: activeIssues, activeIssues, staleAuditIds, auditProblems: problems, mode: what },
+    { flagged: outstanding.length, problems: problems.length, issues: activeIssues, activeIssues, staleAuditIds, auditProblems: problems, mode: what },
   );
 }
 
@@ -883,7 +948,23 @@ export class WikiService {
     });
   }
 
-  private async ensureCommitReviewTasks(input: WikiCommitInput): Promise<void> {
+  /**
+   * Report the cross-paper reviews this commit did not do. Never refuse it.
+   *
+   * This used to throw. A paper read in full would reach `wiki_commit` with
+   * three Claims of its own and be told to first review 37 Claims belonging to
+   * three other papers on entirely different subjects, because every unreviewed
+   * task in the library was marked `required: true`. The only way through was
+   * `checkpoint: true`, whose documented purpose is something else entirely,
+   * and which silently skipped the rest of the closing checks too.
+   *
+   * Cross-paper review is how the Wiki gets deeper, not how one paper gets
+   * written down. So it is advisory: the commit lands, and the response says
+   * what is still open and how to pick it up.
+   */
+  private async ensureCommitReviewTasks(
+    input: WikiCommitInput,
+  ): Promise<string[]> {
     const sessions = await this.store.readingSessions();
     const scope = input.prepareToken
       ? this.touchPrepareToken(input.prepareToken)?.reviewScope
@@ -900,6 +981,7 @@ export class WikiService {
     const submitted = new Set(
       (input.crossPaperReview ?? []).map((r) => r.taskId),
     );
+    const advisories: string[] = [];
     for (const itemKey of keys) {
       const session = await sessions.openForItem(input.libraryID, itemKey);
       if (!session && scope?.itemKey !== itemKey) continue;
@@ -910,18 +992,22 @@ export class WikiService {
         session,
       );
       const pending = taskList.filter(
-        (t) => t.required && !submitted.has(t.taskId),
+        (t) => t.pending && !submitted.has(t.taskId),
       );
       if (pending.length && !input.checkpoint)
-        throw new Error(
-          `Cross-paper Wiki review required for task(s) ${pending.map((t) => t.taskId).join(", ")}. ` +
-            "Use wiki_prepare_update and page crossPaperTasks. Submit crossPaperReview with explicit exclusions or gaps. Use checkpoint true to save progress without completing reading.",
+        advisories.push(
+          `${pending.length} cross-paper Wiki link(s) for ${itemKey} are still unreviewed ` +
+            `(task ${pending.map((t) => t.taskId).join(", ")}). This knowledge is saved either way. ` +
+            "To deepen the Wiki later, page crossPaperTasks in wiki_prepare_update and submit " +
+            "crossPaperReview with explicit exclusions or gaps - a task about an unrelated paper " +
+            "is answered by excluding it, and costs one line.",
         );
     }
     await reviews.validateSnapshots(
       input.libraryID,
       input.crossPaperReview ?? [],
     );
+    return advisories;
   }
 
   private async presentPreparedContext(
@@ -962,12 +1048,12 @@ export class WikiService {
         (claim: any) => claim.claimId,
       ),
       crossPaperTaskIds: (response.crossPaperTasks ?? [])
-        .filter((task: any) => task.required)
+        .filter((task: any) => task.pending)
         .map((task: any) => task.taskId),
       mandatorySignalIds: signals
         .filter((signal) => signal.mustResolve)
         .map((signal) => signal.signalId),
-      note: "Read all obligations from context section reviewTasks. Submit required crossPaperReview entries (or explicitly select empty tasks with deferMissingTargets). Task reviews cover their mapped signals; use RESOLVE_LINK_SIGNAL only for remaining mandatory signals.",
+      note: "Read all obligations from context section reviewTasks. crossPaperTaskIds are SUGGESTED, not required: wiki_commit writes without them, and a task about an unrelated paper is answered by excluding it. Submit crossPaperReview entries for the ones worth doing (or explicitly select empty tasks with deferMissingTargets). Task reviews cover their mapped signals; use RESOLVE_LINK_SIGNAL only for remaining mandatory signals.",
     };
     const preparation = [
       { kind: "skeleton", ...contextSkeleton },
@@ -1009,7 +1095,13 @@ export class WikiService {
         ...(response.concepts ?? []),
         ...(contextSkeleton?.nearbyConcepts ?? []),
         ...(contextSkeleton?.hubConcepts ?? []),
-        ...(contextSkeleton?.duplicateCandidates ?? []),
+        // The candidates themselves are {probe, matches}; the section is called
+        // "concepts" and has to hold concepts, so page the matches. The probe
+        // that found them stays in the compact placeholder, which now carries
+        // the names inline - see `duplicateCandidate` in wikiPreparedContext.
+        ...(contextSkeleton?.duplicateCandidates ?? []).flatMap(
+          (candidate: any) => candidate?.matches ?? [],
+        ),
         ...response.pagePreparations.flatMap(
           (page: any) => page.concepts ?? [],
         ),
@@ -1029,7 +1121,8 @@ export class WikiService {
           kind: "crossPaperTask",
           taskId: t.taskId,
           revision: t.revision,
-          required: t.required,
+          required: false,
+          pending: t.pending,
           targetCount: t.targetCount,
           relatedItemKey: t.relatedItemKey,
         })),
@@ -1451,6 +1544,8 @@ export class WikiService {
       currentChunkAddresses: ReadonlySet<number>;
       explicitRecord: boolean;
       audit: readonly WikiSynthesisAuditEntry[];
+      /** Which reading's proved-sentence bank this record draws on. */
+      auditScope?: string;
     },
   ): void {
     const validation = new WikiValidation({
@@ -1502,6 +1597,7 @@ export class WikiService {
           options.currentChunkAddresses,
           options.explicitRecord,
           options.audit,
+          options.auditScope,
         ),
       );
     validation.finish();
@@ -1513,6 +1609,7 @@ export class WikiService {
     currentChunkAddresses: ReadonlySet<number>,
     explicitRecord: boolean,
     synthesisAudit: readonly WikiSynthesisAuditEntry[],
+    auditScope?: string,
   ): void {
     assertSynthesisEvidenceClosure(
       record,
@@ -1521,7 +1618,47 @@ export class WikiService {
         : readable,
       synthesisAudit,
       "record",
+      this.synthesisAuditMemory(auditScope),
     );
+  }
+
+  /**
+   * What one reading has already proved to the synthesis audit.
+   *
+   * In memory, per reading, and deliberately not durable: it exists to stop a
+   * single note from being re-proved five times inside one sitting, not to
+   * excuse a paper from ever being checked again. A restart loses it and the
+   * next submission proves everything once more, which is the correct failure
+   * direction. Scoped per reading session so two papers open at once cannot
+   * borrow each other's answers, and bounded so a long-lived server does not
+   * accumulate one entry per sentence ever written.
+   */
+  private readonly provenAuditIds = new Map<string, Set<string>>();
+
+  private synthesisAuditMemory(scope: string | undefined) {
+    if (!scope) return undefined;
+    let proven = this.provenAuditIds.get(scope);
+    if (!proven) {
+      if (this.provenAuditIds.size >= WIKI_AUDIT_MEMORY_SCOPES) {
+        const oldest = this.provenAuditIds.keys().next();
+        if (!oldest.done) this.provenAuditIds.delete(oldest.value);
+      }
+      proven = new Set<string>();
+      this.provenAuditIds.set(scope, proven);
+    }
+    // Refresh insertion order so the scope being read is never the one evicted.
+    this.provenAuditIds.delete(scope);
+    this.provenAuditIds.set(scope, proven);
+    const bank = proven;
+    return {
+      proven: bank,
+      remember: (auditIds: readonly string[]) => {
+        for (const id of auditIds) {
+          if (bank.size >= WIKI_AUDIT_MEMORY_SENTENCES) return;
+          bank.add(id);
+        }
+      },
+    };
   }
 
   /**
@@ -2425,7 +2562,7 @@ export class WikiService {
           ),
           deferMissingTargets: undefined,
         };
-      await this.ensureCommitReviewTasks(input);
+      const crossPaperAdvisories = await this.ensureCommitReviewTasks(input);
       if (!input.checkpoint) await this.assertLinkSignalsAnswered(input);
       await this.assertQuestionTerminologyRecorded(input);
       const hydrated = await this.hydrateActions(
@@ -2433,7 +2570,7 @@ export class WikiService {
         input.libraryID,
       );
       actions = hydrated.actions;
-      warnings = hydrated.warnings;
+      warnings = [...hydrated.warnings, ...crossPaperAdvisories];
 
       // THE DURABLE BOUNDARY. When this resolves the write is permanent, and
       // the vectors those claims still need are queued in the same
@@ -4195,6 +4332,8 @@ export class WikiService {
             summary,
             readable,
             options.synthesisAudit ?? [],
+            "synthesis",
+            this.synthesisAuditMemory(String(session.sessionId)),
           ),
         );
       validation.finish();
@@ -4248,6 +4387,7 @@ export class WikiService {
           currentChunkAddresses: new Set(recordChunkIds),
           explicitRecord: options.readingRecord !== undefined,
           audit: options.synthesisAudit ?? [],
+          auditScope: String(session.sessionId),
         });
       } else {
         assertUnchangedCarriesNothingNew(previousBody, batchChunks, reason);
@@ -4543,6 +4683,7 @@ export class WikiService {
         currentChunkAddresses: currentAddresses,
         explicitRecord: options.readingRecord !== undefined,
         audit: options.synthesisAudit ?? [],
+        auditScope: String(session.sessionId),
       });
     } else {
       assertUnchangedCarriesNothingNew(previousBody, batchChunks, reason);
@@ -6439,7 +6580,11 @@ export class WikiService {
           `"${value}" was submitted as quoted from ${itemKeys.join(", ")}, but none of those ` +
             "documents contains it. Stored as ai — supplied from your own knowledge — which is " +
             "allowed and can still be upgraded to literature by a paper that does state it. " +
-            "A literature mark cannot be revised once stored, so it is only ever set from text.",
+            "A literature mark cannot be revised once stored, so it is only ever set from text. " +
+            "NOTHING WAS REJECTED: the term and its sources are recorded, only the provenance " +
+            "mark was corrected. If this is a translation — a Chinese name read out of an " +
+            "English paper — that is the expected result and not a mistake on your part: mark " +
+            "the term in the SOURCE language literature and the translated one ai.",
         );
       }
       if (!changed) continue;

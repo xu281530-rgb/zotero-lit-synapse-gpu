@@ -101,7 +101,7 @@ test("a shared trailing citation keeps semicolon clauses together", () => {
     [],
   );
 });
-test("audit ids accept unchanged statements and reject changed source versions", () => {
+test("an audit id survives a change to the source it does not depend on", () => {
   const flags = auditSynthesis(sentence, { chunks });
   assert.match(flags[0].auditId, /^audit-/);
   const support = chunks
@@ -115,17 +115,41 @@ test("audit ids accept unchanged statements and reject changed source versions",
     ),
     [],
   );
-  const changed = chunks.map((chunk) => ({
+  // The id names the SENTENCE and the addresses it cites, so re-delivering the
+  // paper with more text in the same chunks leaves it alone. Callers used to
+  // have a prepared entry rejected as STALE_AUDIT with nothing visibly changed.
+  const grown = chunks.map((chunk) => ({
     ...chunk,
     text: `${chunk.text} Additional qualification.`,
   }));
-  const newFlags = auditSynthesis(sentence, { chunks: changed });
-  assert.notEqual(newFlags[0].auditId, flags[0].auditId);
+  const grownFlags = auditSynthesis(sentence, { chunks: grown });
+  assert.equal(grownFlags[0].auditId, flags[0].auditId);
+  assert.deepEqual(
+    verifySynthesisAudit(
+      grownFlags,
+      [{ auditId: flags[0].auditId, support }],
+      grown,
+    ),
+    [],
+  );
+});
+test("a stable id does not excuse a quotation the source no longer carries", () => {
+  const flags = auditSynthesis(sentence, { chunks });
+  const support = chunks
+    .slice(0, 3)
+    .map(({ chunkId, text }) => ({ chunkId, quote: text }));
+  const rewritten = chunks.map((chunk) => ({
+    ...chunk,
+    text: "The methods were compared under one set of conditions and the recorded measurements are reported below.",
+  }));
+  const rewrittenFlags = auditSynthesis(sentence, { chunks: rewritten });
+  assert.equal(rewrittenFlags[0].auditId, flags[0].auditId);
+  // Same id, still refused: every quotation is re-read out of the CURRENT text.
   assert.ok(
     verifySynthesisAudit(
-      newFlags,
+      rewrittenFlags,
       [{ auditId: flags[0].auditId, support }],
-      changed,
+      rewritten,
     ).length,
   );
 });
@@ -134,18 +158,13 @@ test("audit ids distinguish mathematical powers from adjacent digits", () => {
   const flat = sentence.replace("responses", "responses at x2");
   const a = auditSynthesis(squared, { chunks });
   const b = auditSynthesis(flat, { chunks });
-  const sourceA = chunks.map((chunk) => ({
-    ...chunk,
-    text: `${chunk.text} x\u00B2`,
-  }));
-  const sourceB = chunks.map((chunk) => ({
-    ...chunk,
-    text: `${chunk.text} x2`,
-  }));
   assert.notEqual(a.at(-1)?.auditId, b.at(-1)?.auditId);
+});
+test("an audit id follows the addresses the sentence cites", () => {
+  const narrowed = sentence.replace("chunk 51-53", "chunk 51-52");
   assert.notEqual(
-    auditSynthesis(sentence, { chunks: sourceA })[0].auditId,
-    auditSynthesis(sentence, { chunks: sourceB })[0].auditId,
+    auditSynthesis(sentence, { chunks })[0].auditId,
+    auditSynthesis(narrowed, { chunks })[0].auditId,
   );
 });
 test("paging and source-view options are advertised", () => {

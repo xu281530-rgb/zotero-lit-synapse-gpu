@@ -128,6 +128,20 @@ await test("malformed explicit citations retain raw text and offsets", () => {
   assert.equal(issues[0].raw, "[chunk:unknown]");
   assert.equal(text.slice(issues[0].start, issues[0].end), issues[0].raw);
 });
+await test("a citation bracket may carry the writer's own words", () => {
+  // Refused on the first attempt for a shape nobody had been warned about, and
+  // for no reason: every address in it parses.
+  const aside = "（chunk 43，呼应第一批记录中 chunk 2 的存疑）";
+  assert.deepEqual(citations.invalidWikiCitations(aside), []);
+  assert.deepEqual(citations.citedWikiChunkIds(aside), [2, 43]);
+  assert.deepEqual(
+    citations.invalidWikiCitations("(chunk 12, see also Figure 4)"),
+    [],
+  );
+  // A bracket that announces an address and gives none is still refused.
+  assert.equal(citations.invalidWikiCitations("(chunk twelve)").length, 1);
+  assert.equal(citations.invalidWikiCitations("(chunk )").length, 1);
+});
 await test("post-sentence citations stay with their statement", () => {
   assert.deepEqual(
     audit.splitSentences(

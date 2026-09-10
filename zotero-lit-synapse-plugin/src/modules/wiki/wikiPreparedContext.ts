@@ -88,6 +88,46 @@ export function compactPreparedResponse(
     sourcedFromThisPaper: c.sourcedFromThisPaper,
     contextSection: "concepts",
   });
+  /**
+   * A duplicate candidate is NOT a concept, and summarising it as one erased it.
+   *
+   * `nearbyConcepts`, `hubConcepts` and the rest are `{canonicalName, name,
+   * description}`. `duplicateCandidates` is `{probe, matches[]}` - the question
+   * asked and the concepts that came back. Running the concept mapper over it
+   * read three field names that do not exist on the record, so every candidate
+   * compacted to `{canonicalName: "", name: "", description: ""}` and a pointer.
+   * Not a paging artefact: the placeholder was empty from the moment it was
+   * built, and paging to `concepts` was the only way to ever see the data.
+   *
+   * Scope, because it was reported as the cause of an empty "共享术语" in the
+   * plugin panel and is not: that panel renders LEXICAL LINK SIGNALS
+   * (`termSnapshot` + two excerpts, via `pendingSignalsByLink`), a different
+   * table reached by a different path, and it degrades visibly rather than
+   * silently when a field is missing. This bug is confined to what MCP callers
+   * see.
+   *
+   * The names are the whole value here - "is 核心交错对齐打印方法 the concept I am
+   * about to create again" is answered by reading them - so they go inline and
+   * the pointer becomes a way to get the rest, not the only way to get any.
+   */
+  const duplicateCandidate = (d: any) => {
+    const matches = Array.isArray(d?.matches) ? d.matches : [];
+    return {
+      probe: text(d?.probe, 120),
+      matchCount: matches.length,
+      matches: matches.slice(0, 5).map((m: any) => ({
+        conceptId: m.conceptId,
+        name: text(m.name ?? m.canonicalName, 80),
+        score:
+          typeof m.score === "number" ? Number(m.score.toFixed(4)) : m.score,
+        matchedBy: m.matchedBy,
+        sourceDocuments: m.sourceDocuments,
+        sourcedFromThisPaper: m.sourcedFromThisPaper,
+      })),
+      matchesTruncated: matches.length > 5,
+      contextSection: "concepts",
+    };
+  };
   const claim = (c: any) => ({
     claimId: c.claimId,
     pageId: c.pageId,
@@ -165,7 +205,7 @@ export function compactPreparedResponse(
               conceptCount: skeleton.conceptCount,
               paperConcepts: take(skeleton.paperConcepts).map((c) => text(c)),
               duplicateCandidates: take(skeleton.duplicateCandidates).map(
-                concept,
+                duplicateCandidate,
               ),
               nearbyConcepts: take(skeleton.nearbyConcepts).map(concept),
               hubConcepts: take(skeleton.hubConcepts).map(concept),
@@ -194,7 +234,10 @@ export function compactPreparedResponse(
         relatedItemKey: t.relatedItemKey,
         revision: t.revision,
         state: t.state,
-        required: t.required,
+        // Advisory, always. See `ensureCommitReviewTasks`: an unreviewed link
+        // to an unrelated paper no longer blocks writing this paper down.
+        required: false,
+        pending: t.pending,
         targetCount: t.targetCount,
         missingTargets: t.targetCount === 0,
         readWith: {
@@ -215,7 +258,7 @@ export function compactPreparedResponse(
         contextSection: "linkSignals",
       })),
       pendingLinkNote:
-        "Review required cross-paper tasks first. Their reviews cover mapped signals; decide uncovered mandatory signals separately. Read complete passages in context before deciding.",
+        "Cross-paper tasks are suggestions and never block wiki_commit; do the ones that share a subject with this paper, and exclude the rest in one line. Their reviews cover mapped signals; decide uncovered mandatory signals separately. Read complete passages in context before deciding.",
       pendingWikiWriteUp: take(response.pendingWikiWriteUp).map((p) => ({
         itemKey: p.itemKey,
         mode: p.mode,

@@ -329,7 +329,14 @@ export class WikiCrossPaperReview {
         [libraryID, itemKey, relatedItemKey, options.topic],
       );
       const task = this.mapTask(row[0]);
-      task.required = state === "pending";
+      // `pending` says the task has not been reviewed against the current
+      // revision. It is NOT an obligation: cross-paper review deepens the Wiki,
+      // it does not gate writing this paper's own knowledge down, and shipping
+      // it as `required: true` made a 47-chunk paper wait on 37 Claims from
+      // three unrelated papers. `wiki_commit` reads `pending` and reports the
+      // count; nothing throws on it.
+      task.pending = state === "pending";
+      task.required = false;
       task.previousReview = latest;
       task.changedTargetIds = targetClaims
         .filter(

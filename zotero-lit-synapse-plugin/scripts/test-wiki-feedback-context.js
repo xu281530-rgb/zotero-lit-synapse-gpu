@@ -85,6 +85,64 @@ await test("audit accepts typographic unit equivalents while still checking the 
     [],
   );
 });
+await test("a sentence proved once in a reading is not asked for again", () => {
+  // The cost this removes: one unproved sentence failed the WHOLE submission,
+  // and the next response listed every sentence again - including the ones that
+  // had just verified - so each round trip had to resend every quotation. Two
+  // batches of one paper took five to seven rounds of that.
+  const chunks = [
+    {
+      chunkId: 1,
+      text: "The interleaved core path ensures a reliable bond between adjacent honeycomb cells under the tested conditions.",
+    },
+    {
+      chunkId: 2,
+      text: "The measured compressive modulus increases with the number of interlacing points in every specimen group.",
+    },
+  ];
+  const proved = {
+    sentence: "The interleaved path eliminates debonding between adjacent cells (chunk 1).",
+    support: [
+      {
+        chunkId: 1,
+        quote: "The interleaved core path ensures a reliable bond between adjacent honeycomb cells",
+      },
+    ],
+  };
+  const later = {
+    sentence: "The modulus increases by 67 percent across the groups (chunk 2).",
+    support: [
+      {
+        chunkId: 2,
+        quote: "The measured compressive modulus increases with the number of interlacing points",
+      },
+    ],
+  };
+  const record = `${proved.sentence}\n\n${later.sentence}\n`;
+  const call = (audit, scope) =>
+    service.assertReadingRecordAudited(record, chunks, new Set([1, 2]), false, audit, scope);
+
+  // Round one proves the first sentence and leaves the second open. It still
+  // fails - nothing is written - but the proof is banked.
+  let first;
+  try {
+    call([proved], "session-7");
+  } catch (error) {
+    first = error;
+  }
+  assert.ok(first, "the unproved sentence still fails the whole submission");
+  assert.match(first.message, /does not close/);
+  assert.ok(/67 percent/.test(first.message), first.message);
+  assert.ok(!/eliminates debonding/.test(first.message), "the proved one is gone from the list");
+
+  // Round two answers only what was still open, and closes.
+  call([later], "session-7");
+
+  // A different reading has its own bank and still has to prove both.
+  assert.throws(() => call([later], "session-8"), /eliminates debonding/);
+  // And with no scope at all the check is exactly as stateless as it was.
+  assert.throws(() => call([later], undefined), /eliminates debonding/);
+});
 await test("faithful source wording is not stopped by its own absolute words", () => {
   const text =
     "This configuration cannot provide identical responses under these experimental conditions.";
@@ -180,6 +238,58 @@ await test("compact prepare preserves candidates and pages every reading-record 
         section: "pages",
       }),
     /expired/,
+  );
+});
+await test("a compact duplicate candidate carries its probe and its matches", async () => {
+  service.prepareTokens.set("dup-token", {
+    libraryID: 1,
+    expiresAt: Date.now() + 60000,
+    preparedPageTitles: new Set(),
+  });
+  const matches = [
+    { conceptId: 30, name: "核心交错对齐打印方法", score: 0.81412, matchedBy: "vector", sourceDocuments: 1, sourcedFromThisPaper: true },
+    { conceptId: 31, name: "有效粘接长度", score: 0.69631, matchedBy: "vector", sourceDocuments: 1, sourcedFromThisPaper: true },
+    { conceptId: 22, name: "连续曲线纤维铺放", score: 0.61612, matchedBy: "vector", sourceDocuments: 3, sourcedFromThisPaper: false },
+  ];
+  const result = await service.presentPreparedContext(
+    {
+      prepareToken: "dup-token",
+      pages: [],
+      claims: [],
+      semanticClaims: [],
+      pagePreparations: [],
+      wikiSkeleton: {
+        pages: [],
+        duplicateCandidates: [{ probe: "交错对齐打印路径策略", matches }],
+        nearbyConcepts: [
+          { conceptId: 12, name: "连续纤维增材制造", description: "A field term." },
+        ],
+      },
+      pendingLinkSignals: [],
+    },
+    { libraryID: 1, compact: true },
+  );
+  const [candidate] = result.wikiSkeleton.duplicateCandidates;
+  // The bug: the concept mapper read canonicalName/name/description off a
+  // {probe, matches} record and emptied every one of them.
+  assert.equal(candidate.probe, "交错对齐打印路径策略");
+  assert.equal(candidate.matchCount, 3);
+  assert.equal(candidate.matches[0].name, "核心交错对齐打印方法");
+  assert.equal(candidate.matches[0].conceptId, 30);
+  assert.equal(candidate.matches[0].score, 0.8141);
+  assert.equal(candidate.matches[2].sourcedFromThisPaper, false);
+  assert.equal(candidate.canonicalName, undefined);
+  // Concepts of a real shape still compact the way they always did.
+  assert.equal(result.wikiSkeleton.nearbyConcepts[0].name, "连续纤维增材制造");
+  // And the section the pointer names holds concepts, not the wrapper record.
+  const paged = service.getPreparedContext({
+    libraryID: 1,
+    prepareToken: "dup-token",
+    section: "concepts",
+  });
+  assert.deepEqual(
+    paged.items.map((entry) => entry.conceptId).sort((a, b) => a - b),
+    [12, 22, 30, 31],
   );
 });
 await test("reading-note pagination rejects mixed versions and reconstructs the full note", async () => {
