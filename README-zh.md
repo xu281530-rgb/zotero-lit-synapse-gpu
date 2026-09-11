@@ -1,8 +1,10 @@
 # Zotero LitSynapse - Model Context Protocol Integration for Zotero
 
-Zotero LitSynapse 是一个开源项目，旨在通过模型上下文协议（Model Context Protocol, MCP）将强大的 AI 功能与领先的文献管理工具 Zotero 无缝集成，为 AI 助手（如 Claude）提供与您本地 Zotero 文献库交互的能力。
-_This README is also available in: [:gb: English](./README.md) | :cn: 简体中文._
-[![zotero target version](https://img.shields.io/badge/Zotero-9-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
+Zotero LitSynapse 把你本地的 Zotero 9 文献库变成一个 AI 助手真正能用的工具：它是一个内置了 Model Context Protocol（MCP）服务器的单一 Zotero 插件，让 Claude Desktop、Claude Code、Cursor、Gemini CLI 等客户端可以通过本地 HTTP 连接搜索、阅读、交叉引用甚至（在你允许的情况下）编辑你的文献库——不需要额外的服务器进程，也不会把你的文献库上传到云端。
+
+_This README is also available in: [:gb: English](./README.md) | :cn: 简体中文。_
+
+[![zotero target version](https://img.shields.io/badge/Zotero-9.0.x-green?style=flat-square&logo=zotero&logoColor=CC2936)](https://www.zotero.org)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
 [![Version](https://img.shields.io/badge/Version-3.3.0-brightgreen)]()
@@ -11,72 +13,119 @@ _This README is also available in: [:gb: English](./README.md) | :cn: 简体中�
 
 ---
 
-## 关注我们
+## 目录
 
-| 公众号                       |                                           加入群聊                                            |
-| :--------------------------- | :-------------------------------------------------------------------------------------------: |
-| ![Reading PDF](./IMG/MP.jpg) | 扫左侧公众号二维码，关注后私信「入群」即可（群二维码有时效且群已满 200 人，无法直接扫码加入） |
-
-## 📚 项目概述
-
-Zotero LitSynapse 服务器是一个基于 Model Context Protocol 的工具服务器，它为 Claude Desktop 等 AI 应用提供了与 Zotero 文献管理系统的无缝集成。通过此服务器，AI 助手可以：
-
-- 🔍 **智能搜索**：多维度搜索文献库（标题/作者/年份/标签/全文/语义），支持布尔运算和相关性评分
-- 📖 **内容提取**：通过专用分页工具读取 PDF 全文、笔记、批注和摘要
-- 📝 **批注分析**：按颜色、标签、关键词检索和分析 PDF 高亮与注释
-- 📂 **分类浏览**：浏览和搜索分类层级结构，获取分类下的条目
-- 🧠 **语义搜索**：基于 AI 向量嵌入的概念匹配，发现跨语言的相关文献
-- 🧩 **LLM Wiki 长期记忆**：通过提问逐步沉淀可复用的 Claim、Concept 和 Relation，并始终回溯 Zotero 原文 chunk
-- ✏️ **写入操作**：创建笔记、管理标签、更新元数据、创建新条目并关联附件
-- 💾 **全文数据库**：访问和搜索缓存的 PDF 全文内容
-
-这使得 AI 助手能够帮助您进行文献综述、引用管理、内容分析、批注整理、知识库管理等学术工作。
-
-## 🚀 项目结构
-
-本项目采用了**统一架构**，将 MCP 服务器集成在插件内：
-
-- **`zotero-lit-synapse/`**: 一个集成了 **MCP 服务器功能**的 Zotero 插件，使用 Streamable HTTP 协议直接与 AI 客户端通信
-- **`IMG/`**: 截图和说明文档图片
-- **`README.md`** / **`README-zh.md`**: 项目说明文档
-
-**统一架构：**
-
-```
-AI 客户端 ↔ Streamable HTTP ↔ Zotero 插件（集成 MCP 服务器）
-```
-
-这种设计消除了对单独 MCP 服务器进程的需求，提供了更加简化和高效的集成方式。
+- [项目概述](#-项目概述)
+- [功能导览](#-功能导览)
+- [快速上手](#-快速上手)
+- [支持的 AI 客户端](#-支持的-ai-客户端)
+- [配置参考](#-配置参考)
+- [系统架构](#-系统架构)
+- [开发者指南](#-开发者指南)
+- [故障排查](#-故障排查)
+- [MCP 工具参考](#-mcp-工具参考)
+- [贡献指南](#-贡献指南)
+- [许可证](#-许可证)
+- [致谢](#-致谢)
 
 ---
 
-## 🚀 快速上手指南
+## 📚 项目概述
 
-本指南旨在帮助普通用户快速配置和使用 Zotero LitSynapse，让您的 AI 助手能够与 Zotero 文献库无缝协作。
+Zotero LitSynapse 是一个基于 Model Context Protocol 的工具服务器，它不是运行在 Zotero 旁边，而是直接嵌入在 Zotero 内部。通过它，AI 助手可以完成你原本需要手动在文献库里做的那些事：
 
-### 1. 快速使用教程（面向普通用户）
+- 🔍 **智能搜索**：三段式检索漏斗——先在全库做关键词 + 语义混合检索，再取摘要，最后深入某一篇的正文段落——全程支持布尔运算、相关性评分和游标分页。
+- 📖 **内容提取**：摘要、附件正文、索引后的文档分块，每一种都由专用的分页工具返回，而不是一个带隐藏模式的万能工具。
+- 📝 **批注分析**：按颜色、标签、关键词检索并阅读 PDF 高亮、批注和笔记。
+- 📂 **分类浏览**：像文件管理器一样逐层浏览分类结构，绝不会一次性把整棵树倒出来。
+- 🧠 **语义搜索**：基于向量嵌入的概念匹配，可跨语言、跨措辞发现相关文献，并可选启用 GPU 加速。
+- 📄 **高保真 PDF 解析（MinerU）**：可选的版面感知解析器，在文本进入索引之前先把标题层级、公式、表格重建为结构化 Markdown，而不是依赖 Zotero 自带的纯文本提取。
+- 🌐 **PDF 翻译**：可选的 AI 辅助翻译流水线，复用 MinerU 解析出的结构，并可维护一份持久化的专业术语表。
+- 🧩 **LLM Wiki 长期记忆**：一个由提问驱动、可复用的知识库，存放 Claim、Concept 和 Relation，每一条都能回溯到它源自 Zotero 中的具体段落。
+- ✏️ **写入操作**：创建笔记、管理标签、更新元数据、创建条目、重组分类、关联附件——默认全部关闭。
+- 🔒 **本地优先的安全设计**：服务器默认只监听本机回环地址，开启远程访问需要显式授权并配置令牌，任何具有写入能力的功能在你手动开启之前都是关闭的。
 
-**Zotero LitSynapse 是什么？**
+这让文献综述、引用查找、批注整理和长期笔记积累，变成了一场与你自己文献库之间的对话——而且完全运行在你自己的电脑上。
 
-简单来说，Zotero LitSynapse 是一座桥梁，它连接了您的 AI 客户端（如 Cherry Studio, Gemini CLI, Claude Desktop 等）和本地的 Zotero 文献管理软件。通过它，AI 助手可以直接搜索、查询和引用您 Zotero 库中的文献，极大地提升学术研究和写作效率。
+---
 
-**两步快速开始：**
+## 🧩 功能导览
 
-1.  **安装插件**：
-    - 从提供本项目给您的人那里获取最新的 `zotero-lit-synapse-x.x.x.xpi` 文件（或参考下方开发者指南自行构建）。
-    - 在 Zotero 中，通过 `工具 -> 附加组件` 安装该 `.xpi` 文件。
-    - 重启 Zotero。
+### 搜索与检索
 
-2.  **配置插件**：
-    - 在 Zotero 的 `首选项 -> Zotero LitSynapse` 标签页中：
-      - **启用服务器**：勾选此选项启动集成的 MCP 服务器
-      - **端口设置**：默认为 `23120`（可根据需要修改）
-      - **生成客户端配置**：点击此按钮获取适用于您 AI 客户端的配置代码
-    - 将生成的配置代码复制到您的 AI 客户端配置文件中
+- **高级搜索引擎**——支持布尔运算、相关性评分，以及按标题、作者、年份、标签、条目类型的多维度筛选。
+- **混合检索漏斗**——`hybrid_search` 并行运行关键词检索和语义向量检索，任一分支通过自己的阈值即可入选，再用加权 Reciprocal Rank Fusion 对幸存结果排序；`search_fulltext` 在单篇论文内部重复同一套漏斗逻辑。
+- **按用途拆分的内容工具**——摘要、附件正文、文档分块各自由专用分页工具提供，不再捆绑在一个隐藏的"详细程度"开关背后。
+- **智能批注系统**——检索并读取 PDF 高亮、批注、墨迹与图片标注、笔记，可按颜色、标签、关键词筛选，每条结果都能追溯到对应的文献、附件和批注本身。
+- **分类管理**——逐层浏览分类层级、按名称搜索分类，并能在不下载文件夹内容的前提下获知每个文件夹的条目数量。
 
-配置完成后，您就可以在 AI 助手中通过自然语言与您的 Zotero 文献库进行交互了。
+### 语义搜索与 GPU 加速
 
-**配置示例（Claude Desktop）：**
+- 基于索引段落的语义搜索，支持任意 OpenAI 兼容的嵌入接口（OpenAI、Ollama 或自建服务）——自动检测，并提供连接测试与实时速率/成本统计。
+- 一个共享的向量索引（基于 SQLite），同时服务于 `semantic_search`、`hybrid_search` 和 `find_similar`；主文献库视图中有索引状态列，右键菜单可对单个条目/整个分类进行索引管理。
+- **原生 GPU 向量加速**——一个可选的、仅支持 NVIDIA 显卡的原生模块（`native/vector-gpu/`，CUDA + C++），把向量扫描放到 GPU 上执行而非 CPU，支持 Auto / Float32 / Int8 三种精度模式，并实时汇报状态（设备信息、常驻向量数量，以及回退到 CPU 时的具体原因）。完全可选，不安装它也能在 CPU 上正常工作。
+- 内置基准测试工具会实测你自己的文献库，直接给出推荐的阈值和超时设置，而不是让你去猜。
+
+### 高保真 PDF 解析（MinerU）
+
+Zotero 自带的全文提取只是纯文本转储——没有标题、没有表格结构、没有公式。MinerU 是一个可选的解析后端，会在文本被切分、索引之前先把 PDF 的真实版面重建为结构化 Markdown，让搜索结果和全文阅读带上真正的文档结构，而不是一整墙文字。
+
+- 两种部署模式：**云端**（官方 `mineru.net` API——需要你自己的 API Token，并消耗你自己的配额）或**本地**（自建 `mineru-api` 服务，Python 3.10–3.13，默认地址 `http://127.0.0.1:8000`）。
+- 可配置模型版本（VLM / hybrid / pipeline）、语言，以及独立开关的 OCR、公式识别、表格识别。
+- 已存在的 Doc2X 或此前解析过的 MinerU Markdown 会被优先复用，最后才回退到 Zotero 自带的 PDF 处理器，避免重复解析。
+- 解析出的 Markdown 可选择性地作为附件挂载到 Zotero 条目上，并支持配置并发数、超时、大小上限、按需阻塞开关和缓存管理。
+
+### PDF 翻译
+
+一个叠加在 MinerU 解析结果之上的可选翻译流水线，让翻译后的文档保留原始结构，而不是被一个朴素的文本翻译器毁掉表格和标题层级。
+
+- 独立于嵌入服务的翻译配置——API 地址、密钥、模型、目标语言。
+- 可选的 AI 上下文感知翻译、单篇文档术语表生成，以及一份可复用的全局术语表，让专业术语在不同论文间保持一致。
+- 可选的领域专家画像，用来引导术语选择贴合某个具体学科。
+
+### LLM Wiki 与长期记忆
+
+- 权威的 Page、Claim、Concept、Alias、Relation 和 Evidence 独立保存在专属的 `zotero-lit-synapse-wiki.sqlite` 数据库中，不会与搜索索引混在一起。
+- 每一条 Evidence 摘录都会与真实的 Zotero 文档分块进行校验，并在搜索索引重置或重建后自动重新定位，而不会悄悄失效。
+- 提供受控的准备-提交流程（`wiki_prepare_update` / `wiki_commit`），以及检索、查看、导出、重验证和单篇论文深读工具——服务器本身不会发起任何隐藏的 LLM 调用。
+- Concept 与 Claim 的向量嵌入，加上一跳关系遍历，构成第三条检索路径，与关键词、语义检索并列；Shadow Mode 会让它在你针对自己文献库校准之前，不影响现有排序结果。
+- Zotero 内置的 Wiki 面板展示知识状态、Evidence、术语与别名管理、Page 合并、错误 Claim 删除、Markdown 导出，以及一张展示文献间关联的 3D 知识图谱。
+
+### 写入操作
+
+- 创建或修改笔记（支持 Markdown 自动转 HTML）、管理标签、更新元数据字段、创建新条目、重新挂靠或导入独立 PDF。
+- 分类变更工具（创建、重命名、删除、增删条目、移动、合并重复条目），全部采用批量预检 + 全有或全无的写入方式，并提供 `dryRun` 模式，让你在真正写入前就能看到确切的变更结果。
+- 服务器层面默认全部关闭——除非你主动打开写入操作，否则客户端根本看不到这些工具的存在。
+
+### 安全与隐私
+
+- **默认仅本地运行**——服务器绑定在 `127.0.0.1`，除非你显式开启远程连接，否则数据不会离开你的电脑。
+- **Bearer Token 鉴权**——你可以在偏好设置中生成（并随时重新生成）一个 MCP 访问令牌，开启远程访问时必须使用它。
+- **高风险功能全部默认关闭**——写入操作、文件导入、暴露本地文件路径默认都是关闭的，破坏性批量操作的确认弹窗也无法从客户端一侧跳过。
+- **客户端配置生成器**——一键为你使用的具体 AI 客户端生成可直接粘贴的 MCP 配置，无需手动拼接连接地址和令牌。
+
+---
+
+## 🚀 快速上手
+
+### 1. 安装插件
+
+1. 获取最新的 `zotero-lit-synapse-x.x.x.xpi`——可以从提供本项目给你的人那里拿到、从仓库的 Releases 页面下载，或者[自行构建](#-开发者指南)。
+2. 在 Zotero 中，通过 `工具 → 附加组件 → ⚙ → 从文件安装附加组件…` 安装该 `.xpi` 文件。
+3. 重启 Zotero。
+
+### 2. 配置服务器
+
+打开 `Zotero → 设置 → Zotero LitSynapse`，进入 **Server（服务器）** 标签页：
+
+1. 勾选 **Enable Server（启用服务器）**，启动内置的 MCP 服务器。
+2. **Port（端口）** 保持默认值 `23120` 即可，除非它与本机其他程序冲突。
+3. 除非确有需要，否则不要开启远程访问——具体要求见[配置参考](#-配置参考)。
+4. 点击 **Generate Client Configuration（生成客户端配置）**，从列表中选择你使用的 AI 客户端，复制生成的配置。
+
+### 3. 连接 AI 客户端
+
+把生成的配置粘贴到对应客户端的 MCP 设置中（各客户端配置文件位置见[支持的 AI 客户端](#-支持的-ai-客户端)），然后重启客户端。对于直接读取原始 MCP JSON 配置的客户端，最简示例如下：
 
 ```json
 {
@@ -89,893 +138,449 @@ AI 客户端 ↔ Streamable HTTP ↔ Zotero 插件（集成 MCP 服务器）
 }
 ```
 
-**使用示例:**
+### 4. 验证是否生效
 
-- `"帮我查找一下我的 Zotero 库里所有关于"人工智能"的文献"`
-- `"获取去年由 Hinton 发表的关于 transformer 的期刊文章"`
-- `"查找 DOI 为 10.1038/nature14539 的文献"`
+对你的 AI 助手说一句类似"帮我在 Zotero 文献库里搜索一下关于 transformer 的文献"这样的话。如果它调用了 Zotero 相关工具并返回了你文献库中的真实结果，说明连接已经成功；如果没有，请参考[故障排查](#-故障排查)。
 
 ---
 
-### 2. 连接 AI 客户端
+## 🖥️ 支持的 AI 客户端
 
-**重要**：Zotero 插件现在包含了**集成的 MCP 服务器**，使用 Streamable HTTP 协议。无需安装单独的服务器。
+内置的**客户端配置生成器**（Server 标签页 → Generate Client Configuration）可以按名称直接生成以下每一个客户端的现成配置，通常你不需要手写：
 
-#### Streamable HTTP 连接
+| 客户端 | 说明 |
+| :--- | :--- |
+| Claude Desktop | Streamable HTTP MCP |
+| Claude Code | Streamable HTTP MCP |
+| Codex | Streamable HTTP MCP |
+| Cline (VS Code) | Streamable HTTP MCP |
+| Continue.dev | Streamable HTTP MCP |
+| Cursor | Streamable HTTP MCP |
+| Cherry Studio | Streamable HTTP |
+| Gemini CLI | Streamable HTTP MCP |
+| Chatbox | Streamable HTTP MCP |
+| WorkBuddy | Streamable HTTP MCP |
+| Trae AI | Streamable HTTP MCP |
+| Qwen Code | Streamable HTTP MCP |
+| 自定义（原生 HTTP） | 任何直接支持 MCP 2025-06-18 Streamable HTTP 协议的客户端 |
 
-插件使用 Streamable HTTP 协议，支持与 AI 客户端的实时双向通信：
-
-1. 在 Zotero 插件设置中**启用服务器**
-2. 点击**生成客户端配置**按钮
-3. 将生成的配置**复制到您的 AI 客户端**
-
-#### 支持的 AI 客户端
-
-- **Claude Desktop**: Streamable HTTP MCP 支持
-- **Cherry Studio**: Streamable HTTP 支持
-- **Cursor IDE**: Streamable HTTP MCP 支持
-- **自定义实现**: Streamable HTTP 协议
-
-### 验证与故障排查
-
-配置完成后，如何确认一切正常工作？
-
-**1. 验证连接**
-
-- **查看客户端状态**：大多数 AI 客户端（如 ChatBox, Cherry Studio）的 MCP 配置界面会显示服务器的连接状态。如果显示为 "Connected" 或绿色指示灯，说明连接已成功建立。
-- **使用测试命令**：在 AI 助手的聊天框中，发送一个简单的测试命令，例如：
-  `"使用 zotero 工具查找任何文献，返回一条即可"`
-  如果 AI 能够调用 `zotero.search_library` 并返回结果，说明整个链路已通。
-
-**2. 故障排查指南**
-
-如果连接失败或工具不工作，请按以下步骤排查：
-
-| 步骤  | 检查项              | 解决方案                                                                                                                                                                |
-| :---- | :------------------ | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **1** | **Zotero 插件服务** | 确保 Zotero 正在运行，并且在 `首选项 -> Zotero LitSynapse` 中，"Enable Server" 已被勾选。                                                                               |
-| **2** | **路径配置**        | 确认 AI 客户端中的 `command` 设置为 `node`，并且作为参数的 `index.js` **绝对路径**完全正确。路径错误是导致失败的最常见原因。                                            |
-| **3** | **端口冲突**        | 如果 Zotero 插件端口 `23119` 被占用，请在插件设置中更换端口，并在 `zotero-lit-synapse-server` 目录下创建 `.env` 文件，内容为 `ZOTERO_API_PORT=新端口号`。                       |
-| **4** | **查看日志**        | 大多数客户端都提供 MCP 服务器的日志输出功能。在 MCP 配置界面寻找 "Show Logs" 或类似的按钮。日志是定位问题的最有效工具，通常会明确指出是路径错误、命令失败还是其他问题。 |
-| **5** | **防火墙/安全软件** | 确认您的防火墙或安全软件没有阻止 `node.exe` (Windows) 或 `node` (macOS/Linux) 的网络通信。                                                                              |
-| **6** | **环境依赖**        | 确保您的系统中已安装 Node.js (版本 18+)。您可以在终端中运行 `node -v` 来检查版本。                                                                                      |
-
-**3. 常见错误信息**
-
-- **`command not found` 或 `spawn ENOENT`**: 通常表示 `node` 命令不存在或路径错误。请检查 Node.js 是否已正确安装并加入了系统环境变量，或者检查客户端配置中的命令是否正确。
-- **`Error: connect ECONNREFUSED 127.0.0.1:23119`**: 表示 MCP 服务器无法连接到 Zotero 插件。请执行上述排查指南的第 1 步和第 3 步。
-- **JSON 格式错误**: 在手动编辑配置文件时，请确保您的 JSON 语法正确，没有遗漏逗号或括号。
-
-如果以上步骤均无法解决问题，请联系插件维护者，并附上您的操作系统、客户端版本和相关的日志信息，以便更好地帮助您。
+任何实现了 MCP 2025-06-18 规范 Streamable HTTP 传输方式的客户端，都可以使用[快速上手](#-快速上手)中给出的原始配置直接连接，即使它不在上面的预设列表中。
 
 ---
 
-## 🧩 插件功能特性
+## ⚙️ 配置参考
 
-`zotero-lit-synapse` 是一个集成了 MCP 服务器功能的 Zotero 插件，直接与 AI 客户端通信。
+所有设置都在 `Zotero → 设置 → Zotero LitSynapse` 中，分布在四个标签页里。
 
-### 主要功能
+### Server（服务器）
 
-- **集成 MCP 服务器**: 内置 MCP 服务器，使用 Streamable HTTP 协议，无需额外进程
-- **高级搜索引擎**: 支持全文搜索、布尔运算、相关性评分，按标题、作者、年份、标签、文献类型等多维度筛选
-- **按用途读取内容**: 摘要、完整批注、附件正文窗口和索引段落分别由专用分页工具返回，不再使用隐藏内容模式
-- **智能批注系统**: 按颜色、标签、关键词搜索和检索 PDF 高亮、注释和笔记，支持智能排序
-- **分类管理**: 浏览、搜索分类层级结构，获取分类详情、子分类和条目列表
-- **语义搜索**: 基于 AI 向量嵌入的语义搜索，支持 OpenAI/Ollama API，发现概念相关的文献
-- **LLM Wiki 与长期研究记忆**:
-  - Page、Claim、Concept、Alias、Relation 与 Evidence 的权威数据独立保存到 `zotero-lit-synapse-wiki.sqlite`
-  - 每条 Evidence 都验证真实 Zotero 文献和原文 chunk；搜索索引 reset/rebuild 后自动进入待重连并重新定位，不删除长期知识
-  - 提供受控的准备、提交、检索、查看、导出、重验证和指定单篇深读工具；服务器不新增隐藏 LLM 调用
-  - Alias/Concept、Claim embedding、Relation 和有限一跳关联构成第三路召回；2.0.0 默认使用 Shadow Mode，不改变现有关键词+语义 Weighted RRF 排序，等待真实文库校准
-  - Zotero Wiki 面板支持知识状态、证据查看、标准术语与 alias 管理、Page 合并、错误 Claim 删除、Markdown 导出和文献知识图谱
-- **写入功能**: 创建/修改笔记、管理标签、更新元数据字段、创建新条目并关联独立 PDF
-- **全文数据库**: 缓存的 PDF 全文数据库，支持列表、搜索、获取和统计操作
-- **独立附件管理**: 搜索和管理只有 PDF 没有元数据信息的独立条目
-- **客户端配置生成器**: 自动为各种 AI 客户端生成配置
-- **安全性**: 仅本地操作，确保数据完全隐私
-- **用户友好**: 通过 Zotero 首选项界面轻松配置
+- **Enable Server / Port**——启动内置 MCP 服务器；默认端口为 `23120`。
+- **Allow Remote Connections（允许远程连接）**——默认关闭，服务器只接受来自 `127.0.0.1` 的连接。开启后会把服务暴露到你的网络中，并要求配置访问令牌；请只在你信任的网络环境中开启。
+- **MCP Access Token（访问令牌）**——可以在此标签页随时生成或重新生成的 Bearer Token；任何远程客户端都必须使用它，即便在本机使用，如果电脑有其他用户共享，也建议启用。
+- **Client Configuration Generator（客户端配置生成器）**——为[支持的客户端](#-支持的-ai-客户端)中的任意一个生成可直接粘贴的配置。
 
----
+### Retrieval & Semantic Search（检索与语义搜索）
 
-## 效果展示
+- **嵌入服务**——支持任意 OpenAI 兼容接口（OpenAI、Ollama 或自建服务）：API 地址、密钥、模型、向量维度、请求超时、最大批处理大小，并提供内置连接测试。
+- **速率限制与用量**——可配置每分钟请求数与每分钟 Token 数上限，并提供实时用量与成本统计，避免索引大型文献库时悄悄超出服务商限额。
+- **混合检索调优**——关键词分支和语义分支各自独立的相关性阈值、各自独立的 RRF 权重（把某个权重设为 `0` 即可完全禁用该分支）、邻近段落扩展，以及各自独立的关键词搜索/向量扫描超时。
+- **分块设置**——目标分块大小与容差（修改后需要重建索引）。
+- **内置基准测试**——一键实测你自己文献库的检索表现，直接给出推荐的阈值和超时设置，而不用你去猜。
+- **GPU 向量加速**——[功能导览](#语义搜索与-gpu-加速)中提到的原生 CUDA 向量扫描的启用开关和计算精度（Auto / Float32 / Int8）；同一标签页会实时汇报设备状态，以及回退到 CPU 时的具体原因。
 
-这里是一些展示 Zotero LitSynapse 功能的截图：
+### LLM Wiki
 
-| 功能                      |                   截图                    |
-| :------------------------ | :---------------------------------------: |
-| **功能说明**              |      ![功能说明](./IMG/功能说明.png)      |
-| **文献检索**              |      ![文献检索](./IMG/文献检索.png)      |
-| **元数据查看**            |    ![元数据查看](./IMG/元数据查看.png)    |
-| **全文读取 1**            |    ![全文读取 1](./IMG/全文读取1.png)     |
-| **全文读取 2**            |    ![全文读取 2](./IMG/全文读取2.png)     |
-| **附件检索 (Gemini CLI)** | ![附件检索](./IMG/geminicli-附件检索.png) |
-| **PDF 读取 (Gemini CLI)** | ![PDF 读取](./IMG/geminicli-pdf读取.png)  |
+- **Enable Wiki**——整体开关 19 个 `wiki_*` 工具。
+- **写入模式**——新 Claim/Concept 的确认后写入或全自动整合。
+- **Shadow Mode**——在你针对自己文献库校准之前，阻止 Wiki 检索路径影响 `hybrid_search` / `semantic_search` 的排序结果，默认开启。
+- **相关性阈值与 RRF 权重**——关闭 Shadow Mode 后，用来调节 Wiki 检索路径的贡献程度。
+- **情节相似度阈值**与**搜索超时**——控制跨论文关联发现的灵敏度和时间预算。
+- **数据管理**——Wiki 数据的删除控制，以及当前存储的 Page、Claim、Evidence、向量数量等实时统计。
+
+### Documents（文档处理）
+
+- **MinerU**——云端/本地模式及其接口地址或令牌、模型版本（VLM / hybrid / pipeline）、语言、OCR/公式/表格识别开关、解析后的 Markdown 是否挂载到 Zotero 条目、并发数、超时、文件大小上限、按需阻塞开关，以及缓存管理。
+- **PDF Translation（PDF 翻译）**——服务商、API 地址、密钥、模型、目标语言；AI 上下文感知开关；单篇文档与全局术语表选项；可选的领域专家画像。
+- **写入与隐私**——**Enable Write Operations（启用写入操作）**（默认关闭）、**每次写入前确认**开关、**Allow File Import（允许文件导入）**（高风险，`write_item` 的 `import` 动作需要它，默认关闭）以及 **暴露本地文件路径**（默认关闭）。
 
 ---
 
-## 👨‍💻 开发者安装指南
+## 🏗️ 系统架构
+
+```
+AI 客户端  <-- Streamable HTTP -->  Zotero 插件（内置 MCP 服务器 + Zotero API 访问）
+```
+
+MCP 服务器、搜索索引、Wiki 数据库，以及可选的 MinerU/GPU 集成，全部运行在 Zotero 进程内部。不需要安装、配置或维护任何独立的服务器进程——在偏好设置中启用服务器就是全部的安装步骤。
+
+---
+
+## 👨‍💻 开发者指南
 
 ### 前置要求
 
-- **Zotero** 7.0 或更高版本
-- **Node.js** 18.0 或更高版本（仅用于开发）
-- **npm** 或 **yarn** 包管理器（仅用于开发）
-- **Git**（仅用于开发）
+- **Zotero 9.0.x**（插件声明的 `strict_min_version` / `strict_max_version` 分别是 `9.0` / `9.0.*`，无法在其他主版本上加载）。
+- **Node.js 18+** 与 **npm**——仅在从源码构建插件时需要，运行插件本身不需要。
+- **Git**。
 
-### 步骤 1: 安装和配置 Zotero 插件
+### 从源码构建
 
-1. 自行构建最新的 `zotero-lit-synapse-x.x.x.xpi` 文件（见下方步骤 2），或获取他人提供的预构建版本
-2. 在 Zotero 中，通过 `工具 -> 附加组件` 安装该 `.xpi` 文件
-3. 在 Zotero 的 `首选项 -> Zotero LitSynapse` 标签页中，配置服务器设置：
-   - **启用服务器**：启动集成的 MCP 服务器
-   - **端口设置**：默认为 `23120`
-   - **生成客户端配置**：点击按钮获取适用于您 AI 客户端的配置
+```bash
+git clone https://github.com/xu281530-rgb/zotero-lit-synapse-gpu.git
+cd zotero-lit-synapse-gpu/zotero-lit-synapse-plugin
+npm install
+npm run build      # 构建 .xpi 并通过 tsc --noEmit 做类型检查
+npm run start       # 或者：开发模式，热重载进正在运行的 Zotero
+```
 
-### 步骤 2: 开发环境设置（可选）
+构建产物会写入 `.scaffold/build/zotero-lit-synapse.xpi`，安装方式与使用预构建版本相同。
 
-如果您想要修改或开发插件，可以按照以下步骤设置开发环境：
+### 可选：GPU 原生模块
 
-1. 获取本仓库（克隆或直接复制项目目录）后进入目录：
+CUDA 向量加速后端位于 `native/vector-gpu/`，是一个独立的 CMake 项目。配好工具链后，单独构建并打包它的产物：
 
-   ```bash
-   cd zotero-lit-synapse
-   ```
+```bash
+npm run build:gpu-native   # 构建原生 CUDA/C++ 模块
+npm run package:gpu-assets # 打包构建产物供插件使用
+npm run build:gpu          # 一次性完成以上两步
+```
 
-2. 设置插件开发环境：
+这一步完全可选——不构建它，插件依然可以在 CPU 上正常运行。
 
-   ```bash
-   cd zotero-lit-synapse
-   npm install
-   npm run build
-   ```
+### 测试
 
-3. 在 Zotero 中加载插件：
-
-   ```bash
-   # 开发模式（自动重载）
-   npm run start
-
-   # 或手动安装构建后的 .xpi 文件
-   npm run build
-   ```
-
-### 步骤 3: 连接 AI 客户端
-
-插件包含了集成的 MCP 服务器，使用 Streamable HTTP 协议：
-
-**Streamable HTTP 连接示例（Claude Desktop）：**
-
-1. 找到 Claude Desktop 配置文件：
-   - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-   - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-   - **Linux**: `~/.config/Claude/claude_desktop_config.json`
-
-2. 编辑配置文件：
-
-   ```json
-   {
-     "mcpServers": {
-       "zotero": {
-         "transport": "streamable_http",
-         "url": "http://127.0.0.1:23120/mcp"
-       }
-     }
-   }
-   ```
-
-3. 重启 Claude Desktop 应用
-
-### 步骤 4: 开始使用
-
-配置完成后，您就可以在 AI 助手中通过自然语言与您的 Zotero 文献库进行交互了。
-
-**示例:**
-
-- `"帮我查找一下我的 Zotero 库里所有关于“人工智能”的文献"`
-- `"获取去年由 Hinton 发表的关于 transformer 的期刊文章"`
-- `"查找 DOI 为 10.1038/nature14539 的文献"`
+项目提供了大量针对性的测试与校准脚本（远超一百个，覆盖从 BM25F 评分到 Wiki 提交校验，再到 GPU 协议帧格式的方方面面），而不是一个单一的整体测试命令。运行 `npm run test` 可以启动 scaffold 自带的测试运行器；如果需要针对具体改动的脚本，可以查看 `package.json` 的 `scripts` 字段中对应的 `test:*` / `calibrate:*` / `benchmark:*` 脚本。
 
 ---
 
-## 👨‍💻 开发者文档
+## 🐛 故障排查
 
-### 技术架构
+**连接被拒绝（`ECONNREFUSED 127.0.0.1:23120`）**
+确认 Zotero 正在运行、插件已启用，并且 Server 标签页中的 **Enable Server** 已勾选；再确认 AI 客户端配置中的端口号与偏好设置中显示的端口号一致。
 
-```
-┌─────────────┐  Streamable HTTP  ┌──────────────────────────────┐
-│ AI 客户端    │ <--------------> │ Zotero 插件（集成 MCP 服务器） │
-│ (Claude, etc) │                   │ + 内置API + 数据访问        │
-└─────────────┘                   └──────────────────────────────┘
-```
+**Streamable HTTP 连接失败**
+确认地址完全等于 `http://127.0.0.1:<端口>/mcp`；确认没有防火墙或安全软件阻止 Zotero 进程监听该端口；如果你开启了远程访问，确认客户端把 MCP 访问令牌作为 Bearer 凭证发送。
 
-1. **AI 客户端** 通过 Streamable HTTP 协议直接与插件通信
-2. **Zotero 插件** 内置 MCP 服务器，处理 MCP 请求并调用 Zotero API
-3. **数据处理** 在插件内部完成，无需额外进程
-4. **响应返回** 直接发送给 AI 客户端
+**AI 客户端看不到任何 Zotero 工具**
+确认客户端配置里使用的是 `"transport": "streamable_http"`（而不是 `stdio`）；确认 JSON 语法正确；修改配置后记得重启客户端——大多数客户端只在启动时读取一次 MCP 配置。
 
-### 插件开发
+**服务器无法启动**
+配置的端口可能已被其他进程占用，换一个端口再试；也可以查看 Zotero 自带的错误控制台（`工具 → 开发者 → 错误控制台`）获取更具体的报错信息。
 
-1. 进入插件目录并安装依赖：
-   ```bash
-   cd zotero-lit-synapse
-   npm install
-   ```
-2. 启动开发模式：
+**某次工具调用报校验错误**
+服务器会对含糊或格式错误的调用直接按名称拒绝，而不是自己去猜——请直接阅读报错内容本身，它会指出具体是哪个字段、出于什么原因（类型错误、必填数组为空、在改变搜索参数的同时携带了游标等），而不是悄无声息地失败。
 
-   ```bash
-   npm start
-   ```
-
-   这将启动 Zotero 并自动加载插件。代码更改时会自动重载。
-
-3. 构建插件 `.xpi` 文件：
-   ```bash
-   npm run build
-   ```
-
-### MCP 服务器开发
-
-MCP 服务器已集成在插件内，位于 `src/modules/streamableMCPServer.ts`。主要功能：
-
-- Streamable HTTP 连接管理
-- MCP 协议处理
-- 工具调用路由
-- 错误处理和日志记录
+如果以上步骤都无法解决问题，请提交 issue，并附上你的操作系统、Zotero 版本、AI 客户端，以及相关的报错文本或日志。
 
 ---
 
-## 🔧 API 参考（MCP 工具列表）
+## 🔧 MCP 工具参考
 
-所有工具定义只写在一处——`src/modules/toolCatalog.ts`——MCP 的 `tools/list`
-响应与 HTTP `/capabilities` 文档都由它投影得到。**不存在需要人工同步的第二份
-清单**，`npm run test:tool-catalog` 会在两份投影出现分歧时让构建失败。
+所有工具定义都集中在同一处——`src/modules/toolCatalog.ts`——MCP 的 `tools/list` 响应和 HTTP 的 `/capabilities` 文档都是从它投影生成的，不存在需要手动同步的第二份清单，`npm run test:tool-catalog` 会在两份投影出现分歧时直接让构建失败。服务器一共提供 50 个工具，分为五组：搜索与查询 11 个、分类管理 3 个、语义搜索与阅读 6 个、LLM Wiki 19 个、写入操作 11 个。
 
-插件集成的 MCP 服务器提供以下 **47 个工具**，分为 5 大类：
-
-### 一、搜索与查询（12 个）
+### 一、搜索与查询（11 个）
 
 #### `hybrid_search`
 
-检索漏斗的第一段。该工具并行执行关键词检索和语义向量检索。关键词一路覆盖
-**全库元数据**（标题、摘要、作者、期刊名、标签、Extra）**以及已建立关键词索引的
-正文**；语义一路覆盖已索引的段落。两路都不扫描 Zotero 的全文缓存、也不会临时解析
-PDF，所以两边的正文覆盖范围都等于「已经索引了多少」——关键词侧的覆盖率见
-`metadata.bodyKeywords`，语义侧见每一行的 `fullText` 字段。
+检索漏斗的第一阶段。它并行运行关键词检索和语义向量检索。关键词分支覆盖全库的元数据（标题、摘要、作者、期刊名、标签、extra 字段）**以及关键词索引中每一篇文档的正文**；语义分支覆盖已索引的段落。两个分支都不会扫描 Zotero 的全文缓存，也不会临时解析 PDF，因此两边的正文覆盖范围都取决于已经建立的索引——`metadata.bodyKeywords` 汇报关键词索引的覆盖比例，每一行结果的 `fullText` 字段汇报语义索引的覆盖情况。
 
-**两路如何融合**：两路**从不互相比较分数**。关键词一路按归一化 BM25F、语义一路
-按余弦相似度，**各自用各自的阈值过滤**；通过的结果取**并集**——只要过了其中任意
-一路就会进入结果，某一路可以「放行」，但永远不能「否决」。也就是说，关键词一路
-完全没找到的文献，语义分够高照样返回，反之亦然。
+**两个分支如何合并。** 它们从不互相比较。每个分支都在自己的量纲上被独立过滤——关键词用归一化 BM25F，语义用余弦相似度——分别对照用户各自配置的阈值，通过者**取并集**：只要通过任意一个阈值就足够入选，一个分支可以让一篇文档入选，但永远无法否决它。关键词分支从未找到的论文，只要语义打分认可，依然会被返回，反之亦然。
 
-排序则用**加权 RRF**，依据是每篇文献在**准入它的那一路里的名次**：
+排序则采用**加权 Reciprocal Rank Fusion**，依据每篇文档在**通过它的每个分支内部**所处的名次：
 
 ```
 score = keywordWeight/(rrfK + keywordRank) + semanticWeight/(rrfK + semanticRank)
 ```
 
-缺席的一路贡献 0，而不是扣分。两路都准入的文献因此拿到两份贡献，在名次相当时
-排在只有一路准入的文献前面——「互相印证」体现为位次，而不是一笔加成分。
+未入选的分支贡献为零而不是惩罚分，因此同时被两个分支接纳的文档会获得双份贡献，在相近名次下会压过只被单一分支接纳的文档。互相印证体现为排位而不是加分。`rrfK` 控制名次优势衰减的速度；偏好某个分支则是两个权重存在的意义。
 
-**`score` 是名次分，不是相关度**：它数值很小（两路都排第一时约 0.033），拿它跟
-0.6 比、或者跟另一次检索的分数比，都没有意义，也**不再有任何阈值二次过滤它**。
-要判断「有多相关」，看 `normalizedKeywordScore` 和 `normalizedSemanticScore`
-——这两个才是真实的 0-1 相关度，也正是阈值实际作用的那两个数；**某一栏缺失表示
-那一路没有准入这篇，而不是它得了 0 分**。不要按其它字段重排结果：重排会把融合
-本身抵消掉。
+**`score` 是名次而不是相关度。** 它是一个很小的名次一致性数值（默认 `rrfK = 60` 时，两个分支都排第一的文档得分接近 0.033），拿它和 0.6 比较、或者和另一次搜索的分数比较都没有意义，而且**不会对它施加任何阈值**。要判断一篇文档究竟有多相关，请看 `normalizedKeywordScore` 和 `normalizedSemanticScore`——它们是各自分支量纲下真实的 0-1 相关度，也正是阈值实际生效的对象。某一项**缺失**代表该分支没有接纳这篇文档，而不是它的分数为零。不要用其他任何方式对结果重新排序：对一次名次融合的结果再排序会破坏融合本身。
 
-返回的是**轻量候选行**：`itemKey`、题名、作者、年份、期刊、该文献的书写语言、
-RRF 排序分 `score`、两路各自的相关度、命中来源 `matchedBy`、
-`matchedKeywords` / `matchedFields`、`hasAbstract`，以及少量最相关段落的证据摘录。
+- `query`（未携带 `cursor` 时必填）、`keywords`、`domain`、`expertRole`、`topK`、`cursor`、`minKeywordScore`、`minSemanticScore`、`language`、`rrfK`、`keywordWeight`、`semanticWeight`、`libraryID`
+- 每篇文档返回一条轻量候选行：`itemKey`、`title`、`creators`、`year`、`publicationTitle`、`language`、RRF 的 `score`、`normalizedKeywordScore`、`normalizedSemanticScore`、`matchedBy`、`matchedKeywords`、`matchedFields`、`hasAbstract`，以及来自最佳匹配段落的简短摘录。
+- **不会返回摘要正文。** 摘要依然被索引、依然被关键词分支检索，只是不会随结果返回，这样一份 20 条的候选列表才能保持精简。只有当某篇论文真正值得深入阅读时，才用 `get_item_abstract` 单独获取它的摘要。
+- 如果用户只是想知道哪些文献相关，可以直接依据这些结果行作答。
 
-**摘要不再随结果返回**。摘要仍然参与关键词检索、语义检索与排序，只是不再一并
-发回——20 篇候选里通常只有几篇需要细看。需要看摘要时，对那一篇单独调用
-`get_item_abstract`。若用户只问哪些文献相关，直接用这些候选行回答即可。
+**分页。** `topK` 是单页大小，不是搜索深度。响应中带有 `pagination` 区块——`appliedKeywordMinScore`、`appliedSemanticMinScore`、`totalRelevant`、`returned`、`offset`、`range`、`hasMore`、`nextCursor`，其中 `totalRelevant` 是至少被一个分支接纳的文档总数，通常会超过一页。执行顺序是**检索 → 各分支按自己的阈值过滤 → 取并集 → 按 RRF 排序 → 分页**，因此后面的页码里不可能出现两个分支都拒绝的文档，最后一页也不会被人为填满。把 `nextCursor` 原样作为 `cursor` 传回（其余参数保持不变或省略），即可在同一份排序结果上继续翻页；它不会重新执行检索，因此分页之间不会出现重复、遗漏或乱序。在携带 `cursor` 的同时改变 `query`、`keywords`、`domain`、`expertRole`、`minKeywordScore` 或 `minSemanticScore` 会被拒绝——那属于一次新的搜索。分页状态保留 15 分钟，覆盖最近 5 次搜索；过期的游标会给出明确的错误提示，而不是悄悄从头开始。
 
-**分页**。`topK` 是「一页多少篇」，不是「这次检索挖多深」。响应里带一个
-`pagination` 块：`appliedKeywordMinScore` / `appliedSemanticMinScore`（本次生效
-的两路阈值）、`totalRelevant`（**至少被一路准入的文献总数**，通常不止一页）、
-`returned`、`offset`、`range`、`hasMore`、`nextCursor`。顺序是
-**召回 → 两路各自按阈值准入 → 取并集 → RRF 排序 → 再分页**，所以后面的页永远
-不会出现两路都没准入的文献，最后一页短也绝不会拿低分结果凑数。把
-`nextCursor` 原样作为 `cursor` 传回（其余参数保持不变或省略），就能在**同一份
-已排好序的名单**上继续往下看——它不会重新检索，因此不会重复、遗漏或改变顺序。
-带着 cursor 同时改 `query` / `keywords` / `domain` / `expertRole` /
-`minKeywordScore` / `minSemanticScore` 会被拒绝：那是另一次检索，应该重新发起。分页状态保留 15 分钟、最近 5 次检索；
-cursor 过期会明确报错，而不是悄悄重新搜一遍。
-
-**检索深度**。两路召回都是**穷尽**的：融合层拿到的是全部候选，`ranked` 里是所有
-通过阈值的文献，`results` 只是它上面的一扇窗口，所以不存在「候选池被挖满、池外
-还有合格文献」这回事，也没有 `candidateK` 这个参数。`totalRelevant` 是精确值，
-只有在某一路检索失败或超时时才降级为下界，此时 `pagination.degradedRetrieval`
-与 `pagination.totalRelevantIsLowerBound` 会同时置位。
+**检索深度。** 两个分支都是**穷尽式**的：融合会看到所有候选，`ranked` 包含每一篇被至少一个分支接纳的文档，`results` 只是其中的一个窗口。因此不存在需要"够用就好"的候选池，也没有 `candidateK` 参数。`totalRelevant` 是精确值，只有在某个分支失败或超时时才会退化为下限——此时 `pagination.degradedRetrieval` 和 `pagination.totalRelevantIsLowerBound` 都会被置位。
 
 #### `search_library`
 
-高级文献库搜索，支持多维度筛选、布尔运算和相关性评分。
+针对标题、作者、年份、条目类型等明确字段约束的结构化元数据搜索。一般文献发现请优先使用 `hybrid_search`。
 
-| 参数                 | 类型    | 描述                                                                       |
-| -------------------- | ------- | -------------------------------------------------------------------------- |
-| `q`                  | string  | 通用搜索关键词                                                             |
-| `title`              | string  | 标题搜索（支持 `titleOperator`: contains/exact/startsWith/endsWith/regex） |
-| `yearRange`          | string  | 年份范围（如 "2020-2023"）                                                 |
-| `fulltext`           | string  | 全文搜索（附件/笔记内容），支持 `fulltextMode`: attachment/note/both       |
-| `itemType`           | string  | 文献类型筛选（journalArticle/book/attachment 等）                          |
-| `includeAttachments` | string  | 设为 "true" 可搜索独立 PDF 条目                                            |
-| `relevanceScoring`   | boolean | 启用相关性评分                                                             |
-| `sort`               | string  | 排序：relevance/date/title/year                                            |
-| `limit` / `offset`   | number  | 分页控制，`limit` 默认 200                                                 |
+- `q`、`title`、`titleOperator`、`yearRange`、`itemType`、`includeAttachments`、`relevanceScoring`、`sort`、`limit`（默认 200）、`offset`
 
 #### `search_annotations`
 
-按关键词、颜色或标签搜索批注，支持智能排序和相关性过滤。
+当你还不知道哪篇文档持有相关内容时，用来搜索**你自己的标记**——全库范围的 PDF 高亮、批注，以及你在 Zotero 中写下的笔记。它返回的一切都是用户自己的阅读痕迹，而不是文献本身：应逐字引用并明确归属给用户。
 
-| 参数       | 类型     | 描述                                                              |
-| ---------- | -------- | ----------------------------------------------------------------- |
-| `q`        | string   | 搜索关键词（与 colors/tags 至少提供一个）                         |
-| `itemKeys` | string[] | 限定搜索范围到指定条目                                            |
-| `types`    | string[] | 批注类型：note/highlight/annotation/ink/text/image                |
-| `colors`   | string[] | 按颜色过滤（支持色名或 hex：yellow/red/green/blue/purple/orange） |
-| `tags`     | string[] | 按标签过滤                                                        |
+`q`、`colors`、`tags` 中至少要有一个非空值；空字符串和空数组会被直接拒绝，而不是触发一次不加过滤的全量扫描。所有满足过滤条件的标记会在返回单页结果**之前**先被完整评分和排序——此前的实现只对前 100 条任意候选排序，在匹配数超过这个数字的文献库中，真正最佳的结果经常被排在窗口之外。
 
-当前页内的高亮、笔记正文和评论都按完整原文返回，不做令牌压缩；`limit` 默认
-15、最大 100。
+每条结果携带三个独立的键，其中只有一个是文档键：`sourceItemKey` 是这篇**论文**，`attachmentKey` 是标记所在的那个 PDF，`annotationKey` 是标记本身。请用 `sourceItemKey` 继续后续调用——它正是 `get_annotations(itemKeys)`、`get_item_details`、`search_fulltext`、`get_document_chunks` 所期望的那个键。
 
-每条命中带三个互不相同的 key，其中只有一个是文献级 key：`sourceItemKey` 是
-**文献条目**，`attachmentKey` 是批注所在的 PDF/附件，`annotationKey` 是批注
-本身。继续往下查一律用 `sourceItemKey`——`get_annotations(itemKeys)`、
-`get_item_details`、`search_fulltext`、`get_document_chunks` 认的都是它。
+> 1.9.1 之前，每条结果只带一个名为 `parentKey` 的字段：对高亮它是附件键，对笔记它是条目键。把一条高亮的 `parentKey` 传给 `get_annotations` 什么也匹配不到、只会返回空页，读起来像"这篇论文没有任何标记"，而不是"传错了键"。这个字段被直接移除而不是标记为废弃：一个名字对应两种含义本身就是缺陷，保留它只会保留这个失败模式。
 
-> 1.9.1 之前每行只有一个 `parentKey`，它对高亮是附件 key、对笔记是文献 key。
-> 把高亮的 `parentKey` 交给 `get_annotations` 会一条都匹配不到，返回一个空页，
-> 看上去像「这篇没有标记」而不像「你传错了 key 的种类」。这个字段是直接删除
-> 而不是标记弃用：一个名字两种含义本身就是缺陷，留着就等于把故障留着。
-
-当这条标记上面根本没有文献时——用户自己写的顶层笔记，或者挂在未归档附件上的
-标记——`sourceItemKey` 是 **null**，并由 `noSourceItemReason` 说明是哪一种。
-它绝不会用替代值填上：独立笔记的自身 key 一度充当过这个角色，而在真实库里实测，
-拿它调 `get_annotations` 返回 0 条，调 `get_document_chunks` 则报「它有一个文本
-附件但未建索引」——笔记根本没有附件。**所有文献级工具都拒收的 key，就不是文献
-级 key。**
-
-把附件 key、笔记 key 或批注 key 交给 `get_item_details`、`get_document_chunks`、
-`search_fulltext`，现在会被明确拒绝，并告诉你该用哪个 key。此前
-`get_item_details` 传附件 key 会「成功」返回，标题是 PDF 文件名。
+- `q`、`itemKeys`（文档键；会全部被搜索）、`types`、`colors`、`tags`、`minRelevance`、`limit`（默认 15，最大 100）、`offset`
+- 当前页的每一条结果都包含完整的高亮/笔记原文和完整的评论，没有任何压缩或"简略模式"。
+- 返回 `pagination`，包含 `total`、`offset`、`limit`、`hasMore`、`nextOffset`
+- 每条结果返回 `sourceItemKey`、`attachmentKey`（笔记没有此字段）和 `annotationKey`
+- 当一条标记之上没有文档——比如一条顶层笔记，或者挂在未归档附件上的标记——`sourceItemKey` 会是 **null**，并附上 `noSourceItemReason` 说明原因。它绝不会用别的值来替补：曾经短暂地用独立笔记自身的键顶替过这个字段，结果在真实文献库中 `get_annotations` 对它返回 0 条标记，而 `get_document_chunks` 则把"缺少索引"归咎于一篇本就没有附件的笔记。一个所有文档级工具都会拒绝的键，就不是一个文档键。
+- 把附件键、笔记键或标记键传给 `get_item_details`、`get_document_chunks` 或 `search_fulltext`，现在会被直接按名称拒绝，并在拒绝信息中给出应该使用的文档键。此前 `get_item_details` 会在附件键上"成功"执行，并把 PDF 的文件名当作标题返回。
 
 #### `search_fulltext`
 
-检索漏斗的第三段：对 `hybrid_search` 定位到的**单篇**文献做正文级混合检索。
-评分规则与 `hybrid_search` **完全一致，只是候选从「整库的文献」换成「这一篇的
-段落」**：关键词一路按归一化 BM25F、语义一路按余弦，各自用**同一组用户设置**的
-阈值准入，取并集后按加权 RRF 排序——一个段落只要过了其中一路就会返回。`score`
-同样是 RRF 名次分而非相关度。全库正文扫描已禁用。
+检索漏斗的第三阶段：对由 `hybrid_search` 定位到的**某一篇**文档的段落，执行关键词 + 语义混合检索。评分规则与 `hybrid_search` 完全一致，只是下沉了一层——候选变成了这篇论文的段落，而不是全库的文档。两个分支受同样的两项用户设置约束，通过者取并集（一个段落只需要满足其中一个条件），排序采用加权 RRF，依据每个段落在各自分支内的名次，因此这里的 `score` 同样是名次而不是相关度。全库范围的全文扫描在此被禁用。
 
-调用前应先用 `get_item_abstract` 读该篇摘要，据此把 `domain` 与 `expertRole`
-重新贴合到这篇论文，并根据它自身的研究内容重写 `query` 与 `keywords`——
-**关键词用该文献自身的语言书写，只用一种语言**：单篇文档内部，另一种语言的
-探针匹配不到任何内容，只会稀释关键词覆盖度。
+调用它之前，先用 `get_item_abstract` 读一遍这篇论文的摘要，根据论文实际研究的内容重新确定 `domain` 和 `expertRole`，并用论文自身的主题写出 `query` 和 `keywords`——**用这篇论文实际使用的那种语言**，只用一种语言而不是两种都用，因为另一种语言的探针词无法匹配到单篇文档中的段落。
 
-| 参数               | 类型     | 描述                                         |
-| ------------------ | -------- | -------------------------------------------- |
-| `itemKey`          | string   | **必需**，要深入的那一篇                     |
-| `query`            | string   | 针对该篇写的自然语言检索句                   |
-| `keywords`         | string[] | 该篇专属探针，使用该文献自身的语言           |
-| `domain`           | string   | 重新贴合该篇的学科/子领域                    |
-| `expertRole`       | string   | 针对该篇采用的专家视角                       |
-| `chunkIds`         | number[] | 上下文扩展：拉取指定段落的相邻段落           |
-| `neighborRadius`   | number   | 上下文扩展半径，受用户设置上限约束           |
-| `maxChunks`        | number   | 返回段落数上限，受用户设置上限约束           |
-| `minKeywordScore`  | number   | 关键词一路的相关度下限，只能比用户设置更严格 |
-| `minSemanticScore` | number   | 语义一路的相关度下限，只能比用户设置更严格   |
+- `itemKey`（必填）、`query`、`keywords`、`domain`、`expertRole`、`maxChunks`、`minKeywordScore`、`minSemanticScore`、`chunkIds`、`neighborRadius`、`libraryID`
 
 #### `search_collections`
 
-按名称查找分类，用于「用户提到某个文件夹名、你需要它的 `collectionKey`」。
-返回的是身份与路径，不是内容。参数：`q`（必需）、`limit`、`offset`、`libraryID`；
-用响应中的 `pagination.nextOffset` 继续翻页。
+当用户按名称提到某个文件夹、你需要它的 `collectionKey` 时，用来按名称查找分类。只返回身份信息和路径，不返回内容。参数：`q`（必填）、`limit`、`offset`、`libraryID`。可通过响应中的 `pagination.nextOffset` 继续翻页。
 
 #### `get_libraries`
 
-列出当前 Zotero 客户端里的所有文献库。响应为
-`{ results, pagination, metadata }`，`pagination` 含 `total`、`hasMore` 和
-`nextOffset`。参数：`limit`、`offset`。
+列出当前客户端可见的所有 Zotero 文献库。响应格式为 `{ results, pagination, metadata }`，`pagination` 中包含 `total`、`hasMore`、`nextOffset`。参数：`limit`、`offset`。
 
 #### `search_libraries`
 
-按名称查找文献库，用于用户提到某个群组库、你需要它的 `libraryID` 时。
-参数：`q`（必需）、`limit`、`offset`。
+当用户提到某个群组文献库、你需要它的 `libraryID` 时，用来按名称查找文献库。参数：`q`（必填）、`limit`、`offset`。
 
 #### `get_annotations`
 
-读取**你自己在指定文献上留下的标记**：PDF 高亮、批注、图片/墨迹批注，以及你在
-Zotero 里手写的笔记。**笔记正文从这里读**——`get_item_details` 不再返回笔记
-正文，因为元数据查询顺带把用户的私人笔记发回去时，没有任何标记说明哪些话是
-谁写的。
+读取你已经指名的文档上**你自己的标记**：PDF 高亮、批注、图片与墨迹标注，以及你在 Zotero 中写下的笔记。笔记正文正是从这里获取的——`get_item_details` 不再返回笔记正文，因为一个元数据查询顺带把用户的私人笔记发出去，却没有任何标记说明这段话到底是谁写的。
 
-`itemKeys`、`itemKey`、`annotationId`、`annotationIds` 四者传其一。`itemKeys`
-支持**多篇**，而且每一篇都会真的读到——这正是「对比我在这五篇上的标记」能一次
-调用完成的原因。`itemKeys` 收的是**文献条目 key**——即 `search_annotations`
-命中行里的 `sourceItemKey`，而不是它的 `attachmentKey`；返回的每一行也都带着
-自己的 `sourceItemKey`，多篇混在一页时仍然各归各的来源。
+传入 `itemKeys`（一篇或**多篇**文档——全部都会被读取，这也是"对比我在这五篇论文里的标记"能一次调用完成的原因）、`itemKey`、`annotationId`、`annotationIds` 中的**恰好一个**。`itemKeys` 接受的是**文档**键——即 `search_annotations` 结果中的 `sourceItemKey`，而不是它的 `attachmentKey`。每条结果都携带它来源的 `sourceItemKey`，因此即便一次读取多篇文档，标记的归属依然清晰可辨。
 
-结果始终分页：一篇读透的 PDF 可能有几百条高亮。当前页内每条高亮、笔记正文和
-评论都完整返回，不做截断或令牌压缩。
+结果总是分页返回，因为一份读得仔细的 PDF 可能有成百上千条高亮。当前页中每一条标记都包含完整的原文和完整的评论。
 
-- `itemKeys`、`itemKey`、`annotationId`、`annotationIds`、`types`、`colors`、
-  `tags`、`limit`（默认 20、最大 100）、`offset`、`libraryID`
+- `itemKeys`、`itemKey`、`annotationId`、`annotationIds`、`types`、`colors`、`tags`、`limit`（默认 20，最大 100）、`offset`、`libraryID`
 
 #### `get_item_details`
 
-**文献元数据详情工具**，用于引用与著录。返回标题、作者、日期、类型、期刊、
-卷期页、DOI、URL、语言、标签，以及每个附件一行的基本信息。
+一个条目的书目元数据——引用工具。返回标题、作者、日期、条目类型、期刊、卷期页码、DOI、URL、语言、标签，以及每个附件各一行的信息。
 
-**不返回任何正文内容**：没有摘要正文、没有 Notes 正文、没有批注正文、没有 PDF
-正文、没有 chunks——这四类各有专门的工具按需返回并正确分页。这里给出的是
-**可用性**：`hasAbstract` / `abstractChars` 告诉你 `get_item_abstract` 会返回
-什么而不返回它，`noteCount` 告诉你 `get_annotations` 能找到几条笔记。
+**它不返回任何正文内容，这是有意为之。** 没有摘要正文、没有笔记正文、没有批注文字、没有 PDF 正文、没有分块——这些内容各自都有专门的工具负责返回，并且各自都做了正确的分页。它给你的是"是否存在"这一层信息：`hasAbstract` / `abstractChars` 说明 `get_item_abstract` 会返回什么，但并不真的返回；`noteCount` 说明 `get_annotations` 能找到多少条笔记。
 
-`fullText` 使用与全部检索结果**同一套五态全文状态**（`indexed` / `parse_failed`
-/ `no_source` / `not_indexed` / `unknown`），取代了原先按附件给的
-`hasFulltext` 布尔值——那个值只看文件扩展名，因此对从未解析成功的 PDF 也报
-「有全文」。按附件的判断仍在，改名为 `hasExtractableText`，含义是「这种文件类型
-可能能抽出文本」。
+`fullText` 汇报语义索引实际持有的内容，使用与所有搜索结果相同的五档取值（`indexed` / `parse_failed` / `no_source` / `not_indexed` / `unknown`）。这取代了旧版每附件一个的 `hasFulltext` 布尔值——它只看文件扩展名，因此会把从未成功解析过的 PDF 也标记为"有全文"；这个按附件区分的旧标志依然保留，改名为 `hasExtractableText`，含义是"这种文件类型理论上可以提取出文本"。
 
-参数：`itemKey`（必需）、`libraryID`。
+参数：`itemKey`（必填）、`libraryID`。
 
 #### `get_item_abstract`
 
-检索漏斗的第二段：按需获取**单篇**摘要。只在你确实考虑深入阅读某篇时才调用，
-一次一个 `itemKey`；它不是 `hybrid_search` 之后的批处理步骤——20 篇候选不等于
-20 次摘要读取。参数：`itemKey`（必需）、`format`（json/text）。
+检索漏斗的第二阶段：按需获取某个条目的摘要。只在你确实认真考虑要深入阅读某篇论文时才调用它——它不是 `hybrid_search` 之后的批量步骤，20 条候选并不意味着要拿 20 份摘要。
+
+参数：`itemKey`（必填）、`format`（json/text）。
 
 #### `get_attachment_text`
 
-**获取指定文献条目下某一个附件的文本内容**——PDF、Markdown/HTML/纯文本文件——
-除此之外什么都不返回。它取代了 `get_content`：后者把摘要、Notes、每个附件的
-正文和网页快照混在一个对象里返回，既无法只要其中一路，也完全没有分页。
+**单个附件**（PDF、Markdown/HTML/纯文本文件）的正文文本，仅此而已。它取代了 `get_content`——后者把摘要、笔记、每个附件的正文和网页快照全部合并成一个对象，既没法单独只要其中一项，也完全没有分页。
 
-**选择附件**。只传 `itemKey` 会返回该条目的附件清单而不返回正文；再带上你要的
-`attachmentKey` 调用一次即可。条目下只有一个可出文本的附件时会自动选中
-（`selectedAutomatically: true`）；有两个时**绝不猜**——读错附件返回的文本看起来
-完全正常，却属于另一篇文档。
+**选择附件。** 只传 `itemKey` 会得到附件列表而不返回正文；再带上你想要的 `attachmentKey` 重新调用一次。只有一个可提取文本的附件时会自动选中（`selectedAutomatically: true`）；有两个时绝不会替你猜——因为读错附件返回的文本看起来完全正常，却属于另一份文档。对于独立的 PDF 或其他未归档附件，直接把该附件自己的键作为 `itemKey` 传入即可，不需要父条目。当本地文件可用时，附件行会包含 `sizeBytes`。
 
-独立 PDF 或其他未归档附件不需要父条目：直接把附件 key 作为 `itemKey`。本地文件
-可访问时，附件清单还会返回 `sizeBytes`。
+**文本的来源。** 每次响应都会在 `textSource.method` 中说明来源，并附带一段 `description` 说明这段文本可以在多大程度上被信任：`doc2x`（保留了出版商的原始结构）、`mineru_cache` / `mineru_attachment`（复用了先前解析好的 MinerU Markdown，版面已重建）、`mineru`（本次调用中实时解析）、`markdown_attachment`、`zotero_fulltext_cache`（Zotero 自带的扁平索引——**没有版面、没有表格**）、`pdf_processor`、`html_parsing`、`text_reading`。无法产出文本时，`method` 会说明具体原因（`mineru_disabled`、`mineru_on_demand_disabled`、`mineru_failed`、`mineru_error`、`no_text`）。
 
-**明确文本来源**。每次响应都在 `textSource.method` 里说明文本是哪条路径产出的，
-并附一句 `description` 说明可以据此主张什么：`doc2x`（保留出版结构，最好）、
-`mineru_cache` / `mineru_attachment`（复用已有 MinerU Markdown，版面是重建的）、
-`mineru`（本次调用现场解析）、`markdown_attachment`、`zotero_fulltext_cache`
-（Zotero 自带全文索引，**无版面、无表格**）、`pdf_processor`、`html_parsing`、
-`text_reading`。取不到文本时，method 会说明原因：`mineru_disabled`、
-`mineru_on_demand_disabled`、`mineru_failed`、`mineru_error`、`no_text`。
+**分页。** 文本以字符窗口的形式返回，会在附近有段落或句子边界的地方截断，确保一个窗口不会截断在词语中间。`pagination` 包含 `totalChars`、`offset`、`returnedChars`、`hasMore`、`nextOffset`。
 
-**分页**。文本按字符窗口返回，并在附近有段落或句子边界时切在边界上，所以一个
-窗口不会断在词中间。`pagination` 里有 `totalChars`、`offset`、`returnedChars`、
-`hasMore`、`nextOffset`。
-
-它**不承担全文检索职责**：定位文献用 `hybrid_search` / `keyword_search`，在单篇
-内部查找用 `search_fulltext`。
-
-- `itemKey`（必需）、`attachmentKey`、`offset`、`limit`、`libraryID`
+- `itemKey`（必填）、`attachmentKey`、`offset`、`limit`、`libraryID`
 
 ### 二、分类管理（3 个）
 
 #### `get_collections`
 
-列出分类，主要用途是让你读到用户真实的文件夹名，再把相关的作为 `collectionKeys`
-传给 `hybrid_search` 限定范围。扁平分页列表：默认列顶层分类，或者
-`parentCollection` 的直接子级。
+列出分类，主要用途是让你读到用户真实的文件夹名称，再把相关的分类作为 `collectionKeys` 传给 `hybrid_search`。扁平结构且支持分页：默认返回顶层分类，或者 `parentCollection` 的直接子分类。
 
-响应结构是 `{ results, pagination, metadata }`。1.9.1 之前它返回的是一个裸
-JSON 数组、总数只放在 `X-Total-Count` 响应头里，而 MCP 只转发 body，所以总数
-和服务端挂上去的 `metadata` 都被 `JSON.stringify` 静默丢弃了——300 条里的第
-一页 100 条，和一共就 100 条的完整库，返回的东西一模一样。`search_collections`
-用同一个信封。
+响应格式为 `{ results, pagination, metadata }`。1.9.1 之前它返回的是一个裸数组，总数放在 `X-Total-Count` 响应头里——而 MCP 协议只转发响应体，因此总数和服务器附带的 `metadata` 区块都会被 `JSON.stringify` 悄悄丢弃，300 条结果中的一页 100 条会和一个只有 100 条的完整文献库无法区分。`search_collections` 返回同样的响应结构。
 
 参数：`parentCollection`、`limit`（默认 100）、`offset`、`libraryID`。
 
-> `recursive` 已在 1.9.1 删除。它一次返回所有层级且不分页，和
-> `get_collection_items` 重复，等于把逐级浏览刚取代掉的整体倾倒又放了回来。
-> 现在传它会直接报错而不是被忽略。想知道某个子树里有什么，用
-> `get_collection_items`——它按文件夹给出 `directItemCount`、`totalItemCount`
-> 和 `hasChildren`，不需要把整棵树拉下来。
+> `recursive` 参数已在 1.9.1 移除。它会在一次不分页的响应中返回所有层级，与 `get_collection_items` 功能重复，并重新引入了逐层浏览器本来要替代的整体转储问题。现在传入它会直接报错，而不是被静默忽略。`get_collection_items` 会为每个文件夹汇报 `directItemCount`、`totalItemCount` 和 `hasChildren`，因此不下载子树内容也能了解它包含什么。
 
-> `get_subcollections` 已在 1.9.0 删除：它就是本工具把 `parentCollection` 改名成
-> `collectionKey`，最终进的是同一个 handler、走同一段递归。改用
-> `get_collections` 并传 `parentCollection`。
+> `get_subcollections` 已在 1.9.0 作为重复工具被移除：它其实就是把这个工具的 `parentCollection` 改名为 `collectionKey`，最终走的是同一个处理逻辑、同一套递归遍历。请改用带 `parentCollection` 参数的 `get_collections`。
 
 #### `get_collection_details`
 
-单个分类的元数据：名称、父级、含多少条目与子分类。它**不列出**这些内容。
-参数：`collectionKey`（必需）。
+某个分类的元数据：名称、父分类、包含多少条目和子分类，但不列出具体内容。参数：`collectionKey`（必填）。
 
 #### `get_collection_items`
 
-**像文件浏览器一样逐级浏览文献库**。每次调用只返回当前这一层的子目录，加上当前
-层**直属**文献的一页——绝不返回整棵树。
+**像文件管理器一样逐层浏览文献库。** 每次调用返回当前层级的子文件夹，以及直接归档在这一层的一页文档——绝不会返回整棵树。
 
-不传 `collectionKey` 就从文献库顶层开始（顶层分类，以及不属于任何分类的文献），
-然后传入想进入的目录的 `collectionKey` 逐级下探。每次响应都会重复当前位置
-（`location`：`libraryID`、`collectionKey`、`name`、`path`）和你来时的 `parent`，
-所以随时能往回走。
+不带 `collectionKey` 调用即可从库的根目录开始（顶层分类，以及未归入任何分类的文档），传入你想打开的文件夹的 `collectionKey` 即可继续下钻。每次响应都会重复当前的 `location`（`libraryID`、`collectionKey`、`name`、`path`）以及你从哪个 `parent` 而来。
 
-每个子目录行带 `directItemCount`、`totalItemCount`、`hasChildren`——这正是「不打开
-就能决定往哪下探」的依据：`directItemCount` 为 0 而 `totalItemCount` 有 300 的
-目录是个容器，不是死胡同。`totalItemCount` 会去重，同时归在父目录和子目录下的
-一篇文献只算一篇。
+每个子文件夹行都带有 `directItemCount`、`totalItemCount` 和 `hasChildren`，这让你可以在不打开任何内容的情况下选择该往哪里下钻：`directItemCount` 为 0、`totalItemCount` 为 300 的文件夹是一个容器，而不是死胡同。`totalItemCount` 会去重——一篇同时归档在父文件夹和子文件夹中的论文只会被计一次。
 
-文献行刻意做得很轻：`itemKey`、标题、作者、年份、期刊、DOI、类型。**没有摘要、
-Notes、批注、附件正文或 chunks**——旧版本直接用 `formatItem` 的默认字段表，两条
-就有 4.5 KB，列一个 200 篇的目录要吃掉大半个上下文窗口。
+文档行的信息刻意保持精简——`itemKey`、标题、作者、年份、期刊、DOI、条目类型。不包含摘要、笔记、批注、附件正文或分块：旧版本会返回 `formatItem` 的完整默认字段列表，导致两行结果就有 4.5 KB，列出一个 200 条的文件夹几乎耗尽一个上下文窗口。
 
-- `collectionKey`、`path`（如 `"材料/凝固/柱状晶"`，会解析成 key；路径有歧义时
-  **报错并列出候选 key**，绝不猜）、`limit`、`offset`、`libraryID`
+- `collectionKey`、`path`（例如 `"Materials/Solidification/CET"`，会被解析为对应的键；路径存在歧义时会直接报错并列出候选键，而不是随意猜测）、`limit`、`offset`、`libraryID`
 - 返回 `location`、`parent`、`subcollections`、`items`、`itemPagination`
 
-### 三、语义检索与阅读（5 个，可在偏好设置中禁用）
+### 三、语义检索与阅读（6 个，可在偏好设置中禁用）
 
-`hybrid_search`、`keyword_search`、`semantic_search` 返回**完全相同的轻量候选
-行**，共用同一套范围限定和同一套 cursor 分页，所以三者之间切换没有额外学习成本。
-但有两点不同，不能互相搬运：一是**各自适用自己那一路的阈值**（`keyword_search`
-用关键词阈值，`semantic_search` 与 `find_similar` 用语义阈值，`hybrid_search`
-两个独立各用各的）；二是 **`score` 的含义不同**——单分支工具的 `score` 是 0-1
-相关度，而 `hybrid_search` 与 `search_fulltext` 的 `score` 是 RRF **名次分**。它们在实现上也是共用的：一份词法检索服务
-（`runLexicalSearch`）、一份语义检索服务（`SemanticSearchService.search`）、
-一份分页存储、一份候选行投影——**不存在三套检索算法**。
+`hybrid_search`、`keyword_search`、`semantic_search` 返回**同样的轻量候选行**，共享同样的范围限定和游标分页逻辑，因此在它们之间切换没有任何额外成本。真正不同、也绝不能混用的有两点：每个工具应用的是它**自身所属分支**的阈值（`keyword_search` 用关键词阈值，`semantic_search` 和 `find_similar` 用语义阈值，`hybrid_search` 独立应用两者），以及 `score` 字段的含义——在单分支工具上是 0–1 的相关度，在 `hybrid_search` 和 `search_fulltext` 上则是名次融合的**位置**。它们的实现也是共享的：一个词法检索服务（`runLexicalSearch`）、一个语义检索服务（`SemanticSearchService.search`）、一套分页存储、一套结果行投影逻辑，两种检索算法都不存在第二份实现。
 
 #### `keyword_search`
 
-**独立关键词检索**，纯词法匹配，不涉及任何 embedding。检索范围是**全库的元数据**
-（标题、摘要、作者、期刊名、标签、Extra）**加上已建立关键词索引的正文**，两者在
-同一次 BM25F 打分里一起算。
+纯词法检索——不涉及向量嵌入，也不做任何语义打分。它把你的检索词与**整个文献库**的元数据（标题、摘要、作者、期刊名、标签、extra 字段）**以及关键词索引中每一篇文档的正文**放在同一次 BM25F 计算中打分。
 
-**正文覆盖是部分的。** 正文匹配读的是插件自己的关键词索引，既不扫描 Zotero 的
-全文缓存，也不会临时解析 PDF——它只能覆盖已经建过索引的文献。因此一篇文献没出现
-在结果里，可能只是**没建索引**，而不是不相关：`metadata.bodyKeywords` 里的
-`indexedDocuments` 与 `metadataCollectionSize` 就是用来区分这两件事的。
+**正文覆盖是局部的。** 正文匹配读取的是插件自己的关键词索引；它从不扫描 Zotero 的全文缓存，也从不临时打开 PDF，因此它能覆盖到的正好是已经建立索引的那些文档。结果中缺席的论文可能只是尚未建立索引，而不是真的不相关——`metadata.bodyKeywords` 会同时汇报 `indexedDocuments` 和 `metadataCollectionSize`，方便你区分这两种情况。
 
-正文命中是完整命中：一篇标题、摘要、标签里一个查询词都没有的文献，可以仅凭正文
-进入排名。这类结果的 `matchedFields` 是 `["body"]`，并带回 **`bodyEvidence`**
-——命中所在的段落，每条含 `chunkId`、该段命中了哪些关键词、命中几次、以及片段
-原文。对一条「正文-only」的结果来说，这是它为什么会出现在你面前的**唯一**依据。
-其中 `occurrences` 是给人看的证据强度，**不参与任何排序或打分**。
+正文命中也是一次完整的命中：一篇标题、摘要、标签中都不含任何检索词的文档，仍然可以仅凭正文进入排名。这样的结果行会带有 `matchedFields: ["body"]` 和一个 **`bodyEvidence`** 数组——列出承载了这些检索词的具体段落，每一条都附带其 `chunkId`、命中了哪些关键词、命中了多少次，以及段落原文。对于一条纯正文命中的结果，这是唯一能解释它为何出现在结果中的信息。`occurrences` 只是给阅读者看的证据强度指标，不参与排序。
 
-这里的 `score` 是**真实的 0-1 相关度**：只有一路，没有东西要融合，所以它就是阈值
-实际作用的那个归一化 BM25F 分。它和 `hybrid_search` 的 `score`（RRF 名次分）
-**不是同一个量纲**，两者之间不要互相搬运数值。生效的下限是用户的**关键词**相关度
-阈值，与 `hybrid_search` 关键词分支用的是同一项设置。
+这里的 `score` 是真正的 0–1 相关度：只有一个分支意味着不存在需要融合的对象，因此它就是被应用了阈值的、归一化后的 BM25F 分数。这与 `hybrid_search` 的 `score`——一个名次融合位置——完全是两个量纲，绝不能把两者的数值互相带入比较。这里应用的阈值是用户的**关键词**相关性阈值，与门控 `hybrid_search` 关键词分支的是同一个设置。
 
-两种用途：一是用户点名的精确术语、缩写、牌号、标准号，必须一条不漏；二是——也是
-设计意图——**关键词粗筛**，把它返回的 `itemKeys` 交给 `semantic_search` 作为
-`itemKeys`，让语义精查只在这份短名单上打分。日常文献发现仍应首选
-`hybrid_search`，因为它同时跑这一路和语义那一路。
+它有两种用途：一是不能遗漏的精确检索词，二是——也是设计初衷——作为一个**粗筛工具**，把它的 `itemKeys` 交给 `semantic_search`，让语义打分只在这份候选名单内进行。对于普通的文献发现，`hybrid_search` 仍然是默认的第一步，因为它同时运行了这个分支和语义分支。
 
-- `keywords`（新检索时必需；中英双语，1–16 个，推荐 5–12）、`query`（只用于
-  缺省时生成机械回退探针，**永远不会被 embedding**）、`domain`、`expertRole`、
-  `collectionKeys`、`itemKeys`、`topK`、`cursor`、`minScore`、`libraryID`
+- `keywords`（未携带游标时必填；支持中英双语，1–16 个，推荐 5–12 个）、`query`（仅作为兜底探针，绝不会被向量化）、`domain`、`expertRole`、`collectionKeys`、`itemKeys`、`topK`、`cursor`、`minScore`、`libraryID`
 
 #### `semantic_search`
 
-**纯语义检索**：把一句自然语言查询做 embedding，与全部已索引段落比对。适合概念或
-机理明确、但用词无法确定的问题，也适合作为 `keyword_search` 粗筛之后的精查。
+纯粹的向量相似度检索：把一段自然语言查询向量化，并与每一个已索引段落进行比较。适用于那些你无法精确定位关键词、或者用作 `keyword_search` 粗筛结果之上精排的场景。
 
-1.9.0 之前，这是全插件最后一个还停在旧架构上的工具：`topK` 硬编码 10、`minScore`
-硬编码 0.3，完全无视用户自己的阈值与页大小；没有 cursor；不支持 collection 或
-itemKeys 限定；返回的行里带**未截断的原始 chunk 正文**（在真实文献库里，整段参考
-文献列表被当作「证据」发回来）；也没有统一全文状态——因此语义命中一篇论文的**摘要**
-和命中它的正文，在返回结果里长得一模一样。现在这些全部与 `hybrid_search` 对齐。
+在 1.9.0 之前，这是唯一一个还停留在检索漏斗架构之前的工具：写死的 `topK = 10` 和 `minScore = 0.3`，完全无视用户自己的设置；没有游标；没有分类或条目范围限定；结果行直接携带未截断的原始分块文本（在真实文献库中，整段参考文献列表都可能作为"证据"出现）；也没有 `fullText` 状态——因此一次命中论文摘要的语义结果，和一次命中论文正文的结果完全无法区分。以上问题现在已全部与 `hybrid_search` 保持一致。
 
-- `query`（新检索时必需）、`domain`、`expertRole`、`collectionKeys`、`itemKeys`、
-  `topK`、`cursor`、`minScore`、`language`、`libraryID`
+- `query`（未携带游标时必填）、`domain`、`expertRole`、`collectionKeys`、`itemKeys`、`topK`、`cursor`、`minScore`、`language`、`libraryID`
 
 #### `find_similar`
 
-以一篇文献的多个代表性段落为查询，发现语义相似的**文献**。全程纯语义，不涉及关键词。
+用一篇论文自身的若干段落作为查询，查找与之语义相似的**文档**。纯语义匹配——不涉及任何关键词。
 
-调用链：AI 先用 `search_fulltext` 从目标文献中挑出有代表性的核心段落 → 把这些 `chunkId` 传给本工具 → 直接复用它们已存储的向量扫描整个语义索引（不重新生成向量）→ 自动排除该文献自身 → 按文献聚合成唯一分数 → 过用户阈值 → 分页。
+通常先用 `search_fulltext` 挑出源论文中有代表性的段落，再把它们的 `chunkId` 传入这里。每个分块都会作为独立的查询向量在整个索引中被扫描一遍；各个分块的得分会被汇总成每个候选文档的**唯一**得分（对每个查询分块，取该候选文档中最匹配的两个段落取平均；再把各查询分块得到的这些平均值以 0.75 × 均值 + 0.25 × 最大值的方式组合），因此一篇文档要合格，需要和所提供的多个方面产生关联，而不是仅凭一个偶然匹配的段落。源论文本身会被排除在结果之外。
 
-聚合口径：对每个查询 chunk，取候选文献中最相似的两段求平均得到 s_i；文献分 = 0.75 × mean(s_i) + 0.25 × max(s_i)。全部是余弦值的均值/最大值，与阈值同为 0–1 尺度。这样一篇文献要靠「在你给的多个方面上都相关」得分，而不是靠单个偶然高分段落。
+所有超过用户相关性阈值的文档都会被返回——合格数量没有上限——并进行排序和分页。**单页最多包含用户配置的最大文档数**，没有固定的页面大小，`topK` 只能把它调低。结果只携带身份信息、分数和匹配到的 `chunkId`，不携带段落正文；要阅读某个候选，请用 `search_fulltext`。
 
-达到阈值的文献数量不设上限，按分数排序后分页返回；**每页返回数量受用户设置的「最大返回文献数」限制**，没有写死的每页篇数，`topK` 只能把它调得更小；响应里返回 `hasMore` / `nextCursor`；翻页只是在已排好序的名单上开窗口，不会重新扫描全库。返回内容只有身份、分数和命中的 `chunkId`，不含段落原文——要读内容请对该文献调用 `search_fulltext`。
+超时：没有独立设置。扫描的时间预算是用户设置的单次扫描超时 `vectorScanTimeoutMs`，按查询分块数量以及即将执行扫描的路径进行缩放——CPU 上是 `0.8 + 0.35N`（对索引进行一次共享遍历），GPU 上是 `0.5 + 1.1N`（每个查询分块各自进行一次常驻向量扫描）。两个系数都来自实测（`npm run benchmark:find-similar-scaling`），实际应用的时间预算会在响应的 metadata 中给出。
 
-超时：不新增独立设置。扫描截止时间 = 用户的单次扫描超时 `vectorScanTimeoutMs` × 动态倍率，倍率按查询 chunk 数量 N 和实际执行路径确定：CPU 为 `0.8 + 0.35N`（数据库只读一遍，只有点积随 N 增长），GPU 为 `0.5 + 1.1N`（向量常驻显存，每个查询各扫一遍）。两组系数均来自实测（`npm run benchmark:find-similar-scaling`），本次生效的预算会写在返回的 `metadata.scanBudget` 里。
-
-| 参数        | 类型     | 描述                                                               |
-| ----------- | -------- | ------------------------------------------------------------------ |
-| `itemKey`   | string   | 查询文献（新检索必需，翻页时可省略）                               |
-| `chunkIds`  | number[] | 该文献中代表性段落的 chunkId（新检索必需，最多 20 个，须同属一篇） |
-| `minScore`  | number   | 文献级相关度下限，只能比用户设置更严格                             |
-| `topK`      | number   | 每页篇数，上限为用户设置的最大返回文献数                           |
-| `cursor`    | string   | 续页游标，原样回传 `nextCursor`                                    |
-| `libraryID` | number   | 文献库 ID（默认用户库）                                            |
+- `itemKey`（发起新搜索时必填）、`chunkIds`（发起新搜索时必填，最多 20 个，且必须全部来自同一篇文档）、`minScore`、`topK`（单页大小，受用户设置的最大文档数限制）、`libraryID`、`cursor`（在不重新扫描的情况下继续翻页）
 
 #### `semantic_status`
 
-查看语义搜索服务的状态、索引统计和覆盖率。无需参数。
+获取语义搜索服务状态和索引统计信息，无需任何参数。
 
 #### `build_search_index`
 
-为一篇或多篇文献显式建立或更新统一搜索索引。它直接复用 Zotero“更新索引”的
-targeted build 生命周期：正文只提取、切块一次，然后同时更新语义向量与关键词索引；
-现有 build lock、暂停/reset 栅栏、失败日志、Chunk 设置和嵌入兼容性检查都继续生效。
-该操作可能成本较高，`wiki_build_from_paper` 不会隐式触发它。
+显式为一个或多个文档构建或刷新统一搜索索引。它使用与 Zotero 更新索引命令相同的目标化生命周期——对每篇文档提取并分块一次，随后同时更新语义向量和关键词索引。它保留了现有的构建锁、暂停/重置屏障、失败日志、分块设置和嵌入兼容性检查。这个操作可能开销较大，且 `wiki_build_from_paper` 从不会隐式触发它。
 
-- `itemKeys`（必需，1-100 篇）、`libraryID`
-- 逐篇返回语义索引、关键词索引和正文可用性，并给出总体统计；任一分支失败都会明确
-  标出。`parse_failed` 与 `no_source` 表示真实的正文缺失，不会伪装成索引成功。
+- `itemKeys`（必填，1-100 篇文档）、`libraryID`
+- 为每篇文档返回一个结果以及汇总统计。语义和关键词两方面的结果是分开汇报的，因此一个分支不会悄悄掩盖另一个分支的失败。`parse_failed` 和 `no_source` 会如实汇报确实没有可索引正文的情况，而不是虚报成功。
 
 #### `get_document_chunks`
 
-**按文献原始 chunk 顺序分页读整篇正文**。`search_fulltext` 回答的是「这篇论文在
-哪里说了 X」，本工具回答的是「让我把这篇读一遍」。
+按语义索引存储的顺序，**从头到尾读一篇论文的正文**，每页返回几个分块。`search_fulltext` 回答的是"这篇论文哪里提到了 X"；这个工具回答的是"让我完整读一遍这篇论文"。
 
-每个 chunk 带 `chunkIndex`（阅读顺序上的位置）和 `chunkId`（索引分配的稳定 id，
-也是 `search_fulltext`、`find_similar` 接受的那个）。两者**不可互相推算**——凡是
-有 chunk 被丢弃的文档，它们就会错开。
+每个分块都带有 `chunkIndex`（在阅读顺序中的位置）和 `chunkId`（`search_fulltext` 和 `find_similar` 所接受的稳定 ID）。这两者**不可**互相换算——它们在任何分块被丢弃的地方都会产生偏差——因此永远不要用一个去推算另一个。
 
-**禁止一次性返回整篇**：一页最多 20 个 chunk，没有任何参数能要来全文。PDF 从未
-解析成功、或根本没有文本附件的文献会被**拒绝**，并说明是四种情况中的哪一种，
-而不是把标题和摘要伪装成正文交回去。
+分页是强制的：一页最多 20 个分块，没有办法一次要到整篇文档。一篇 PDF 从未成功解析、或者没有文本附件的文档，会被**直接拒绝**并说明具体是哪种情况，而不是拿标题和摘要冒充正文来敷衍作答。
 
-- `itemKey`（新阅读时必需）、`cursor`、`offset`、`limit`、`libraryID`
-- 返回 `fullText`、`pagination`（`totalChunks`、`returned`、`offset`、`range`、
-  `hasMore`、`nextCursor`）和 `data`
+- `itemKey`（未携带游标时必填）、`cursor`、`offset`、`limit`、`libraryID`
+- 返回 `fullText`、`pagination`（`totalChunks`、`returned`、`offset`、`range`、`hasMore`、`nextCursor`）和 `data`
 
-> `fulltext_database` 已在 1.9.0 删除。它四个 action 里有两个（`list`、`stats`）
-> 是把索引库管理能力直接暴露给 AI，第三个（`get`）会**一次性、无分页**地返回整篇
-> 正文——那是全服务器唯一一条绕开检索漏斗的旁路。数据库维护能力保留在插件设置
-> 界面内部，不再对外暴露。
+> `fulltext_database` 已在 1.9.0 移除。它原有四个动作中的两个（`list`、`stats`）本质是暴露给调用方的索引管理操作；第三个（`get`）会在一次不分页的响应中返回整篇文档——这是当时唯一还残留的、绕开所有其他工具都遵守的检索漏斗的通道。索引维护现在只存在于插件的偏好设置界面中。
 
-### 四、LLM Wiki（18 个，可独立禁用）
+### 四、LLM Wiki（19 个，可独立禁用）
 
-Wiki 使用独立长期知识数据库，保存可复用的 Page、Claim、Concept、Relation 和可回溯
-Evidence，而不是再建一份论文摘要索引。普通研究采用“先检索、后受控提交”的流程；
-`wiki_build_from_paper` 仅允许用户明确指定单篇文献时使用。服务器不会隐藏调用 LLM。
+Wiki 是一个独立的长期知识数据库。它存储可复用的 Page、Claim、Concept、Relation 和可追溯的 Evidence，而不是又一份论文摘要索引。日常研究使用"准备-受控提交"流程；`wiki_build_from_paper` 只能用于用户明确要求深读的某一篇论文。服务器本身不会发起任何隐藏的 LLM 调用。
 
-**两种阅读，同一份阅读总结。** 一篇文献有两种被读的方式，它们写进同一份 Markdown
-阅读总结，共用同一份已读 chunk 台账。
+**两种阅读方式，共用一份阅读笔记。** 一篇论文可以以两种不同的方式被阅读，两者都会写入同一份 Markdown 笔记和同一份"实际读过哪些分块"的台账。
 
-*问答式渐进阅读*是日常路径：用户提问，`hybrid_search` → `search_fulltext` 找到相关
-段落，AI 真正读懂其中一部分并作答，随后对**每一篇真正读过的文献**调用
-`wiki_update_reading_note`，传入 `readChunkIds`（本轮真正读过并用于作答的 chunk）、
-检索时用的 `domain` / `expertRole`，以及整份重写后的阅读总结。检索命中但没有真正阅读
-的 chunk 不能列进去——检索返回不等于阅读，服务器只为你申报的部分背书。
+**提问驱动的阅读**是日常路径。用户提出问题，先后用 `hybrid_search`、`search_fulltext` 找到相关段落，模型真正读了其中一些并给出回答——随后，对**每一篇真正被读过的论文**，调用 `wiki_update_reading_note`，带上 `readChunkIds`（本次真正用来回答问题的分块）、检索这篇论文时使用的 `domain` 和 `expertRole`，以及重写后、包含刚学到的内容的整份笔记。检索返回过、但没有人真正使用过的分块不会被列入：检索不等于阅读，服务器只对被明确声明过的内容负责。
 
-已读 chunk 是**集合**而不是游标：第一次读 `{7,8,42}`、第二次读 `{15,42,70}`，累计为
-`{7,8,15,42,70}` 共 5 个，重复的 42 不会重复计数，同一次调用里重复申报也不会。总结
-顶部会画出覆盖情况，实心方块表示已读、空心方块表示未读（超过 100 个 chunk 时一格代表
-若干 chunk，部分已读用半实心方块表示）。
+以这种方式读过的分块以**集合**而非游标的方式累积。先 `{7,8,42}` 再 `{15,42,70}` 是五个不同的分块，而不是六个；重复出现的 42 不会被计两次，一次调用内部的重复同样如此。笔记标题栏用方格图案描绘覆盖情况：读过的分块是实心方格，未读的是空心方格（超过一百个分块后，一格会代表若干个分块，部分读过的格子会画成半实心）。
 
-顺序是**先总结、后 Wiki**，并且由服务器强制：某篇文献上一轮读到的内容还没写进 Wiki
-时，这篇文献拒绝被再次阅读，直到一次 `wiki_commit` 引用了它。同一轮问答读了三篇文献，
-就可以由一次提交同时结清三篇。真正读到新内容才需要写 Wiki；本轮没读到新内容就明确
-跳过，不必为了凑流程往 Wiki 里塞重复条目。写入时应当优先扩充已有的 Page、Claim、
-Concept 与关系，而不是在旁边新建一份近似的。
+顺序是**先笔记、后 Wiki**，服务器会强制执行这一点，而不只是要求：如果最近一次阅读还没有反映到 Wiki 里，这篇论文会拒绝被再次阅读，直到某次 `wiki_commit` 引用了它。一次提问读了三篇论文，只需要一次引用了全部三篇的提交即可结清。只有真正读到了新内容的那一轮才需要更新 Wiki——如果这一轮只是基于已有理解作答，就应如实说明并跳过更新，而不是往 Wiki 里塞入重复内容。写入的内容应该延伸已经存在的 Page、Claim、Concept 和关系，而不是在旁边制造近似重复的条目。
 
-阅读总结只增不减：每次重写允许重组、合并、修正，但整体缩水超过一成会被拒绝——每轮
-悄悄压缩一点，二十轮之后早期读到的参数就全没了，而这种退化单看任何一次重写都很合理。
-总结里的每一条事实、参数、结论、机制和图表都必须在正文中标注对应 chunk 编号（如
-「熔池深度 1.2 mm（chunk 42）」），否则无法保存；但标题里出现 chunk 编号仍然会被
-拒绝，那是分页日志。
+笔记只会增长。每次重写都可以重新组织、合并和修正，但一次丢失超过原文十分之一内容的重写会被拒绝——如果每一轮都压缩一点点，到第二十次提问时第三页读到的那些参数就会消失得无影无踪，而单独看每一次重写又都显得合理。笔记中的每一个事实、参数、结果、机制和图表，都必须在正文中标明它来自哪个分块（例如"熔池深度达到 1.2 mm（分块 42）"），否则笔记无法保存；把分块编号写在**标题**里同样会被拒绝，因为那是流水账，不是知识组织方式。
 
-问答式阅读**永远不会**获得 `paper_reviewed`：即使零散读遍全文，`finalSynthesis` 在这条
-路径上被拒绝，Evidence 一律停留在 `chunk_local` / `section_read`。全文深度是一个动作
-——从头读到尾，再把它作为一个整体重新梳理——零散片段无论累计多少都没有执行过它。
+提问驱动的阅读**永远**不会达到 `paper_reviewed` 深度。即使零散的提问碰巧覆盖了每一个分块，这条路径上的 `finalSynthesis` 依然会被拒绝，Evidence 也只能停留在 `chunk_local` 或 `section_read` 层级。"通读全文"指的是一个具体的动作——完整读一遍，再把它当作一个整体去梳理——无论零散的片段读了多少次，都无法构成这个动作。
 
-*全文深度阅读*仍是原来的路径，且会**继承**问答阶段的成果。阅读顺序由服务器强制。首次调用 `wiki_build_from_paper`
-只返回该文献的元数据与摘要，不返回任何正文；随后用 `wiki_set_reading_expert`
-生成这篇文献专属的领域专家角色，同时在该 Zotero 条目下创建一份持久化的 Markdown
-**阅读总结**附件。之后正文按页下发，每读完一批，用 `wiki_update_reading_note`
-重写**整份**总结——新增、删除、合并、移动、改写，而不是往后追加。按分页组织的笔记
-（`Chunks 8-15`、`本页新增`）会被拒绝：chunk 只是正文的传输单位，不是知识的组织
-方式。未回写的批次最多允许积压 1 批，第 2 批未回写就拒绝继续下发；若某一批确实没有
-新内容，可用 `unchanged` 说明原因，但不允许连续两次。
+**深读单篇论文**是最初的路径，现在会**继承**提问阅读已经读过的内容。一篇论文按固定顺序被阅读，服务器会强制执行这个顺序。开局的 `wiki_build_from_paper` 调用只返回论文的元数据和摘要，不返回正文；`wiki_set_reading_expert` 会给出唯一一位负责阅读这篇论文的领域专家，同时在这个 Zotero 条目上创建一份持久化的 Markdown **阅读笔记**附件。随后正文分块按页依次送达，每送达一页就用 `wiki_update_reading_note` 重写整份笔记——合并、重新排序、修正，而不是简单追加。按投送批次组织的笔记（例如"分块 8-15"、"本批新增"）会被拒绝：分块只是文本的运输方式,不是组织知识的方式。最多允许有一个已投送但尚未处理的批次，否则下一页会被拒绝送达；一个确实没有新增内容的批次可以回答 `unchanged`，但不能连续两次都这样回答。
 
-总结顶部的机器可读区——`paperKey`、`title`、`abstract`、`expert`、`readChunks`、
-`totalChunks`、`nextChunk`、`coverage`、`status`、`updatedAt`——由服务器依据阅读台账
-写入，AI 不能修改，因此总结里的任何措辞都无法让这篇文献看起来读得比实际更多。由于
-它是条目下的真实文件，Zotero 重启、MCP 断线、对话中断与 context compaction 都不会
-造成损失：`wiki_get_reading_note` 会交回总结、专家角色和应当续读的 chunk 序号。
+笔记顶部的信息块——`paperKey`、`title`、`abstract`、`expert`、`readChunks`、`totalChunks`、`nextChunk`、`coverage`、`status`、`updatedAt`——由服务器根据阅读台账自动维护，而不是由模型填写，因此笔记里写的任何内容都无法让这篇论文的进度看起来比实际更靠前。因为笔记是条目上一份真实的文件，Zotero 重启、MCP 断开连接或者上下文被压缩都不会造成任何损失：`wiki_get_reading_note` 会返回笔记、专家画像，以及应该从哪个分块继续阅读。
 
-若这篇文献此前已被问答读过，`wiki_build_from_paper` 不会从头再来：同一个阅读会话被
-就地提升为全文模式，已读 chunk 台账与阅读总结原样保留，翻页会跳过开头已读的连续区段，
-只补读问答没有覆盖到的部分，响应中的 `carriedOverFromQuestionAnswering` 说明继承了
-多少。唯一仍会重新要求的是那份**慎重**的专家角色——问答阶段由检索参数临时拼出的角色
-标记为 provisional，可以被正式角色替换，因为从头读完一篇文献值得先认真决定由谁来读。
-显式传入 `offset` 时不会跳读，这样为了核对引文而回读某一段仍然可用，且不计入整合闸门。
+如果提问阅读已经涉及过这篇论文，`wiki_build_from_paper` 不会从头开始：同一个会话会被原地升级为全文阅读模式，保留原有的分块台账和笔记，翻页时会跳过页首那些已经读过的连续文本，只请求提问从未触及的部分，`carriedOverFromQuestionAnswering` 会说明具体继承了多少内容。唯一仍然要求重新给出的是一份**经过认真考虑**的专家画像：提问过程中临时根据检索参数拼凑出的阅读者身份会被标记为临时性的、可能被替换，因为决定由谁来通读一整篇论文，值得认真对待。显式传入的 `offset` 从不会被跳过,因此重新阅读某个段落以核对一句引用依然可行,也不会对完整性检查产生任何额外成本。
 
-全部 chunk 交付完成后，还必须再做三次覆盖全文的复盘，`wiki_prepare_update` 才会开始
-写入阶段：一次是整体重构阅读总结（`finalSynthesis`），一次是复盘该文献确立的术语
-（`wiki_record_concepts` 且 `final` 为真），最后一次是对**整个 Wiki** 的系统性复盘
-（`wiki_prepare_update` 的 `wikiReview`）。后者构建独立术语库：一个概念一个实体，
-含一个主术语与任意别名术语，每组术语都由中文全称、英文全称、简称构成，且硬性规则是
-简称禁止独立存在；确实没有新术语时，用空清单加理由作答。有效名称不会被静默吞掉：
-两篇文献对同一术语给出不同拼写时，两个名称都作为该概念的两条术语保留；只有 AI 推断
-出来、又被文献否定的字段才会按文献修正。用户手动修改过的字段与手动锁定的主术语，
-AI 之后都不再改动。
+一旦所有分块都已投送完毕,在 `wiki_prepare_update` 允许开始正式写入之前,还需要再完成三次审查:一次针对整篇论文（`finalSynthesis`）,一次针对论文确立的术语（带 `final` 的 `wiki_record_concepts`）,一次针对**整个 Wiki**（`wiki_prepare_update` 上的 `wikiReview`）。第二次审查会构建独立的概念库:每个概念是一个实体,有一个主术语和任意数量的别名术语,每个术语都带有中文全称、英文全称和缩写——硬性规则是缩写永远不能单独存在。一篇没有引入任何新内容的论文,可以返回一个空列表并说明原因。名称永远不会被直接覆盖掉:两篇论文对同一个术语有不同的拼写方式时,两种拼写都会作为同一个概念下的两行术语保留下来,只有当某篇论文明确推翻了模型此前推断出的某个值时,那个值才会被替换。
 
-第三道门是 2.5.0 新增的。前两道看的都是**这篇文献**：总结是否连贯，术语是否梳理过。
-但 Wiki 是在阅读过程中一路增量长出来的，到读完时往往已经漂移——早期依据某个 chunk
-写下的 Claim 被后面的 chunk 限定了范围，隔了几轮写下的两个 Concept 其实是同一个，
-早期画出的关系已经不再成立。所以最后要求以读完的全文为依据，对已有内容做一次五个
-维度的复盘：Page 是否需要补充、调整或新建；Claim 需要新增、合并、修正还是被推翻；
-Evidence 是否单薄、哪些可以提升到全文深度；Concept / Term 需要补充、纠错还是去重；
-已有关系需要新增还是撤销。每个维度都必须作答，「无需改动，因为……」是完全合格的答案，
-也是最常见的答案；不作答则不放行，因为空白与「没看过」无法区分。复盘一篇文献只需
-提交一次，校验失败后重试不必重复提交。
+第三次审查是 2.5.0 版本新增的。前两次审查关注的都是**这篇论文本身**:笔记是否连贯,术语是否已经审查过。但 Wiki 是在整个阅读过程中持续增量增长的,到论文读完时通常已经出现了漂移——某个早期分块写下的 Claim,被后面的分块限定了适用范围;两个相隔多轮写下的 Concept,其实是同一个东西;早期画出的一条关系,现在已经不再成立。所以最后这道关卡会带着读完的整篇论文,从五个维度反问:是否需要调整或新建某个 Page;完整阅读之后,哪些 Claim 得到了确认、需要加限定条件、需要合并,或者被推翻了;哪些 Claim 的 Evidence 还比较单薄,哪些 Evidence 现在可以提升到全文深度;哪些术语需要新增、修正或去重;哪些关系应该被建立或撤销。每一个维度都必须给出回答——"这里不需要改动,因为……"是一个完全合格、也是最常见的回答——但沉默不被接受,因为沉默无法与"没有真正检查过"区分开来。这个审查每篇论文只会被要求一次,验证失败后的重试不会重新触发它。
 
-此外，Evidence 只有在**全部 chunk 已交付**且
-**该次整体重构已记录**时，才能达到 `paper_reviewed` / `cross_paper` 深度——交付不等于
-读懂。总结本身永远不是 Evidence：Claim 仍必须引用能在该文献真实 chunk 中校验通过的
-原文摘录，而且该 chunk 必须**已经被记录为读过**——由 `wiki_build_from_paper` 下发，
-或由 `wiki_update_reading_note` 的 `readChunkIds` 申报。引用一段没人读过的原文会被
-指名拒绝：摘录确实在文献里，缺的是对它的阅读。这也是「先总结、后 Wiki」的另一半——
-Claim 只能建立在阅读总结已经涵盖的内容之上。该附件也被排除在检索索引之外，避免一篇论文的总结被当作论文原文检索出来。
+Evidence 只有在两个条件都满足时才能达到 `paper_reviewed` 或 `cross_paper` 深度:全文阅读投送了每一个分块,**并且**完成了那次最终审查。投送不等于理解。笔记本身永远不能作为 Evidence——Claim 依然必须引用经过校验、确实来自论文自身索引分块的摘录,而且那个分块必须已经被记录为"已读",无论它是通过 `wiki_build_from_paper` 投送的,还是通过 `readChunkIds` 声明的。引用一段没有人读过的文字会被直接按名称拒绝:摘录内容确实存在于论文中,缺失的是对它的阅读。这正是"先笔记、后 Wiki"的另一半含义——一条 Claim 只能建立在笔记已经记录过的内容之上。笔记本身也被排除在搜索索引之外,因此一篇论文的总结永远不会被当成论文本身检索出来。
 
-- `wiki_prepare_update` —— 写入前搜索已有知识；可传入最多两个准确的 `proposedPageTitles`，短期 token 只能授权真正搜索过的 Page 标题；`pendingWikiWriteUp` 列出阅读总结已领先于 Wiki 的文献；文献读完全文后还需传入 `wikiReview`（Page / Claim / Evidence / Concept / 关系五个维度的整体复盘）
-- `wiki_get_prepared_context` —— 按类别和偏移量读取准备阶段的完整快照。准备结果默认精简；先用 `preview: true` 查阅已有论断、证据和跨论文候选，再提交五轴复盘。长记录和大型条目可分页完整取回。
-- `wiki_commit` —— 提交经过验证的 SKIP、Evidence、Claim、Page、Relation 或冲突动作
-- `wiki_search` —— 检索 Concept/Alias、Claim、Relation 与一跳 Evidence 关联
-- `wiki_get_page` —— 查看 Page、Claim 与 Evidence
-- `wiki_get_claim` —— 查看一个原子 Claim 及其来源
-- `wiki_get_link_review` —— 恢复持久化跨论文核验任务、目标快照、结果和历史；支持独立分页读取 targets、discovery、verdicts、outcomes 和 history，不依赖十分钟准备令牌。先比较相关旧 Wiki，逐条记录排除理由，缺知识时明确暂缓。通过 `wiki_commit.crossPaperReview` 将结论绑定到真实论断、术语来源或新增论断关系；`checkpoint: true` 保存进度但不结束阅读。图谱每对论文只画一条线，主显示优先级为存在分歧、共享论断、方法差异或限定、同一条目、共享概念；点击任何类型的线均以统一卡片展示全部关系、Claim 和来源摘录。证据概况区分当前支持、历史来源及尚未核验的语义评价；旧分数仅为启发式规则值，不是正确概率。
-- `wiki_status` —— 查看 Wiki 与 Evidence 链接状态
-- `wiki_export` —— 导出派生 Markdown，不改变权威数据库；末尾追加术语库章节
-- `wiki_record_concepts` —— 记录在真正阅读文献时识别出的专业概念：每个概念一个实体，含一个主术语与任意别名术语，每组术语都由中文全称、英文全称、简称三个字段构成，并记录来源文献。未带 `final` 的调用只暂存在当前阅读会话中、不写库也不弹确认；带 `final` 的那一次把全部内容一次写入，因此一篇文献只有一次写入、一次确认。每个字段单独记录来源类型（文献原文 / AI 补全 / 人工修改），AI 可以依据可靠专业知识补全中文、英文或简称，但必须如实标注
-- `wiki_list_concepts` —— 列出独立术语库，含全部术语与来源
-- `wiki_export_concepts` —— 单独导出术语库 Markdown
-- `wiki_reverify` —— 索引重建后重新定位 Evidence，并在同一轮里重新校验全部未结算的跨文献候选连接
-- `wiki_scan_links` —— 计算跨文献候选连接：库中哪些文献可能相关，具体通过哪些段落、术语或概念相关。通常不需要手动调用——一篇文献首次产生真实阅读记录时会自动入队，队列在后台消化；批量导入不会触发扫描。一次扫描 = 用该文献最多 20 个代表性段落做一次全库向量粗召回，再在 top 候选上做文献对局部双向精查，精查阶段不再扫全库。它写入的只是候选：会出现在 `wiki_prepare_update` 的 `pendingLinkSignals` 里，带两侧原文摘录和由服务端计算的 `mustResolve`；这里不写入任何 Page、Claim、Evidence、概念或关系
-- `wiki_build_from_paper` —— 阅读用户明确指定的单篇文献：先给元数据与摘要，再分页下发正文；用 `pagination.nextCursor` 逐页翻到 `pagination.coverageComplete` 为真，且必须先结束当前这篇才能开始下一篇；继承该文献问答阶段已读的 chunk 与阅读总结，只补读未读部分。这个「一次一篇」的独占限制只针对全文阅读，问答式阅读不受限，可同时累积多篇
-- `wiki_set_reading_expert` —— 依据元数据与摘要生成该文献专属的领域专家角色，并在条目下创建持久化 Markdown 阅读总结
-- `wiki_update_reading_note` —— 用当前对该文献的理解整体替换阅读总结。全文阅读时每读完一批调用一次；问答后对每篇真正读过的文献调用一次，并传入 `readChunkIds`（本轮真正读过并用于作答的 chunk）与检索时的 `domain` / `expertRole`。`finalSynthesis` 表示全文交付后的最终整体重构，问答路径不可用
-- `wiki_get_reading_note` —— 取回某篇文献的总结、专家角色与准确续读位置；重启或对话中断后的恢复入口
-- `wiki_finish_reading` —— 只读不写地结束一篇打开的文献（`skipped`）。不传 `itemKey` 时结束当前全文阅读的那篇；传 `itemKey` 时也可结束一篇问答式阅读的文献，同时解除它「未写入 Wiki」的阻塞
+- `wiki_prepare_update` — 在提出任何变更之前先搜索现有知识;最多传入两个精确的 `proposedPageTitles`,让它签发的短时效令牌只能授权那些真正被搜索过的 Page 标题。`pendingWikiWriteUp` 会列出哪些论文的阅读笔记已经领先于 Wiki。一篇论文一旦被完整深读过,还需要额外提供 `wikiReview`——一次覆盖 Page、Claim、Evidence、Concept、Relation 五个维度的全 Wiki 审查
+- `wiki_get_prepared_context` — 按区块和偏移量取回一份已准备好的快照。准备阶段默认返回精简结果;使用 `preview: true` 可以在提交五维度审查之前先查看 Claim、Evidence 和跨论文候选项。阅读记录和较大的条目会分页返回,不会丢失内容
+- `wiki_commit` — 应用已通过校验的 `SKIP`、Evidence、Claim、Page、Relation 或冲突处理动作
+- `wiki_search` — 检索 Concept/Alias、Claim、Relation,以及一跳范围内的 Evidence 关联
+- `wiki_get_page` — 读取一个 Page 及其 Claim 和 Evidence
+- `wiki_get_claim` — 读取一条原子化的 Claim 及其来源信息
+- `wiki_get_link_review` — 取回持久化的跨论文任务、目标快照、结论和历史记录。可以独立于 prepare 令牌单独获取 Page 目标、发现结果、结论、结果或历史。对比选定的旧 Wiki 知识、记录每一次排除、并显式推迟处理缺失的知识。`wiki_commit.crossPaperReview` 会把结论绑定到真实的 Claim、术语来源,或新的 Claim 关系上;`checkpoint: true` 可以在不结束阅读的情况下保存进度。图谱按论文对绘制连线,优先展示分歧、共享 Claim、方法比较或限定条件,其次是共享 Page,再次是共享 Concept。点击任意一条连线会以统一的卡片形式展示所有关系,附带 Claim 和原文摘录。Evidence 摘要会区分当前有效的支持、已归档的来源,以及未经验证的语义评估;保留下来的旧版评分只是启发式参考,不是正确性概率
+- `wiki_status` — 汇报 Wiki 和 Evidence 关联的状态
+- `wiki_export` — 渲染衍生的 Markdown,不改动权威数据库;概念库会作为最后一节被附加进去
+- `wiki_record_concepts` — 记录在真正阅读一篇论文过程中识别出的专业概念,每个概念作为一个实体,带一个主术语和任意数量的别名术语(中文全称/英文全称/缩写),以及它们被识别出的来源文档。不带 `final` 的调用只会暂存在当前打开的阅读会话中,不写入任何内容;带 `final` 的那一次调用会一次性写入全部内容,因此一篇论文只需要一次数据库写入和一次确认,而不是按批次多次写入。每个字段都带有自己的来源标注——引自论文原文、由模型补全、或由人工编辑——模型可以用自己的知识补全某个术语,只要如实说明这一点
+- `wiki_list_concepts` — 列出独立的概念库,包含每个术语及其来源
+- `wiki_export_concepts` — 单独把概念库导出为 Markdown
+- `wiki_reverify` — 在索引重建之后重新关联 Evidence,并在同一次操作中对所有待处理的跨论文候选项重新对照实时索引进行校验
+- `wiki_scan_links` — 计算跨论文关联候选:哪些论文与哪些论文相关,通过哪些段落、术语或概念产生关联。通常不需要手动调用——一篇论文第一次产生真实阅读记录时会被自动加入队列,队列会在后台自行处理;刻意批量导入论文并不会触发它。一次扫描是对全库最多 20 个代表性分块做一次向量扫描,随后进行不再重新扫描全库的成对精细比对。它写入的是**建议**:这些建议会在 `wiki_prepare_update` 中以 `pendingLinkSignals` 的形式出现,附带原文段落和服务器计算出的 `mustResolve`,这个工具本身不会写入任何 Page、Claim、Evidence、Concept 或关系
+- `wiki_build_from_paper` — 深读一篇被明确指定的论文:先返回元数据和摘要,再按页依次返回正文分块;沿着 `pagination.nextCursor` 持续调用,直到 `pagination.coverageComplete` 为真;必须先结束当前正在读的论文,才能开始下一篇。它会继承提问阅读已经读过的内容——同一份笔记、同一份台账——只请求剩余部分。"同一时间只能深读一篇"这条限制只适用于全文阅读本身;提问驱动的阅读不占用这个名额,可以同时涉及多篇论文
+- `wiki_set_reading_expert` — 根据论文的元数据和摘要生成这篇论文唯一的领域专家画像,并在对应的 Zotero 条目上创建持久化的 Markdown 阅读笔记
+- `wiki_update_reading_note` — 用你当前对这篇论文的理解重写整份阅读笔记。在全文阅读中每投送一页调用一次;在回答完提问后,对每一篇真正读过的论文调用一次,并带上 `readChunkIds` 说明真正被使用过的分块,以及检索这篇论文时用的 `domain` / `expertRole`。`finalSynthesis` 用于在所有分块都投送完毕后标记全文审查这一遍,提问驱动的路径上不可用
+- `wiki_get_reading_note` — 取回一篇论文的笔记、专家画像和精确的续读位置;这是重启或上下文压缩之后的恢复路径
+- `wiki_finish_reading` — 在不写入的情况下关闭一篇论文(`skipped`)。不带 `itemKey` 时关闭的是当前正在深读的论文;带上 `itemKey` 时也可以关闭一篇提问阅读一直在涉及的论文,从而解除对它继续被阅读的限制
 
 ### 五、写入操作（11 个，可在偏好设置中禁用）
 
-写入默认关闭。关闭时这 11 个工具在 `tools/list` 与 `/capabilities` 中都不出现——
-服务器绝不声明一个自己会拒绝执行的能力。
+写入操作被禁用时（这是默认状态），这 11 个工具全部会从 `tools/list` 和 `/capabilities` 中隐藏——服务器不会去宣传一个自己会拒绝执行的能力。
 
-还有两个 Wiki 工具会跟着一起消失，它们不在本节里，但值得单独说明：
-`wiki_set_reading_expert` 与 `wiki_update_reading_note` 会在 Zotero 条目下真的
-创建并改写 Markdown 阅读总结附件，属于 Zotero 写操作，因此受同一道写入闸门管辖。
-也就是说，关闭写入会连带停掉 Wiki 阅读总结，`tools/list` 里少掉的是 13 个工具，
-不是 11 个。
+还有两个 Wiki 工具与它们同步隐藏，值得特别说明，因为它们并不在本节列出：`wiki_set_reading_expert` 和 `wiki_update_reading_note` 会在 Zotero 条目上创建并重写阅读笔记这份真实的 Markdown 附件，因此它们本质上是 Zotero 写入操作，也按写入操作被门控。关闭写入操作因此也会连带停用 Wiki 阅读笔记——从 `tools/list` 中消失的是十三个工具，而不是十一个。
 
-#### 分类增删改
+#### 分类变更
 
-- `create_collection` —— `name`（必需）、`parentCollection`、`libraryID`
-- `update_collection` —— `collectionKey`（必需），并且 `name`、`parentCollection`
-  至少提供一个
-- `delete_collection` —— `collectionKey`（必需）、`deleteItems`
-- `add_items_to_collection` —— `collectionKey`、`itemKeys`（均必需）
-- `remove_items_from_collection` —— `collectionKey`、`itemKeys`（均必需）
-- `move_items_to_collection` —— `toCollectionKey`、`itemKeys`（均必需）、`dryRun`
-- `merge_items` —— `groups`（必需）、`dryRun`
+- `create_collection` — `name`（必填）、`parentCollection`、`libraryID`
+- `update_collection` — `collectionKey`（必填），以及 `name`、`parentCollection` 中至少一项
+- `delete_collection` — `collectionKey`（必填）、`deleteItems`
+- `add_items_to_collection` — `collectionKey`、`itemKeys`（均为必填）
+- `remove_items_from_collection` — `collectionKey`、`itemKeys`（均为必填）
+- `move_items_to_collection` — `toCollectionKey`、`itemKeys`（均为必填）、`dryRun`
+- `merge_items` — `groups`（必填）、`dryRun`
 
-`move_items_to_collection` 是重新整理文献库用的工具，也是这几个里唯一结果为
-「归位」而非「追加」的一个：执行完每个条目只属于 `toCollectionKey` 一个分类，
-原有的其他归属全部解除。如果某篇文献本就该同时属于多处（比如既在课题分类里、
-又在待读清单里），请改用 `add_items_to_collection`，它不动已有归属。
+`move_items_to_collection` 是重组工具，也是这五个工具中唯一一个结果是**替换归档**而非追加归档的工具：每个条目最终只归档在 `toCollectionKey` 中，不会保留在其他地方。如果一份文档需要同时保留在多个文件夹中，请改用 `add_items_to_collection`。
 
-整批要么全成、要么全不动。执行前有一轮体检：条目不存在、条目在回收站、以及
-子笔记或子附件（这类条目根本不能归入分类）都会让整批中止，此时一个字节都没写，
-返回里会列出出问题的 key，你改好或剔除后重新调用即可；体检通过后的写入在单个
-事务里完成，中途失败也不会留下整理到一半的库。`dryRun` 跑的是同一套体检、返回
-同一份计划——哪些条目移动、每个条目会失去哪些归属——但不写入，也不弹确认框，
-因此可以放心用它把整理方案先摆给用户看，确认后再真正执行。
+批量操作是全有或全无的。缺失的条目、已在回收站的条目，以及子级笔记或附件，都会在任何写入发生之前的预检阶段被直接拒绝，因此一个错误的键会让整批操作直接中止、什么都不会被写入，而不会让文献库处于"重组到一半"的状态；写入本身在单个事务中完成。`dryRun` 会执行同样的预检并返回同样的方案——哪些条目会移动、每个条目会失去哪些归档关系——但不会真正写入，也不会触发确认弹窗，这正是它能安全地用来向用户展示一个拟议中的重组方案的原因。
 
-`add_items_to_collection` 和 `remove_items_from_collection` 如果所有 key 都不存在，
-会作为工具调用失败；有效和无效 key 混合时返回 `success: false`、`partial: true`，
-并分别列出完成项和缺失项。附件迁移确认框会列出目标父条目和全部子 key；合并确认框
-会先做预检，再逐组列出保留条目以及将被 Zotero 移入回收站的重复条目。
+对于 `add_items_to_collection` 和 `remove_items_from_collection`，如果整批条目全部缺失，本次调用会直接失败。如果是部分缺失，则返回 `success: false` 和 `partial: true`，并分别列出已完成和缺失的键。重新挂靠的确认弹窗会列出目标分类和每一个子级键；合并操作的确认弹窗会对分组做预检，并列出每一个保留下来的条目和每一个将被 Zotero 移入回收站的重复条目。
 
-#### 条目与笔记写入
+#### 条目与笔记变更
 
 #### `write_note`
 
 创建或修改 Zotero 笔记，支持 Markdown 自动转换为 HTML。
 
-| 参数        | 类型     | 描述                                                |
-| ----------- | -------- | --------------------------------------------------- |
-| `action`    | string   | **必需**：create/update/append                      |
-| `parentKey` | string   | 关联到指定条目（create 时可选，省略则创建独立笔记） |
-| `noteKey`   | string   | 已有笔记 Key（update/append 必需）                  |
-| `content`   | string   | **必需**，笔记内容（Markdown 或 HTML）              |
-| `tags`      | string[] | 添加标签                                            |
+- `action`（必填：create/update/append）、`parentKey`、`noteKey`、`content`（必填）、`tags`
 
-`content` 必须是字符串，且「不传」和「传空字符串」是两回事。空字符串表示
-**清空**，只有 `update` 接受：它会把笔记内容抹掉，返回里带 `cleared: true`
-和被抹掉的字符数（笔记条目本身还在，要彻底删除请在 Zotero 里删）。
-`create` 和 `append` 拒绝空内容——在这两个动作下，空内容只可能意味着你的
-内容生成返回了空值。
+`content` 是必填字段且必须是字符串；不传它和传一个空字符串是两回事。空字符串意味着**清空**，只有 `update` 动作接受它——此时笔记会被清空，响应中会报告 `cleared: true` 以及被清除的字符数（笔记条目本身仍然保留——如果需要彻底删除，请在 Zotero 中手动删除）。`create` 和 `append` 会拒绝空内容，因为在这两种场景下，空内容只可能意味着内容生成本身出了问题、返回了空结果。
 
 #### `write_tag`
 
-添加、移除或替换条目上的标签。
+对条目添加、移除或替换标签。
 
-| 参数      | 类型     | 描述                                                 |
-| --------- | -------- | ---------------------------------------------------- |
-| `action`  | string   | **必需**：add（追加）/remove（移除）/set（替换全部） |
-| `itemKey` | string   | **必需**，条目 Key                                   |
-| `tags`    | string[] | **必需**，标签列表                                   |
+- `action`（必填：add/remove/set）、`itemKey`（必填）、`tags`（必填）
 
 #### `write_metadata`
 
 更新条目的元数据字段（标题、摘要、日期、DOI、作者等）。
 
-| 参数       | 类型   | 描述                                                          |
-| ---------- | ------ | ------------------------------------------------------------- |
-| `itemKey`  | string | **必需**，条目 Key                                            |
-| `fields`   | object | 要更新的字段（title/abstractNote/date/url/DOI/language 等）   |
-| `creators` | array  | 替换作者列表，每项包含 creatorType/firstName/lastName 或 name |
+- `itemKey`（必填）、`fields`、`creators`
 
 #### `write_item`
 
-创建新的文献条目、重新关联附件，或把本机文件导入为附件。
+创建新条目、重新挂靠已有附件，或把本地文件作为附件导入。
 
-| 参数             | 类型     | 描述                                                                 |
-| ---------------- | -------- | -------------------------------------------------------------------- |
-| `action`         | string   | **必需**：create（创建条目）/reparent（移动附件）/import（导入文件） |
-| `itemType`       | string   | 条目类型（journalArticle/book/conferencePaper/thesis 等）            |
-| `fields`         | object   | 元数据字段                                                           |
-| `creators`       | array    | 作者列表                                                             |
-| `tags`           | string[] | 标签                                                                 |
-| `attachmentKeys` | string[] | 要关联的独立附件 Key 列表                                            |
-| `parentKey`      | string   | reparent 操作的目标父条目 Key                                        |
-| `filePath`       | string   | import 专用：要导入文件的绝对路径                                    |
-| `parentItemKey`  | string   | import 专用：把文件挂到哪个条目下                                    |
-| `title`          | string   | import 专用：附件显示名，默认取文件名                                |
+- `action`（必填：create/reparent/import）、`itemType`、`fields`、`creators`、`tags`、`attachmentKeys`、`parentKey`
+- 仅 import 需要：`filePath`（文件的绝对路径）、`parentItemKey`（要挂载到的条目）、`title`（默认取文件名）
 
-`create` 的条目创建与全部 `attachmentKeys` 归属变更在同一个事务里完成，因此失败
-时一个字节都不会写入，重试也不会留下重复条目。找不到、或不是附件的 key 不会中止
-创建，它们会带着原因出现在返回的 `skippedAttachments` 里。
+`create` 在单个事务中同时完成新条目的创建和每一个 `attachmentKeys` 的重新挂靠，因此一旦失败不会写入任何内容，重试也不会留下重复条目。指向不存在内容、或指向的内容并非附件的键，不会导致整个创建过程中止——它们会连同原因一起出现在响应的 `skippedAttachments` 中。
 
-`import` 还需要**允许文件导入**这项偏好处于开启状态，否则直接失败；它就是
-「把 PDF 转成 Markdown 再挂回条目」这条路要用的动作。
-
----
-
-## 🐛 常见问题 (FAQ)
-
-#### 1. 连接被拒绝错误
-
-**问题**: `Error: connect ECONNREFUSED 127.0.0.1:PORT`
-**解决方案**:
-
-- 确保 Zotero 正在运行
-- 检查 Zotero 插件是否已启用
-- 在插件设置中检查服务器是否已启用
-- 确认端口号（默认 23120）与 AI 客户端配置一致
-
-#### 2. Streamable HTTP 连接失败
-
-**问题**: `Streamable HTTP connection failed`
-**解决方案**:
-
-- 确保在插件设置中启用了服务器
-- 检查防火墙设置，允许 Zotero 进行网络通信
-- 确认 URL 格式正确：`http://127.0.0.1:23120/mcp`
-
-#### 3. Claude Desktop 无法识别工具
-
-**问题**: Claude 不显示 Zotero 相关工具
-**解决方案**:
-
-- 检查 `claude_desktop_config.json` 中的配置是否正确
-- 确保使用了 `"transport": "streamable_http"` 配置
-- 确保 JSON 格式正确
-- 重启 Claude Desktop 应用
-
-#### 4. 插件服务器无法启动
-
-**问题**: 插件设置显示服务器启动失败
-**解决方案**:
-
-- 检查端口是否被占用，尝试更换端口
-- 重启 Zotero 应用
-- 查看 Zotero 错误控制台（`工具 -> 开发者 -> 错误控制台`）
+`import` 额外要求开启 **Allow File Import** 偏好设置，否则会直接失败；它对应的场景是"把一份 PDF 转换成 Markdown，再把这份 `.md` 挂载到条目上"。
 
 ---
 
@@ -983,20 +588,20 @@ Claim 只能建立在阅读总结已经涵盖的内容之上。该附件也被�
 
 欢迎贡献代码、报告问题或提出建议！
 
-1.  Fork 本仓库。
-2.  创建您的功能分支 (`git checkout -b feature/AmazingFeature`)。
-3.  提交您的更改 (`git commit -m 'Add some AmazingFeature'`)。
-4.  推送到分支 (`git push origin feature/AmazingFeature`)。
-5.  开启一个 Pull Request。
+1. Fork 本仓库。
+2. 创建你的特性分支（`git checkout -b feature/AmazingFeature`）。
+3. 提交你的更改（`git commit -m 'Add some AmazingFeature'`）。
+4. 推送到该分支（`git push origin feature/AmazingFeature`）。
+5. 提交一个 Pull Request。
 
 ## 📄 许可证
 
-本项目采用 [MIT License](./LICENSE) 授权。
+本项目基于 [MIT 许可证](./LICENSE) 开源。
 
 ## 🙏 致谢
 
-- [Zotero](https://www.zotero.org/) - 优秀的开源文献管理工具。
-- [Model Context Protocol](https://modelcontextprotocol.org/) - 实现 AI 工具集成的协议。
+- [Zotero](https://www.zotero.org/) —— 一款出色的开源文献管理工具。
+- [Model Context Protocol](https://modelcontextprotocol.org/) —— 用于 AI 工具集成的协议标准。
 - [![Using Zotero Plugin Template](https://img.shields.io/badge/Using-Zotero%20Plugin%20Template-blue?style=flat-square&logo=github)](https://github.com/windingwind/zotero-plugin-template)
-- 本项目基于 [cookjohn](https://github.com/cookjohn) 的原始 [zotero-lit-synapse](https://github.com/cookjohn/zotero-lit-synapse) 项目开发，感谢原作者的工作。
-- 同时感谢 [Zotero Mark Reader](PENDING_URL) 项目作者，本项目的阅读/批注相关功能借鉴了该项目。
+- 本项目基于 [cookjohn](https://github.com/cookjohn) 的原始项目 [zotero-lit-synapse](https://github.com/cookjohn/zotero-lit-synapse) 开发——感谢这份最初的 Zotero LitSynapse 集成方案，本项目正是在它的基础上衍生而来。
+- 同时感谢 Zotero Mark Reader 作者，本项目的阅读/批注相关功能借鉴了它的实现思路。
